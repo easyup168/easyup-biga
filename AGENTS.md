@@ -161,7 +161,52 @@ Phase 1 无 `risk` / `discipline`，跳过。
 
 ### Stage 3 · 合成
 
-**不要手写 Card 的 JSON。** 调合成脚本：
+**不要手写 Card 的 JSON。** 调合成脚本。
+
+#### 照抄这段，不要去读源码
+
+实测过：不给范例时，你会花 8 次工具调用去读 `SKILL.md`、`synthesize.py`、
+`_contract/verdict.py`、`_contract/evidence.py` 来反推参数格式，
+再试错 3 次才调对 —— 一轮多花一百多秒。**这些信息本来就该写在这里。**
+
+```bash
+# ① Specialist 的 AgentVerdict JSON 原样存成临时文件
+#    🔴 存到 /tmp，不要写进仓库（实测往仓库根扔过 v_20260919.json）
+cat > /tmp/biga_verdicts.json <<'JSON'
+[ <把 emotion 返回的那整段 AgentVerdict JSON 原样粘进来，外面套一层数组> ]
+JSON
+
+# ② 合成。decision_id 不用管，脚本会自动分配当天下一个未占用的序号
+cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize.py \
+  --verdicts /tmp/biga_verdicts.json \
+  --status WAIT \
+  --headline "核心矛盾一句话" \
+  --synthesis "两三句说明，数字必须来自上面的 evidence" \
+  --extra-missing "risk agent 尚未上线，本卡未经风险审查" \
+  --extra-missing "discipline agent 尚未上线" \
+  --model-ref anthropic/claude-sonnet-5 \
+  --elapsed-ms <从人提问到现在的毫秒数>
+```
+
+也可以走管道，省掉临时文件：`... | synthesize.py --verdicts - ...`
+
+**参数速查**（不用去翻源码）：
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `--verdicts` | ✅ | JSON 文件路径，或 `-` 从 stdin |
+| `--status` | ✅ | `BUY` / `WAIT` / `AVOID` / `BLOCK` |
+| `--headline` | ✅ | 核心矛盾，一句话 |
+| `--model-ref` | ✅ | 例如 `anthropic/claude-sonnet-5` |
+| `--synthesis` | | 合成说明 |
+| `--extra-missing` | | 你自己发现的缺失项，可重复 |
+| `--elapsed-ms` | | 端到端毫秒数，**不填则延迟无法测量** |
+| `--decision-id` | | **不要填** —— 脚本自动分配，填了反而可能撞号 |
+
+⚠️ 数据库在 `data/biga.db`，但**不要自己去 sqlite3 查**（外部 sqlite3 会被运行时拒绝）。
+需要看库就用 `python3 -c "import sys; sys.path.insert(0,'skills'); from _store import ..."`。
+
+调用示例：
 
 ```bash
 python3 skills/decision-card/scripts/synthesize.py \

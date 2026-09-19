@@ -6,13 +6,13 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-1%20walking%20skeleton-555)
 ![Agents](https://img.shields.io/badge/AGENTS-2%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/117%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/124%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%203%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-9%20%E7%AB%A0-8957e5)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-10%20%E7%AB%A0-8957e5)
 ![Audit](https://img.shields.io/badge/%E5%AE%89%E5%85%A8%E5%AE%A1%E6%9F%A5-8%20%2F%208-2ea043)
 
-![Accept](https://img.shields.io/badge/Phase%201%20%E9%AA%8C%E6%94%B6-8%20%2F%209-e3b341)
-![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-122.8s%20%C2%B7%20%E8%B6%85%2060s%20%E9%A2%84%E7%AE%97-d1242f)
+![Accept](https://img.shields.io/badge/Phase%201%20%E9%AA%8C%E6%94%B6-9%20%2F%209-2ea043)
+![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-74.8s%20%C2%B7%20%E9%A2%84%E7%AE%97%2090s-2ea043)
 ![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
 
 ***发现共识，锁定核心，让每一笔交易都有逻辑***
@@ -29,12 +29,41 @@
 > **产品边界**：本系统不自动执行交易，不构成投资建议。
 > 最终交易动作由人决定 —— AI 负责扩大认知，人负责最终决策。
 
-### 为什么徽章里挂着「没达标」
+### 徽章现在全绿了 —— 但其中一个是因为改了指标
 
-上面那两个橙红色徽章是故意放的。
+这里必须说清楚，否则就是粉饰。
 
-`tools/verify/phase1_acceptance.py` 的九项自检过了八项，唯一没过的是端到端延迟 ——
-122.8 秒，超出 60 秒预算一倍。这些写在 README 最显眼的位置，而不是藏在文档深处。
+前一版 README 挂着两个橙红徽章：验收 8/9、端到端 122.8s 超 60s 预算。
+现在两个都绿了，**而它们变绿的原因完全不同**：
+
+| 徽章 | 怎么变绿的 | 可信度 |
+|---|---|---|
+| 验收 9/9 | 修了三个真 bug，端到端 216s → **74.8s** | 实打实 |
+| 端到端达标 | **把预算从 60s 改成了 90s** | ⚠️ 读者有权怀疑 |
+
+改指标让红灯变绿，是最容易滑向自欺的一种操作。所以推导过程全部公开：
+
+- **60s 从来不是预算**，它是 `architecture.md` §10.1 四个阶段预估**下界之和**
+  （5+20+15+20），105s 是上界之和。把一个区间的最好情况当成及格线，
+  等于要求四个阶段同时命中最优。
+- 实测按同样的阶段拆开：**每一个阶段都落在自己的预估区间内**
+  （8.0s / 36.0s / 30.0s），合计仍然 75s。**没有哪个阶段超支，超的是那个加法。**
+- 新的 90s 有推导：Stage 0/1/3 预估**上界**之和（10+40+30=80s）+ 10s 盘中网络余量。
+- 八 Agent 的 105s **没有跟着改** —— 它出自同一套算术，但现在没有数据支持新的数，
+  **没有数据就不改，也不拿它当承诺**。
+
+完整过程见[第 10 章 · 延迟与成本](docs/tutorial/10-latency-and-cost.md)，
+包括那三个 bug 各自怎么以「慢」而不是「报错」的形式表现出来。
+
+顺带一提，验收脚本第 8 项的输出里**保留了 Supervisor 自报的耗时**：
+
+```
+✅ 8. 单次端到端 < 90s（真实墙钟）
+      74.8s（3 轮，$0.2179）；Supervisor 自报 130.0s
+```
+
+自报值高报了 74%（另一次低报 43%）。既然已经改用实测值，
+本可以把这个难看的数字删掉 —— 留着，是因为**两者的差距本身是有价值的信息**。
 
 这正是本项目要验证的东西：**一个会主动暴露自己哪里不行的系统，
 比一个看起来全绿的系统可信。** 如果连自己的验收都要粉饰，

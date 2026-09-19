@@ -22,6 +22,7 @@ from _store import (
     load_card,
     load_raw_snapshot,
     load_verdicts,
+    next_decision_id,
     record_agent_run,
     record_verdict_run,
     save_card,
@@ -172,6 +173,47 @@ class TestDecisionRecords:
 
     def test_不存在返回None(self, db):
         assert load_card("BIGA-20260101-999", path=db) is None
+
+
+class TestDecisionIdAllocation:
+    """回归：`synthesize.py` 原本硬编码 `new_task_id(1)`，当天第二次决策必撞主键。
+
+    症状不是崩溃退出 —— Supervisor 会自己去查库推序号然后重试，
+    每轮多花一百多秒。**只看「Card 出来了没有」永远发现不了。**
+    """
+
+    def test_首次分配001(self, db):
+        assert next_decision_id(day="20260919").endswith("-001")
+
+    def test_自动跳过已占用的序号(self, db):
+        save_card(make_card(decision_id="BIGA-20260919-001"), path=db)
+        save_card(make_card(decision_id="BIGA-20260919-002"), path=db)
+        assert next_decision_id(day="20260919") == "BIGA-20260919-003"
+
+    def test_连续两次合成不撞主键(self, db):
+        """当初这条测试存在的话，那个 bug 根本进不了主干。"""
+        a = next_decision_id(day="20260919")
+        save_card(make_card(decision_id=a), path=db)
+        b = next_decision_id(day="20260919")
+        assert a != b
+        save_card(make_card(decision_id=b), path=db)   # 不该抛错
+
+    def test_回放不占用新序号(self, db):
+        rid = save_card(make_card(decision_id="BIGA-20260919-001"), path=db)
+        save_card(make_card(decision_id="BIGA-20260919-001", status="AVOID"),
+                  replay_of=rid, path=db)
+        # 回放记录用的是同一个 decision_id，不该把 002 也算成已占用
+        assert next_decision_id(day="20260919") == "BIGA-20260919-002"
+
+    def test_撞号时的报错要能自解释(self, db):
+        """原来抛的是裸 sqlite3.IntegrityError，调用方只能去猜（实测它猜了很久）。"""
+        save_card(make_card(decision_id="BIGA-20260919-001"), path=db)
+        with pytest.raises(ValueError, match="next_decision_id"):
+            save_card(make_card(decision_id="BIGA-20260919-001"), path=db)
+
+    def test_按天隔离(self, db):
+        save_card(make_card(decision_id="BIGA-20260919-001"), path=db)
+        assert next_decision_id(day="20260920") == "BIGA-20260920-001"
 
 
 class TestAgentRuns:
