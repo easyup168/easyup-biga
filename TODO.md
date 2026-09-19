@@ -200,7 +200,9 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 ```bash
 cd ~/.openclaw-biga/workspace
 FAIL=0
-chk() { c=$(git log --all -p 2>/dev/null | grep -cE "^\+.*$2" || true); \
+# 🔴 grep -v '^+chk "' 是必需的：本脚本的正则字面量也在被扫描的文件里，
+#    不排除就会永远自匹配 3 处 —— 而一个永远报警的检查很快会被当成噪音忽略。
+chk() { c=$(git log main -p 2>/dev/null | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
         [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
 chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z ]*PRIVATE KEY|ssh-(ed25519|rsa) AAAA)'
 chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
