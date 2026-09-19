@@ -181,15 +181,37 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       提交身份：项目账号（仓库级 `git config`，未动全局）
 - [ ] 要不要装 `gh` CLI
 
-### 🔴 转 Public 之前必须做完
+### 转 Public 之前必须做完
 
-- [ ] 重跑完整安全审查（六项：凭据 / 家目录路径 / 个人邮箱 / 邻居可识别细节 /
-      内网 IP / gateway token）
-- [ ] **决定 commit 作者邮箱是否换成 `easyup168@users.noreply.github.com`**
-      现在用的是真实 gmail。仓库私有时无所谓；**转公开后它会进入全网可爬的 git 历史**，
-      是垃圾邮件与撞库的常见来源。
-      GitHub 的 noreply 地址同样能把 commit 关联到账号，不损失任何东西。
-      ⚠️ 要改就得**再次重写历史**，所以最好在转公开前一次做完
+- [x] **完整安全审查 —— 八项全过**（2026-09-19）
+      凭据/私钥 · Gateway token · 家目录路径 · 个人邮箱 · 邻居可识别细节 ·
+      内网公网 IP · 旧用户名 · 密码赋值
+      审查脚本见本节末尾，**每次转可见性前重跑一遍**
+- [x] **commit 作者邮箱改用 GitHub noreply**
+      `easyup <easyup168@users.noreply.github.com>`，全历史 16 个 commit 已重写。
+      noreply 与真实邮箱在 GitHub 上功能完全等价（关联、头像、贡献图都正常），
+      唯一区别是公开后不会被爬虫抓到真实地址
+      ⚠️ 审查当场还抓到一个反讽的问题：我在**记录「别泄露邮箱」这件事**的
+      CHANGELOG/TODO 条目里，把邮箱本身写进去了。
+      **文档里描述一个敏感值时，不要把那个值抄进去。**
+
+- [ ] 转 Public 当天：再跑一次下面这段，八项全绿才动开关
+
+```bash
+cd ~/.openclaw-biga/workspace
+FAIL=0
+chk() { c=$(git log --all -p 2>/dev/null | grep -cE "^\+.*$2" || true); \
+        [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
+chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z ]*PRIVATE KEY|ssh-(ed25519|rsa) AAAA)'
+chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
+chk "家目录路径"     '/home/[a-z][a-z0-9_-]*'
+chk "个人邮箱"       '[a-zA-Z0-9._%-]+@(gmail|qq|163|126|outlook|hotmail|foxmail|sina)\.'
+chk "邻居可识别细节" '(EASYUP|\bQMT\b|market\.db|nodeenv|find_node_bin|[0-9]+ 个 systemd)'
+chk "IP 地址"        '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
+chk "旧用户名"       '\b***\b'
+chk "密码赋值"       '(password|passwd|secret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
+[ "$FAIL" -eq 0 ] && echo "══ 可以转 Public ══" || echo "══ 不要转 ══"
+```
 
 ---
 
