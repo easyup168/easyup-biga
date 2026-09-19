@@ -197,8 +197,6 @@ def record_agent_run(
     model: str | None = None,
     verdict: str | None = None,
     missing_count: int = 0,
-    tokens_in: int | None = None,
-    tokens_out: int | None = None,
     error: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
@@ -206,16 +204,21 @@ def record_agent_run(
 
     🔴 这张表是「Supervisor 确实调用了 Specialist」的唯一凭证。
     Agent 在回答里声称自己调用过，不算数 —— LLM 完全可以把整段调用编出来。
+
+    ⚠️ 这里**不记 token 与成本**。那些数据的唯一真相源是 OpenClaw 运行时的
+    trajectory，在这里存第二份必然滞后且会产生第二套口径。
+    成本核算走 `tools/verify/latency_report.py`（读 `_store.runtime`）。
+    另注意 `elapsed_ms` 记的是**技能**耗时，不是 agent 的 LLM 轮次耗时 ——
+    做延迟分析要用后者。
     """
     with connect(path) as conn:
         cur = conn.execute(
             """INSERT INTO agent_runs
                (decision_id, task_id, agent, model, status, verdict,
-                missing_count, elapsed_ms, tokens_in, tokens_out, error,
-                started_at, finished_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                missing_count, elapsed_ms, error, started_at, finished_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (decision_id, task_id, agent, model, status, verdict, missing_count,
-             elapsed_ms, tokens_in, tokens_out, error, started_at, finished_at),
+             elapsed_ms, error, started_at, finished_at),
         )
         return int(cur.lastrowid)
 
@@ -227,17 +230,14 @@ def record_verdict_run(
     finished_at: str,
     decision_id: str | None = None,
     model: str | None = None,
-    tokens_in: int | None = None,
-    tokens_out: int | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
     """从一个 `AgentVerdict` 直接记账，省得调用方手抄字段（抄错就是口径分裂）。"""
     return record_agent_run(
         task_id=v.task_id, agent=v.agent, status=v.status, verdict=v.verdict,
         missing_count=len(v.missing), elapsed_ms=v.elapsed_ms,
-        decision_id=decision_id, model=model, tokens_in=tokens_in,
-        tokens_out=tokens_out, started_at=started_at, finished_at=finished_at,
-        path=path,
+        decision_id=decision_id, model=model,
+        started_at=started_at, finished_at=finished_at, path=path,
     )
 
 
