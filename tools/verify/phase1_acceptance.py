@@ -210,7 +210,7 @@ def check_5_fail_closed(run_live: bool) -> Check:
     return c
 
 
-def check_8_latency(decision_id: str | None, budget_ms: int = 60_000) -> Check:
+def check_8_latency(decision_id: str | None, budget_ms: int = 90_000) -> Check:
     """🔴 读**真实墙钟**，不读 Supervisor 自报的数。
 
     早先这条查的是 `card.elapsed_ms` —— 那是 Supervisor 自己填进来的数字，

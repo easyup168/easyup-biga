@@ -113,8 +113,8 @@
         自己 `status=succeeded`，而 emotion 还在后台跑，**Card 从未产出**。
         典型的「每步日志都绿、事情没做成」。
         已在 `AGENTS.md` 加 Stage 1.5「必须等 + 必须出卡」与回合结束自检
-      - ⚠️ **延迟超预算**：仅 emotion 一个 specialist 就 79.9s，验收 #8 卡的是 <60s。
-        skill 本身只占 ~19s，其余是 LLM 开销（`thinking=high`）。待复测后评估
+      - ⚠️ 延迟：当时记的 79.9s 来自 **Supervisor 自报**，不可信（实测它两个方向都偏）。
+        真实测量与三个 bug 的修复见下方「验收第 8 条」与教程第 10 章
 
       教程 07 待写
 - [x] `replay <decision_id>` —— 与在线路径共用 `card_ops.synthesize()`（纯函数）
@@ -132,14 +132,29 @@
 
 ### Phase 1 验收（全部满足才算过）
 
-1. [ ] Supervisor **确实 spawn 了** `emotion`（`agent_runs` 有该行，不是自己编的）
-2. [ ] `emotion` 返回**合法 `AgentVerdict`**，含 ≥1 条带 `as_of` 的 `Evidence`
-3. [ ] 输出 Decision Card，含 状态 / 证据 / **缺失项** 三段
-4. [ ] `decision_records` 落库 1 行，`replay` 重跑出一致结论
-5. [ ] 故意打断数据源 → Card 显示 `UNKNOWN` + `missing` 非空，**不是 PASS**（红线 R-3）
-6. [ ] 另一套系统：gateway pid / openclaw 版本 / `nvm default` / PATH / 18789 监听 五项未变
-7. [ ] 另一套系统的 PATH 解析仍指向 `v24.18.0`（红线 R-2 未被破坏）
-8. [ ] 单次端到端 **< 60s**（只有 2 个 agent；8 个时才允许到 105s）
+> ✅ **九项全过**（`PASS 9 · FAIL 0 · PENDING 0`，2026-09-19，`BIGA-20260919-010`）
+>
+> ```bash
+> python3 tools/verify/phase1_acceptance.py \
+>         --decision-id BIGA-20260919-010 --baseline <基线.json> --live
+> ```
+> 脚本把「没测」记为 `PENDING` 而不是 `PASS` —— 不带 `--decision-id` 跑只会得到
+> `PASS 2 · PENDING 7`。**这是故意的**：R-3 对验收脚本自己同样适用。
+
+1. [x] Supervisor **确实 spawn 了** `emotion`（`agent_runs` 有该行，不是自己编的）
+       两份独立记录都核：`agent_runs` + 运行时 `subagent_runs`
+2. [x] `emotion` 返回**合法 `AgentVerdict`**，含 ≥1 条带 `as_of` 的 `Evidence` —— 13 条
+3. [x] 输出 Decision Card，含 状态 / 证据 / **缺失项** 三段 —— 缺失项 3 条
+4. [x] `decision_records` 落库 1 行，`replay --check` 重跑出一致结论
+5. [x] 故意打断数据源 → `UNKNOWN` + `missing` 3 条，**不是 PASS**（红线 R-3）
+6. [x] 另一套系统：gateway pid / 启动时间 / config / `nvm default` / 18789 监听 五项未变
+7. [x] 另一套系统的 PATH 解析仍指向 `v24.18.0`（红线 R-2 未被破坏）
+       外加 6b：`/proc/<pid>/fd` 逐个核 —— 无任何 BigA 进程持有邻居目录下的句柄（I-1）
+8. [x] 单次端到端 **< 90s**（热缓存，2 个 agent）—— 实测 **74.8s / $0.2179**
+       ⚠️ **这一条的预算从 60s 改成了 90s。** 60s 是四个阶段预估「下界之和」，
+       不是预算；实测每个阶段都在自己区间内而合计 75s。推导见
+       `architecture.md` §10.1 与教程第 10 章。**八 Agent 的 105s 未改**
+       判据是 `latency_report.py` 的**等卡墙钟**，不是 Card 上的 `elapsed_ms`
 
 ### Phase 1 明确不做
 

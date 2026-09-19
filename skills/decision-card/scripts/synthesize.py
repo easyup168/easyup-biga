@@ -29,8 +29,8 @@ _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _contract import AgentVerdict, new_task_id  # noqa: E402
-from _store import init_schema, record_verdict_run  # noqa: E402
+from _contract import AgentVerdict  # noqa: E402
+from _store import init_schema, next_decision_id, record_verdict_run  # noqa: E402
 from card_ops import Judgment, persist, synthesize  # noqa: E402
 
 
@@ -63,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
         print("没有任何 Verdict —— 不出卡。", file=sys.stderr)
         return 1
 
-    decision_id = args.decision_id or new_task_id(1)
+    if not args.no_store:
+        init_schema()
+    # 🔴 不要硬编码序号。原来写的是 new_task_id(1)，当天第二次决策必撞主键，
+    #    Supervisor 只好每次自己查库推序号 —— 一轮多花一百多秒。
+    decision_id = args.decision_id or next_decision_id()
     card = synthesize(
         decision_id=decision_id,
         verdicts=verdicts,
@@ -75,7 +79,6 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if not args.no_store:
-        init_schema()
         # 先记每个 Specialist 的执行账本 —— 它是「确实调用过」的唯一凭证。
         for v in verdicts:
             record_verdict_run(v, decision_id=decision_id,

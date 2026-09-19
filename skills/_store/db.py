@@ -34,6 +34,7 @@ __all__ = [
     "save_card",
     "load_card",
     "load_verdicts",
+    "next_decision_id",
     "record_agent_run",
     "list_agent_runs",
     "save_raw_snapshot",
@@ -131,6 +132,21 @@ def save_card(
             f"save_card 只接受 _contract.DecisionCard，收到 {type(card).__name__}"
         )
     payload = json.dumps(card.to_dict(), ensure_ascii=False, sort_keys=True)
+    try:
+        return _insert_card(card, payload, replay_of, path)
+    except sqlite3.IntegrityError as e:
+        if "decision_records.decision_id" not in str(e):
+            raise
+        # 报错要能自解释：否则调用方只能去猜，然后手动查库推序号（实测发生过）
+        raise ValueError(
+            f"decision_id {card.decision_id!r} 已被占用。"
+            f"同一天的第 N 次决策要用不同序号 —— "
+            f"用 `_store.next_decision_id()` 自动分配，不要硬编码 001。"
+        ) from e
+
+
+def _insert_card(card: DecisionCard, payload: str, replay_of: int | None,
+                 path: pathlib.Path | str | None) -> int:
     with connect(path) as conn:
         cur = conn.execute(
             """INSERT INTO decision_records
@@ -151,6 +167,38 @@ def save_card(
             ),
         )
         return int(cur.lastrowid)
+
+
+def next_decision_id(
+    *, day: str | None = None, path: pathlib.Path | str | None = None
+) -> str:
+    """分配当天下一个未被占用的 ``BIGA-YYYYMMDD-NNN``。
+
+    🔴 这个函数存在的理由是一个真实的 bug：
+    `synthesize.py` 原本写的是 ``new_task_id(1)`` —— 序号硬编码为 1，
+    于是**当天第二次决策必然撞主键**（partial unique index 拒绝）。
+
+    症状不是报错退出，而是 Supervisor 每次都去「自救」：
+    找库在哪 → 查已有的 decision_id → 自己推下一个 → 重试，
+    一轮下来多花一百多秒。**系统看起来能跑，只是每次都在做三倍的功。**
+
+    只看「Card 出来了没有」永远发现不了它 —— 得看耗时分解。
+    """
+    from _contract import new_task_id, now_cn
+
+    day = day or now_cn().strftime("%Y%m%d")
+    with connect(path, readonly=True) as conn:
+        rows = conn.execute(
+            "SELECT decision_id FROM decision_records WHERE decision_id LIKE ?",
+            (f"BIGA-{day}-%",),
+        ).fetchall()
+    used = set()
+    for r in rows:
+        tail = r["decision_id"].rsplit("-", 1)[-1]
+        if tail.isdigit():
+            used.add(int(tail))
+    seq = next(i for i in range(1, 1000) if i not in used)
+    return new_task_id(seq, day=day)
 
 
 def load_card(

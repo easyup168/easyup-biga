@@ -26,11 +26,20 @@
 理由：LLM 算错不会报错，而且算错的过程不可回放。
 一个错误的炸板率会一路传到 Decision Card，没有任何环节能发现它。
 
+🔴 **你的 cwd 是 `agents/emotion/`，不是仓库根。** 命令必须带上仓库根，照抄这条：
+
 ```bash
-python3 skills/emotion-calc/scripts/emotion_calc.py
+cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_calc.py
 ```
 
 这条命令的 stdout 是一份完整的 `AgentVerdict` JSON。**你的工作从它开始。**
+
+实测过：不写 `cd` 的话你会在自己的 cwd 里找不到 `skills/`，然后去
+`find` 整个 workspace、再 `find /` 搜整个文件系统，还得回头收拾
+留下的后台进程 —— 十次工具调用里六次浪费在这上面。
+
+⚠️ **任何情况下都不要 `find /`。** 它会扫遍整个文件系统，慢且会留下后台进程。
+路径不对时，先看这份契约里写的那条命令，而不是去搜。
 
 ### 2. 你不发明数据
 
@@ -52,10 +61,10 @@ python3 skills/emotion-calc/scripts/emotion_calc.py
 
 ## 工作流程
 
-1. **跑 skill**
+1. **跑 skill**（注意 `cd`，你的 cwd 不是仓库根）
 
    ```bash
-   python3 skills/emotion-calc/scripts/emotion_calc.py
+   cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_calc.py
    ```
 
    **默认不加 `--date`**（宽松模式）—— 取数据源给出的最近一个交易日。
@@ -110,6 +119,28 @@ python3 skills/emotion-calc/scripts/emotion_calc.py
 - 并且必须在 `missing` 里加一条：
   `情绪周期趋势 —— 只有单日快照，无历史序列，无法区分「衰退期」与「修复期的某一天」`
 
+#### 🔴 往 missing 里加东西，就必须同时降级 verdict 和 status
+
+契约不允许「有缺失项却说一切正常」。你改完 `missing` 之后，**同一份 JSON 里**：
+
+| 原值 | 改成 |
+|---|---|
+| `"status": "completed"` | `"status": "partial"` |
+| `"verdict": "PASS"` | `"verdict": "WARNING"`（核心三项还在）或 `"UNKNOWN"`（核心三项有缺） |
+
+三个字段要一起改，改一个不改另两个，契约会直接拒绝构造：
+
+```
+ValueError: [emotion] missing=[...] 非空却给出 verdict='PASS'
+            —— UNKNOWN ≠ PASS，算不出来必须说算不出来（铁律 1）
+```
+
+实测过：不写这一段的话，你会试两次才摸对，每次多花几十秒。
+
+⚠️ 所以「把 skill 的 JSON 原样带上」这句话**有一个例外** ——
+当你要追加缺失项时，这三个字段必须跟着改。其余字段（`evidence`、`result`、
+`task_id`…）仍然原样，一个数字都不许动。
+
 这不是保守，是诚实。**把「一天的数字」说成「一个阶段」是在编造你没有的信息。**
 
 ### 两个常见误判
@@ -137,7 +168,8 @@ skill 会返回一个 0–100 的 `emotion_score`。
 
 ## 输出格式
 
-把 skill 返回的 JSON **原样带上**，然后附一段自然语言判断：
+把 skill 返回的 JSON 带上（**唯一允许改的是上面说的那三个字段**），
+然后附一段自然语言判断：
 
 ```
 <AgentVerdict JSON 原文>

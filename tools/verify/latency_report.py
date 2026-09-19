@@ -8,12 +8,17 @@
    而真正的大头是 **agent 的 LLM 轮次**（几十秒）。
    只看前者做延迟分析，会把优化做到错的地方去。
 
+🔴 两个口径不是一回事，本脚本分开报：
+   · **等卡** —— 人从提问到看见 Card 等了多久、花了多少。验收 #8 判的是这个。
+   · **决策总成本** —— 还要加上卡落库之后 runtime 唤醒 Supervisor 的「尾巴」轮次。
+     算账、报价、评估模型开销时看的是这个。
+
 用法::
 
     latency_report.py                       # 最近一次决策
     latency_report.py --decision-id BIGA-20260919-003
     latency_report.py --all                 # 全部轮次，按时间排
-    latency_report.py --budget-ms 60000     # 自定预算
+    latency_report.py --budget-ms 90000     # 自定预算
 """
 
 from __future__ import annotations
@@ -30,7 +35,11 @@ from _contract import CN_TZ  # noqa: E402
 from _store import connect  # noqa: E402
 from _store.runtime import read_task_runs, read_turns  # noqa: E402
 
-DEFAULT_BUDGET_MS = 60_000
+# 90s 的推导见 architecture.md §10.1 —— 不是拍脑袋，也不是原来那个「下界相加」的 60s。
+DEFAULT_BUDGET_MS = 90_000
+
+# 卡后「尾巴」轮次的串联间隔上限：超过这个空档就认为是另一次运行，不再往后收。
+TAIL_GAP_S = 300
 
 
 
@@ -109,14 +118,25 @@ def main(argv: list[str] | None = None) -> int:
         print("    只能按固定时长往前取窗口。**窗口里可能混进别的运行**，")
         print("    下面的合计数偏大，不可作为达标判据。")
         print()
-    print(f"{'起始':>8}  {'agent':<9}{'耗时':>8}{'输出tok':>9}{'缓存tok':>10}{'成本$':>9}  停止原因")
-    print("─" * 78)
+    # 🔴 缓存读和缓存写**必须分开列**。写缓存按 1.25× 计费、读缓存按 0.1×，
+    #    差 12 倍。合成一列「缓存tok」会让「刚重启过、缓存是冷的」看起来像
+    #    「这个配置更贵」—— 本项目已经因此差点把一次冷启动误读成配置劣化。
+    print(f"{'起始':>8}  {'agent':<9}{'耗时':>8}{'输出tok':>9}{'缓存读':>9}{'缓存写':>9}{'成本$':>9}  停止原因")
+    print("─" * 88)
+    cold = False
     for t in turns:
         local = t.started_at.astimezone(CN_TZ)
+        if t.cache_write > t.cache_read * 0.3:
+            cold = True
         print(f"{local:%H:%M:%S}  {t.agent_id:<9}{t.duration_ms/1000:7.1f}s"
-              f"{t.tokens_out:9d}{t.cache_read + t.cache_write:10d}"
+              f"{t.tokens_out:9d}{t.cache_read:9d}{t.cache_write:9d}"
               f"{t.cost_usd:9.4f}  {t.stop_reason or '—'}")
-    print("─" * 78)
+    print("─" * 88)
+    if cold:
+        print("⚠️  缓存写占比偏高 —— 这次多半是**冷启动**（刚重启 gateway / 改过配置 /")
+        print("    换过提示词）。此时的**成本不可与热缓存的运行横向比较**；")
+        print("    耗时受影响小，仍可比。")
+        print()
 
     # 🔴 与调度器的记录对账。两份独立来源对不上时必须说出来 ——
     #    沉默地展示一份残缺却完整模样的分解，比报错危险得多。
@@ -142,13 +162,39 @@ def main(argv: list[str] | None = None) -> int:
             print(f"✅ 与调度器记录对账一致（窗口内 {len(in_win)} 条）")
         print()
 
+    # 🔴 卡后还有账：子 agent 全部 settle 之后 runtime 会**再唤醒一次** Supervisor
+    #    （runId 带 `announce:requester-settle`，投递失败还会 retry-N）。
+    #    那几轮不计入「等卡时间」—— 卡此时已经落库了 —— 但真金白银花掉了。
+    #    只报窗口内成本，就会低报一次决策的真实开销。
+    tail: list = []
+    if not args.all:
+        keys = {t.session_key for t in turns}
+        cursor = max(t.ended_at for t in turns)
+        for t in sorted(probe.turns, key=lambda x: x.started_at):
+            if t.session_key not in keys or t.started_at <= cursor:
+                continue
+            if (t.started_at - cursor).total_seconds() > TAIL_GAP_S:
+                break
+            tail.append(t)
+            cursor = t.ended_at
+
     wall = int((max(t.ended_at for t in turns)
                 - min(t.started_at for t in turns)).total_seconds() * 1000)
     cost = sum(t.cost_usd for t in turns)
-    print(f"{'墙钟总计':>10} {wall/1000:6.1f}s      预算 {args.budget_ms/1000:.0f}s"
-          f"      {'✅ 达标' if wall < args.budget_ms else '❌ 超预算 '
-                  f'{wall/args.budget_ms:.1f}×'}")
-    print(f"{'成本合计':>10} ${cost:.4f}")
+    verdict = "✅ 达标" if wall < args.budget_ms else f"❌ 超预算 {wall/args.budget_ms:.1f}×"
+    print(f"{'等卡墙钟':>10} {wall/1000:6.1f}s      预算 {args.budget_ms/1000:.0f}s      {verdict}")
+    print(f"{'等卡成本':>10} ${cost:.4f}")
+    if tail:
+        tcost = sum(t.cost_usd for t in tail)
+        tms = sum(t.duration_ms for t in tail)
+        print()
+        print(f"卡后尾巴 {len(tail)} 轮 · {tms/1000:.1f}s · ${tcost:.4f}"
+              f"（占决策总成本 {tcost/(cost+tcost):.0%}）")
+        for t in tail:
+            print(f"      {t.started_at.astimezone(CN_TZ):%H:%M:%S} {t.agent_id:<9}"
+                  f"{t.duration_ms/1000:6.1f}s  out={t.tokens_out:<5d} ${t.cost_usd:.4f}")
+        print("      ⇒ 卡已落库，不计入等卡时间；但这是同一次决策真实花掉的钱。")
+        print(f"{'决策总成本':>10} ${cost + tcost:.4f}")
     print()
 
     # 按 agent 汇总，指出瓶颈

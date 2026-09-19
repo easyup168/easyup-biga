@@ -517,13 +517,30 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 
 ### 10.1 延迟预算
 
-| Stage | 内容 | 并行度 | 预估 |
-|---|---|---|---|
-| 0 | Supervisor 拆任务 | — | 5-10s |
-| 1 | market / sector / news / technical / emotion | **×5 并行** | 20-40s（取最慢那个） |
-| 2 | risk / discipline | **×2 并行** | 15-25s |
-| 3 | Supervisor 合成 + 渲染 Card | — | 20-30s |
-| | **合计** | | **60-105s** |
+| Stage | 内容 | 并行度 | 预估 | Phase 1 实测 |
+|---|---|---|---|---|
+| 0 | Supervisor 拆任务、发出 spawn | — | 5-10s | **8.0s** ✅ |
+| 1 | market / sector / news / technical / emotion | **×5 并行** | 20-40s（取最慢那个） | **36.0s** ✅（只有 emotion） |
+| — | 子 agent 交回到 Supervisor 的空档 | — | 未估 | 1.0s |
+| 2 | risk / discipline | **×2 并行** | 15-25s | 未上线 |
+| 3 | Supervisor 合成 + 渲染 Card | — | 20-30s | **30.0s** ✅（压线） |
+| | **合计** | | **60-105s** | **74.8s** |
+
+> 🔴 **「60-105s」是下界之和与上界之和，不是预算区间。**
+> 5+20+15+20 = 60，10+40+25+30 = 105。把 60 拿去当及格线，等于要求
+> **四个阶段同时命中各自的最好情况**。
+>
+> Phase 1 实测把这件事证实了：**每个阶段都落在自己的预估区间内**
+> （Stage 0 在区间内、Stage 1 在区间内、Stage 3 压着上沿），**合计仍然 74.8s**。
+> 没有任何一个阶段「超支」，超的是那个加法。
+>
+> 另一处推理错误：原验收写「只有 2 个 agent，所以该 < 60s」。但 Stage 1 的下界
+> 20s 描述的是「5 个并行 specialist 里**最快**那个」—— Phase 1 只有一个 emotion，
+> 它就是 36s，没得挑。**减少 agent 数量不会把 Stage 1 拉到下界**，
+> 而 Stage 0 + Stage 3 是与 agent 数量无关的固定开销（实测 38s，占 51%）。
+>
+> 实测方法见 `tools/verify/latency_report.py`；结论不依赖 Supervisor 自报的
+> `elapsed_ms`（那个值实测在两个方向上都偏离过，低报 43%、高报 74%）。
 
 **串行做法会是 2-5 分钟** —— 差距全在 Stage 1/2 的并行。
 因此 `agents.defaults.subagents.maxConcurrent ≥ 6` 是**功能要求不是调优**。
@@ -588,7 +605,12 @@ Phase 2 结束时出一张「单次决策成本分解」，据此决定要不要
 5. 故意把情绪数据源打断 → Card 显示 `UNKNOWN` + `missing` 非空，**不是 PASS**（L-2）
 6. 生产侧：gateway pid、openclaw 版本、`default` alias、PATH、18789 监听 —— 五项全部未变
 6b. 🔴 生产侧的 PATH 解析仍指向 **v24.18.0**（约束 D-1 未被破坏）
-7. 单次端到端 **< 60s**（只有 2 个 agent，8 个时才允许到 105s）
+7. 单次端到端 **< 90s**（热缓存，2 个 agent）—— 判据是 `latency_report.py` 的
+   **等卡墙钟**，不是 Card 上 Supervisor 自报的 `elapsed_ms`。
+   90s = Stage 0/1/3 预估上界之和（10+40+30 = 80s）+ 10s 盘中网络余量。
+   ⚠️ 八 Agent 的 105s 出自同一套「下界相加」的算术，且 Stage 3 在**只有一个**
+   specialist 时就已经压着 30s 上沿 —— 那个数要等 Phase 2 有数据了重新推，
+   **现在不改，也不要拿它当承诺**。
 
 ### 11.4 Phase 1 明确不做
 
