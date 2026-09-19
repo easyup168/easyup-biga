@@ -6,6 +6,18 @@
 *.db-shm
 *.db-journal
 
+# === 个人偏好（非项目契约；本仓库公开）===
+USER.md
+
+# === Specialist 的脚手架残留 ===
+# 运行时**每次 spawn 都会重建**这些文件（不是一次性的，删了还会回来）。
+# spawned session 不加载 SOUL.md / IDENTITY.md，所以它们对 Specialist 是死文件；
+# 提交进来只会误导后来的人去改一个不生效的地方。
+# ⚠️ 只忽略 agents/ 下的 —— 仓库根的那两个是 Supervisor 的，是有效契约。
+/agents/*/SOUL.md
+/agents/*/IDENTITY.md
+/agents/*/BOOTSTRAP.md
+
 # === 运行时 / 密钥 ===
 .env
 *.key

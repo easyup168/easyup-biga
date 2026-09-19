@@ -69,16 +69,36 @@
 
 ## 当前状态
 
-**Phase 1 · 环境搭建中。**
+**Phase 1 · walking skeleton 基本成型。** 117 条测试全绿。
 
 | 项 | 状态 |
 |---|---|
 | Node v24.21.0 + OpenClaw 2026.9.5（隔离安装） | ✅ |
 | `biga` wrapper（强制 profile 隔离） | ✅ |
 | Workspace 骨架 + git | ✅ |
-| `biga setup`（profile 初始化，端口 19789） | ⬜ |
-| 契约层 `_contract` / 数据层 `_store` | ⬜ |
-| 第一个 Specialist Agent + 端到端链路 | ⬜ |
+| `biga setup` —— 端口 19789，未接 IM | ✅ |
+| 契约层 `_contract` —— 四条铁律构造时拒绝 + AST 单一实现扫描 | ✅ |
+| 数据层 `_store` —— 三张表，只追加由触发器强制 | ✅ |
+| `emotion-calc` —— 真采 A 股情绪数据 | ✅ |
+| `emotion` Agent + Supervisor 委派配置 | ✅ |
+| 合成与回放 —— 两条路径共用同一份组装代码 | ✅ |
+| 隔离演练 —— `kill -9` 自己，邻居六项未变 | ✅ |
+| 端到端：Supervisor 真的 spawn Specialist | 🔄 进行中 |
+
+Phase 1 的 8 条验收标准由 `tools/verify/phase1_acceptance.py` 逐条机器核对 ——
+**`PENDING` 不计为通过**。
+
+```bash
+python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.json --live
+```
+
+## 开发教程
+
+本仓库同时是一份**开源开发教程**：[`docs/tutorial/`](docs/tutorial/README.md)。
+
+每一章对应项目里实际完成的一段工作 —— 真跑过的命令、真踩过的坑。
+它与普通教程的区别在于全程有一个额外约束：**同机上已经跑着另一套长期运行的实例，
+不能碰它一根手指**。
 
 ## 运行环境
 
