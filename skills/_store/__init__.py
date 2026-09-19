@@ -1,0 +1,38 @@
+"""BigA 数据访问层 —— 唯一 DB 入口。
+
+🔴 业务代码不许出现裸 `sqlite3.connect`（tests/test_no_raw_sqlite.py 钉死）。
+"""
+
+from .db import (
+    DEFAULT_DB_PATH,
+    AppendOnlyViolation,
+    connect,
+    db_path,
+    init_schema,
+    list_agent_runs,
+    load_card,
+    load_raw_snapshot,
+    load_verdicts,
+    record_agent_run,
+    record_verdict_run,
+    save_card,
+    save_raw_snapshot,
+)
+from .schema import SCHEMA_VERSION
+
+__all__ = [
+    "DEFAULT_DB_PATH",
+    "SCHEMA_VERSION",
+    "AppendOnlyViolation",
+    "connect",
+    "db_path",
+    "init_schema",
+    "list_agent_runs",
+    "load_card",
+    "load_raw_snapshot",
+    "load_verdicts",
+    "record_agent_run",
+    "record_verdict_run",
+    "save_card",
+    "save_raw_snapshot",
+]
