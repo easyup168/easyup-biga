@@ -1,9 +1,40 @@
-# EasyUp for BigA 2.0
+<div align="center">
+
+<img src="docs/images/easyupnew5.png" alt="EasyUp" width="420">
+
+# EasyUp for BigA 2.0 — 会说「我不知道」的 A 股 Multi-Agent 决策系统
+
+![Phase](https://img.shields.io/badge/PHASE-1%20walking%20skeleton-555)
+![Agents](https://img.shields.io/badge/AGENTS-2%20%2F%208-1f6feb)
+![Tests](https://img.shields.io/badge/117%20TESTS-PASSING-2ea043)
+![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%203%20tables-555)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-9%20%E7%AB%A0-8957e5)
+
+![Accept](https://img.shields.io/badge/Phase%201%20%E9%AA%8C%E6%94%B6-8%20%2F%209-e3b341)
+![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-122.8s%20%C2%B7%20%E8%B6%85%2060s%20%E9%A2%84%E7%AE%97-d1242f)
+![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
+
+***发现共识，锁定核心，让每一笔交易都有逻辑***
+
+</div>
+
+---
 
 基于 OpenClaw 的 Multi-Agent A 股短线**决策辅助**系统。
 
 > **产品边界**：本系统不自动执行交易，不构成投资建议。
 > 最终交易动作由人决定 —— AI 负责扩大认知，人负责最终决策。
+
+### 为什么徽章里挂着「没达标」
+
+上面那两个橙红色徽章是故意放的。
+
+`tools/verify/phase1_acceptance.py` 的九项自检过了八项，唯一没过的是端到端延迟 ——
+122.8 秒，超出 60 秒预算一倍。这些写在 README 最显眼的位置，而不是藏在文档深处。
+
+这正是本项目要验证的东西：**一个会主动暴露自己哪里不行的系统，
+比一个看起来全绿的系统可信。** 如果连自己的验收都要粉饰，
+那它出的 Decision Card 也不值得信。
 
 ---
 
