@@ -1,0 +1,25 @@
+# === 数据（自建事实层，不入库）===
+/data/*
+!/data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# === 运行时 / 密钥 ===
+.env
+*.key
+*.pem
+runtime/
+node_modules/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# === 临时 ===
+*.log
+/tmp/
+.DS_Store
