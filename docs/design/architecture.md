@@ -45,7 +45,7 @@
 │  state : ~/.openclaw         │   │  state : ~/.openclaw-biga    │
 │  data  : 现有事实层（不共用）  │   │  data  : biga.db（自建）      │
 │  agents: main ×1             │   │  agents: ×8                  │
-│  飞书  : cli_xxxxxxxxxx（已脱敏）     │   │  飞书  : 需独立应用（§2.4）    │
+│  IM    : 已接入（独立应用）    │   │  IM    : 需独立应用（§2.6）    │
 │  交易  : 自动下单 ✅           │   │  交易  : ❌ Phase 1 不下单     │
 └──────────────────────────────┘   └──────────────────────────────┘
         零共享可写状态 —— 两侧唯一的交集是宿主机资源（CPU/内存/磁盘）
@@ -176,7 +176,7 @@ specialist 是有界工人，窄 cwd 反而是对的。
 
 ### 2.6 飞书：Phase 1 不接
 
-生产的飞书 app 是 `cli_xxxxxxxxxx（已脱敏）`。两个 gateway 共用同一个 app ⇒ 同一条消息两个 bot 都回。
+同机另一套实例已占用一个 IM 机器人应用。两个 gateway 共用同一个应用 ⇒ 同一条消息两个 bot 都回。
 **Phase 1 一律走本地 TUI**：`~/.openclaw-biga/bin/biga chat`。
 接飞书是 Phase 3 的事，届时需要一个**独立自建应用**。
 
