@@ -22,8 +22,7 @@
 
 ### 安全
 
-- 重写全部 14 个 commit 的作者身份为 `easyup <easyup168@users.noreply.github.com>`，
-  并从文件内容中清除旧用户名。
+- 重写全部 14 个 commit 的作者身份，统一为项目账号，并从文件内容中清除旧用户名。
   ⚠️ **转 Public 前需决定是否改用 GitHub 的 noreply 邮箱** ——
   真实邮箱进入公开 git 历史后全网可爬，而 noreply 同样能关联 commit 到账号。
   改的话要再次重写历史，最好在转公开前一次做完
