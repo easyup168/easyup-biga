@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/easyupnew5.png" alt="EasyUp" width="420">
+<img src="images/LOGO_BigA01.png" alt="EasyUp for BigA" width="480">
 
 # EasyUp for BigA 2.0 — 会说「我不知道」的 A 股 Multi-Agent 决策系统
 
@@ -18,6 +18,9 @@
 ***发现共识，锁定核心，让每一笔交易都有逻辑***
 
 </div>
+
+<sub>品牌素材在 [`images/`](images/)：`LOGO_BigA01` 横版字标 · `LOGO_BigA02` 方形图标 ·
+`LOGO_BigA03` 方案总览。三张图由 AI 生成，保留了 C2PA 内容凭证（`caBX` 块）未作剥离。</sub>
 
 ---
 

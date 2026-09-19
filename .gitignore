@@ -31,6 +31,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# === Windows 残留 ===
+# 从 Windows 复制文件到 WSL 时产生的 NTFS 备用数据流标记
+*:Zone.Identifier
+
 # === 临时 ===
 *.log
 /tmp/
