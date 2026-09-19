@@ -1,0 +1,121 @@
+"""BigA 事实层 schema —— 按版本号递增的迁移列表。
+
+为什么 schema 单独一个模块而不是散在 db.py 里：
+切 PostgreSQL 时，需要改的只有「方言相关的 SQL」和「连接逻辑」两处，
+把它们分开放，届时一眼能看出改哪些。
+
+🔴 三张表全部**只追加不修改**，由 SQLite 触发器强制（不是靠约定）。
+   理由见 architecture.md §9 L-8：状态被原地 UPDATE 之后，
+   「当时看到的是什么」就永久不可重建了，事后归因直接残废。
+"""
+
+from __future__ import annotations
+
+__all__ = ["MIGRATIONS", "SCHEMA_VERSION"]
+
+
+def _append_only(table: str, note: str) -> str:
+    """生成一对拒绝 UPDATE / DELETE 的触发器。
+
+    用触发器而不是「代码里不写 UPDATE」——
+    约定靠人守，触发器靠数据库守。多一个人、多一个脚本都不会绕过它。
+    """
+    return f"""
+CREATE TRIGGER IF NOT EXISTS {table}_no_update
+BEFORE UPDATE ON {table}
+BEGIN
+    SELECT RAISE(ABORT, '{table} 只追加不修改：{note}');
+END;
+
+CREATE TRIGGER IF NOT EXISTS {table}_no_delete
+BEFORE DELETE ON {table}
+BEGIN
+    SELECT RAISE(ABORT, '{table} 只追加不删除：{note}');
+END;
+"""
+
+
+_V1 = """
+-- ───────────────────────────────────────────────────────────────
+-- decision_records —— Decision Card 冻结存档，回放的唯一真相源
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS decision_records (
+    record_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id   TEXT    NOT NULL,
+    -- 回放产生的记录指向它回放的那条；在线路径为 NULL。
+    -- 回放绝不覆盖原始记录 —— 覆盖了就没法回答「换模型后结论变了吗」。
+    replay_of     INTEGER REFERENCES decision_records(record_id),
+    status        TEXT    NOT NULL,
+    headline      TEXT    NOT NULL,
+    model_ref     TEXT    NOT NULL,
+    missing_count INTEGER NOT NULL,
+    -- 🔴 真相源。上面那些列都是从它派生出来的查询用副本，写入时统一由卡对象生成，
+    --    调用方无法单独指定，因此不可能与 card_json 不一致。
+    card_json     TEXT    NOT NULL,
+    generated_at  TEXT    NOT NULL,
+    elapsed_ms    INTEGER NOT NULL,
+    created_at    TEXT    NOT NULL
+);
+
+-- 一个 decision_id 只能有一条「在线」记录，回放记录不限条数。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_online
+    ON decision_records(decision_id) WHERE replay_of IS NULL;
+CREATE INDEX IF NOT EXISTS ix_decision_id ON decision_records(decision_id);
+CREATE INDEX IF NOT EXISTS ix_decision_created ON decision_records(created_at);
+
+-- ───────────────────────────────────────────────────────────────
+-- agent_runs —— 每次 Agent 执行的账本
+--
+-- 它同时承担两件事：
+--   1. 成本与延迟可观测（模型分层要靠它的数据来定，不靠拍脑袋）
+--   2. 🔴 证明「Supervisor 确实 spawn 了 Specialist」，而不是自己编了个答案
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id   TEXT,
+    task_id       TEXT    NOT NULL,
+    agent         TEXT    NOT NULL,
+    model         TEXT,
+    status        TEXT    NOT NULL,
+    verdict       TEXT,
+    missing_count INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms    INTEGER NOT NULL,
+    tokens_in     INTEGER,
+    tokens_out    INTEGER,
+    error         TEXT,
+    started_at    TEXT    NOT NULL,
+    finished_at   TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_runs_decision ON agent_runs(decision_id);
+CREATE INDEX IF NOT EXISTS ix_runs_agent    ON agent_runs(agent, finished_at);
+
+-- ───────────────────────────────────────────────────────────────
+-- raw_market_snapshot —— 采集原样落盘，永不改写
+--
+-- 这里存的是「当时从数据源拿到的字节」，不做任何归一化。
+-- 上层算错了可以重算；raw 丢了就永远重算不了。
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS raw_market_snapshot (
+    snapshot_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    source         TEXT    NOT NULL,
+    as_of          TEXT    NOT NULL,
+    retrieved_at   TEXT    NOT NULL,
+    payload_json   TEXT    NOT NULL,
+    content_sha256 TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_raw_source_asof ON raw_market_snapshot(source, as_of);
+CREATE INDEX IF NOT EXISTS ix_raw_sha         ON raw_market_snapshot(content_sha256);
+""" + _append_only("decision_records", "回放追加新行，不覆盖原始判断") \
+    + _append_only("agent_runs", "执行账本改了就不是账本了") \
+    + _append_only("raw_market_snapshot", "raw 层永不改写（L-8）")
+
+
+#: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
+MIGRATIONS: list[tuple[int, str]] = [
+    (1, _V1),
+]
+
+SCHEMA_VERSION: int = MIGRATIONS[-1][0]
