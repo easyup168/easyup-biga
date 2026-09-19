@@ -9,6 +9,7 @@
 ![Tests](https://img.shields.io/badge/117%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%203%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-9%20%E7%AB%A0-8957e5)
+![Audit](https://img.shields.io/badge/%E5%AE%89%E5%85%A8%E5%AE%A1%E6%9F%A5-8%20%2F%208-2ea043)
 
 ![Accept](https://img.shields.io/badge/Phase%201%20%E9%AA%8C%E6%94%B6-8%20%2F%209-e3b341)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-122.8s%20%C2%B7%20%E8%B6%85%2060s%20%E9%A2%84%E7%AE%97-d1242f)
