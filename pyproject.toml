@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# skills/ 是包根 —— 业务代码一律 `from _contract import ...`
+pythonpath = ["skills", "."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
