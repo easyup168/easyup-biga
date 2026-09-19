@@ -16,32 +16,119 @@
 - [x] 装 openclaw 2026.9.5 到 `~/.openclaw-biga/runtime/` —— **未进 nvm bin**（红线 R-2）
 - [x] `bin/biga` wrapper —— 强制注入 `--profile biga`（红线 R-1）
 - [x] 隔离实测：跑 BigA 命令后，另一套系统的 state / config mtime 未变
-- [x] 守卫测试落在另一套仓库：一条常驻守卫测试（3 项）
+- [x] 守卫测试落在另一套仓库（受害者侧），3 项，断言其 PATH 解析未被改掉
 - [x] workspace 骨架 + git init + 首个 commit
 - [x] 文档：架构 / 安装指南 / 上游参考 / CLAUDE.md
 - [x] 公开化处理：抽掉实盘系统可识别细节（`architecture.md` §9 改写）
+- [x] `docs/tutorial/` 开源教程体系启动 —— README 索引 + 第 01/02 章
+      纪律写进 `CLAUDE.md`「教程纪律」：**每完成一段先写教程再往下做**（裁定 10）
 
 ### ⬜ 待做
 
-- [ ] **决定 Phase 1 建几个 agent**
-      建议 2 个（`main` + `emotion`）先验证机制。8 个全建 = 6 个零消费方组件。
-      **等小飞裁定**
-- [ ] `biga setup` —— profile 初始化，端口 **19789**，**跳过飞书**
-      验收：`~/.openclaw-biga/openclaw.json` 生成，`biga agents list` 正常
-- [ ] `skills/_contract/` —— `Evidence` / `AgentVerdict` / `DecisionCard`
-      验收：`tests/test_contract_single_impl.py` 绿（AST 扫描确认无第二份实现）
-- [ ] `skills/_store/db.py` + 三张表
+- [x] **决定 Phase 1 建几个 agent** —— 已裁定：**2 个**（`main` + `emotion`）
+      8 条验收标准无一需要第三个 agent；无 skill 的空 agent 只能编数字，违反契约铁律 3
+- [x] `biga setup` —— profile 初始化，端口 **19789**，**未接任何 IM 通道**
+      走 `setup --baseline` + `config patch`，不走 onboarding 向导（理由见教程 02）
+      验收：`config validate` 绿；`gateway.port=19789`；`model.primary=anthropic/claude-sonnet-5`；
+      `subagents.maxConcurrent=6`；`channels` 未设；另一套实例 state mtime 未变
+- [x] `skills/_contract/` —— `Evidence` / `AgentVerdict` / `DecisionCard`
+      四条铁律全部在 `__post_init__` 里**拒绝构造**，不是记日志
+      验收：`pytest` 51 绿（行为 43 + AST 单一实现扫描 8）；
+      AST 扫描已用探针验证「真的会红」（重名类 / 近名类 / 字典版契约三种形状）
+      ⚠️ 一处对 `architecture.md` §4.1 的偏离：`Evidence` 增加 `field`/`label` 两字段 ——
+      不加则铁律 3 无法执行、§7.1 的 Card 样例也渲染不出来。已在教程 03 §3 说明
+      教程：`docs/tutorial/03-contract-layer.md`
+- [x] `skills/_store/db.py` + `schema.py` + 三张表
       `decision_records` / `agent_runs` / `raw_market_snapshot`
-      验收：`tests/test_no_raw_sqlite.py` 绿
-- [ ] `skills/emotion-calc/` —— 真采一次 A 股情绪数据，输出合法 `AgentVerdict`
-      验收：命令行跑出带 `as_of` 的 JSON
-- [ ] 建 agent `emotion` + 写 `agents/emotion/AGENTS.md`
-      `biga agents add emotion --workspace ~/.openclaw-biga/workspace/agents/emotion`
-- [ ] 配 `main`(Supervisor)：仓库根的 `AGENTS.md` / `SOUL.md` / `IDENTITY.md`
-      \+ `subagents.allowAgents: ["emotion"]` + `tools.agentToAgent.allow`
+      只追加由 **SQLite 触发器**强制（6 个），不是代码约定；回放用 partial unique index
+      支持不覆盖原始记录；读路径一律 `readonly=True` 连接
+      验收：`pytest` 75 绿（+ store 行为 20 + 无裸 sqlite3 扫描 4）；扫描已用探针验证会红
+      教程：`docs/tutorial/04-store-layer.md`
+- [x] `skills/emotion-calc/` —— 真采 A 股情绪数据，输出合法 `AgentVerdict`
+      2026-09-18 实测：涨停 78 / 炸板 25 / 跌停 0 / 炸板率 24.27% / 最高 4 板 /
+      梯队 {1:66,2:8,3:2,4:2} / 涨跌平 4277·1173·180 / 情绪分 55.52，耗时 18.8s
+      🔴 **数据源静默陷阱**：请求非交易日照样 `rc=0` 返回数据（元旦→`tc=0`）。
+      因此 `as_of` 一律取自响应里的 `qdate`，绝不取自请求日期；严格模式对不上进 `missing[]`
+      ⚠️ 因此**没用现成封装库** —— 它把 `qdate` 整理掉了，那个陷阱就无法防御
+      R-3 三条路径实测可复现：PASS / WARNING / UNKNOWN，无一行「PASS + 有缺失」
+      验收：`pytest` 102 绿（+ emotion 离线 27）；raw 层落盘 4 条/次
+      教程：`docs/tutorial/05-first-skill.md`
+- [x] 建 agent `emotion` + 写 `agents/emotion/AGENTS.md`
+      ⚠️ 清理了脚手架默认产物：嵌套 `.git`（会让父仓当 submodule）、`BOOTSTRAP.md`
+      （会让 Specialist 开口问「我该叫什么名字」）、`SOUL.md`/`IDENTITY.md`（spawned
+      session 不加载）、`USER.md`
+      契约含「拿单日数据**说不了**什么」一节 —— 防 LLM 把不完整信息补成完整故事
+      教程：`docs/tutorial/06-agents.md`
+- [x] 配 `main`(Supervisor)：仓库根 `AGENTS.md` / `SOUL.md` / `IDENTITY.md`
+      `allowAgents:["emotion"]`（不预填 6 个不存在的 agent = 避免死配置）；
+      `emotion.allowAgents:[]`（叶子节点）；`agentToAgent.allow:["main","emotion"]`（两端都要列）
 - [ ] 端到端跑通：`biga agent --agent main -m "今天市场情绪怎么样？"`
-- [ ] `replay <decision_id>` —— 与在线路径共用同一份合成代码
-- [ ] 隔离演练：`kill -9` BigA gateway，确认另一套系统 gateway pid 不变
+      🔴 **被认证方式卡住 —— 根因已查清**
+
+      **现象**：Supervisor 跑起来了，但它找不到 OpenClaw 的跨 agent spawn 工具，
+      退而使用通用子 agent。那个子 agent **契约执行得很对**（读了
+      `agents/emotion/AGENTS.md`、跑了 `emotion_calc.py`），但它不是 `emotion` agent ——
+      `subagent_runs` 为 0 行，**验收第 1 条过不了**。
+
+      **实测证据**
+      | 观察 | 证据 |
+      |---|---|
+      | MCP server 本身正常 | 直接 HTTP 探测（含 `initialize` 握手）返回 **49 个工具**，含 `sessions_spawn` |
+      | Supervisor 看不到它们 | 会话记录：`ToolSearch "sessions_spawn"` 等 4 次查询全部落空 |
+      | 退路被走了 | `Agent general-purpose` |
+      | 第一次运行卡死 | `activeTool=Agent ... reason=blocked_tool_call`，346s 后 `CLI run aborted` |
+      | 真凭据不存在 | `models auth list` → `Profiles: (none)`；claude-cli 是插件自带 synthetic auth |
+
+      **根因（已确证，非推断）**：gateway 日志里有一行
+      `Warning: MCP server blocked by ***: openclaw`。
+      本机 `~/.claude/***` 有***
+      `restrictions.***.allowed = false`，
+      **Claude CLI 被禁止加载任何 MCP server**。
+      登录选 Claude CLI 方式 ⇒ OpenClaw 进入 `cli-backend` 模式 ⇒ 桥接的 MCP 工具
+      被这条策略整体拦掉 ⇒ `ToolSearch` 返回 "No matching deferred tools found"。
+
+      ⇒ **只要走 Claude CLI 桥接，跨 agent spawn 就不可能工作。** 与提示词无关。
+      ⚠️ 该策略是组织管控，**不要去改它**。
+
+      **已做的修正**：Supervisor 的 `AGENTS.md` 写死工具真名
+      `mcp__openclaw__sessions_spawn`，并明令禁止用通用 Agent 顶替（附三条理由）。
+      但工具不可见时，契约改得再硬也没用。
+
+      **解法（已实施，两件事缺一不可）**
+      1. **运行时**：`agents.defaults.models."anthropic/claude-sonnet-5".agentRuntime.id`
+         由 login 写入的 `claude-cli` 改为 **`openclaw`**（内置 harness，不经 Claude CLI，
+         那条***不适用）。haiku fallback 同改
+      2. **凭据**：见裁定 11 —— 复用邻居的 ***
+
+      **已验证的结果**
+      - `agent --agent main -m "只回复两个字：收到"` → 干净返回「收到」
+      - 🔴 **Supervisor 真的 spawn 了 emotion**，证据在 OpenClaw 自己的表里：
+        `subagent_runs`: `controller_session_key=agent:main:main`,
+        `child_session_key=agent:emotion:subagent:deb35b08-…`
+      - emotion 子会话 `status=succeeded`，8 次工具调用，耗时 **79.9s**，
+        raw 层新增 8 条快照（确实跑了采集）
+
+      **发现的新问题（已修契约，待复测）**
+      - 第一次成功 spawn 后，Supervisor 用 `sessions_yield` **提前收工**：
+        自己 `status=succeeded`，而 emotion 还在后台跑，**Card 从未产出**。
+        典型的「每步日志都绿、事情没做成」。
+        已在 `AGENTS.md` 加 Stage 1.5「必须等 + 必须出卡」与回合结束自检
+      - ⚠️ **延迟超预算**：仅 emotion 一个 specialist 就 79.9s，验收 #8 卡的是 <60s。
+        skill 本身只占 ~19s，其余是 LLM 开销（`thinking=high`）。待复测后评估
+
+      教程 07 待写
+- [x] `replay <decision_id>` —— 与在线路径共用 `card_ops.synthesize()`（纯函数）
+      AST 测试钉死「两个 CLI 都不自己构造 DecisionCard」
+      `--check` 当场抓到真 bug：回放丢了 Supervisor 的 3 条 `extra_missing`，
+      **让 Card 悄悄变好看** —— 已修（从原卡无损反推）并补了「守卫会红」的测试
+      实测：在线 WAIT(#1) + 换 opus 回放 AVOID(#2)，原记录未改动
+      教程：`docs/tutorial/08-replay.md`
+- [x] 隔离演练：`kill -9` BigA gateway（pid 64645）
+      邻居**六项逐位一致**：pid 391 未变、**启动时间未变**（证明没被重启过）、
+      state/config mtime 未变、`nvm default=24.18.0`、nvm bin 仅 v24.18.0 带 openclaw
+      无孤儿进程残留
+      ⚠️ 演练中发现：起 gateway 会**自动创建 4 条 cron**（见「待裁定」）
+      教程：`docs/tutorial/09-isolation-drill.md`
 
 ### Phase 1 验收（全部满足才算过）
 
@@ -51,7 +138,7 @@
 4. [ ] `decision_records` 落库 1 行，`replay` 重跑出一致结论
 5. [ ] 故意打断数据源 → Card 显示 `UNKNOWN` + `missing` 非空，**不是 PASS**（红线 R-3）
 6. [ ] 另一套系统：gateway pid / openclaw 版本 / `nvm default` / PATH / 18789 监听 五项未变
-7. [ ] 生产侧的 PATH 解析 仍解析到 `v24.18.0`（红线 R-2 未被破坏）
+7. [ ] 另一套系统的 PATH 解析仍指向 `v24.18.0`（红线 R-2 未被破坏）
 8. [ ] 单次端到端 **< 60s**（只有 2 个 agent；8 个时才允许到 105s）
 
 ### Phase 1 明确不做
@@ -63,7 +150,29 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 
 ## 待裁定
 
-- [ ] **Phase 1 建 2 个还是 8 个 agent**（见上）
+- [ ] 🔴 **换掉共享的 anthropic 凭据**（裁定 11 的退出条件，Phase 3 前必须做）
+      当前 BigA 用的是从邻居复制的同一条 *** ——
+      **token 轮换时两套一起停，且排查方向天生指向 BigA（错的那边）**。
+      触发条件任一成立即换：① 管理员批下独立 API key
+      ② *** 放开 `***` ③ 出现第一次因这条耦合导致的误判排查
+
+- [x] **模型认证方式** —— 已裁定：**复用邻居实例的 *****（裁定 11）
+      过程：① 选 Claude CLI → `cli-backend` 模式，MCP 被***拦死，spawn 不可见
+      ② 改用非 CLI 重登 → 它自动又选了 Claude CLI（探测到本机有 claude）
+      ③ 查邻居配置 → 它用的是 `*** [anthropic/token] static`，
+         既非 CLI 桥接也非 API key
+      ④ `claude ***` 生成长期 token 的路 → ***** 已禁**
+      ⑤ ⇒ 复用邻居那条 token（生成于***之前，账号下唯一可用的 anthropic 凭据）
+      ⚠️ 耦合已在 `CLAUDE.md`「已知耦合」一节记明，含排查顺序与退出条件
+- [x] **起 gateway 自动创建的 4 条 cron** —— 已裁定：**暂不动，记录在案**。
+      实测 `heartbeat-main` 已跑过一次并失败（`heartbeat skipped: no-route`），
+      是典型的零消费方组件。Phase 3 建自己的调度域时统一处理。清单：
+      `memory-core:memory-dreaming-promotion` / `heartbeat:main` /
+      `skill-collection-review:main` / `skill-collection-review:emotion`
+      （第四条在 `agents add emotion` 时创建）。
+      与 `architecture.md` §8「只有一个调度域、不用内置 cron」+ Phase 1「不建任何 cron」冲突。
+      目前不常驻 gateway 所以不会实际运行
+
 - [ ] GitHub 远端 —— 仓库建好后执行：
       `git remote add origin git@github.com-easyup168:easyup168/easyup-biga.git && git push -u origin main`
       （本机无 `gh` CLI；SSH 已通）

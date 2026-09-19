@@ -294,7 +294,7 @@ def test_only_one_nvm_version_has_openclaw():
     )
 ```
 
-完整版另含两项：生产侧的 PATH 解析 指向那个唯一安装、以及 BigA 本体确实在 nvm 之外。
+完整版另含两项：生产侧的 PATH 解析指向那个唯一安装、以及 BigA 本体确实在 nvm 之外。
 
 ---
 

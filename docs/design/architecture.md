@@ -12,7 +12,7 @@
 
 | # | 议题 | 裁定 | 对架构的影响 |
 |---|---|---|---|
-| 1 | 与现系统的关系 | **完全独立，自己重新采数据** | 不挂载 它的行情库；新系统自建数据层；两套零共享可写状态 |
+| 1 | 与现系统的关系 | **完全独立，自己重新采数据** | 不挂载它的行情库；新系统自建数据层；两套零共享可写状态 |
 | 2 | 交易执行 | **两套互不干扰；将来都有自动下单；最终替代现系统 —— 但那是很久以后，暂不考虑** | Phase 1 不下单；但**架构不得堵死下单路径**（§9 为此预留） |
 | 3 | 第一阶段范围 | **先装好新版 OpenClaw，实现最简单的功能验证** | Phase 1 = walking skeleton，不是完整系统（§11） |
 | 4 | Agent 形态 | **真八 Agent，完全照参考文档** | Supervisor + 7 Specialist 全部是独立 OpenClaw agent |
@@ -82,7 +82,7 @@
 
 ### 2.2 🔴 约束 D-1：BigA 的 openclaw 不得装进 nvm 的 bin 目录
 
-生产的 几十个 systemd cron unit 经 一个共用的 PATH 注入模块 注入 PATH，其选法是：
+生产侧有几十个 systemd cron unit，它们的 PATH 由一个共用模块注入，其选法是：
 
 ```python
 with_oc = [d for d in nvm_versions if (d / "bin" / "openclaw").exists()]
@@ -96,7 +96,7 @@ with_oc = [v24.18.0, v24.21.0]  →  max = v24.21.0
 ```
 
 **生产 cron 的 PATH 会静默切到 BigA 的 binary**，然后用 2026.9.5 去操作生产 state
-（cron 命令不带 `--profile`）。这正是 那个模块 自己注释里记的那类事故 ——
+（cron 命令不带 `--profile`）。这正是那个模块自己注释里记下的那类事故 ——
 同型事故实际发生过：某个定时推送任务连续失败数百次，而 cron 状态与审计**全程绿色**。
 
 **做法**：nvm 只提供 node 本体，openclaw 用 `--prefix` 装到 profile 目录内。
@@ -107,8 +107,8 @@ npm i --prefix ~/.openclaw-biga/runtime openclaw@latest
 
 于是 `v24.21.0/bin/` 里只有 `node`、没有 `openclaw` ⇒ `with_oc` 仍是 `[v24.18.0]` ⇒ 生产不受影响。
 
-**双保险**：在**生产仓库**加 一条常驻守卫测试，
-断言 生产侧的 PATH 解析 解析到 `v24.18.0`。BigA 哪天不小心装错位置，生产侧当场报红。
+**双保险**：在**生产仓库**里加一条守卫测试，断言它的 PATH 解析结果仍指向 `v24.18.0`。
+BigA 哪天不小心装错位置，生产侧当场报红。
 
 ### 2.3 完整路径表
 
@@ -188,7 +188,7 @@ specialist 是有界工人，窄 cwd 反而是对的。
 - 删除前核对：零进程使用 / 不在 PATH / 非 default / 唯一引用它的 `openclaw.service` 已 disabled+inactive
 - ⚠️ **v22.22.0 这个 node 本身必须保留** —— 它下面还有 `puppeteer`，仍被另一个脚本硬编码引用。
   只卸 openclaw，不要删整个版本目录
-- 删除后 生产侧的 PATH 解析 仍解析到 `v24.18.0`，它的相关测试 7 项全绿
+- 删除后生产侧的 PATH 解析仍指向 `v24.18.0`，其相关测试全绿
 - 遗留：`~/.config/systemd/user/openclaw.service`（现指向已删除的路径，disabled+inactive）
   与 `openclaw-gateway.service.bak` —— 建议一并清理，**待小飞确认**
 
@@ -564,7 +564,7 @@ Phase 2 结束时出一张「单次决策成本分解」，据此决定要不要
 | 1 | 装 node **v24.21.0**（增量；不改 `default`、不卸 v24.18.0） | `nvm ls` 见到它；生产 gateway pid 不变 |
 | 2 | `npm i --prefix ~/.openclaw-biga/runtime openclaw@latest` —— 🔴 **不装进 nvm bin**（约束 D-1） | `runtime/node_modules/.bin/openclaw --version` ≥2026.9.5；且 `v24.21.0/bin/` 里**没有** openclaw |
 | 3 | 写 `~/.openclaw-biga/bin/biga` wrapper（强制 `--profile biga`）并加执行位 | `biga --version` 可用 |
-| 4 | 🔴 **生产侧**加 一条常驻守卫测试，断言 生产侧的 PATH 解析 → `v24.18.0` | 绿（这是 D-1 的常驻守卫） |
+| 4 | 🔴 **生产侧**加一条守卫测试，断言其 PATH 解析 → `v24.18.0` | 绿（这是 D-1 的常驻守卫） |
 | 5 | `biga setup`：端口 **19789**，**跳过飞书** | `~/.openclaw-biga/openclaw.json` 生成 |
 | 6 | 在 `~/.openclaw-biga/workspace/` 建 git 仓库 + §2.4 骨架 + `.gitignore`（`data/`） | `git log` 有首个 commit |
 | 7 | 写 `skills/_contract/`（Evidence / AgentVerdict / DecisionCard） | `tests/test_contract_single_impl.py` 绿 |
@@ -587,7 +587,7 @@ Phase 2 结束时出一张「单次决策成本分解」，据此决定要不要
 4. `decision_records` 落库 1 行，`biga replay` 能重跑出一致结论
 5. 故意把情绪数据源打断 → Card 显示 `UNKNOWN` + `missing` 非空，**不是 PASS**（L-2）
 6. 生产侧：gateway pid、openclaw 版本、`default` alias、PATH、18789 监听 —— 五项全部未变
-6b. 🔴 生产侧的 PATH 解析 仍解析到 **v24.18.0**（约束 D-1 未被破坏）
+6b. 🔴 生产侧的 PATH 解析仍指向 **v24.18.0**（约束 D-1 未被破坏）
 7. 单次端到端 **< 60s**（只有 2 个 agent，8 个时才允许到 105s）
 
 ### 11.4 Phase 1 明确不做
