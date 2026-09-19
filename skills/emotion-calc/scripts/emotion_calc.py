@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""emotion-calc —— A 股情绪事实计算，输出一份合法的 AgentVerdict。
+
+分工（architecture.md §6 硬约束 S-1 / S-2）
+--------------------------------------------
+本脚本**只产出事实与分数**，不做任何判断性归类。
+
+  归这里（Python）          归 Emotion Agent（LLM）
+  ─────────────────────    ────────────────────────────
+  涨停/跌停/炸板家数         这算不算「亢奋期」
+  炸板率、最高板、梯队分布    炸板率 24% 在当前位置是否算健康
+  赚钱效应中位数             要不要提示追高风险
+  情绪分（确定性公式）        这个分数此刻该不该信
+
+为什么划在这里：判断逻辑一旦散进 skill，就会产生第二套口径 ——
+同一个「强不强」在 skill 里算一遍、在 agent 的 prompt 里又算一遍，
+两边慢慢漂开，而且漂开时不会报错。
+
+🔴 缺失即缺失
+-------------
+任何一项算不出来，都进 `missing[]` 并如实出现在 Decision Card 上。
+**绝不填 0、绝不跳过、绝不用昨天的值顶替。**
+这是本项目最优先防范的失败模式：静默 fail-open —— 放行与通过的日志长得一模一样。
+
+用法::
+
+    # 最近一个交易日（宽松：接受数据源给出的最新交易日）
+    python3 emotion_calc.py
+
+    # 指定交易日（严格：数据源给的日期对不上就进 missing[]）
+    python3 emotion_calc.py --date 20260918
+
+    # 演练数据源中断，验证 UNKNOWN ≠ PASS
+    python3 emotion_calc.py --break-source limit_up
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import pathlib
+import sys
+import time
+import threading
+from datetime import datetime, time as dtime
+from typing import Any
+
+_HERE = pathlib.Path(__file__).resolve()
+_REPO = _HERE.parent.parent.parent.parent
+sys.path.insert(0, str(_REPO / "skills"))
+sys.path.insert(0, str(_HERE.parent))
+
+from _contract import CN_TZ, AgentVerdict, Evidence, new_task_id, now_cn  # noqa: E402
+from _store import init_schema, save_raw_snapshot  # noqa: E402
+from sources import (  # noqa: E402
+    BreadthResult,
+    PoolResult,
+    SourceError,
+    fetch_breadth,
+    fetch_pool,
+)
+
+AGENT = "emotion"
+CALC_VERSION = "emotion-calc/1"
+
+#: A 股收盘时刻。股池数据描述的是这一刻之后的全天结果。
+_CLOSE = dtime(15, 0, 0)
+
+#: 情绪分参考公式的权重。业内常见口径，**未经本项目验证** ——
+#: 它的区分力要到测量阶段做安慰剂检验后才算数，因此只作为一个内部参考数，
+#: 不参与任何归类，也不单独上 Card。
+_SCORE_W = {"limit_up_div": 150.0, "limit_up_w": 40.0,
+            "streak_div": 10.0, "streak_w": 30.0,
+            "seal_w": 30.0}
+
+
+def _as_of_from_qdate(qdate: str) -> datetime:
+    """把交易日转成「当日收盘」这个时刻。
+
+    🔴 as_of 取自数据自己声明的 qdate，绝不取自我请求的日期。
+    理由见 sources.py 模块 docstring 里的实测表。
+    """
+    d = datetime.strptime(qdate, "%Y%m%d").date()
+    return datetime.combine(d, _CLOSE, tzinfo=CN_TZ)
+
+
+class Collector:
+    """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
+
+    def __init__(self, date: str | None, break_source: set[str], store: bool):
+        self._lock = threading.Lock()
+        self.date = date
+        self.break_source = break_source
+        self.store = store
+        self.pools: dict[str, PoolResult] = {}
+        self.breadth: BreadthResult | None = None
+        self.missing: list[str] = []
+        self.warnings: list[str] = []
+        self.raw_ids: list[int] = []
+
+    def _note(self, *, missing: str | None = None, warning: str | None = None) -> None:
+        with self._lock:
+            if missing:
+                self.missing.append(missing)
+            if warning:
+                self.warnings.append(warning)
+
+    def _keep(self, pool: str, r: PoolResult) -> None:
+        with self._lock:
+            self.pools[pool] = r
+
+    def _keep_raw(self, snapshot_id: int) -> None:
+        with self._lock:
+            self.raw_ids.append(snapshot_id)
+
+    # -- 采集 --------------------------------------------------------------
+
+    def _target_date(self) -> str:
+        return self.date or now_cn().strftime("%Y%m%d")
+
+    def collect_pool(self, pool: str, label: str) -> None:
+        if pool in self.break_source:
+            self._note(missing=f"{label} —— 数据源被人为中断（--break-source {pool}）")
+            return
+        try:
+            r = fetch_pool(pool, self._target_date())
+        except (SourceError, ValueError) as e:
+            self._note(missing=f"{label} —— 数据源不可用: {e}")
+            return
+
+        if r.qdate is None:
+            self._note(missing=f"{label} —— 返回中没有 qdate，无法确认这是哪一天的数据")
+            return
+
+        if self.date is not None and not r.date_matches:
+            # 显式指定了日期 = 一个契约。对不上就是没拿到要的东西。
+            self._note(missing=f"{label} —— 请求 {self.date} "
+                              f"但数据源返回的是 {r.qdate} 的数据")
+            return
+        if self.date is None and r.qdate != self._target_date():
+            self._note(warning=f"{label} 取到的是最近交易日 {r.qdate} 的数据，不是今天")
+
+        self._keep(pool, r)
+        if self.store:
+            self._keep_raw(save_raw_snapshot(
+                source=f"em:push2ex/{pool}",
+                as_of=_as_of_from_qdate(r.qdate).isoformat(),
+                retrieved_at=now_cn().isoformat(),
+                payload=r.raw,
+            ))
+
+    def collect_breadth(self) -> None:
+        if "breadth" in self.break_source:
+            self._note(missing="涨跌家数 —— 数据源被人为中断（--break-source breadth）")
+            return
+        try:
+            self.breadth = fetch_breadth()
+        except SourceError as e:
+            self._note(missing=f"涨跌家数 —— 数据源不可用: {e}")
+        # ⚠️ 这里**不**落 raw、**不**发警告：
+        # 两者都依赖 qdate，而 qdate 要等全部股池跑完才知道。
+        # 并行采集下在这里读 self.qdate 是竞态 —— 统一放到全部完成后做。
+
+    # -- 派生 --------------------------------------------------------------
+
+    @property
+    def qdate(self) -> str | None:
+        """三个池报的交易日。不一致时返回 None 并记入 missing。"""
+        dates = {r.qdate for r in self.pools.values() if r.qdate}
+        if not dates:
+            return None
+        if len(dates) > 1:
+            return None
+        return dates.pop()
+
+
+def _ladder(rows: list[dict[str, Any]]) -> dict[int, int]:
+    """连板梯队分布 {板数: 家数}。`lbc` = 连板次数。"""
+    out: dict[int, int] = {}
+    for r in rows:
+        n = int(r.get("lbc") or 1)
+        out[n] = out.get(n, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def build_verdict(
+    *,
+    date: str | None,
+    break_source: set[str],
+    store: bool,
+    task_id: str,
+) -> AgentVerdict:
+    t_start = time.monotonic()
+    c = Collector(date, break_source, store)
+
+    # 四个请求互不依赖，并行拿。串行约 26s，并行约 8s ——
+    # 端到端预算卡在 60s，这一步不是调优，是能不能用的问题。
+    jobs = [
+        lambda: c.collect_pool("limit_up", "涨停家数"),
+        lambda: c.collect_pool("broken_board", "炸板家数"),
+        lambda: c.collect_pool("limit_down", "跌停家数"),
+        c.collect_breadth,
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        for fut in [pool.submit(j) for j in jobs]:
+            fut.result()
+
+    # 三个池报了不同的交易日 —— 不能把它们当成同一天的事实汇总。
+    reported = {r.qdate for r in c.pools.values() if r.qdate}
+    if len(reported) > 1:
+        c.missing.append(
+            f"全部情绪指标 —— 各股池报告的交易日不一致 {sorted(reported)}，"
+            "不能当作同一天的事实汇总"
+        )
+        c.pools.clear()
+
+    qdate = c.qdate
+    result: dict[str, Any] = {}
+    evidence: list[Evidence] = []
+    retrieved = now_cn()
+
+    def add(field: str, value: Any, label: str, source: str) -> None:
+        result[field] = value
+        evidence.append(Evidence(
+            field=field, source=source, value=value,
+            as_of=_as_of_from_qdate(qdate), retrieved_at=retrieved,
+            calc_version=CALC_VERSION, label=label,
+        ))
+
+    if qdate:
+        zt = c.pools.get("limit_up")
+        zb = c.pools.get("broken_board")
+        dt = c.pools.get("limit_down")
+
+        if zt:
+            add("limit_up_count", zt.total, "涨停家数", "em:push2ex/limit_up")
+            ladder = _ladder(zt.rows)
+            add("max_streak", max(ladder) if ladder else 0, "最高板",
+                "em:push2ex/limit_up")
+            add("streak_2plus_count", sum(v for k, v in ladder.items() if k >= 2),
+                "连板家数(≥2)", "em:push2ex/limit_up")
+            add("streak_ladder", {str(k): v for k, v in ladder.items()},
+                "连板梯队分布", "em:push2ex/limit_up")
+            never_broken = sum(1 for r in zt.rows if int(r.get("zbc") or 0) == 0)
+            add("seal_never_broken_rate",
+                round(never_broken / zt.total, 4) if zt.total else None,
+                "全天未炸板占比", "em:push2ex/limit_up")
+
+        if zb:
+            add("broken_board_count", zb.total, "炸板家数", "em:push2ex/broken_board")
+        if dt:
+            add("limit_down_count", dt.total, "跌停家数", "em:push2ex/limit_down")
+
+        # 炸板率需要两个池同时在场 —— 缺一个就不是「算出来是 0」，是「算不出来」。
+        if zt and zb:
+            denom = zt.total + zb.total
+            if denom:
+                add("broken_rate", round(zb.total / denom, 4), "炸板率",
+                    "derived:limit_up+broken_board")
+            else:
+                c.missing.append("炸板率 —— 涨停与炸板家数均为 0，分母为零")
+        else:
+            c.missing.append("炸板率 —— 需要涨停池与炸板池同时可用")
+
+        if c.breadth:
+            b = c.breadth
+            c.warnings.append(
+                "涨跌家数接口不返回交易日字段，其 as_of 是按股池的 qdate 推断的"
+            )
+            add("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
+            add("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
+            add("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
+            if store:
+                c.raw_ids.append(save_raw_snapshot(
+                    source="em:push2delay/ulist.np",
+                    as_of=_as_of_from_qdate(qdate).isoformat(),
+                    retrieved_at=retrieved.isoformat(),
+                    payload=b.raw,
+                ))
+
+        # 情绪分：确定性公式，三个输入缺一不可。
+        if {"limit_up_count", "max_streak", "broken_rate"} <= set(result):
+            w = _SCORE_W
+            score = (
+                min(result["limit_up_count"] / w["limit_up_div"], 1.0) * w["limit_up_w"]
+                + min(result["max_streak"] / w["streak_div"], 1.0) * w["streak_w"]
+                + (1.0 - result["broken_rate"]) * w["seal_w"]
+            )
+            add("emotion_score", round(score, 2), "情绪分(参考)",
+                "derived:emotion-calc")
+        else:
+            c.missing.append("情绪分 —— 需要涨停家数 / 最高板 / 炸板率三项齐备")
+
+        add("trade_date", qdate, "交易日", "em:push2ex/qdate")
+    else:
+        c.missing.append("全部情绪指标 —— 没有任何股池返回可用的交易日")
+        if c.breadth:
+            # 数据确实取到了，但没有可信的交易日就无法给它一个 as_of。
+            # 带着错误的 as_of 上 Card，比没有这条数据更糟。
+            c.missing.append(
+                "涨跌家数 —— 已取到数据，但缺少可信交易日，无法确定它描述的是哪一天"
+            )
+
+    # verdict 表达的是**数据完整度**，不是市场判断。
+    # 「这算不算亢奋期」由 Emotion Agent 依据 AGENTS.md 里的口径来说。
+    core = {"limit_up_count", "broken_rate", "max_streak"}
+    if not c.missing:
+        status, level = "completed", "PASS"
+    elif core <= set(result):
+        status, level = "partial", "WARNING"
+    else:
+        status, level = "partial", "UNKNOWN"
+
+    return AgentVerdict(
+        task_id=task_id,
+        agent=AGENT,
+        status=status,
+        verdict=level,
+        result=result,
+        confidence=round(len(result) / 15, 2) if result else 0.0,
+        evidence=evidence,
+        warnings=c.warnings,
+        missing=c.missing,
+        elapsed_ms=int((time.monotonic() - t_start) * 1000),
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="A 股情绪事实计算 → AgentVerdict JSON")
+    ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式："
+                                   "数据源返回的日期对不上即进 missing[]")
+    ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--break-source", action="append", default=[],
+                    metavar="NAME",
+                    help="演练用：人为中断某个数据源 "
+                         "(limit_up|broken_board|limit_down|breadth)")
+    ap.add_argument("--no-store", action="store_true",
+                    help="不写 raw_market_snapshot（默认写）")
+    ap.add_argument("--render", action="store_true", help="附带人类可读摘要")
+    args = ap.parse_args(argv)
+
+    store = not args.no_store
+    if store:
+        init_schema()
+
+    v = build_verdict(
+        date=args.date,
+        break_source=set(args.break_source),
+        store=store,
+        task_id=args.task_id or new_task_id(1),
+    )
+    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+
+    if args.render:
+        print("\n" + "─" * 60, file=sys.stderr)
+        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms", file=sys.stderr)
+        for e in v.evidence:
+            print(f"  {e.display_label:<16} = {e.value}"
+                  f"   as_of {e.as_of:%Y-%m-%d %H:%M}", file=sys.stderr)
+        if v.warnings:
+            print("  警告:", file=sys.stderr)
+            for w in v.warnings:
+                print(f"    · {w}", file=sys.stderr)
+        if v.missing:
+            print(f"  ⚠ 缺失项（{len(v.missing)}）:", file=sys.stderr)
+            for m in v.missing:
+                print(f"    · {m}", file=sys.stderr)
+
+    # 退出码：0=完整，2=有缺失但核心可用，3=核心缺失
+    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
