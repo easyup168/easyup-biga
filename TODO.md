@@ -173,10 +173,23 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       与 `architecture.md` §8「只有一个调度域、不用内置 cron」+ Phase 1「不建任何 cron」冲突。
       目前不常驻 gateway 所以不会实际运行
 
-- [ ] GitHub 远端 —— 仓库建好后执行：
-      `git remote add origin git@github.com-easyup168:easyup168/easyup-biga.git && git push -u origin main`
-      （本机无 `gh` CLI；SSH 已通）
+- [x] **GitHub 远端** —— 已连通并推送
+      仓库：`easyup168/easyup-biga`（当前**私有**）
+      认证：为 `easyup168` 单独生成密钥 `~/.ssh/id_ed25519_easyup168`，
+      用 Host 别名 `github.com-easyup168` 区分 —— 本机另一个账号的默认密钥完全未受影响
+      ⚠️ 克隆/remote 必须写别名主机名，写成 `github.com` 会用错密钥
+      提交身份：`easyup <easyup168@users.noreply.github.com>`（仓库级配置，未动全局）
 - [ ] 要不要装 `gh` CLI
+
+### 🔴 转 Public 之前必须做完
+
+- [ ] 重跑完整安全审查（六项：凭据 / 家目录路径 / 个人邮箱 / 邻居可识别细节 /
+      内网 IP / gateway token）
+- [ ] **决定 commit 作者邮箱是否换成 `easyup168@users.noreply.github.com`**
+      现在用的是真实 gmail。仓库私有时无所谓；**转公开后它会进入全网可爬的 git 历史**，
+      是垃圾邮件与撞库的常见来源。
+      GitHub 的 noreply 地址同样能把 commit 关联到账号，不损失任何东西。
+      ⚠️ 要改就得**再次重写历史**，所以最好在转公开前一次做完
 
 ---
 

@@ -15,6 +15,19 @@
 
 ## [未发布]
 
+### 新增
+
+- 接入 GitHub 远端 `easyup168/easyup-biga`（当前私有）。
+  为该账号单独生成 SSH 密钥并用 Host 别名区分，本机另一账号的默认密钥不受影响
+
+### 安全
+
+- 重写全部 14 个 commit 的作者身份为 `easyup <easyup168@users.noreply.github.com>`，
+  并从文件内容中清除旧用户名。
+  ⚠️ **转 Public 前需决定是否改用 GitHub 的 noreply 邮箱** ——
+  真实邮箱进入公开 git 历史后全网可爬，而 noreply 同样能关联 commit 到账号。
+  改的话要再次重写历史，最好在转公开前一次做完
+
 ### 待完成（Phase 1 验收第 8 条）
 
 - 端到端延迟 **122.8s**，超出 60s 预算一倍。两次测量显示瓶颈在 LLM 轮次
