@@ -1,0 +1,195 @@
+"""铁律 4 的常驻守卫：契约只有一份实现。
+
+AST 全仓扫描，拦三种「第二套实现」的形状：
+
+  A. 重名类      —— 仓库里除 `skills/_contract/` 外再定义 `Evidence` / `AgentVerdict`
+                     / `DecisionCard`。
+  B. 近名类      —— 定义 `EmotionVerdict` / `MarketEvidence` / `MiniDecisionCard`
+                     之类「看起来是自己那一版」的类。这是契约漂移最常见的起点。
+  C. 字典版契约  —— 不定义类，直接手搓一个 key 长得和契约一样的 dict。
+                     这是最隐蔽的一种：它不引入任何新符号，grep 也搜不到。
+
+为什么这条值得写一个专门的测试：
+同一判据在多处各写一遍时，错法全是**静默**的 —— 每一份都返回一个看似合理的值，
+没有任何一处会报错。等到发现口径不一致，往往已经过了几个月。
+
+需要合法地写一个「长得像契约」的东西时（例如测试里的假对象），
+在该行或上一行加注释豁免::
+
+    class FakeEvidence:  # contract-exempt: 测试用的鸭子类型，用于断言契约拒绝它
+"""
+
+from __future__ import annotations
+
+import ast
+import pathlib
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+CONTRACT_DIR = REPO / "skills" / "_contract"
+
+EXCLUDE_DIRS = {".git", "__pycache__", "node_modules", "runtime", ".pytest_cache", "data"}
+
+EXEMPT_MARKER = "contract-exempt:"
+
+#: A —— 契约类名，全仓只许 `_contract/` 定义
+CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard"}
+
+#: B —— 近名类：名字里带这些词根的类定义，都算另起炉灶
+NAME_ROOTS = ("Evidence", "Verdict", "DecisionCard")
+
+#: pytest 的测试容器类按约定以 Test 开头，它们是分组而非数据结构，不参与 B 的判定。
+#: 这是规则的精确化，不是豁免 —— 豁免要写在被扫的代码里，规则该准的地方要自己准。
+TEST_CLASS_PREFIX = "Test"
+
+#: C —— 字典版契约：键集合 + 其中的「特征键」
+DICT_SHAPES: dict[str, tuple[set[str], set[str]]] = {
+    "AgentVerdict": (
+        {"task_id", "agent", "status", "verdict", "result",
+         "confidence", "evidence", "warnings", "missing", "elapsed_ms"},
+        {"task_id", "verdict", "elapsed_ms", "missing"},
+    ),
+    "Evidence": (
+        {"field", "source", "value", "as_of", "retrieved_at", "calc_version", "label"},
+        {"as_of", "retrieved_at", "calc_version"},
+    ),
+    "DecisionCard": (
+        {"decision_id", "status", "headline", "verdicts",
+         "missing", "synthesis", "model_ref"},
+        {"decision_id", "headline", "verdicts", "model_ref"},
+    ),
+}
+
+MIN_DICT_KEYS = 4
+
+
+def _py_files() -> list[pathlib.Path]:
+    out: list[pathlib.Path] = []
+    for p in REPO.rglob("*.py"):
+        if any(part in EXCLUDE_DIRS for part in p.relative_to(REPO).parts):
+            continue
+        out.append(p)
+    return sorted(out)
+
+
+def _is_exempt(lines: list[str], lineno: int) -> bool:
+    """该行或上一行带豁免注释。"""
+    for idx in (lineno - 1, lineno - 2):
+        if 0 <= idx < len(lines) and EXEMPT_MARKER in lines[idx]:
+            return True
+    return False
+
+
+def _in_contract(p: pathlib.Path) -> bool:
+    return CONTRACT_DIR in p.parents
+
+
+ALL_FILES = _py_files()
+
+
+def test_扫描范围非空():
+    """守卫的守卫：扫描本身失效时必须报红，而不是安静地全绿。
+
+    一个扫不到任何文件的扫描器永远通过 —— 这正是「零消费方」失败模式在测试里的化身。
+    """
+    assert len(ALL_FILES) >= 3, f"只扫到 {len(ALL_FILES)} 个 .py，扫描范围可能坏了"
+    assert any(_in_contract(p) for p in ALL_FILES), "没扫到 _contract/ 本身"
+
+
+def test_A_契约类名只在_contract_下定义():
+    offenders: list[str] = []
+    for p in ALL_FILES:
+        if _in_contract(p):
+            continue
+        src = p.read_text(encoding="utf-8")
+        lines = src.splitlines()
+        for node in ast.walk(ast.parse(src, filename=str(p))):
+            if isinstance(node, ast.ClassDef) and node.name in CONTRACT_NAMES:
+                if _is_exempt(lines, node.lineno):
+                    continue
+                offenders.append(f"{p.relative_to(REPO)}:{node.lineno} class {node.name}")
+    assert not offenders, (
+        "发现契约类的第二份实现（铁律 4）：\n  " + "\n  ".join(offenders)
+        + "\n一切契约必须 `from _contract import ...`。"
+    )
+
+
+def test_B_不许定义近名的自建契约类():
+    offenders: list[str] = []
+    for p in ALL_FILES:
+        if _in_contract(p):
+            continue
+        src = p.read_text(encoding="utf-8")
+        lines = src.splitlines()
+        for node in ast.walk(ast.parse(src, filename=str(p))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if node.name in CONTRACT_NAMES:
+                continue  # 由 A 负责
+            if node.name.startswith(TEST_CLASS_PREFIX):
+                continue  # pytest 分组容器
+            if any(root in node.name for root in NAME_ROOTS):
+                if _is_exempt(lines, node.lineno):
+                    continue
+                offenders.append(f"{p.relative_to(REPO)}:{node.lineno} class {node.name}")
+    assert not offenders, (
+        "发现自建的近名契约类（铁律 4）：\n  " + "\n  ".join(offenders)
+        + "\n需要扩展契约就改 skills/_contract/，不要在局部另起一个。"
+    )
+
+
+def test_C_不许手搓字典版契约():
+    offenders: list[str] = []
+    for p in ALL_FILES:
+        if _in_contract(p):
+            continue
+        src = p.read_text(encoding="utf-8")
+        lines = src.splitlines()
+        tree = ast.parse(src, filename=str(p))
+        for node in ast.walk(tree):
+            keys: set[str] = set()
+            if isinstance(node, ast.Dict):
+                keys = {
+                    k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "dict":
+                keys = {kw.arg for kw in node.keywords if kw.arg}
+            if not keys:
+                continue
+            for shape, (full, distinctive) in DICT_SHAPES.items():
+                hit = keys & full
+                if len(hit) >= MIN_DICT_KEYS and keys & distinctive:
+                    if _is_exempt(lines, node.lineno):
+                        continue
+                    offenders.append(
+                        f"{p.relative_to(REPO)}:{node.lineno} "
+                        f"疑似手搓 {shape}，命中键 {sorted(hit)}"
+                    )
+                    break
+    assert not offenders, (
+        "发现字典形式的第二套契约（铁律 4）：\n  " + "\n  ".join(offenders)
+        + "\n请构造 _contract 的 dataclass 再调 .to_dict()；"
+        "确有必要时加注释 `# contract-exempt: <理由>`。"
+    )
+
+
+def test_contract_目录里每个契约恰好定义一次():
+    """_contract/ 内部也不许重复定义 —— 一份实现的前提是它自己不分裂。"""
+    seen: dict[str, list[str]] = {n: [] for n in CONTRACT_NAMES}
+    for p in sorted(CONTRACT_DIR.rglob("*.py")):
+        tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name in CONTRACT_NAMES:
+                seen[node.name].append(f"{p.relative_to(REPO)}:{node.lineno}")
+    for name, locs in seen.items():
+        assert len(locs) == 1, f"{name} 应恰好定义 1 次，实际 {len(locs)} 次：{locs}"
+
+
+@pytest.mark.parametrize("name", sorted(CONTRACT_NAMES))
+def test_契约可从包根导入(name):
+    import _contract
+
+    assert hasattr(_contract, name), f"_contract 未导出 {name}"
