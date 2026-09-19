@@ -211,20 +211,52 @@ def check_5_fail_closed(run_live: bool) -> Check:
 
 
 def check_8_latency(decision_id: str | None, budget_ms: int = 60_000) -> Check:
-    c = Check("8", f"单次端到端 < {budget_ms // 1000}s（2 个 agent）")
+    """🔴 读**真实墙钟**，不读 Supervisor 自报的数。
+
+    早先这条查的是 `card.elapsed_ms` —— 那是 Supervisor 自己填进来的数字，
+    等于让被考核方自己报成绩。实测它（122.8s）比真实墙钟（215.2s）小得多。
+
+    真相源是 OpenClaw 运行时的 trajectory：每一轮 LLM 的起止时刻。
+    """
+    c = Check("8", f"单次端到端 < {budget_ms // 1000}s（真实墙钟）")
     if not decision_id:
         return c.pending("未提供 --decision-id") or c
+    from datetime import datetime, timedelta
+
     from _store import load_card
+    from _store.runtime import read_turns
 
     card = load_card(decision_id)
     if card is None:
         return c.fail("Card 不存在") or c
     if card.elapsed_ms <= 0:
-        return c.pending("Card 的 elapsed_ms 未填，无法判定") or c
-    if card.elapsed_ms < budget_ms:
-        c.ok(f"{card.elapsed_ms / 1000:.1f}s")
+        return c.pending(
+            "Card 的 elapsed_ms 为 0（Supervisor 没传 --elapsed-ms），"
+            "无法精确定界这次决策的时间窗") or c
+
+    probe = read_turns()
+    if probe.unavailable:
+        return c.pending("运行时数据不完整：" + "；".join(probe.unavailable)) or c
+
+    end = datetime.fromisoformat(card.generated_at)
+    start = end - timedelta(milliseconds=card.elapsed_ms)
+    # 区间重叠：合成轮的结束时刻必然晚于 Card 的生成时刻
+    win = [t for t in probe.turns
+           if t.ended_at.astimezone(end.tzinfo) >= start
+           and t.started_at.astimezone(end.tzinfo) <= end]
+    if not win:
+        return c.pending("窗口内没有 LLM 轮次，无法测量") or c
+
+    wall = int((max(t.ended_at for t in win)
+                - min(t.started_at for t in win)).total_seconds() * 1000)
+    cost = sum(t.cost_usd for t in win)
+    detail = (f"{wall / 1000:.1f}s（{len(win)} 轮，${cost:.4f}）"
+              f"；Supervisor 自报 {card.elapsed_ms / 1000:.1f}s")
+    if wall < budget_ms:
+        c.ok(detail)
     else:
-        c.fail(f"{card.elapsed_ms / 1000:.1f}s 超预算")
+        c.fail(f"{detail} —— 超预算 {wall / budget_ms:.1f}×")
+        c.notes.append("分解见 tools/verify/latency_report.py")
     return c
 
 

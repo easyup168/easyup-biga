@@ -113,9 +113,33 @@ CREATE INDEX IF NOT EXISTS ix_raw_sha         ON raw_market_snapshot(content_sha
     + _append_only("raw_market_snapshot", "raw 层永不改写（L-8）")
 
 
+_V2 = """
+-- ───────────────────────────────────────────────────────────────
+-- v2：删掉从未被写入的 token 列
+--
+-- 背景：v1 建表时预留了 tokens_in / tokens_out，想用来做成本核算。
+-- 实际上**从建表起就没有任何生产方**（8 行记录，0 行有值）——
+-- 这是「零消费方」模式的反面：有人建了列，但没有人写。
+--
+-- 为什么是删而不是补上写入：
+--   1. 真实数据在 OpenClaw 运行时自己的 trajectory 里，那是**唯一真相源**。
+--      在这里再存一份，就是第二套口径，且必然滞后。
+--   2. synthesize.py 是在 agent 轮次**中途**调用的，那一轮的 token 用量
+--      此刻还没结算完，根本写不进来。
+--
+-- ⇒ 成本核算改为按需读运行时：`tools/verify/latency_report.py`。
+-- ⚠️ 代价已知：运行时若清理旧 trajectory，历史成本就没了。
+--    等 Phase 3 有了自己的调度域，再加一个对账任务把它固化进来。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE agent_runs DROP COLUMN tokens_in;
+ALTER TABLE agent_runs DROP COLUMN tokens_out;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
+    (2, _V2),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

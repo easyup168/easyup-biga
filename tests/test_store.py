@@ -14,6 +14,7 @@ import pytest
 
 from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
 from _store import (
+    SCHEMA_VERSION,
     AppendOnlyViolation,
     connect,
     init_schema,
@@ -66,13 +67,21 @@ def make_card(**kw) -> DecisionCard:
 
 class TestSchema:
     def test_init幂等(self, db):
-        assert init_schema(db) == init_schema(db) == 1
+        # 不硬编码版本号：写死数字会让每次迁移都变成「机械改数字」，
+        # 而不是「确认迁移做对了」。
+        assert init_schema(db) == init_schema(db) == SCHEMA_VERSION
 
     def test_三张表都在(self, db):
         with connect(db, readonly=True) as c:
             names = {r[0] for r in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"decision_records", "agent_runs", "raw_market_snapshot"} <= names
+
+    def test_token列已在v2删除(self, db):
+        """它们从建表起就没有生产方；留着假装有，比没有更糟。"""
+        with connect(db, readonly=True) as c:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(agent_runs)")}
+        assert "tokens_in" not in cols and "tokens_out" not in cols
 
     def test_WAL已开启(self, db):
         with connect(db) as c:
