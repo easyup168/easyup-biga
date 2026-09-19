@@ -180,13 +180,34 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       ⑤ ⇒ 复用邻居那条 token（生成于***之前，账号下唯一可用的 anthropic 凭据）
       ⚠️ 耦合已在 `CLAUDE.md`「已知耦合」一节记明，含排查顺序与退出条件
 - [x] **起 gateway 自动创建的 4 条 cron** —— 已裁定：**暂不动，记录在案**。
-      实测 `heartbeat-main` 已跑过一次并失败（`heartbeat skipped: no-route`），
-      是典型的零消费方组件。Phase 3 建自己的调度域时统一处理。清单：
-      `memory-core:memory-dreaming-promotion` / `heartbeat:main` /
+      清单：`heartbeat:main` / `memory-core:memory-dreaming-promotion` /
       `skill-collection-review:main` / `skill-collection-review:emotion`
-      （第四条在 `agents add emotion` 时创建）。
-      与 `architecture.md` §8「只有一个调度域、不用内置 cron」+ Phase 1「不建任何 cron」冲突。
-      目前不常驻 gateway 所以不会实际运行
+
+      **已查实这四条是 openclaw 自带的托管任务，不是我们建的**（2026-09-19 复核）：
+      - 四条**全部带 `declaration_key`** —— 这个字段正是「系统声明的托管任务」与
+        「人手工建的」的分水岭。作为对照，邻居实例 91 条 cron 的该字段**全是 NULL**
+      - 声明写死在包里：`server-reload-managed-*.mjs` 的
+        `requestActiveCronJobCancellationByDeclarationKeyPrefix("skill-collection-review:")`、
+        `resolveSkillCollectionReviewMonitorSpecs`。「reload managed」= 服务启动时对账重建
+      - ⚠️ **跨实例对比不能用来证明「是不是默认」** —— BigA 是 2026.9.5，
+        邻居是 2026.7.1-2，大版本差。那个对比只说明 `declaration_key` 机制是新加的
+
+      🔴 **之前记的「heartbeat 已失败」是错的，这里更正**：
+      `cron_run_receipts.error_text` 写得很清楚 —— `heartbeat skipped: no-route`。
+      heartbeat 的活儿是往 IM 频道推状态，而 **Phase 1 明确不接任何 IM**，
+      没有投递路由所以跳过。**这是设计内的正确行为，不是故障，没有东西要修。**
+
+      真正的问题在观测面：**同一件事，两份记录说法不一致** ——
+      `cron_run_receipts.status = skipped`（对），
+      而 `task_runs.status = failed`（错）。
+      先前就是读了 `task_runs` 才误报「heartbeat 失败 5 次」。
+      > **一个把合法跳过标成失败的指标，会持续制造假警报，
+      > 而假警报的终点是所有人都不再看它。** 与 R-3 同源：状态标错和状态缺失一样危险。
+      查根因请直接读 `cron_run_receipts.error_text`，不要信 `task_runs.status`。
+
+      与 `architecture.md` §8「只有一个调度域、不用内置 cron」+ Phase 1「不建任何 cron」
+      仍有形式上的冲突，但既然是上游默认行为、且当前全部空转（heartbeat 无路由、
+      另三条未到期），Phase 3 建自己的调度域时统一处理
 
 - [x] **GitHub 远端** —— 已连通并推送
       仓库：`easyup168/easyup-biga`（当前**私有**）

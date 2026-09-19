@@ -119,6 +119,23 @@ bug 清完、信号干净之后重测，**推翻了最初的假设**：
 **`phase1_acceptance.py` 九项全过（PASS 9 / FAIL 0 / PENDING 0）。**
 Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可回放 Decision Card。
 
+### 修复 · 更正一处误报：heartbeat 并没有失败
+
+- 先前记「自动创建的 heartbeat cron 每小时失败一次」，**是错的**。
+  `cron_run_receipts.error_text` 写的是 `heartbeat skipped: no-route` ——
+  heartbeat 要往 IM 频道推状态，而 Phase 1 明确不接任何 IM，
+  没有投递路由所以跳过。**设计内的正确行为，没有东西要修**
+- 🔴 误报的来源是**两份记录对同一件事说法不一致**：
+  `cron_run_receipts.status = skipped`（对），`task_runs.status = failed`（错）。
+  读了后者就得出了「在故障」的结论。
+  > 一个把合法跳过标成失败的指标，会持续制造假警报，
+  > 而假警报的终点是所有人都不再看它 —— 与 R-3 同源：**状态标错和状态缺失一样危险**
+- 顺带查实那 4 条 cron 确是 openclaw 自带的托管任务：全部带 `declaration_key`
+  （邻居实例 91 条 cron 该字段全为 NULL），声明写死在 `server-reload-managed-*.mjs`。
+  ⚠️ 但**跨实例对比不足以证明「是不是默认」** —— 两边大版本不同
+  （2026.9.5 vs 2026.7.1-2），那个对比只能说明该机制是新加的。
+  决定性证据是包自身的源码，它与版本无关
+
 ### 新增 · 教程第 10 章
 
 [`docs/tutorial/10-latency-and-cost.md`](docs/tutorial/10-latency-and-cost.md) ——
