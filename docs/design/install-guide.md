@@ -96,7 +96,7 @@ with_oc = [v24.18.0, v24.21.0]   →   max = v24.21.0
 失败是**静默**的：推送函数只返回 `False`，调用方照样把条目记成「已推送」，
 退出码 0，cron 状态全绿，审计全绿。
 
-本项目实测过同型事故：某个推送任务自 2026-07-20 起**全部失败 600+ 次无人察觉**，
+同型事故实际发生过：某个定时推送任务连续失败数百次而无人察觉，
 根因就是 PATH 上的 node 版本差了 3 个 patch 号。
 
 ### 2.3 解法
@@ -160,7 +160,7 @@ npm warn install-scripts 5 packages have install scripts not yet covered by allo
 ```
 
 > **关于 `install-scripts` 警告**：npm 默认拦截 postinstall 脚本。
-> 本项目的生产实例也是这样装的（`npm config get allow-scripts` 为空），
+> 既有的那套实例也是这样装的（`npm config get allow-scripts` 为空），
 > 运行数月无异常 —— 所以**不需要放行**。
 > 若你的场景需要，可用 `npm i --allow-scripts=openclaw,...`。
 
@@ -356,7 +356,7 @@ systemctl --user show -p MainPID --value openclaw-gateway.service
 | **少打 `--profile`** | 生产 `openclaw.sqlite` 的 mtime 变了 | OpenClaw CLI **会自动跑 doctor 迁移**，不是只读操作。这就是 wrapper 存在的理由。作者本人在调研阶段就踩过一次 |
 | **以为要先升 node** | 走了弯路 | `openclaw@2026.9.5` engines 是 `>=24.16.0 <25 \|\| >=26.1.0`，很多现役 v24 已经满足。装新 node 是为**隔离**，不是为版本 |
 | **node 差 3 个 patch 号起不来** | `Node.js >=22.22.3 <23 ... is required (current: v22.22.0)` | 装之前先 `npm view openclaw@<版本> engines` |
-| **清理旧副本时误删整个 node** | 别的项目炸了 | 旧 node 版本下可能还有**别的**包在被引用（本机 v22 下的 `puppeteer` 仍被一个生产脚本硬编码引用）。只 `npm uninstall -g openclaw`，别删整个版本目录 |
+| **清理旧副本时误删整个 node** | 别的项目炸了 | 旧 node 版本下可能还有**别的**包在被引用（实例：某个 v22 下的 `puppeteer` 仍被一个脚本硬编码引用）。只 `npm uninstall -g openclaw`，别删整个版本目录 |
 | **残留 systemd unit** | 指向已删路径的死引用 | 清理前先确认 `is-enabled` / `is-active`，移到备份目录而非直接删 |
 | **两个实例共用同一个 IM 应用** | 同一条消息两个 bot 都回 | 第二个实例必须用**独立的**机器人应用；过渡期先只用本地 TUI |
 | **端口间距不够** | browser/CDP 端口打架 | 官方要求 base 端口间距 **≥120**（browser = base+2，CDP 自动分配到 base+110）。本文用 18789 / 19789，间距 1000 |
