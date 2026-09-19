@@ -178,7 +178,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       认证：为 `easyup168` 单独生成密钥 `~/.ssh/id_ed25519_easyup168`，
       用 Host 别名 `github.com-easyup168` 区分 —— 本机另一个账号的默认密钥完全未受影响
       ⚠️ 克隆/remote 必须写别名主机名，写成 `github.com` 会用错密钥
-      提交身份：`easyup <easyup168@users.noreply.github.com>`（仓库级配置，未动全局）
+      提交身份：项目账号（仓库级 `git config`，未动全局）
 - [ ] 要不要装 `gh` CLI
 
 ### 🔴 转 Public 之前必须做完
