@@ -244,7 +244,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 
 - [x] 转 Public 当天（2026-09-20）：八项全绿后转公开
 
-- [ ] 🔴 **触发条件已经变了 —— 现在是「每次 push 前」，不再是「转可见性前」**
+- [x] 🔴 **触发条件已经变了 —— 现在是「每次 push 前」，不再是「转可见性前」**
 
       仓库已公开 ⇒ **push 即发布**，没有「先推上去、转公开之前再检查」这个窗口了。
       而且 `phase2` 分支一样公开可见 —— 这正是审查脚本必须扫 `--all` 而不是
@@ -253,30 +253,24 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       ⚠️ 已公开的内容**撤不回来**：删了分支仍可能留在 fork、缓存与各类镜像里。
       所以顺序只能是「先审查、后 push」，不能反过来。
 
-      ⬜ 待做：把这段脚本接成 `pre-push` hook（现在靠人记得，而
-      「靠人记得」正是 §9 那张表反复否掉的那种防护）
+      ✅ 已接成 `pre-push` hook（`tools/git-hooks/pre-push`）——
+      靠人记得跑正是 §9 那张表反复否掉的那种防护。
+      hook 扫**增量**（`remote_sha..local_sha`，新分支则 `<sha> --not --remotes`），
+      手工体检扫 `--all`：已公开的历史撤不回来，为它每次报红只会训练出忽略
 
 ```bash
-cd ~/.openclaw-biga/workspace
-FAIL=0
-# 🔴 grep -v '^+chk "' 是必需的：本脚本的正则字面量也在被扫描的文件里，
-#    不排除就会永远自匹配 3 处 —— 而一个永远报警的检查很快会被当成噪音忽略。
-# 🔴 --all 而不是 main：仓库转 Public 后**所有推上去的分支都可见**，
-#    只扫 main 会漏掉 phase2 等开发分支 —— 那才是当下正在写代码的地方。
-#    （裁定 14 建 phase2 分支的当天就发现了这个漏洞：一个扫不到新代码的
-#    守卫仍然报全绿，比没有守卫更危险。）
-chk() { c=$(git log --all -p 2>/dev/null | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
-        [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
-chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z ]*PRIVATE KEY|ssh-(ed25519|rsa) AAAA)'
-chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
-chk "家目录路径"     '/home/[a-z][a-z0-9_-]*'
-chk "个人邮箱"       '[a-zA-Z0-9._%-]+@(gmail|qq|163|126|outlook|hotmail|foxmail|sina)\.'
-chk "邻居可识别细节" '(EASYUP|\bQMT\b|market\.db|nodeenv|find_node_bin|[0-9]+ 个 systemd)'
-chk "IP 地址"        '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
-chk "旧用户名"       '\b***\b'
-chk "密码赋值"       '(password|passwd|secret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
-[ "$FAIL" -eq 0 ] && echo "══ 可以转 Public ══" || echo "══ 不要转 ══"
+BIGA_REPO=~/.openclaw-biga/workspace
+
+# 手工体检：全历史口径
+$BIGA_REPO/tools/verify/audit_public.sh
+
+# 装 pre-push hook（仓库级 config，克隆后每人执行一次）
+git -C $BIGA_REPO config core.hooksPath tools/git-hooks
 ```
+
+🔴 **八项检查只有一份实现**：`tools/verify/audit_public.sh`。
+之前它是 `TODO.md` 里的一段字面量 —— 一旦 hook 里再抄一份，
+就有了两套口径，而**改了一份忘了另一份时，剩下那份仍然报绿**（L-3）。
 
 ---
 
