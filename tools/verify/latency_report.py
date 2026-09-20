@@ -77,7 +77,22 @@ def _decision_window(decision_id: str | None) -> tuple[str, datetime, int] | Non
     return row["decision_id"], datetime.fromisoformat(row["generated_at"]), int(row["elapsed_ms"] or 0)
 
 
-def _derive_start(end: datetime, turns) -> datetime | None:
+def _previous_card_time(decision_id: str) -> datetime | None:
+    """上一张在线卡的落库时刻 —— 向前串联的**硬边界**。
+
+    🔴 光靠「间隔小于 N 秒就继续往前吃」会把相邻的两次运行并成一个窗口。
+    实测：两次决策相隔 67s，窗口被并起来后报出 238.7s「超预算 2.7×」，
+    而真实值是 71.1s（达标）。**一个会虚报 3 倍的指标比没有指标更糟。**
+    """
+    with connect(readonly=True) as c:
+        row = c.execute(
+            "SELECT generated_at FROM decision_records "
+            "WHERE replay_of IS NULL AND decision_id < ? "
+            "ORDER BY decision_id DESC LIMIT 1", (decision_id,)).fetchone()
+    return datetime.fromisoformat(row["generated_at"]) if row else None
+
+
+def _derive_start(end: datetime, turns, floor: datetime | None = None) -> datetime | None:
     """从 Card 落库时刻**向前串联**轮次，推出这次决策真正的起点。
 
     🔴 为什么不用 Card 自报的 `elapsed_ms`
@@ -89,6 +104,9 @@ def _derive_start(end: datetime, turns) -> datetime | None:
     然后一路向前吃掉间隔小于 `LEAD_GAP_S` 的轮次。
     """
     ordered = sorted(turns, key=lambda t: t.started_at)
+    if floor is not None:
+        # 上一张卡之前的轮次属于上一次决策，绝不并进来。
+        ordered = [t for t in ordered if t.started_at.astimezone(CN_TZ) > floor]
     covering = [t for t in ordered
                 if t.started_at.astimezone(CN_TZ) <= end <= t.ended_at.astimezone(CN_TZ)]
     if not covering:
@@ -199,11 +217,17 @@ def main(argv: list[str] | None = None) -> int:
             print("找不到决策记录。用 --all 看全部轮次。")
             return 1
         did, end, elapsed = got
+        floor = _previous_card_time(did)
         if elapsed > 0:
             start = end - timedelta(milliseconds=elapsed)
-            title = f"{did}（精确窗口 {start:%H:%M:%S}–{end:%H:%M:%S}）"
+            if floor is not None and start < floor:
+                # 自报的 elapsed 越过了上一张卡 —— 它把上一次决策也算进来了。
+                start = floor
+                title = f"{did}（自报窗口过长，已截到上一张卡 {start:%H:%M:%S}–{end:%H:%M:%S}）"
+            else:
+                title = f"{did}（精确窗口 {start:%H:%M:%S}–{end:%H:%M:%S}）"
         else:
-            derived = _derive_start(end, probe.turns)
+            derived = _derive_start(end, probe.turns, floor=floor)
             if derived is not None:
                 start = derived
                 title = f"{did}（由轨迹反推 {start:%H:%M:%S}–{end:%H:%M:%S}）"
