@@ -249,7 +249,11 @@ cd ~/.openclaw-biga/workspace
 FAIL=0
 # 🔴 grep -v '^+chk "' 是必需的：本脚本的正则字面量也在被扫描的文件里，
 #    不排除就会永远自匹配 3 处 —— 而一个永远报警的检查很快会被当成噪音忽略。
-chk() { c=$(git log main -p 2>/dev/null | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
+# 🔴 --all 而不是 main：仓库转 Public 后**所有推上去的分支都可见**，
+#    只扫 main 会漏掉 phase2 等开发分支 —— 那才是当下正在写代码的地方。
+#    （裁定 14 建 phase2 分支的当天就发现了这个漏洞：一个扫不到新代码的
+#    守卫仍然报全绿，比没有守卫更危险。）
+chk() { c=$(git log --all -p 2>/dev/null | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
         [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
 chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z ]*PRIVATE KEY|ssh-(ed25519|rsa) AAAA)'
 chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
