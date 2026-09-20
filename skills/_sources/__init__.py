@@ -29,17 +29,27 @@ from .eastmoney import (
     fetch_breadth,
     fetch_pool,
 )
-from .http import SourceError, get_json
+from .http import SourceError, get_json, get_text
+from .sina import SINA_SYMBOLS, DailyBar, IndexDaily, fetch_index_daily
+from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import MARKET_CLOSE, as_of_for_trade_date
 
 __all__ = [
     "MARKET_CLOSE",
     "POOL_ENDPOINTS",
+    "SINA_SYMBOLS",
+    "TENCENT_SYMBOLS",
     "BreadthResult",
+    "DailyBar",
+    "IndexDaily",
+    "IndexQuote",
     "PoolResult",
     "SourceError",
     "as_of_for_trade_date",
     "fetch_breadth",
+    "fetch_index_daily",
+    "fetch_index_quote",
     "fetch_pool",
     "get_json",
+    "get_text",
 ]
