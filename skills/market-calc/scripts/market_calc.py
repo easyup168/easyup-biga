@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""market-calc —— A 股市场状态事实计算，输出一份合法的 AgentVerdict。
+
+分工（architecture.md §6 硬约束 S-1 / S-2）
+--------------------------------------------
+本脚本**只产出事实**，不做任何判断性归类。
+
+  归这里（Python）              归 Market Agent（LLM）
+  ─────────────────────────    ────────────────────────────
+  指数点位、涨跌幅               这算不算「放量上涨」
+  两市成交额                    2.07 万亿在当前位置是高是低
+  量能比（今日量 / 20 日均量）     缩量反弹要不要提示风险
+  涨跌家数、上涨占比              宽度与指数背离说明什么
+
+🔴 事实的归属（裁定 15）
+------------------------
+**涨跌家数归 market，不归 emotion。** 上游文档把它同时派给了两个 agent，
+但它的端点是**不带日期的实时快照** —— 两个 agent 并行各调一次，
+同一张 Card 上就会出现同一个字段两个值，而两个都带着推断出来的 `as_of`。
+
+    同一个事实只能有一个生产方。
+
+🔴 三个源，各自只干它能自证的那件事
+------------------------------------
+============  ===========================  ==========================
+源            提供                          它自己声明的时间
+============  ===========================  ==========================
+新浪日线       交易日 / 点位 / 涨跌幅 / 量能    每行自带 ``day``  ← **权威**
+腾讯行情       成交额                        14 位时间戳
+东财 ulist    涨跌家数                      **没有**（只能推断）
+============  ===========================  ==========================
+
+五条守卫，每条都对应一次**真见过**的失败形状（见各 `_sources` 模块的实测记录）：
+
+1. 点位 ≤ 0 或 |涨跌幅| > 20% ⇒ 进 `missing`，**不填 0**
+   （东财延迟源实测返回过 `最新=0.0`、`涨跌幅=-29971017728.0`，
+    `rc=0`、字段齐全、类型正确 —— 量级校验是唯一能拦住它的东西）
+2. 腾讯时间戳的日期 ≠ 新浪日线末行 ⇒ 进 `missing`，不挑一个用
+3. 日线不足 21 根 ⇒ 量能进 `missing`，**不拿 15 天凑一个均值**
+4. 腾讯量 ×100 与新浪量偏离 > 1% ⇒ 进 `missing`（单位口径变了）
+5. 涨跌家数端点无日期 ⇒ `warning`（as_of 是推断的）
+
+用法::
+
+    python3 market_calc.py                      # 最近一个交易日
+    python3 market_calc.py --date 20260918      # 严格模式：对不上进 missing[]
+    python3 market_calc.py --break-source sina_sh   # 演练 UNKNOWN ≠ PASS
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import pathlib
+import sys
+import threading
+import time
+from datetime import datetime
+from typing import Any
+
+_HERE = pathlib.Path(__file__).resolve()
+_REPO = _HERE.parent.parent.parent.parent
+sys.path.insert(0, str(_REPO / "skills"))
+
+from _contract import AgentVerdict, Evidence, new_task_id, now_cn  # noqa: E402
+from _sources import (  # noqa: E402
+    BreadthResult,
+    IndexDaily,
+    IndexQuote,
+    SourceError,
+    as_of_for_trade_date,
+    fetch_breadth,
+    fetch_index_daily,
+    fetch_index_quote,
+)
+from _store import init_schema, save_raw_snapshot  # noqa: E402
+
+AGENT = "market"
+CALC_VERSION = "market-calc/1"
+
+#: 两个市场：上证综指 + 深证**综指**（不是成指 —— 综指覆盖整个深市，
+#: 与涨跌家数、成交额的口径一致）。
+MARKETS = {"sh": ("sh000001", "上证指数"), "sz": ("sz399106", "深证综指")}
+
+#: 取多少根日线。20 日均量需要 21 根（20 根基线 + 今日），
+#: 多取几根抵消节假日边界 —— 但不足时不凑（守卫 3）。
+BAR_COUNT = 25
+MA_WINDOW = 20
+
+#: 守卫 1：A 股单日涨跌幅的物理上限远小于 20%，指数更不可能接近。
+#: 这个阈值不是为了抓行情，是为了抓**垃圾值**。
+PCT_ABS_LIMIT = 20.0
+
+#: 守卫 4：两源成交量的允许偏离。
+#: 🔴 不用「完全相等」：盘中两个源的刷新时刻不同，必然有微小差异
+#:    （实测收盘后 sz 两源差 45 股 / 7.5e-10）。
+#:    要求逐位相等会造出一个盘中永远报红的检查，而永远报警的检查会被忽略。
+VOLUME_XCHECK_TOL = 0.01
+
+_YI = 1e8          # 亿
+_WAN_TO_YI = 1e4   # 万元 → 亿元
+
+#: 数据齐备时应当产出的字段数，用于 `confidence`。
+#: 🔴 **故意不做 min(…, 1.0) 截断**：截断会把「加了字段忘了改这个数」
+#:    变成一个悄悄偏小的置信度；不截断则契约层当场拒绝构造（confidence > 1）。
+#:    宁可当场炸，也不要一个悄悄不准的数 —— 由 test_market_calc 钉死。
+_EXPECTED_FIELDS = 15
+
+
+class Collector:
+    """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
+
+    def __init__(self, date: str | None, break_source: set[str], store: bool):
+        self._lock = threading.Lock()
+        self.date = date
+        self.break_source = break_source
+        self.store = store
+        self.daily: dict[str, IndexDaily] = {}
+        self.quotes: dict[str, IndexQuote] = {}
+        self.breadth: BreadthResult | None = None
+        self.missing: list[str] = []
+        self.warnings: list[str] = []
+        self.raw: list[tuple[str, Any]] = []
+
+    def _note(self, *, missing: str | None = None, warning: str | None = None) -> None:
+        with self._lock:
+            if missing:
+                self.missing.append(missing)
+            if warning:
+                self.warnings.append(warning)
+
+    def _keep_raw(self, source: str, payload: Any) -> None:
+        with self._lock:
+            self.raw.append((source, payload))
+
+    # -- 采集 --------------------------------------------------------------
+
+    def collect_daily(self, key: str) -> None:
+        symbol, label = MARKETS[key]
+        if f"sina_{key}" in self.break_source:
+            self._note(missing=f"{label}日线 —— 数据源被人为中断（--break-source sina_{key}）")
+            return
+        try:
+            d = fetch_index_daily(symbol, bars=BAR_COUNT)
+        except (SourceError, ValueError) as e:
+            self._note(missing=f"{label}日线 —— 数据源不可用: {e}")
+            return
+
+        if self.date is not None and d.trade_date != self.date:
+            # 显式指定了日期 = 一个契约。对不上就是没拿到要的东西。
+            self._note(missing=f"{label}日线 —— 请求 {self.date} "
+                              f"但数据源最新一根是 {d.trade_date}")
+            return
+
+        with self._lock:
+            self.daily[key] = d
+        self._keep_raw(f"sina:kline/{symbol}", d.raw)
+
+    def collect_quotes(self) -> None:
+        if "tencent" in self.break_source:
+            self._note(missing="成交额 —— 数据源被人为中断（--break-source tencent）")
+            return
+        try:
+            q = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+        except (SourceError, ValueError) as e:
+            self._note(missing=f"成交额 —— 数据源不可用: {e}")
+            return
+        with self._lock:
+            self.quotes = q
+        self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()})
+
+    def collect_breadth(self) -> None:
+        if "breadth" in self.break_source:
+            self._note(missing="涨跌家数 —— 数据源被人为中断（--break-source breadth）")
+            return
+        try:
+            b = fetch_breadth()
+        except SourceError as e:
+            self._note(missing=f"涨跌家数 —— 数据源不可用: {e}")
+            return
+        with self._lock:
+            self.breadth = b
+        self._keep_raw("em:push2delay/ulist.np", b.raw)
+        # ⚠️ 不在这里发 as_of 警告：它依赖交易日，而交易日要等日线回来才知道。
+        #    并行采集下在这里读是竞态，统一放到全部完成后做。
+
+
+def _pct(daily: IndexDaily) -> float | None:
+    """涨跌幅（%）。同源相除，不跨源 —— 需要至少两根。"""
+    if len(daily.bars) < 2:
+        return None
+    prev = daily.bars[-2].close
+    if prev <= 0:
+        return None
+    return round((daily.last.close / prev - 1) * 100, 4)
+
+
+def _ma_volume(daily: IndexDaily) -> float | None:
+    """前 `MA_WINDOW` 根（**不含今日**）的平均成交量，单位股。
+
+    不含今日是有意的：把今天算进自己的基线，会让放量被自己稀释。
+    根数不够返回 None —— 由上层记 missing，**不用更短的窗口凑**。
+    """
+    if len(daily.bars) < MA_WINDOW + 1:
+        return None
+    window = daily.bars[-(MA_WINDOW + 1):-1]
+    return sum(b.volume for b in window) / len(window)
+
+
+def build_verdict(
+    *,
+    date: str | None,
+    break_source: set[str],
+    store: bool,
+    task_id: str,
+) -> AgentVerdict:
+    t_start = time.monotonic()
+    c = Collector(date, break_source, store)
+
+    jobs = [lambda: c.collect_daily("sh"), lambda: c.collect_daily("sz"),
+            c.collect_quotes, c.collect_breadth]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        for fut in [pool.submit(j) for j in jobs]:
+            fut.result()
+
+    # ── 交易日：只认日线。两市报的日期不一致就不能当同一天的事实汇总 ──
+    reported = {k: d.trade_date for k, d in c.daily.items()}
+    trade_date: str | None = None
+    if len(set(reported.values())) > 1:
+        c.missing.append(
+            f"全部市场指标 —— 两市日线报告的交易日不一致 {sorted(set(reported.values()))}，"
+            "不能当作同一天的事实汇总")
+        c.daily.clear()
+    elif reported:
+        trade_date = next(iter(reported.values()))
+    else:
+        c.missing.append("全部市场指标 —— 没有任何日线可用，交易日无从确定")
+
+    result: dict[str, Any] = {}
+    evidence: list[Evidence] = []
+    retrieved = now_cn()
+    as_of: datetime | None = None
+
+    def add(field: str, value: Any, label: str, source: str) -> None:
+        result[field] = value
+        evidence.append(Evidence(
+            field=field, source=source, value=value,
+            as_of=as_of, retrieved_at=retrieved,
+            calc_version=CALC_VERSION, label=label,
+        ))
+
+    if trade_date:
+        as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
+        if as_of_warning:
+            c.warnings.append(as_of_warning)
+        add("trade_date", trade_date, "交易日", "sina:kline")
+
+        # ── 守卫 2：腾讯与新浪必须说的是同一天 ──────────────────────
+        quotes_usable = bool(c.quotes)
+        if c.quotes:
+            bad = {sym: q.trade_date for sym, q in c.quotes.items()
+                   if q.trade_date != trade_date}
+            if bad:
+                c.missing.append(
+                    f"成交额 —— 腾讯行情的日期 {sorted(set(bad.values()))} "
+                    f"与日线的 {trade_date} 不一致，两个独立源说的不是同一天")
+                quotes_usable = False
+
+        turnover_total = 0.0
+        for key, (symbol, label) in MARKETS.items():
+            d = c.daily.get(key)
+            q = c.quotes.get(symbol) if quotes_usable else None
+
+            # ── 守卫 1：点位与涨跌幅的量级校验（日线派生）─────────────
+            if d is not None:
+                pct = _pct(d)
+                if d.last.close <= 0:
+                    c.missing.append(f"{label}点位 —— 数据源给出 {d.last.close}，不是有效点位")
+                elif pct is None:
+                    c.missing.append(f"{label}涨跌幅 —— 日线不足两根，无法与前收比较")
+                elif abs(pct) > PCT_ABS_LIMIT:
+                    c.missing.append(
+                        f"{label}点位与涨跌幅 —— 算出的涨跌幅 {pct}% 超出 "
+                        f"±{PCT_ABS_LIMIT}%，是数据源给了垃圾值而不是行情")
+                else:
+                    add(f"{key}_close", round(d.last.close, 2), f"{label}点位",
+                        f"sina:kline/{symbol}")
+                    add(f"{key}_pct", pct, f"{label}涨跌幅(%)",
+                        f"derived:sina:kline/{symbol}")
+
+            # ── 守卫 4：两源成交量的单位/口径校验 ─────────────────────
+            # 🔴 成交额来自腾讯，**不因新浪日线缺失而连坐**。
+            #    早先的写法把整个循环体挡在 `if d is None: continue` 后面，
+            #    结果日线一挂，turnover 既不产出也不进 missing —— **字段凭空消失**。
+            #    一个悄悄消失的字段正是 R-3 要防的形状：它在 Card 上什么也不留下。
+            if q is not None and d is not None and d.last.volume > 0:
+                rel = abs(q.volume_hand * 100 - d.last.volume) / d.last.volume
+                if rel > VOLUME_XCHECK_TOL:
+                    c.missing.append(
+                        f"{label}成交额 —— 腾讯成交量×100 与新浪日线偏离 {rel:.2%}"
+                        f"（>{VOLUME_XCHECK_TOL:.0%}），两源口径或单位已不一致")
+                    q = None
+            elif q is not None and d is None:
+                c.warnings.append(
+                    f"{label}成交额 —— 日线缺失，无法做双源交叉校验，该值只有单源支撑")
+
+            if q is not None:
+                yi = round(q.amount_wan / _WAN_TO_YI, 2)
+                add(f"turnover_{key}", yi, f"{label}成交额(亿元)", f"tencent:quote/{symbol}")
+                turnover_total += yi
+
+        if {f"turnover_{k}" for k in MARKETS} <= set(result):
+            add("turnover_total", round(turnover_total, 2), "两市成交额(亿元)",
+                "derived:tencent:quote")
+        else:
+            c.missing.append("两市成交额 —— 需要两个市场的成交额同时可用，缺一不能合计")
+
+        # ── 守卫 3：量能需要 21 根，不足不凑 ─────────────────────────
+        mas = {k: _ma_volume(d) for k, d in c.daily.items()}
+        if c.daily and all(v is not None for v in mas.values()):
+            today_vol = sum(d.last.volume for d in c.daily.values())
+            base_vol = sum(mas.values())
+            add("volume_total", round(today_vol / _YI, 2), "两市成交量(亿股)", "sina:kline")
+            add("volume_ma20", round(base_vol / _YI, 2),
+                f"两市{MA_WINDOW}日均量(亿股，不含今日)", "derived:sina:kline")
+            add("volume_ratio", round(today_vol / base_vol, 4) if base_vol else None,
+                f"量能比(今日/{MA_WINDOW}日均)", "derived:sina:kline")
+        else:
+            short = [MARKETS[k][1] for k, v in mas.items() if v is None]
+            c.missing.append(
+                f"量能 —— {'、'.join(short) or '两市'}日线不足 {MA_WINDOW + 1} 根，"
+                f"不用更短的窗口凑一个均值")
+
+        # ── 守卫 5：涨跌家数没有自己的日期 ───────────────────────────
+        if c.breadth:
+            b = c.breadth
+            c.warnings.append(
+                "涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的")
+            add("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
+            add("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
+            add("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
+            total = b.advance + b.decline + b.flat
+            if total:
+                add("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
+                    "derived:em:push2delay/ulist.np")
+            else:
+                c.missing.append("上涨家数占比 —— 涨跌平三项合计为 0，分母为零")
+
+    if store and as_of is not None:
+        for source, payload in c.raw:
+            save_raw_snapshot(source=source, as_of=as_of.isoformat(),
+                              retrieved_at=retrieved.isoformat(), payload=payload)
+
+    # verdict 表达的是**数据完整度**，不是市场判断。
+    # 「这算不算放量上涨」由 Market Agent 依据 AGENTS.md 里的口径来说。
+    core = {"trade_date", "sh_close", "turnover_total"}
+    if not c.missing:
+        status, level = "completed", "PASS"
+    elif core <= set(result):
+        status, level = "partial", "WARNING"
+    else:
+        status, level = "partial", "UNKNOWN"
+
+    return AgentVerdict(
+        task_id=task_id,
+        agent=AGENT,
+        status=status,
+        verdict=level,
+        result=result,
+        confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        evidence=evidence,
+        warnings=c.warnings,
+        missing=c.missing,
+        elapsed_ms=int((time.monotonic() - t_start) * 1000),
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="A 股市场状态事实计算 → AgentVerdict JSON")
+    ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式")
+    ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
+                    help="演练用：人为中断某个数据源 (sina_sh|sina_sz|tencent|breadth)")
+    ap.add_argument("--no-store", action="store_true", help="不写 raw_market_snapshot")
+    ap.add_argument("--render", action="store_true", help="附带人类可读摘要")
+    args = ap.parse_args(argv)
+
+    store = not args.no_store
+    if store:
+        init_schema()
+
+    v = build_verdict(date=args.date, break_source=set(args.break_source),
+                      store=store, task_id=args.task_id or new_task_id(1))
+    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+
+    if args.render:
+        print("\n" + "─" * 60, file=sys.stderr)
+        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms", file=sys.stderr)
+        for e in v.evidence:
+            print(f"  {e.display_label:<22} = {e.value}"
+                  f"   as_of {e.as_of:%Y-%m-%d %H:%M}", file=sys.stderr)
+        if v.warnings:
+            print("  警告:", file=sys.stderr)
+            for w in v.warnings:
+                print(f"    · {w}", file=sys.stderr)
+        if v.missing:
+            print(f"  ⚠ 缺失项（{len(v.missing)}）:", file=sys.stderr)
+            for m in v.missing:
+                print(f"    · {m}", file=sys.stderr)
+
+    # 退出码：0=完整，2=有缺失但核心可用，3=核心缺失
+    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

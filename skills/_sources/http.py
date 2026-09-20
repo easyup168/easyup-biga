@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__all__ = ["SourceError", "get_json", "UA", "TIMEOUT", "RETRIES"]
+__all__ = ["SourceError", "get_json", "get_text", "UA", "TIMEOUT", "RETRIES"]
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124 Safari/537.36")
@@ -44,13 +44,15 @@ class SourceError(RuntimeError):
     """
 
 
-def get_json(url: str, *, referer: str) -> dict[str, Any]:
-    """取一个返回 JSON 的端点。失败抛 `SourceError`。
+def get_text(url: str, *, referer: str, encoding: str = "utf-8") -> str:
+    """取一个返回文本的端点（重试 / 退避在这里，只此一处）。失败抛 `SourceError`。
 
     Args:
         url: 完整 URL（含 query）。
         referer: 这些接口会按 Referer 拒绝请求，必须由调用方按源指定 ——
             不给默认值是有意的：默认值会让「忘了设」表现为偶发失败而不是报错。
+        encoding: 腾讯行情返回 GBK，新浪返回 UTF-8。**猜错编码不会报错**，
+            只会让中文名变成乱码 —— 所以它是显式参数。
     """
     endpoint = url.split("?")[0]
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer})
@@ -61,19 +63,29 @@ def get_json(url: str, *, referer: str) -> dict[str, Any]:
             time.sleep(BACKOFF_SEC[min(attempt - 1, len(BACKOFF_SEC) - 1)])
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                return resp.read().decode(encoding, errors="replace")
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last = e
             continue
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError as e:
-            # 返回了内容但不是 JSON —— 多半是网关错误页，重试没有意义
-            raise SourceError(
-                f"{endpoint}: 返回不是合法 JSON（前 200 字符）{body[:200]!r}"
-            ) from e
 
     raise SourceError(
         f"{endpoint}: {RETRIES} 次尝试全部失败，最后一次 "
         f"{type(last).__name__}: {last}"
     ) from last
+
+
+def get_json(url: str, *, referer: str) -> Any:
+    """取一个返回 JSON 的端点。失败抛 `SourceError`。
+
+    ⚠️ 返回类型是 `Any` 而不是 `dict`：新浪日线返回的是**数组**。
+    调用方必须自己确认拿到的形状对不对 —— 这正是各适配器该做的事。
+    """
+    endpoint = url.split("?")[0]
+    body = get_text(url, referer=referer)
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        # 返回了内容但不是 JSON —— 多半是网关错误页，重试没有意义
+        raise SourceError(
+            f"{endpoint}: 返回不是合法 JSON（前 200 字符）{body[:200]!r}"
+        ) from e
