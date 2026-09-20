@@ -30,8 +30,37 @@ sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
 from _contract import AgentVerdict  # noqa: E402
-from _store import init_schema, next_decision_id, record_verdict_run  # noqa: E402
+from _store import (  # noqa: E402
+    init_schema,
+    load_verdict,
+    next_decision_id,
+    record_verdict_run,
+)
 from card_ops import Judgment, persist, synthesize  # noqa: E402
+
+
+def _read_by_ids(spec: str) -> list[AgentVerdict]:
+    """按 `verdict_id` 取回判定原件 —— **推荐路径**。
+
+    🔴 为什么优先用 id 而不是贴 JSON
+       贴 JSON 要求 agent 逐字复述结构化数据。实测它做不到：
+       Specialist 转述后 15 条 evidence 的 `retrieved_at` 一条不剩，
+       落库 Card 上的 `retrieved_at` 变成了「敲命令的时刻」而非采集时刻。
+       走 id，数据根本不经过 LLM。
+    """
+    out: list[AgentVerdict] = []
+    for raw in spec.replace(",", " ").split():
+        if not raw.isdigit():
+            raise SystemExit(f"--verdict-ids 只接受数字 id，收到 {raw!r}。"
+                             f"这个 id 由 skill 在 stderr 上打印：verdict_ref=NN")
+        v = load_verdict(int(raw))
+        if v is None:
+            raise SystemExit(
+                f"verdict_id={raw} 在 agent_verdicts 里不存在。"
+                f"确认 Specialist 跑 skill 时没有加 --no-store —— "
+                f"加了就不会落原件，也就没有 id 可引用。")
+        out.append(v)
+    return out
 
 
 def _read_verdicts(src: str) -> list[AgentVerdict]:
@@ -44,8 +73,13 @@ def _read_verdicts(src: str) -> list[AgentVerdict]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="合成 Decision Card（在线路径）")
-    ap.add_argument("--verdicts", required=True,
-                    help="AgentVerdict JSON 文件路径，或 - 表示 stdin")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--verdict-ids",
+                     help="🔴 推荐：判定原件的 id，逗号或空格分隔（skill 在 stderr "
+                          "上打印 verdict_ref=NN）。数据不经过 LLM，不会被复述丢字段")
+    src.add_argument("--verdicts",
+                     help="退路：AgentVerdict JSON 文件路径，或 - 表示 stdin。"
+                          "⚠️ 需要 agent 逐字搬运，实测会丢 retrieved_at")
     ap.add_argument("--status", required=True, choices=["BUY", "WAIT", "AVOID", "BLOCK"])
     ap.add_argument("--headline", required=True, help="核心矛盾，一句话")
     ap.add_argument("--synthesis", default="", help="合成说明（可选）")
@@ -58,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="输出 Card 的 JSON 而非文本卡")
     args = ap.parse_args(argv)
 
-    verdicts = _read_verdicts(args.verdicts)
+    verdicts = (_read_by_ids(args.verdict_ids) if args.verdict_ids
+                else _read_verdicts(args.verdicts))
     if not verdicts:
         print("没有任何 Verdict —— 不出卡。", file=sys.stderr)
         return 1

@@ -230,6 +230,75 @@ def load_verdicts(
     return list(card.verdicts) if card else []
 
 
+# ────────────────────────────────────────────────────────── agent_verdicts
+
+
+def save_verdict(
+    v: AgentVerdict,
+    *,
+    amends: int | None = None,
+    amend_reason: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """把一份 `AgentVerdict` 原件落库，返回 `verdict_id`。
+
+    🔴 **这张表存在的意义是：结构化数据不经过 LLM。**
+
+    skill 算完直接写这里并返回一个 id，agent 只传 id。
+    在此之前，契约要求 Specialist「把 JSON 原样带上」、Supervisor 再抄一遍 ——
+    实测两层复述之后，15 条 evidence 的 `retrieved_at` 一条不剩，
+    落库 Card 上的 `retrieved_at` 变成了「Supervisor 敲命令的时刻」。
+
+    Args:
+        amends: 本行修订的是哪一行。Specialist 追加缺失项时用 ——
+            **写新行，不覆盖原行**（与 `decision_records.replay_of` 同一套做法）。
+        amend_reason: 为什么修订。没有它，修订链读起来只是「有两行」。
+    """
+    if not isinstance(v, AgentVerdict):
+        raise TypeError(
+            f"save_verdict 只接受 _contract.AgentVerdict，收到 {type(v).__name__}")
+    if amends is not None and amend_reason is None:
+        # 修订不写理由，三个月后没人知道这一行为什么存在。
+        raise ValueError("amends 非空时必须给 amend_reason —— 修订要写为什么")
+    blob = json.dumps(v.to_dict(), ensure_ascii=False, sort_keys=True)
+    with connect(path) as conn:
+        cur = conn.execute(
+            """INSERT INTO agent_verdicts
+               (task_id, agent, amends, amend_reason,
+                verdict_json, content_sha256, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (v.task_id, v.agent, amends, amend_reason, blob,
+             hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+             now_cn().isoformat()),
+        )
+        return int(cur.lastrowid)
+
+
+def load_verdict(
+    verdict_id: int, *, path: pathlib.Path | str | None = None
+) -> AgentVerdict | None:
+    """按 id 取回判定原件。找不到返回 None —— 由调用方决定这算不算缺失。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT verdict_json FROM agent_verdicts WHERE verdict_id=?",
+            (int(verdict_id),),
+        ).fetchone()
+    return AgentVerdict.from_dict(json.loads(row["verdict_json"])) if row else None
+
+
+def load_verdict_meta(
+    verdict_id: int, *, path: pathlib.Path | str | None = None
+) -> dict[str, Any] | None:
+    """取回一行的元信息（含修订链），不构造契约对象。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT verdict_id, task_id, agent, amends, amend_reason, "
+            "content_sha256, created_at FROM agent_verdicts WHERE verdict_id=?",
+            (int(verdict_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 # ───────────────────────────────────────────────────────────────── agent_runs
 
 

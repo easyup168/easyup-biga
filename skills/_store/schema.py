@@ -136,10 +136,57 @@ ALTER TABLE agent_runs DROP COLUMN tokens_out;
 """
 
 
+_V3 = """
+-- ───────────────────────────────────────────────────────────────
+-- v3：agent_verdicts —— Specialist 的判定原件
+--
+-- 🔴 它解决的不是「多存一份」，而是「**不让 LLM 搬运结构化数据**」。
+--
+-- 实测（2026-09-20，BIGA-20260920-002）：契约要求 Specialist
+-- 「把 skill 的 JSON 原样带上」、Supervisor 再把它抄进 heredoc。两层复述的结果：
+--
+--   · skill 实际输出 15 条 evidence，每条都有 retrieved_at
+--   · Specialist 转述后：as_of 34 条，retrieved_at **0 条**
+--   · 落库 Card 上 25 条 evidence 的 retrieved_at 全部是 20:44:34
+--     —— 那是 Supervisor 敲命令的时刻，而真实采集时刻是 20:42:48
+--
+-- 也就是说「事实可追溯」这条地基，在最后一公里被 LLM 的复述打穿了：
+-- retrieved_at 是合成时现编的，部分 evidence 条目是从 result 反向重建的。
+--
+-- 附带代价同样可观：那一轮里有 47 秒零工具调用，纯粹在重打 6460 字符的 JSON；
+-- 之后 synthesize.py 因为缺字段失败两次，又花掉 49 秒自救。
+--
+-- ⇒ skill 写这张表并返回一个 id，agent 只传 id。
+--    搬运成本从 O(evidence 数) 变成 O(1)，且数据根本不经过 LLM。
+--
+-- 修订不覆盖：Specialist 追加缺失项时写**新行**并用 amends 指回原行，
+-- 与 decision_records 的 replay_of 是同一套做法（L-8：当时看到的必须可重建）。
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS agent_verdicts (
+    verdict_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id        TEXT    NOT NULL,
+    agent          TEXT    NOT NULL,
+    -- 修订链：本行修订的是哪一行。原始行为 NULL。
+    amends         INTEGER REFERENCES agent_verdicts(verdict_id),
+    amend_reason   TEXT,
+    -- 🔴 真相源。不派生 status/verdict 到单独的列 ——
+    --    agent_runs 已经是执行账本，在这里再存一份就是第二套口径（L-3）。
+    verdict_json   TEXT    NOT NULL,
+    content_sha256 TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_verdict_task  ON agent_verdicts(task_id, agent);
+CREATE INDEX IF NOT EXISTS ix_verdict_sha   ON agent_verdicts(content_sha256);
+CREATE INDEX IF NOT EXISTS ix_verdict_chain ON agent_verdicts(amends);
+""" + _append_only("agent_verdicts", "判定原件改了，就没法证明 Card 上的数字来自采集而非复述")
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
     (2, _V2),
+    (3, _V3),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]
