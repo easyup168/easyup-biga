@@ -104,6 +104,7 @@ npm i --prefix ~/.openclaw-biga/runtime openclaw@latest
 | 11 | anthropic 凭据 | **复用邻居实例的 *****（*** 已禁 `***`）。⇒ 见下方「已知耦合」 |
 | 13 | `discipline` agent | **推到 Phase 3。** 它的输入是人的交易行为史，而 BigA 不下单不接账户 ⇒ 现在没有输入源，硬建只能编。Phase 2 只建 7 个 |
 | 14 | Phase 2 的开发分支 | **独立分支 `phase2`。** `main` 只保留已验收状态 —— 徽章与验收数字必须始终描述一个真被测过的提交 |
+| 15 | 事实的归属 | **同一个事实只能有一个生产 agent。** 首次适用：市场宽度归 `market`，`emotion` 删掉。两个消费方各算一遍不会报错，只会某天悄悄给出两个数 |
 
 ---
 

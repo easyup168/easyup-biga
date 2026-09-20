@@ -296,7 +296,7 @@ git -C $BIGA_REPO config core.hooksPath tools/git-hooks
 
 | 步 | 做什么 | 新增的机制 | 为什么排在这个位置 |
 |---|---|---|---|
-| 2.1 | `market` skill + agent | Stage 1 **第一次真并行** | `maxConcurrent: 6` 配了但从未被验证过 —— 至今只有 1 个 specialist，并行是零次实测 |
+| 2.1 | `market` skill + agent —— **设计见 [`phase2-market.md`](docs/design/phase2-market.md)** | Stage 1 **第一次真并行** | `maxConcurrent: 6` 配了但从未被验证过 —— 至今只有 1 个 specialist，并行是零次实测 |
 | 2.2 | `risk` + Stage 2 | 冻结证据传入 + **BLOCK 否决权** | **唯一的结构性新机制。** BLOCK 正是 Phase 4 要检验区分力、Phase 5 下单要依赖的那个东西 —— 越早端到端落库，样本越多 |
 | 2.3 | `sector` / `technical` | 无 | 到这一步才是真正的「复制」，推后不损失任何信息 |
 | 2.4 | `news` | 时间戳 / 来源 / 新鲜度核验 | **先做数据源 spike。** 这台机器的 *** 策略已经拦掉过一次工具通路（教程 07），等做到最后才发现拿不到搜索 = 整章白写 |
