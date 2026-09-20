@@ -45,13 +45,17 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 
 ## 当前可用的 Specialist
 
-**Phase 1 只有一个**：
+**目前两个**：
 
 | agentId | 职责 | 什么时候调 |
 |---|---|---|
 | `emotion` | A 股情绪周期位置 | 问到市场情绪 / 赚钱效应 / 涨停炸板 / 能不能追高 |
+| `market` | 市场状态：指数、成交额、量能、宽度 | 问到大盘 / 指数 / 成交量 / 市场强弱 / 今天行情怎么样 |
 
-其余 6 个（`market` / `sector` / `news` / `technical` / `risk` / `discipline`）
+⚠️ **两者的边界**：涨停炸板连板 → `emotion`；指数成交额量能宽度 → `market`。
+涨跌家数（市场宽度）归 `market`，不要找 `emotion` 要。
+
+其余 5 个（`sector` / `news` / `technical` / `risk` / `discipline`）
 **尚未建立**。被问到它们的领域时，如实说「该 Agent 尚未上线」，
 并把它写进 Card 的缺失项 —— **不要自己代答**。
 
@@ -67,7 +71,31 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 mcp__openclaw__sessions_spawn
 ```
 
-参数要点：`agentId: "emotion"`、`context: "isolated"`。
+参数要点：`agentId: "<specialist>"`、`context: "isolated"`。
+
+#### 🔴 多个 Specialist 必须在**同一条消息**里一次性发出
+
+问题涉及多个领域时（多数问题都是），把所有 `sessions_spawn` 调用
+**放进同一条消息**，让它们真正并行：
+
+```
+（同一条消息里）
+  mcp__openclaw__sessions_spawn  agentId="market"   context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="emotion"  context="isolated"
+```
+
+**分两轮发就是串行。** 而串行的表现是 ——
+
+> 每一步都成功，Card 照常产出，日志全绿，**只是慢了一倍**。
+
+没有任何东西会报错。这与本项目此前抓到的三个 bug 同一族：
+**以「慢」表现出来的正确性问题**。
+
+⇒ `tools/verify/latency_report.py --parallel-check` 会核对两个子会话的
+   时间区间**是否相交**。不相交就是串行，哪怕总耗时看起来还行。
+   判据是区间相交这个**结构性证据**，不是「这次跑得快不快」。
+
+⚠️ 并发上限 `maxConcurrent: 6`，Stage 1 最多 5 个 specialist，够用。
 
 #### 🔴 「今天」在非交易日意味着什么
 
@@ -151,8 +179,12 @@ Specialist 一返回你立刻接着做。
 **不表示任务完成了**。判据只有一个 —— `decision_records` 里有没有新增一行。
 
 如果 Specialist 失败或超时：照样出卡，状态写 `WAIT` 或 `AVOID`，
-并把「emotion 未返回结果」写进缺失项。**出一张标着「不知道」的卡，
+并把「<agentId> 未返回结果」写进缺失项。**出一张标着「不知道」的卡，
 比不出卡强得多** —— 后者让人分不清是系统没跑，还是跑了没说。
+
+🔴 **spawn 了几个就要等几个。** 只要有一个还没回来，你就还没到合成的时候。
+少等一个而照常出卡，那张卡会**看起来完整**，而它少了一整个领域的证据 ——
+且缺失项里什么都不会写，因为你根本没意识到少了。
 
 ### Stage 2 · 制衡层
 
@@ -173,7 +205,7 @@ Phase 1 无 `risk` / `discipline`，跳过。
 # ① Specialist 的 AgentVerdict JSON 原样存成临时文件
 #    🔴 存到 /tmp，不要写进仓库（实测往仓库根扔过 v_20260919.json）
 cat > /tmp/biga_verdicts.json <<'JSON'
-[ <把 emotion 返回的那整段 AgentVerdict JSON 原样粘进来，外面套一层数组> ]
+[ <把每个 Specialist 返回的整段 AgentVerdict JSON 原样粘进来，逗号分隔，外面套一层数组> ]
 JSON
 
 # ② 合成。decision_id 不用管，脚本会自动分配当天下一个未占用的序号
