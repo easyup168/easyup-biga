@@ -210,7 +210,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       另三条未到期），Phase 3 建自己的调度域时统一处理
 
 - [x] **GitHub 远端** —— 已连通并推送
-      仓库：`easyup168/easyup-biga`（当前**私有**）
+      仓库：`easyup168/easyup-biga` —— **已于 2026-09-20 转为 Public**
       认证：为 `easyup168` 单独生成密钥 `~/.ssh/id_ed25519_easyup168`，
       用 Host 别名 `github.com-easyup168` 区分 —— 本机另一个账号的默认密钥完全未受影响
       ⚠️ 克隆/remote 必须写别名主机名，写成 `github.com` 会用错密钥
@@ -228,12 +228,12 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 - [ ] 要不要装 `gh` CLI
       ⚠️ 与「转 Public」相关：没有它就得走 GitHub 网页或 API 改可见性
 
-### 转 Public 之前必须做完
+### 公开可见性（已转 Public，2026-09-20）
 
 - [x] **完整安全审查 —— 八项全过**（2026-09-19）
       凭据/私钥 · Gateway token · 家目录路径 · 个人邮箱 · 邻居可识别细节 ·
       内网公网 IP · 旧用户名 · 密码赋值
-      审查脚本见本节末尾，**每次转可见性前重跑一遍**
+      审查脚本见本节末尾
 - [x] **commit 作者邮箱改用 GitHub noreply**
       `easyup <easyup168@users.noreply.github.com>`，全历史 16 个 commit 已重写。
       noreply 与真实邮箱在 GitHub 上功能完全等价（关联、头像、贡献图都正常），
@@ -242,7 +242,19 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       CHANGELOG/TODO 条目里，把邮箱本身写进去了。
       **文档里描述一个敏感值时，不要把那个值抄进去。**
 
-- [ ] 转 Public 当天：再跑一次下面这段，八项全绿才动开关
+- [x] 转 Public 当天（2026-09-20）：八项全绿后转公开
+
+- [ ] 🔴 **触发条件已经变了 —— 现在是「每次 push 前」，不再是「转可见性前」**
+
+      仓库已公开 ⇒ **push 即发布**，没有「先推上去、转公开之前再检查」这个窗口了。
+      而且 `phase2` 分支一样公开可见 —— 这正是审查脚本必须扫 `--all` 而不是
+      `main` 的原因（当时是按「以防万一」改的，现在它是**载重**的）。
+
+      ⚠️ 已公开的内容**撤不回来**：删了分支仍可能留在 fork、缓存与各类镜像里。
+      所以顺序只能是「先审查、后 push」，不能反过来。
+
+      ⬜ 待做：把这段脚本接成 `pre-push` hook（现在靠人记得，而
+      「靠人记得」正是 §9 那张表反复否掉的那种防护）
 
 ```bash
 cd ~/.openclaw-biga/workspace
