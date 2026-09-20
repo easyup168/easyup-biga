@@ -233,8 +233,8 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
   --status WAIT \
   --headline "核心矛盾一句话" \
   --synthesis "两三句说明，数字必须来自上面的 evidence" \
-  --extra-missing "risk agent 尚未上线，本卡未经风险审查" \
-  --extra-missing "discipline agent 尚未上线" \
+  --extra-missing supervisor.agent_offline "risk agent 尚未上线，本卡未经风险审查" \
+  --extra-missing supervisor.agent_offline "discipline agent 尚未上线" \
   --model-ref anthropic/claude-sonnet-5
 ```
 
@@ -242,6 +242,28 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
 实测你会直接省略它，于是 Card 上留下 `elapsed_ms=0`。
 延迟由 `tools/verify/latency_report.py` 从运行时轨迹里独立测量 ——
 **被考核方不自己报成绩**，这是 Phase 1 学到的。
+
+#### 🔴 缺失项要带代码
+
+`--extra-missing` 收**两个**参数：`<代码> <人话>`。代码形如 `<域>.<对象>.<原因>`，
+常用的就这几个，直接抄：
+
+| 代码 | 什么时候用 |
+|---|---|
+| `supervisor.agent_offline` | 某个 Specialist 尚未上线 |
+| `supervisor.agent_no_response` | spawn 了但没返回 |
+| `supervisor.evidence_conflict` | 两个 Specialist 给的事实互相矛盾 |
+
+没有代码，缺失项就只能数次数，说不出是哪一类 —— 而「哪一类」正是
+将来判断「系统到底缺什么数据」时唯一有用的信息。
+
+#### 🔴 Specialist 必须带 stance，否则出不了卡
+
+每个给得出判断的 Specialist，除了 `verdict`（数据完整度）还要有
+`stance`（方向判断）。缺了 `synthesize.py` 会直接拒绝，并告诉你让谁去补。
+
+遇到这个报错**不要自己代填** —— 方向判断是那个 Specialist 的职责，
+你替它填，就等于你自己当了一次 market agent。
 
 #### 🔴 绝不要把 Specialist 的 JSON 抄进命令里
 
@@ -268,7 +290,7 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
 | `--headline` | ✅ | 核心矛盾，一句话 |
 | `--model-ref` | ✅ | 例如 `anthropic/claude-sonnet-5` |
 | `--synthesis` | | 合成说明 |
-| `--extra-missing` | | 你自己发现的缺失项，可重复 |
+| `--extra-missing` | | 你自己发现的缺失项：**两个参数**，机器可读代码 + 人话，可重复 |
 | `--decision-id` | | **不要填** —— 脚本自动分配，填了反而可能撞号 |
 
 ⚠️ 没有 `--elapsed-ms`，也不要去找它。理由见上。

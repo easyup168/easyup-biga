@@ -50,6 +50,7 @@ A 股短线**决策辅助**系统。
 | 09 | [隔离演练](09-isolation-drill.md) | `kill -9` 自己，逐项核对邻居毫发无伤 | ✅ |
 | 10 | [延迟与成本](10-latency-and-cost.md) | 216s→75s；延迟其实是正确性 bug 的症状；一个被证伪的验收指标 | ✅ |
 | 11 | [第二个 Specialist](11-second-specialist.md) | 边界划在哪；怎么**证明**它们真的并行；并行解决扇出、解决不了汇聚 | ✅ |
+| 12 | [可追溯性的三个空白](12-traceability-gaps.md) | 读评审的三个筐；stance / raw_hash / 机器可读缺失；新规矩对旧数据只要求可读 | ✅ |
 
 ---
 

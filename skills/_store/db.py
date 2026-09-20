@@ -384,6 +384,19 @@ def list_agent_runs(
 # ──────────────────────────────────────────────────────── raw_market_snapshot
 
 
+def payload_sha256(payload: Any) -> str:
+    """原始响应的内容哈希 —— **唯一实现**。
+
+    `save_raw_snapshot` 用它算入库的 `content_sha256`，
+    采集层用它给 `Evidence.raw_hash` 赋值。两边必须是同一个函数：
+    各算各的，某天序列化参数改了一处，`raw_hash` 就再也对不上 raw 层 ——
+    而那种失效是静默的（两串 sha 都「看起来正常」）。
+    """
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def save_raw_snapshot(
     *,
     source: str,
@@ -404,7 +417,7 @@ def save_raw_snapshot(
     而归一化规则是各数据源特有的，不属于通用存储层。
     """
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    sha = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    sha = payload_sha256(payload)
     with connect(path) as conn:
         cur = conn.execute(
             """INSERT INTO raw_market_snapshot

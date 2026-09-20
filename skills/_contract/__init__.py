@@ -10,7 +10,9 @@
 
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, Evidence, now_cn
+from .missing import LEGACY_CODE, MissingItem
 from .verdict import (
+    STANCE_VOCAB,
     TASK_ID_RE,
     AgentVerdict,
     VerdictLevel,
@@ -20,6 +22,9 @@ from .verdict import (
 
 __all__ = [
     "CN_TZ",
+    "LEGACY_CODE",
+    "MissingItem",
+    "STANCE_VOCAB",
     "DECISION_ID_RE",
     "TASK_ID_RE",
     "AgentVerdict",

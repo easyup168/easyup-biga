@@ -62,14 +62,26 @@ _HERE = pathlib.Path(__file__).resolve()
 _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
-from _contract import CN_TZ, AgentVerdict, Evidence, new_task_id, now_cn  # noqa: E402
+from _contract import (  # noqa: E402
+    CN_TZ,
+    AgentVerdict,
+    Evidence,
+    MissingItem,
+    new_task_id,
+    now_cn,
+)
 from _sources import (  # noqa: E402
     PoolResult,
     SourceError,
     as_of_for_trade_date,
     fetch_pool,
 )
-from _store import init_schema, save_raw_snapshot, save_verdict  # noqa: E402
+from _store import (  # noqa: E402
+    init_schema,
+    payload_sha256,
+    save_raw_snapshot,
+    save_verdict,
+)
 
 AGENT = "emotion"
 CALC_VERSION = "emotion-calc/1"
@@ -100,8 +112,11 @@ class Collector:
         self.missing: list[str] = []
         self.warnings: list[str] = []
         self.raw_ids: list[int] = []
+        #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
+        self.hashes: dict[str, str] = {}
 
-    def _note(self, *, missing: str | None = None, warning: str | None = None) -> None:
+    def _note(self, *, missing: MissingItem | None = None,
+              warning: str | None = None) -> None:
         with self._lock:
             if missing:
                 self.missing.append(missing)
@@ -123,22 +138,27 @@ class Collector:
 
     def collect_pool(self, pool: str, label: str) -> None:
         if pool in self.break_source:
-            self._note(missing=f"{label} —— 数据源被人为中断（--break-source {pool}）")
+            self._note(missing=MissingItem(f"{label} —— 数据源被人为中断（--break-source {pool}）",
+                                          "emotion.pool.source_broken"))
             return
         try:
             r = fetch_pool(pool, self._target_date())
         except (SourceError, ValueError) as e:
-            self._note(missing=f"{label} —— 数据源不可用: {e}")
+            self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
+                                          "emotion.pool.unavailable"))
             return
 
         if r.qdate is None:
-            self._note(missing=f"{label} —— 返回中没有 qdate，无法确认这是哪一天的数据")
+            self._note(missing=MissingItem(
+                f"{label} —— 返回中没有 qdate，无法确认这是哪一天的数据",
+                "emotion.pool.no_qdate"))
             return
 
         if self.date is not None and not r.date_matches:
             # 显式指定了日期 = 一个契约。对不上就是没拿到要的东西。
-            self._note(missing=f"{label} —— 请求 {self.date} "
-                              f"但数据源返回的是 {r.qdate} 的数据")
+            self._note(missing=MissingItem(
+                f"{label} —— 请求 {self.date} 但数据源返回的是 {r.qdate} 的数据",
+                "emotion.pool.date_mismatch"))
             return
         if self.date is None and r.qdate != self._target_date():
             self._note(warning=f"{label} 取到的是最近交易日 {r.qdate} 的数据，不是今天")
@@ -147,6 +167,8 @@ class Collector:
         if self.store:
             got = now_cn()
             snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
+            with self._lock:
+                self.hashes[f"em:push2ex/{pool}"] = payload_sha256(r.raw)
             self._keep_raw(save_raw_snapshot(
                 source=f"em:push2ex/{pool}",
                 as_of=snap_as_of.isoformat(),
@@ -200,10 +222,9 @@ def build_verdict(
     # 三个池报了不同的交易日 —— 不能把它们当成同一天的事实汇总。
     reported = {r.qdate for r in c.pools.values() if r.qdate}
     if len(reported) > 1:
-        c.missing.append(
+        c.missing.append(MissingItem(
             f"全部情绪指标 —— 各股池报告的交易日不一致 {sorted(reported)}，"
-            "不能当作同一天的事实汇总"
-        )
+            "不能当作同一天的事实汇总", "emotion.pool.date_inconsistent"))
         c.pools.clear()
 
     qdate = c.qdate
@@ -216,12 +237,20 @@ def build_verdict(
     #:    —— 少了那个分支，盘中跑会 as_of > retrieved_at，契约层直接拒绝构造。
     as_of: datetime | None = None
 
+    def _raw_hash_for(source: str) -> str | None:
+        """这条证据出自哪份原始响应。派生字段没有单一来源，返回 None ——
+        **不硬凑**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。"""
+        if source.startswith("derived:"):
+            return None
+        return c.hashes.get(source)
+
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
+            raw_hash=_raw_hash_for(source),
         ))
 
     if qdate:
@@ -258,9 +287,11 @@ def build_verdict(
                 add("broken_rate", round(zb.total / denom, 4), "炸板率",
                     "derived:limit_up+broken_board")
             else:
-                c.missing.append("炸板率 —— 涨停与炸板家数均为 0，分母为零")
+                c.missing.append(MissingItem("炸板率 —— 涨停与炸板家数均为 0，分母为零",
+                                             "emotion.broken_rate.zero_denominator"))
         else:
-            c.missing.append("炸板率 —— 需要涨停池与炸板池同时可用")
+            c.missing.append(MissingItem("炸板率 —— 需要涨停池与炸板池同时可用",
+                                         "emotion.broken_rate.incomplete"))
 
         # 情绪分：确定性公式，三个输入缺一不可。
         if {"limit_up_count", "max_streak", "broken_rate"} <= set(result):
@@ -273,11 +304,13 @@ def build_verdict(
             add("emotion_score", round(score, 2), "情绪分(参考)",
                 "derived:emotion-calc")
         else:
-            c.missing.append("情绪分 —— 需要涨停家数 / 最高板 / 炸板率三项齐备")
+            c.missing.append(MissingItem("情绪分 —— 需要涨停家数 / 最高板 / 炸板率三项齐备",
+                                         "emotion.score.incomplete"))
 
         add("trade_date", qdate, "交易日", "em:push2ex/qdate")
     else:
-        c.missing.append("全部情绪指标 —— 没有任何股池返回可用的交易日")
+        c.missing.append(MissingItem("全部情绪指标 —— 没有任何股池返回可用的交易日",
+                                     "emotion.trade_date.undetermined"))
 
     # verdict 表达的是**数据完整度**，不是市场判断。
     # 「这算不算亢奋期」由 Emotion Agent 依据 AGENTS.md 里的口径来说。

@@ -294,16 +294,25 @@ Supervisor 做最终合成与矛盾裁定，用 Opus。
 
 ## 四、通信契约
 
-### 4.1 三个数据结构（`skills/_contract/`，唯一实现）
+### 4.1 四个数据结构（`skills/_contract/`，唯一实现）
 
 ```python
+class MissingItem(str):
+    """缺失项 = 机器可读代码 + 人话。字符串值就是人话，代码挂在 .code 上。"""
+    code: str              # '<域>.<对象>.<原因>'，如 market.turnover.unavailable
+                           # 'legacy.unclassified' = Phase 1/2 早期的裸字符串
+
 @dataclass(frozen=True)
 class Evidence:
-    source: str            # 'biga.db:market_daily' / 'cls:12345' / 'em:api/xxx'
+    field: str             # 它支撑 result 的哪个键（铁律 3 靠它执行）
+    source: str            # 'sina:kline/sh000001' / 'em:push2ex/limit_up'
+    value: Any
     as_of: datetime        # 🔴 数据本身的时间，不是取回时间
     retrieved_at: datetime
-    value: Any
     calc_version: str|None = None   # 口径版本；换算法时可清点受影响结论
+    label: str|None = None          # 渲染 Card 用的中文名
+    raw_hash: str|None = None       # 🔴 指回 raw_market_snapshot.content_sha256
+                                    #    派生字段没有单一来源，允许为空
 
     @property
     def staleness_sec(self) -> int: ...
@@ -313,13 +322,15 @@ class AgentVerdict:
     task_id: str           # BIGA-YYYYMMDD-NNN
     agent: str
     status:  Literal['completed','partial','failed']
-    verdict: Literal['PASS','WARNING','BLOCK','UNKNOWN']
+    verdict: Literal['PASS','WARNING','BLOCK','UNKNOWN']   # 数据完整度
     result:  dict
     confidence: float
     evidence: list[Evidence]
     warnings: list[str]
-    missing:  list[str]    # 🔴 强制：任一必填项算不出来就必须列在这里
+    missing:  list[MissingItem]   # 🔴 强制：任一必填项算不出来就必须列在这里
     elapsed_ms: int
+    stance: str|None = None       # 🔴 方向判断，由 Agent 填，skill 不填
+                                  #    取值必须在 STANCE_VOCAB[agent] 里
 
 @dataclass
 class DecisionCard:
@@ -327,10 +338,25 @@ class DecisionCard:
     status: Literal['BUY','WAIT','AVOID','BLOCK']
     headline: str          # 核心矛盾一句话
     verdicts: list[AgentVerdict]
-    missing: list[str]     # 汇总，必须显示
+    missing: list[MissingItem]    # 汇总，必须显示
     synthesis: str
     model_ref: str
 ```
+
+#### 4.1.1 `status` / `verdict` / `stance` —— 三个不能混的问题
+
+| 字段 | 回答 | 谁填 |
+|---|---|---|
+| `status` | 这次执行**跑完了吗** | skill |
+| `verdict` | 这个判断**有效吗**（数据全不全） | skill |
+| `stance` | 判断**是什么**（市场偏哪边） | **Agent** |
+
+🔴 `verdict=PASS` 的意思是「数据完整」，**不是「看好」**。
+两者混在一起，「没发现问题」与「看多」就再也分不开 —— 而这正是 L-2 的形状。
+
+⚠️ `stance` 必须取自 `STANCE_VOCAB[agent]` 这个固定词表。
+今天写「偏强」、明天写「震荡偏强」，三个月后它就是一列自由文本，
+Phase 4 拿它做不了任何相关性检验。**它存在的唯一理由就是能被聚合。**
 
 ### 4.2 🔴 四条契约铁律
 
@@ -394,12 +420,23 @@ Agent（通过 skill 只读查询）
 | 表 | 用途 |
 |---|---|
 | ★ `decision_records` | Decision Card + 全部 Verdict + 证据（回放的唯一真相源） |
-| ★ `agent_runs` | 每次 spawn 的 agent/耗时/token/status（成本与延迟可观测） |
+| ★ `agent_runs` | 每次 spawn 的 agent/耗时/status（成本与延迟可观测） |
 | ★ `raw_market_snapshot` | 采集原样落盘 |
+| ★ `agent_verdicts`（v3） | **判定原件** —— skill 写、synthesize 按 id 读 |
 | `fact_stock_daily` / `fact_index_daily` | 归一化日线 |
 | `d_emotion_daily` | 情绪分 |
 | `d_sector_strength` | 板块强度 |
 | `raw_news` | 带 `published_at` / `source` / `retrieved_at` |
+
+#### 5.3.1 为什么要 `agent_verdicts`（Phase 2 加的）
+
+它解决的不是「多存一份」，而是**不让 LLM 搬运结构化数据**（见 §9 L-10）。
+
+skill 算完直接把原件落这张表并返回一个 id，Agent 只传 id。
+Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
+与 `decision_records.replay_of` 同一套做法：**原件永不改写**。
+
+四张表全部只追加不修改，由 SQLite 触发器强制。
 
 ---
 
@@ -485,7 +522,8 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 
 ## 九、🔴 必须带进新系统的失败模式清单
 
-下面九条是从一套**长期运行的量化交易系统**里学到的失败模式。
+L-1 ~ L-9 是从一套**长期运行的量化交易系统**里学到的失败模式，
+L-10 是本项目自己踩出来的。
 它们的共同点是：**失败时不报错**。测试绿、日志绿、监控绿，而事情已经坏了几个月。
 
 因此每一条都不只是「注意事项」，而是配一个**在 Phase 1 就建立的、会报红的机制** ——
@@ -503,11 +541,20 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 | **L-8** | **账本幻影行**：记录了实际没有发生的事件（提交即记账，而提交不等于成交） | 账本自洽、总额对得上，但对应的事实不存在 | **raw 层永不改写**；状态变更一律追加而非 `UPDATE`，让「当时看到的」可重建 |
 | **L-9** | **下单末端的时序陷阱**：父进程超时预算与子进程下单耗时倒挂、特定时段必须换委托类型、探针失败时继续执行、止损价贴死价格保护带下限 | 症状是"废单"或"没成交"，看不出是架构问题 | **Phase 1 不下单**，但把这四条冻结进 `docs/design/live-order-rules.md`，将来开下单时直接实现 |
 
+| **L-10** | **结构化数据经 LLM 转述**：让 Agent「把上游的 JSON 原样带上」，再由下游 Agent 抄进命令 | 它不会拒绝也不会报错，只是**漏掉几个字段**。而漏掉的字段往往正是溯源字段 —— 错误要到几个月后做归因时才暴露 | **数据不经过语言模型**：skill 直接落 `agent_verdicts`，Agent 只传 id；修订走 CLI 而不是重打 JSON。并用测试钉死**契约文档里不许再出现贴 JSON 的写法** |
+
+⚠️ **L-10 是这张表里唯一一条在本项目自己踩出来的**，其余九条继承自那套长期运行的系统。
+实测形状：skill 输出 15 条 evidence 全带 `retrieved_at`，Specialist 转述后**一条不剩**；
+落库 Card 上 25 条证据的 `retrieved_at` 被统一填成「Supervisor 敲命令的时刻」，
+与真实采集时刻差 106 秒。更值得警惕的是，Agent 为此**给自己写了一份恢复文档**，
+把「补一个当前时间当 retrieved_at」写成了标准操作 ——
+**当 Agent 开始给自己写「怎么绕过这个错误」的文档时，那是架构在求救。**
+
 ⚠️ **L-9 是裁定 2「将来都有自动下单」的直接落点** ——
 现在不实现，但先把知识存进去，代价近乎为零；等到要用时再重新踩一遍，代价是真金白银。
 
 > 这张表是本设计里最重要的一节。
-> 架构图可以照着任何一篇文章画，这九条只能靠踩出来。
+> 架构图可以照着任何一篇文章画，这几条只能靠踩出来。
 
 ---
 

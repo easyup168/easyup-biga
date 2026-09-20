@@ -20,8 +20,10 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
 from .evidence import Evidence
+from .missing import MissingItem
 
 __all__ = [
+    "STANCE_VOCAB",
     "AgentVerdict",
     "VerdictStatus",
     "VerdictLevel",
@@ -37,6 +39,20 @@ _LEVELS: frozenset[str] = frozenset(get_args(VerdictLevel))
 
 #: 任务号格式 BIGA-YYYYMMDD-NNN
 TASK_ID_RE = re.compile(r"^BIGA-\d{8}-\d{3}$")
+
+#: 各 Agent 的方向判断词表 —— **唯一定义**。
+#:
+#: 🔴 为什么要固定词表：`stance` 存在的意义是「能被聚合」。
+#:    今天写「偏强」、明天写「震荡偏强」、后天写「结构性走强」，
+#:    三个月后它就是一列自由文本，Phase 4 拿它做不了任何相关性检验。
+#:
+#: ⚠️ 这张表与各 agent `AGENTS.md` 里的判断表是同一套口径，
+#:    由 `tests/test_stance_vocab.py` 钉死两边一致 —— 否则改了一边忘了另一边，
+#:    agent 会给出一个契约层拒绝的词，然后花几轮去猜。
+STANCE_VOCAB: dict[str, tuple[str, ...]] = {
+    "market": ("放量上涨", "缩量上涨", "缩量调整", "放量下跌", "分化", "无法判定"),
+    "emotion": ("冰点", "修复", "亢奋", "衰退", "恐慌", "无法判定"),
+}
 
 
 def new_task_id(seq: int, *, day: str | None = None) -> str:
@@ -65,7 +81,24 @@ class AgentVerdict:
         evidence: 支撑 `result` 的证据。
         warnings: 不阻断但需要人看到的问题。
         missing: 🔴 **必填项里没算出来的那些**。非空即代表结论不完整。
+            每条是一个 `MissingItem`（机器可读代码 + 人话）。
         elapsed_ms: 本次耗时，用于延迟预算核算。
+        stance: 🔴 **方向判断**，由 Agent 给，skill 不填。
+
+            与 `verdict` 严格分离：
+
+            === ============================ ==========================
+            字段   回答的问题                    谁来填
+            === ============================ ==========================
+            verdict 这次判断**有效吗**（数据全不全）  skill
+            stance  判断**是什么**（市场偏哪边）      Agent
+            === ============================ ==========================
+
+            `status=PASS` + `stance=缩量调整` = 数据完整、判断有效、市场偏弱。
+            两者混在一起，「没发现问题」和「看多」就分不开了。
+
+            ⚠️ 它落库是为了 Phase 4：要检验 Card 的区分力，就必须能把
+            **方向判断**与 T+5 结果做相关。只写在自然语言回复里，等于每跑一次丢一次。
     """
 
     task_id: str
@@ -76,10 +109,14 @@ class AgentVerdict:
     confidence: float = 0.0
     evidence: list[Evidence] = dc_field(default_factory=list)
     warnings: list[str] = dc_field(default_factory=list)
-    missing: list[str] = dc_field(default_factory=list)
+    missing: list[MissingItem] = dc_field(default_factory=list)
     elapsed_ms: int = 0
+    stance: str | None = None
 
     def __post_init__(self) -> None:
+        # 缺失项统一收成 MissingItem（裸字符串是 Phase 1 遗留，按 legacy 收编）
+        self.missing = [MissingItem.coerce(m) for m in self.missing]
+
         if not TASK_ID_RE.match(self.task_id):
             raise ValueError(
                 f"task_id 必须形如 BIGA-YYYYMMDD-NNN，收到 {self.task_id!r}"
@@ -131,6 +168,21 @@ class AgentVerdict:
                 "读者看到的就是一个没有理由的 UNKNOWN"
             )
 
+        # --- stance：方向判断，与数据完整度分开 ---
+        if self.stance is not None:
+            vocab = STANCE_VOCAB.get(self.agent)
+            if vocab is not None and self.stance not in vocab:
+                raise ValueError(
+                    f"[{self.agent}] stance={self.stance!r} 不在该 agent 的词表里 "
+                    f"{list(vocab)} —— 方向判断必须可聚合，自由发挥的措辞没法做统计")
+            if vocab is None and (not self.stance.strip() or len(self.stance) > 16):
+                raise ValueError(
+                    f"[{self.agent}] stance 必须是 1..16 字的短词，收到 {self.stance!r}")
+            if self.verdict == "UNKNOWN" and self.stance not in (None, "无法判定"):
+                raise ValueError(
+                    f"[{self.agent}] verdict='UNKNOWN' 却给出 stance={self.stance!r} —— "
+                    "数据都不够，方向是从哪来的？（UNKNOWN ≠ 有判断）")
+
         # --- failed 不该带结论 ---
         if self.status == "failed" and self.verdict != "UNKNOWN":
             raise ValueError(
@@ -161,8 +213,9 @@ class AgentVerdict:
             "confidence": self.confidence,
             "evidence": [e.to_dict() for e in self.evidence],
             "warnings": list(self.warnings),
-            "missing": list(self.missing),
+            "missing": [m.to_dict() for m in self.missing],
             "elapsed_ms": self.elapsed_ms,
+            "stance": self.stance,
         }
 
     @classmethod
@@ -176,6 +229,7 @@ class AgentVerdict:
             confidence=d.get("confidence", 0.0),
             evidence=[Evidence.from_dict(x) for x in d.get("evidence", [])],
             warnings=list(d.get("warnings", [])),
-            missing=list(d.get("missing", [])),
+            missing=[MissingItem.coerce(m) for m in d.get("missing", [])],
             elapsed_ms=d.get("elapsed_ms", 0),
+            stance=d.get("stance"),
         )
