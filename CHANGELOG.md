@@ -15,6 +15,27 @@
 
 ## [未发布]
 
+### 变更 · emotion-calc 移出涨跌家数（2.1 第 3 步，裁定 15 落地）
+
+- `advance_count` / `decline_count` / `flat_count` 与 `collect_breadth` 全部移除，
+  Evidence 13 → 10。**情绪分公式只用 涨停家数 / 最高板 / 炸板率，派生值一个没变**
+  （实测仍是 55.52）
+- 新增 `tests/test_field_single_producer.py` —— 全仓 AST 扫描，
+  同一个字段被两个 skill 产出即红。已用探针验证：把 `advance_count`
+  加回 emotion，立刻失败
+- 🔴 **这个守卫当场抓到一个我没想到的情况：`trade_date` 也是两个 skill 都在产。**
+  想清楚之后它**不该**按裁定 15 禁掉 —— 它不是「同一个事实的两份实现」，
+  而是各自的**溯源元数据**：emotion 的来自股池 `qdate`，market 的来自日线 `day`。
+  **两者不一致本身就是一条重要信息**（某个源陈旧了），强行只留一份等于抹掉这个信号。
+  ⇒ 规则改为：溯源字段不但不禁止，反而**要求每个 skill 都有**；
+  跨 agent 的一致性核对是 Supervisor 在 Stage 3 的职责
+
+### 修复 · confidence 永远到不了 1.0
+
+- emotion-calc 的分母写死 15，而它实际只产 13 个字段 ——
+  **数据完整时也只读到 0.87，「完整」这件事永远表达不出来**。
+  现改为钉死真实字段数（10）并由测试守住，与 market-calc 同款
+
 ### 新增 · `skills/market-calc/`（2.1 第 2 步）
 
 15 个字段：指数点位/涨跌幅、两市成交额、量能比、涨跌家数与上涨占比。

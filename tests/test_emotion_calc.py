@@ -50,10 +50,6 @@ def pool(name: str, total: int, rows: list[dict] | None = None, qdate: str = QDA
     )
 
 
-def breadth(a=4277, d=1173, f=180):
-    return sources.BreadthResult(advance=a, decline=d, flat=f, per_market=[], raw={"rc": 0})
-
-
 @pytest.fixture()
 def wired(monkeypatch):
     """把采集层换成可控的桩。返回一个可改的 plan。"""
@@ -62,7 +58,6 @@ def wired(monkeypatch):
                                           [(1, 1)] * 66 + [(2, 0)] * 8 + [(3, 0)] * 2 + [(4, 0)] * 2]),
         "broken_board": pool("broken_board", 25),
         "limit_down": pool("limit_down", 0, []),
-        "breadth": breadth(),
     }
 
     def fake_pool(name, date, **kw):
@@ -73,14 +68,7 @@ def wired(monkeypatch):
         # date，`date_matches` 就永远为真，严格模式那组测试会因为错误的原因通过。
         return dataclasses.replace(v, requested_date=date)
 
-    def fake_breadth():
-        v = plan["breadth"]
-        if isinstance(v, Exception):
-            raise v
-        return v
-
     monkeypatch.setattr(ec, "fetch_pool", fake_pool)
-    monkeypatch.setattr(ec, "fetch_breadth", fake_breadth)
     return plan
 
 
@@ -108,8 +96,24 @@ class TestHappyPath:
         assert r["streak_ladder"] == {"1": 66, "2": 8, "3": 2, "4": 2}
         assert r["broken_rate"] == round(25 / 103, 4)
         assert r["seal_never_broken_rate"] == round(12 / 78, 4)
-        assert r["advance_count"] == 4277
         assert r["trade_date"] == QDATE
+
+    def test_不再产出涨跌家数(self):
+        """裁定 15：涨跌家数归 market。这里守住它不会悄悄长回来。"""
+        import inspect
+        src = inspect.getsource(ec)
+        for field in ("advance_count", "decline_count", "flat_count"):
+            assert field not in src, f"{field} 又出现在 emotion-calc 里了"
+
+    def test_字段数与confidence分母一致(self, wired):
+        """数据齐备时 confidence 必须正好 1.0。
+
+        移出涨跌家数之前这里的分母是 15、实际只有 13 个字段 ——
+        **数据完整时也只读到 0.87，「完整」这件事永远表达不出来**。
+        """
+        v = build()
+        assert len(v.result) == ec._EXPECTED_FIELDS
+        assert v.confidence == 1.0
 
     def test_每个result字段都有证据(self, wired):
         """契约铁律 3 —— 由 AgentVerdict 构造时强制，这里再从外部确认一次。"""
@@ -166,7 +170,7 @@ class TestMissingPaths:
         assert any("连接被重置" in m for m in v.missing)
 
     def test_全断时result为空且missing非空(self, wired):
-        v = build(break_source={"limit_up", "broken_board", "limit_down", "breadth"})
+        v = build(break_source={"limit_up", "broken_board", "limit_down"})
         assert v.result == {}
         assert v.evidence == []
         assert len(v.missing) >= 4
@@ -209,12 +213,13 @@ class TestDateDiscipline:
         v = build()
         assert any("qdate" in m for m in v.missing)
 
-    def test_涨跌家数无可信日期时不被静默丢弃(self, wired):
-        """数据取到了但定不了日期 —— 必须说出来，不能当没发生。"""
+    def test_没有可信交易日时全部作废并说出来(self, wired):
+        """定不了日期就给不了 as_of —— 必须说出来，不能当没发生。"""
         for k in ("limit_up", "broken_board", "limit_down"):
             wired[k] = sources.SourceError("挂了")
         v = build()
-        assert any("涨跌家数" in m and "交易日" in m for m in v.missing)
+        assert v.result == {}
+        assert any("没有任何股池返回可用的交易日" in m for m in v.missing)
 
 
 class TestSources:

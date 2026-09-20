@@ -16,6 +16,18 @@
 同一个「强不强」在 skill 里算一遍、在 agent 的 prompt 里又算一遍，
 两边慢慢漂开，而且漂开时不会报错。
 
+🔴 涨跌家数不在这里（裁定 15）
+------------------------------
+上游文档把「上涨/下跌家数」同时派给了 market 与 emotion，本项目**只让 market 算**。
+
+它的端点是**不带日期字段的实时快照**：两个 agent 并行各调一次，
+同一张 Card 上就会出现**同一个字段两个值**，而两个都带着推断出来的 `as_of`。
+不会报错，只会某天悄悄给出两个数。
+
+    同一个事实只能有一个生产方。
+
+情绪分公式只用 涨停家数 / 最高板 / 炸板率，因此这次移出**不影响任何派生值**。
+
 🔴 缺失即缺失
 -------------
 任何一项算不出来，都进 `missing[]` 并如实出现在 Decision Card 上。
@@ -52,11 +64,9 @@ sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import CN_TZ, AgentVerdict, Evidence, new_task_id, now_cn  # noqa: E402
 from _sources import (  # noqa: E402
-    BreadthResult,
     PoolResult,
     SourceError,
     as_of_for_trade_date,
-    fetch_breadth,
     fetch_pool,
 )
 from _store import init_schema, save_raw_snapshot  # noqa: E402
@@ -71,6 +81,12 @@ _SCORE_W = {"limit_up_div": 150.0, "limit_up_w": 40.0,
             "streak_div": 10.0, "streak_w": 30.0,
             "seal_w": 30.0}
 
+#: 数据齐备时应当产出的字段数，用于 `confidence`。
+#: ⚠️ 移出涨跌家数前这里写的是 15，而实际只有 13 个字段 ——
+#:    意味着**数据完整时 confidence 也只有 0.87，「完整」永远读不出来**。
+#:    现在钉死为真实字段数，并由测试守住（同 market-calc）。
+_EXPECTED_FIELDS = 10
+
 
 class Collector:
     """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
@@ -81,7 +97,6 @@ class Collector:
         self.break_source = break_source
         self.store = store
         self.pools: dict[str, PoolResult] = {}
-        self.breadth: BreadthResult | None = None
         self.missing: list[str] = []
         self.warnings: list[str] = []
         self.raw_ids: list[int] = []
@@ -139,18 +154,6 @@ class Collector:
                 payload=r.raw,
             ))
 
-    def collect_breadth(self) -> None:
-        if "breadth" in self.break_source:
-            self._note(missing="涨跌家数 —— 数据源被人为中断（--break-source breadth）")
-            return
-        try:
-            self.breadth = fetch_breadth()
-        except SourceError as e:
-            self._note(missing=f"涨跌家数 —— 数据源不可用: {e}")
-        # ⚠️ 这里**不**落 raw、**不**发警告：
-        # 两者都依赖 qdate，而 qdate 要等全部股池跑完才知道。
-        # 并行采集下在这里读 self.qdate 是竞态 —— 统一放到全部完成后做。
-
     # -- 派生 --------------------------------------------------------------
 
     @property
@@ -183,13 +186,12 @@ def build_verdict(
     t_start = time.monotonic()
     c = Collector(date, break_source, store)
 
-    # 四个请求互不依赖，并行拿。串行约 26s，并行约 8s ——
-    # 端到端预算卡在 60s，这一步不是调优，是能不能用的问题。
+    # 三个请求互不依赖，并行拿。串行约 20s，并行约 8s ——
+    # 端到端预算卡在 90s，这一步不是调优，是能不能用的问题。
     jobs = [
         lambda: c.collect_pool("limit_up", "涨停家数"),
         lambda: c.collect_pool("broken_board", "炸板家数"),
         lambda: c.collect_pool("limit_down", "跌停家数"),
-        c.collect_breadth,
     ]
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
         for fut in [pool.submit(j) for j in jobs]:
@@ -260,22 +262,6 @@ def build_verdict(
         else:
             c.missing.append("炸板率 —— 需要涨停池与炸板池同时可用")
 
-        if c.breadth:
-            b = c.breadth
-            c.warnings.append(
-                "涨跌家数接口不返回交易日字段，其 as_of 是按股池的 qdate 推断的"
-            )
-            add("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
-            add("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
-            add("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
-            if store:
-                c.raw_ids.append(save_raw_snapshot(
-                    source="em:push2delay/ulist.np",
-                    as_of=as_of.isoformat(),
-                    retrieved_at=retrieved.isoformat(),
-                    payload=b.raw,
-                ))
-
         # 情绪分：确定性公式，三个输入缺一不可。
         if {"limit_up_count", "max_streak", "broken_rate"} <= set(result):
             w = _SCORE_W
@@ -292,12 +278,6 @@ def build_verdict(
         add("trade_date", qdate, "交易日", "em:push2ex/qdate")
     else:
         c.missing.append("全部情绪指标 —— 没有任何股池返回可用的交易日")
-        if c.breadth:
-            # 数据确实取到了，但没有可信的交易日就无法给它一个 as_of。
-            # 带着错误的 as_of 上 Card，比没有这条数据更糟。
-            c.missing.append(
-                "涨跌家数 —— 已取到数据，但缺少可信交易日，无法确定它描述的是哪一天"
-            )
 
     # verdict 表达的是**数据完整度**，不是市场判断。
     # 「这算不算亢奋期」由 Emotion Agent 依据 AGENTS.md 里的口径来说。
@@ -315,7 +295,7 @@ def build_verdict(
         status=status,
         verdict=level,
         result=result,
-        confidence=round(len(result) / 15, 2) if result else 0.0,
+        confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence,
         warnings=c.warnings,
         missing=c.missing,
@@ -331,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--break-source", action="append", default=[],
                     metavar="NAME",
                     help="演练用：人为中断某个数据源 "
-                         "(limit_up|broken_board|limit_down|breadth)")
+                         "(limit_up|broken_board|limit_down)")
     ap.add_argument("--no-store", action="store_true",
                     help="不写 raw_market_snapshot（默认写）")
     ap.add_argument("--render", action="store_true", help="附带人类可读摘要")
