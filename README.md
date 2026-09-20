@@ -162,7 +162,7 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
 │   └── tutorial/    开发教程（10 章，与代码同步）
-└── images/          品牌素材（LOGO_BigA01–04，含 C2PA 内容凭证）
+└── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 
 ---
@@ -192,14 +192,15 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 
 ## 品牌素材
 
-[`images/`](images/) 目录含四张 Logo：
+[`images/`](images/) 目录含五张 Logo：
 
 - `LOGO_BigA01`：横版字标，黑字白底（GitHub 首图 / 浅色背景用）
 - `LOGO_BigA02`：方形图标（头像 / 方形场景用）
 - `LOGO_BigA03`：方案总览
 - `LOGO_BigA04`：方形 App 图标，红底白字圆角
+- `bigA01`：横版字标的**透明底白字**版（深色背景 / 视频叠加用）
 
-四张图由 AI 生成，保留了 C2PA 内容凭证（`caBX` 块）未作剥离。
+五张图由 AI 生成，保留了 C2PA 内容凭证（`caBX` 块）未作剥离。
 
 ---
 
