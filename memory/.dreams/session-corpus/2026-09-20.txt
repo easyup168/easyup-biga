@@ -1,0 +1,4 @@
+[main/sessions/main/8b0bfc7c-72c1-4bc9-9e39-80a044fe39fb#L79] User: 今天大盘和市场情绪怎么样？
+[main/sessions/main/8b0bfc7c-72c1-4bc9-9e39-80a044fe39fb#L80] Assistant: 今天（2026-09-20）是周日，同样非交易日。我并行调两个 Specialist 核实一下，而不是直接假设。
+[main/sessions/main/8b0bfc7c-72c1-4bc9-9e39-80a044fe39fb#L84] Assistant: Both specialists have already settled (no active subagents). Let me pick up their results.
+[main/sessions/main/8b0bfc7c-72c1-4bc9-9e39-80a044fe39fb#L96] Assistant: **BIGA DECISION CARD BIGA-20260920-001** 状态：**WAIT** **核心矛盾：2026-09-20 是周日，非交易日，大盘与情绪均无当日数据。** `market` 和 `emotion` 两个 Specialist 都用严格日期模式核对过：数据源最新一根仍停在 09-18，20260920 没有交易数据，两者都拒绝用旧数据顶替，均返回 `UNKNOWN`（confidence=0.0，evidence 为空）。 ⚠ **缺失项（9）** - 大盘：上证/深证指数日线、全部市场指标 —— 无
