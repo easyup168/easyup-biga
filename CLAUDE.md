@@ -205,10 +205,23 @@ Phase 3 之前必须换成 BigA 自己的凭据。触发条件任一成立即换
 `architecture.md` §9 已按此改写过一遍：保留工程教训与防护机制，抽掉具体数字与内部标识。
 写新文档时沿用同样的标准。
 
-快速自查：
+### 审查只有一份实现，且已接成 hook
+
 ```bash
-grep -rniE 'cli_[a-z0-9]{8}|/home/[a-z]+|api[_-]?key *[:=]|appsecret' --include='*.md' --include='*.py' .
+tools/verify/audit_public.sh --worktree   # commit 之前：扫工作区
+tools/verify/audit_public.sh              # 手工体检：扫全历史
+git config core.hooksPath tools/git-hooks # 装 pre-push（克隆后每人执行一次）
 ```
+
+`pre-push` hook 会在每次推送前扫**本次新增的提交**，不过就拦下。
+
+🔴 **仓库已 Public ⇒ push 即发布。** 原来的纪律是「转可见性前跑一遍审查」，
+那句话隐含一个不再存在的窗口（先推上去、等转公开时再检查）。
+已公开的内容撤不回来 —— 删分支也可能留在 fork、缓存与镜像里。
+
+⚠️ 这八项检查**只有一份实现**（`tools/verify/audit_public.sh`）。
+本节曾另有一段「快速自查」用另一套正则，那就是 L-3 的第二套口径 ——
+**改了一份忘了另一份时，剩下那份仍然报绿。**
 
 ---
 

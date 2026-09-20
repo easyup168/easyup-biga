@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# pre-push —— push 即发布，所以审查必须在 push 之前发生
+#
+# 仓库已 Public。原来的纪律是「转可见性前跑一遍审查」，那句话隐含一个
+# 已经不存在的窗口（先推上去、等转公开时再检查）。现在唯一有效的顺序是
+# **先审查、后 push**，而「靠人记得跑」正是 architecture.md §9 反复否掉的
+# 那类防护 —— 所以把它接成 hook。
+#
+# 装法（core.hooksPath 是仓库级 config，克隆后需各自执行一次）：
+#   git config core.hooksPath tools/git-hooks
+#
+# 临时绕过（只在确认误报时用）：
+#   git push --no-verify
+
+set -uo pipefail
+ROOT=$(git rev-parse --show-toplevel)
+AUDIT="$ROOT/tools/verify/audit_public.sh"
+
+if [ ! -x "$AUDIT" ]; then
+  echo "pre-push: 找不到可执行的 $AUDIT —— 拒绝在没有审查的情况下 push" >&2
+  exit 1
+fi
+
+ZERO=0000000000000000000000000000000000000000
+FAIL=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO" ] && continue                 # 删远端分支，无新增内容
+  echo "── 审查 ${local_ref#refs/heads/} → ${remote_ref#refs/heads/}"
+  if [ "$remote_sha" = "$ZERO" ]; then
+    "$AUDIT" "$local_sha" --not --remotes || FAIL=1      # 新分支：相对所有远端引用的增量
+  else
+    "$AUDIT" "$remote_sha..$local_sha" || FAIL=1
+  fi
+done
+
+[ "$FAIL" -ne 0 ] && echo "pre-push: 审查未通过，已拦下推送（确认是误报可用 --no-verify）" >&2
+exit $FAIL
