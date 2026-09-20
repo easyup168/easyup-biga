@@ -1,12 +1,4 @@
-"""情绪数据采集 —— 纯取数，不做任何判断与计算。
-
-分层依据见 architecture.md §5.2：
-    collectors（本模块）→ raw 层 → indicators（确定性计算）→ derived
-
-本模块的唯一职责是「把数据源返回的东西原样拿回来」。
-它不算涨停率、不判断强弱、不填默认值。任何一层的失败都**如实抛出**，
-由上层决定进 `missing[]` 还是重试 —— 采集层自作主张填个 0，
-上层就永远没有机会知道这里出过问题。
+"""东方财富系端点 —— 股池（涨停/炸板/跌停）与涨跌家数。
 
 🔴 为什么直接打 HTTP，而不用现成的 Python 封装库
 ---------------------------------------------------
@@ -17,7 +9,7 @@
 
 2. **这类爬虫库不承诺 API 稳定。** 一个长期运行的同类系统记录过两次
    接口被删 / 改名导致的**静默失效数月**。它们的结论是把版本号钉死，
-   并且「不许新增接口而不加失败告警」。既然本项目只需要三个端点，
+   并且「不许新增接口而不加失败告警」。既然本项目只需要几个端点，
    直接持有 URL 反而让失效点更少、更可见。
 
 🔴 数据源的静默陷阱（实测，2026-09-19）
@@ -39,20 +31,26 @@
 
     as_of 永远取自 `qdate`（数据自己声明的日期），
     绝不取自「我请求的日期」。两者不符时由上层记入 missing[]。
+
+🔴 涨跌家数端点连 qdate 都没有（实测，2026-09-20）
+---------------------------------------------------
+它返回的是**当前快照**，不带任何日期字段。周日请求它，返回的数与上一交易日
+逐位相同（`4277/1173/180`）—— 它把最后一个交易日冻在那里反复发。
+
+⇒ 这个端点的 `as_of` 只能由调用方结合交易日推断，并且**必须为此记一条 warning**。
+⇒ 也因此（裁定 15）它只能有**一个**生产 agent：两个 agent 并行各调一次，
+   同一张 Card 上就会出现同一个字段两个值，而两个都带着推断出来的 `as_of`。
 """
 
 from __future__ import annotations
 
-import json
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from .http import SourceError, get_json
+
 __all__ = [
-    "SourceError",
     "PoolResult",
     "BreadthResult",
     "fetch_pool",
@@ -60,16 +58,7 @@ __all__ = [
     "POOL_ENDPOINTS",
 ]
 
-_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 _REFERER = "https://quote.eastmoney.com/"
-_TIMEOUT = 15
-
-#: 重试次数与退避。实测这些公开端点会偶发 TLS 握手超时 / 连接被重置，
-#: 单次失败不代表数据源挂了。
-#: 🔴 但重试耗尽后**必须抛错**，由上层记入 missing[] ——
-#:    绝不允许「重试几次还不行就返回 0」，那会把网络抖动变成一条虚假的市场事实。
-_RETRIES = 3
-_BACKOFF_SEC = (0.8, 2.0)
 
 #: 三个股池端点。key 是本项目内部名，value 是接口路径。
 POOL_ENDPOINTS: dict[str, str] = {
@@ -87,14 +76,6 @@ _BREADTH_PATH = "/api/qt/ulist.np/get"
 
 #: 涨跌家数取自各市场的总指数：上证 / 深证综指 / 北证 50
 _BREADTH_SECIDS = "1.000001,0.399106,0.899050"
-
-
-class SourceError(RuntimeError):
-    """数据源不可用或返回了无法解释的内容。
-
-    🔴 采集层遇到问题一律抛这个，绝不返回一个「兜底值」。
-    返回兜底值 = 让上层无法区分「真的是这个数」和「没取到」。
-    """
 
 
 @dataclass(frozen=True)
@@ -133,34 +114,6 @@ class BreadthResult:
     raw: dict[str, Any]
 
 
-def _get_json(url: str) -> dict[str, Any]:
-    endpoint = url.split("?")[0]
-    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": _REFERER})
-    last: Exception | None = None
-
-    for attempt in range(_RETRIES):
-        if attempt:
-            time.sleep(_BACKOFF_SEC[min(attempt - 1, len(_BACKOFF_SEC) - 1)])
-        try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            last = e
-            continue
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError as e:
-            # 返回了内容但不是 JSON —— 多半是网关错误页，重试没有意义
-            raise SourceError(
-                f"{endpoint}: 返回不是合法 JSON（前 200 字符）{body[:200]!r}"
-            ) from e
-
-    raise SourceError(
-        f"{endpoint}: {_RETRIES} 次尝试全部失败，最后一次 "
-        f"{type(last).__name__}: {last}"
-    ) from last
-
-
 def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
     """取一个股池。
 
@@ -183,7 +136,7 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
         "sort": "fbt:asc",
         "date": date,
     })
-    payload = _get_json(f"{_POOL_BASE}{POOL_ENDPOINTS[pool]}?{qs}")
+    payload = get_json(f"{_POOL_BASE}{POOL_ENDPOINTS[pool]}?{qs}", referer=_REFERER)
 
     if payload.get("rc") != 0:
         raise SourceError(f"{pool}: 接口返回 rc={payload.get('rc')}")
@@ -210,7 +163,7 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
 def fetch_breadth() -> BreadthResult:
     """取全市场涨跌平家数。
 
-    ⚠️ 这个接口给的是**当前**快照，不带交易日字段。
+    ⚠️ 这个接口给的是**当前**快照，不带交易日字段（模块 docstring 有实测）。
     因此它的 `as_of` 只能由调用方结合交易日推断 —— 上层会为此单独记一条警告。
     这与股池的 `qdate` 形成对比：**同一次采集里，不同字段的可信度可以是不同的**，
     契约层要求逐条证据带自己的 `as_of`，正是为了不让这种差别被抹平。
@@ -224,7 +177,7 @@ def fetch_breadth() -> BreadthResult:
     payload: dict[str, Any] | None = None
     for host in _BREADTH_HOSTS:
         try:
-            payload = _get_json(f"https://{host}{_BREADTH_PATH}?{qs}")
+            payload = get_json(f"https://{host}{_BREADTH_PATH}?{qs}", referer=_REFERER)
             break
         except SourceError as e:
             errors.append(f"{host}: {e}")
