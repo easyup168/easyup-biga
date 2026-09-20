@@ -30,12 +30,15 @@ from .eastmoney import (
     fetch_pool,
 )
 from .http import SourceError, get_json
+from .tradetime import MARKET_CLOSE, as_of_for_trade_date
 
 __all__ = [
+    "MARKET_CLOSE",
     "POOL_ENDPOINTS",
     "BreadthResult",
     "PoolResult",
     "SourceError",
+    "as_of_for_trade_date",
     "fetch_breadth",
     "fetch_pool",
     "get_json",
