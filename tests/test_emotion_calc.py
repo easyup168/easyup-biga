@@ -248,3 +248,81 @@ class TestLadder:
 
     def test_排序(self):
         assert list(ec._ladder([{"lbc": 3}, {"lbc": 1}, {"lbc": 2}])) == [1, 2, 3]
+
+
+class TestIntradayAsOf:
+    """🔴 盘中跑不能崩 —— 这是 Phase 1 埋的 bug，2.1 修的。
+
+    原来的换算把交易日一律当成「当日 15:00 收盘」。交易日盘中 10:00 采数据时，
+    `as_of`(今天15:00) > `retrieved_at`(今天10:00)，契约层直接 `ValueError`，
+    **整个 skill 崩掉，连一条 missing 都留不下**。
+
+    Phase 1 没撞上，纯粹因为那几天的实测都在收盘后或非交易日跑 ——
+    而 BigA 是短线系统，盘中才是主场景。
+    """
+
+    @staticmethod
+    def _at(hhmm: tuple[int, int], day: str = "20260921"):
+        """把 now_cn 钉死在某个时刻，并让股池报告同一天。"""
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        d = datetime.strptime(day, "%Y%m%d").date()
+        return datetime(d.year, d.month, d.day, hhmm[0], hhmm[1], tzinfo=CN_TZ)
+
+    def test_盘中不崩且as_of退回取回时刻(self, wired, monkeypatch):
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = dataclasses.replace(wired[k], qdate=today)
+        monkeypatch.setattr(ec, "now_cn", lambda: self._at((10, 0), today))
+
+        v = build()   # 不指定 date ⇒ 宽松模式，目标日就是「今天」
+
+        assert v.evidence, "盘中应当照常产出证据，而不是抛异常"
+        for e in v.evidence:
+            assert e.as_of <= e.retrieved_at, f"{e.field} 的 as_of 晚于 retrieved_at"
+        assert any("尚未收盘" in w for w in v.warnings), \
+            "盘中快照必须标出来 —— 不标就会被当成全天结果"
+
+    def test_收盘后仍按收盘时刻(self, wired, monkeypatch):
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = dataclasses.replace(wired[k], qdate=today)
+        monkeypatch.setattr(ec, "now_cn", lambda: self._at((16, 0), today))
+
+        v = build()
+
+        assert all(e.as_of.hour == 15 and e.as_of.minute == 0 for e in v.evidence)
+        assert not any("尚未收盘" in w for w in v.warnings)
+
+
+class TestTradeTimeHelper:
+    """换算本身的分支 —— 它是两个 skill 共用的判据，单独钉死。"""
+
+    @staticmethod
+    def _dt(day: str, h: int, m: int = 0):
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        d = __import__("datetime").datetime.strptime(day, "%Y%m%d").date()
+        return datetime(d.year, d.month, d.day, h, m, tzinfo=CN_TZ)
+
+    def test_过去的交易日取收盘(self):
+        a, w = sources.as_of_for_trade_date(
+            "20260918", retrieved_at=self._dt("20260920", 20))
+        assert (a.hour, a.minute) == (15, 0) and w is None
+
+    def test_未来的交易日不静默接受(self):
+        rt = self._dt("20260921", 10)
+        a, w = sources.as_of_for_trade_date("20260922", retrieved_at=rt)
+        assert a == rt and w and "晚于当前日期" in w
+
+    def test_四个分支都给出合法的as_of(self):
+        rt = self._dt("20260921", 10)
+        for td in ("20260918", "20260921", "20260922"):
+            a, _ = sources.as_of_for_trade_date(td, retrieved_at=rt)
+            assert a <= rt, f"{td} 算出的 as_of 晚于 retrieved_at —— 契约层会拒绝"
+
+    def test_非法日期格式抛错(self):
+        with pytest.raises(ValueError):
+            sources.as_of_for_trade_date("2026-09-18", retrieved_at=self._dt("20260921", 10))

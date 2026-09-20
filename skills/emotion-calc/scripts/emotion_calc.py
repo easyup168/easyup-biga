@@ -43,7 +43,7 @@ import pathlib
 import sys
 import time
 import threading
-from datetime import datetime, time as dtime
+from datetime import datetime
 from typing import Any
 
 _HERE = pathlib.Path(__file__).resolve()
@@ -55,6 +55,7 @@ from _sources import (  # noqa: E402
     BreadthResult,
     PoolResult,
     SourceError,
+    as_of_for_trade_date,
     fetch_breadth,
     fetch_pool,
 )
@@ -63,25 +64,12 @@ from _store import init_schema, save_raw_snapshot  # noqa: E402
 AGENT = "emotion"
 CALC_VERSION = "emotion-calc/1"
 
-#: A 股收盘时刻。股池数据描述的是这一刻之后的全天结果。
-_CLOSE = dtime(15, 0, 0)
-
 #: 情绪分参考公式的权重。业内常见口径，**未经本项目验证** ——
 #: 它的区分力要到测量阶段做安慰剂检验后才算数，因此只作为一个内部参考数，
 #: 不参与任何归类，也不单独上 Card。
 _SCORE_W = {"limit_up_div": 150.0, "limit_up_w": 40.0,
             "streak_div": 10.0, "streak_w": 30.0,
             "seal_w": 30.0}
-
-
-def _as_of_from_qdate(qdate: str) -> datetime:
-    """把交易日转成「当日收盘」这个时刻。
-
-    🔴 as_of 取自数据自己声明的 qdate，绝不取自我请求的日期。
-    理由见 `skills/_sources/eastmoney.py` 模块 docstring 里的实测表。
-    """
-    d = datetime.strptime(qdate, "%Y%m%d").date()
-    return datetime.combine(d, _CLOSE, tzinfo=CN_TZ)
 
 
 class Collector:
@@ -142,10 +130,12 @@ class Collector:
 
         self._keep(pool, r)
         if self.store:
+            got = now_cn()
+            snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
             self._keep_raw(save_raw_snapshot(
                 source=f"em:push2ex/{pool}",
-                as_of=_as_of_from_qdate(r.qdate).isoformat(),
-                retrieved_at=now_cn().isoformat(),
+                as_of=snap_as_of.isoformat(),
+                retrieved_at=got.isoformat(),
                 payload=r.raw,
             ))
 
@@ -218,16 +208,24 @@ def build_verdict(
     result: dict[str, Any] = {}
     evidence: list[Evidence] = []
     retrieved = now_cn()
+    #: 🔴 as_of 取自数据自己声明的 qdate，绝不取自我请求的日期
+    #:    （理由见 `_sources/eastmoney.py` 的实测表）；
+    #:    而「交易日 → 时刻」的换算走共享实现，它认得「今天尚未收盘」那个分支
+    #:    —— 少了那个分支，盘中跑会 as_of > retrieved_at，契约层直接拒绝构造。
+    as_of: datetime | None = None
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
-            as_of=_as_of_from_qdate(qdate), retrieved_at=retrieved,
+            as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
         ))
 
     if qdate:
+        as_of, as_of_warning = as_of_for_trade_date(qdate, retrieved_at=retrieved)
+        if as_of_warning:
+            c.warnings.append(as_of_warning)
         zt = c.pools.get("limit_up")
         zb = c.pools.get("broken_board")
         dt = c.pools.get("limit_down")
@@ -273,7 +271,7 @@ def build_verdict(
             if store:
                 c.raw_ids.append(save_raw_snapshot(
                     source="em:push2delay/ulist.np",
-                    as_of=_as_of_from_qdate(qdate).isoformat(),
+                    as_of=as_of.isoformat(),
                     retrieved_at=retrieved.isoformat(),
                     payload=b.raw,
                 ))
