@@ -192,6 +192,12 @@ URL 变了会 404，库函数改名会 `AttributeError`，但库函数**悄悄�
 `sources.py` 的唯一职责是「把数据源返回的东西原样拿回来」。它不算涨停率、
 不判断强弱、**不填默认值**。
 
+> ⏩ **后续变动**：这个文件在 Phase 2 的 2.1 被抽到了共享包
+> `skills/_sources/`（`http.py` + `eastmoney.py`）—— 因为出现了第二个消费方
+> `market-calc`，而共用的不只是 URL，更是重试 / 退避 / 备选主机链这套判据。
+> 过程见[第 11 章](11-second-specialist.md)。本章其余内容不受影响：
+> 职责划分与错误处理口径一个字没改。
+
 ```python
 class SourceError(RuntimeError):
     """数据源不可用或返回了无法解释的内容。

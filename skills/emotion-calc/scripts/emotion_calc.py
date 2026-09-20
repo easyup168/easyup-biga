@@ -49,17 +49,16 @@ from typing import Any
 _HERE = pathlib.Path(__file__).resolve()
 _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
-sys.path.insert(0, str(_HERE.parent))
 
 from _contract import CN_TZ, AgentVerdict, Evidence, new_task_id, now_cn  # noqa: E402
-from _store import init_schema, save_raw_snapshot  # noqa: E402
-from sources import (  # noqa: E402
+from _sources import (  # noqa: E402
     BreadthResult,
     PoolResult,
     SourceError,
     fetch_breadth,
     fetch_pool,
 )
+from _store import init_schema, save_raw_snapshot  # noqa: E402
 
 AGENT = "emotion"
 CALC_VERSION = "emotion-calc/1"
@@ -79,7 +78,7 @@ def _as_of_from_qdate(qdate: str) -> datetime:
     """把交易日转成「当日收盘」这个时刻。
 
     🔴 as_of 取自数据自己声明的 qdate，绝不取自我请求的日期。
-    理由见 sources.py 模块 docstring 里的实测表。
+    理由见 `skills/_sources/eastmoney.py` 模块 docstring 里的实测表。
     """
     d = datetime.strptime(qdate, "%Y%m%d").date()
     return datetime.combine(d, _CLOSE, tzinfo=CN_TZ)

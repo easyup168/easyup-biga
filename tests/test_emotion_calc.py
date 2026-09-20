@@ -20,6 +20,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "emotion-calc" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(REPO / "skills"))
 
 
 def _load(name: str):
@@ -30,7 +31,11 @@ def _load(name: str):
     return mod
 
 
-sources = _load("sources")
+# 采集层已抽到共享包 `skills/_sources/`（2.1 第 1 步）。
+# 局部名仍叫 `sources`，让本文件其余引用零改动 ——
+# 这次重构的信号是「124 条测试一条不变」，改测试就把信号弄脏了。
+import _sources as sources  # noqa: E402
+
 ec = _load("emotion_calc")
 
 QDATE = "20260918"
