@@ -29,7 +29,7 @@ _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _contract import AgentVerdict  # noqa: E402
+from _contract import AgentVerdict, MissingItem  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
     load_verdict,
@@ -83,8 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", required=True, choices=["BUY", "WAIT", "AVOID", "BLOCK"])
     ap.add_argument("--headline", required=True, help="核心矛盾，一句话")
     ap.add_argument("--synthesis", default="", help="合成说明（可选）")
-    ap.add_argument("--extra-missing", action="append", default=[],
-                    help="Supervisor 自己发现的缺失项，可重复")
+    ap.add_argument("--extra-missing", action="append", default=[], nargs=2,
+                    metavar=("CODE", "TEXT"),
+                    help="Supervisor 自己发现的缺失项：机器可读代码 + 人话，可重复。"
+                         "例如 supervisor.agent_offline \"risk agent 尚未上线\"")
     ap.add_argument("--model-ref", required=True, help="做这次合成的模型标识")
     ap.add_argument("--decision-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
     ap.add_argument("--elapsed-ms", type=int, default=0, help="端到端耗时")
@@ -98,6 +100,20 @@ def main(argv: list[str] | None = None) -> int:
         print("没有任何 Verdict —— 不出卡。", file=sys.stderr)
         return 1
 
+    # 🔴 每个给得出判断的 Specialist 都必须提交 stance。
+    #    放在这里而不是契约层，是因为契约层会在 `from_dict` 时也生效 ——
+    #    那会让 Phase 1/2 早期落库的卡（没有 stance）再也回放不了。
+    #    ⇒ 新卡严格，旧卡可读。这是「能不能重建当时看到的东西」优先于形式一致。
+    silent = [v.agent for v in verdicts if v.verdict != "UNKNOWN" and not v.stance]
+    if silent:
+        print(
+            f"这些 Specialist 给出了判断却没有提交 stance：{silent}\n"
+            f"  stance 是方向判断（市场偏哪边），verdict 是数据完整度（数据全不全），\n"
+            f"  两者不能互相替代。没有 stance，这次结论就无法参与后续的区分力检验。\n"
+            f"  让它补一条：amend_verdict.py --ref <它的 ref> --stance <词表里的词>",
+            file=sys.stderr)
+        return 1
+
     if not args.no_store:
         init_schema()
     # 🔴 不要硬编码序号。原来写的是 new_task_id(1)，当天第二次决策必撞主键，
@@ -108,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         verdicts=verdicts,
         judgment=Judgment(status=args.status, headline=args.headline,
                           synthesis=args.synthesis,
-                          extra_missing=list(args.extra_missing)),
+                          extra_missing=[MissingItem(t, c)
+                                         for c, t in args.extra_missing]),
         model_ref=args.model_ref,
         elapsed_ms=args.elapsed_ms,
     )

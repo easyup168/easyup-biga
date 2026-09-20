@@ -41,6 +41,9 @@ class Evidence:
         retrieved_at: 取回这份数据的时间。
         calc_version: 口径版本。换算法时据此清点受影响的历史结论。
         label: 给人看的字段名，用于渲染 Decision Card。缺省时回退到 `field`。
+        raw_hash: 🔴 **这条证据出自哪一份原始响应**（`raw_market_snapshot.content_sha256`）。
+            没有它，「这个结论基于哪份数据」只能靠时间戳猜。
+            派生字段（`source` 以 ``derived:`` 开头）没有单一来源，允许为空。
     """
 
     field: str
@@ -50,6 +53,7 @@ class Evidence:
     retrieved_at: datetime
     calc_version: str | None = None
     label: str | None = None
+    raw_hash: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("field", "source"):
@@ -89,6 +93,7 @@ class Evidence:
             "retrieved_at": self.retrieved_at.isoformat(),
             "calc_version": self.calc_version,
             "label": self.label,
+            "raw_hash": self.raw_hash,
         }
 
     @classmethod
@@ -101,4 +106,5 @@ class Evidence:
             retrieved_at=datetime.fromisoformat(d["retrieved_at"]),
             calc_version=d.get("calc_version"),
             label=d.get("label"),
+            raw_hash=d.get("raw_hash"),
         )

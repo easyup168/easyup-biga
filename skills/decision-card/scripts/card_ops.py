@@ -27,7 +27,12 @@ _HERE = pathlib.Path(__file__).resolve()
 _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
-from _contract import AgentVerdict, CardStatus, DecisionCard  # noqa: E402
+from _contract import (  # noqa: E402
+    AgentVerdict,
+    CardStatus,
+    DecisionCard,
+    MissingItem,
+)
 from _store import load_card, save_card  # noqa: E402
 
 __all__ = ["Judgment", "synthesize", "persist", "SYNTHESIS_VERSION"]
@@ -46,7 +51,7 @@ class Judgment:
     synthesis: str = ""
     #: Supervisor 自己发现的缺失项（例如「risk agent 尚未上线，未经风险审查」）。
     #: 与各 Verdict 的 missing 合并后上 Card。
-    extra_missing: list[str] = dc_field(default_factory=list)
+    extra_missing: list[MissingItem] = dc_field(default_factory=list)
 
 
 def synthesize(
@@ -67,11 +72,15 @@ def synthesize(
     去重但**保持首次出现的顺序** —— 顺序稳定，回放的 diff 才是干净的。
     """
     seen: set[str] = set()
-    missing: list[str] = []
+    missing: list[MissingItem] = []
     for m in [m for v in verdicts for m in v.missing] + list(judgment.extra_missing):
-        if m not in seen:
-            seen.add(m)
-            missing.append(m)
+        item = MissingItem.coerce(m)
+        # 🔴 按「代码 + 文本」去重，不只按文本：两个 agent 报同一句话但代码不同，
+        #    那是两件事（例如两个源各自不可用），合并会让统计少一条。
+        key = f"{item.code}\x00{item}"
+        if key not in seen:
+            seen.add(key)
+            missing.append(item)
 
     # 契约层会在这里拒绝：missing 非空却给 BUY、BLOCK 却给 BUY、缺失项没上浮……
     return DecisionCard(

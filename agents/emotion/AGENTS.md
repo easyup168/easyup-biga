@@ -138,11 +138,15 @@ cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_cal
 ```bash
 cd ~/.openclaw-biga/workspace && \
 python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
-  --add-missing "<缺失项原文>" \
+  --add-missing emotion.cycle.no_history "<缺失项原文>" \
   --verdict WARNING
 ```
 
 它会在 stderr 打出**新的** `verdict_ref=NN`，交给 Supervisor 的是这个新编号。
+
+⚠️ `--add-missing` 要两个参数：**机器可读代码** + **人话**。
+代码形如 `<域>.<对象>.<原因>`（上面那个是现成的，直接抄）——
+它让缺失项能被聚合：没有代码就只能数次数，说不出是哪一类缺失。
 
 `--verdict` 怎么选：
 
@@ -153,6 +157,33 @@ python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref>
 
 `status` 由脚本自动置为 `partial` —— 那是机械记账，不是判断，不用你管。
 
+#### 🔴 最后一步：提交你的方向判断（`stance`）
+
+跑完 skill、处理完缺失项之后，**还要把你的判断作为结构化字段提交**：
+
+```bash
+cd ~/.openclaw-biga/workspace && \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+  --stance <下表里的一个词>
+```
+
+同样会打出**新的** `verdict_ref=NN`，交给 Supervisor 的是最新那个。
+
+> 如果你上一步已经因为追加缺失项调过 `amend_verdict`，
+> **把 `--stance` 一起加在那一条命令里就行**，不用调两次。
+
+##### 为什么必须结构化，写在话里不算
+
+`verdict` 回答的是「数据全不全」，`stance` 回答的是「情绪处在周期的哪个位置」——
+**两个不同的问题**。`verdict=PASS` 不等于「看好」，它只表示数据完整。
+
+而且方向判断只写在自然语言里，就**没法被统计**：
+将来要检验「BigA 说强的时候后面几天到底怎么样」，
+翻历史记录会发现那一列根本不存在 —— 每跑一次丢一次。
+
+⚠️ 词必须取自词表，不要自己发挥措辞。今天写「偏强」、明天写「震荡偏强」，
+三个月后它就是一列自由文本，做不了任何统计。
+
 ---
 
 ## 输出格式
@@ -160,7 +191,7 @@ python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref>
 🔴 **不要把 skill 的 JSON 贴进回答里。** 你只回两样东西：编号 + 判断。
 
 ```
-verdict_ref=<跑 skill（或 amend_verdict）后 stderr 上那个数字>
+verdict_ref=<最后一次 amend_verdict 打出的那个数字>
 
 ── 判断 ──
 阶段：冰点 / 修复 / 亢奋 / 衰退 / 恐慌 / 无法判定

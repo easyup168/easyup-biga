@@ -63,7 +63,13 @@ _HERE = pathlib.Path(__file__).resolve()
 _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
-from _contract import AgentVerdict, Evidence, new_task_id, now_cn  # noqa: E402
+from _contract import (  # noqa: E402
+    AgentVerdict,
+    Evidence,
+    MissingItem,
+    new_task_id,
+    now_cn,
+)
 from _sources import (  # noqa: E402
     BreadthResult,
     IndexDaily,
@@ -74,7 +80,12 @@ from _sources import (  # noqa: E402
     fetch_index_daily,
     fetch_index_quote,
 )
-from _store import init_schema, save_raw_snapshot, save_verdict  # noqa: E402
+from _store import (  # noqa: E402
+    init_schema,
+    payload_sha256,
+    save_raw_snapshot,
+    save_verdict,
+)
 
 AGENT = "market"
 CALC_VERSION = "market-calc/1"
@@ -122,8 +133,11 @@ class Collector:
         self.missing: list[str] = []
         self.warnings: list[str] = []
         self.raw: list[tuple[str, Any]] = []
+        #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
+        self.hashes: dict[str, str] = {}
 
-    def _note(self, *, missing: str | None = None, warning: str | None = None) -> None:
+    def _note(self, *, missing: MissingItem | None = None,
+              warning: str | None = None) -> None:
         with self._lock:
             if missing:
                 self.missing.append(missing)
@@ -133,24 +147,29 @@ class Collector:
     def _keep_raw(self, source: str, payload: Any) -> None:
         with self._lock:
             self.raw.append((source, payload))
+            self.hashes[source] = payload_sha256(payload)
 
     # -- 采集 --------------------------------------------------------------
 
     def collect_daily(self, key: str) -> None:
         symbol, label = MARKETS[key]
         if f"sina_{key}" in self.break_source:
-            self._note(missing=f"{label}日线 —— 数据源被人为中断（--break-source sina_{key}）")
+            self._note(missing=MissingItem(
+                f"{label}日线 —— 数据源被人为中断（--break-source sina_{key}）",
+                "market.index_daily.source_broken"))
             return
         try:
             d = fetch_index_daily(symbol, bars=BAR_COUNT)
         except (SourceError, ValueError) as e:
-            self._note(missing=f"{label}日线 —— 数据源不可用: {e}")
+            self._note(missing=MissingItem(f"{label}日线 —— 数据源不可用: {e}",
+                                          "market.index_daily.unavailable"))
             return
 
         if self.date is not None and d.trade_date != self.date:
             # 显式指定了日期 = 一个契约。对不上就是没拿到要的东西。
-            self._note(missing=f"{label}日线 —— 请求 {self.date} "
-                              f"但数据源最新一根是 {d.trade_date}")
+            self._note(missing=MissingItem(
+                f"{label}日线 —— 请求 {self.date} 但数据源最新一根是 {d.trade_date}",
+                "market.index_daily.date_mismatch"))
             return
 
         with self._lock:
@@ -159,12 +178,14 @@ class Collector:
 
     def collect_quotes(self) -> None:
         if "tencent" in self.break_source:
-            self._note(missing="成交额 —— 数据源被人为中断（--break-source tencent）")
+            self._note(missing=MissingItem("成交额 —— 数据源被人为中断（--break-source tencent）",
+                                          "market.turnover.source_broken"))
             return
         try:
             q = fetch_index_quote([sym for sym, _ in MARKETS.values()])
         except (SourceError, ValueError) as e:
-            self._note(missing=f"成交额 —— 数据源不可用: {e}")
+            self._note(missing=MissingItem(f"成交额 —— 数据源不可用: {e}",
+                                          "market.turnover.unavailable"))
             return
         with self._lock:
             self.quotes = q
@@ -172,12 +193,14 @@ class Collector:
 
     def collect_breadth(self) -> None:
         if "breadth" in self.break_source:
-            self._note(missing="涨跌家数 —— 数据源被人为中断（--break-source breadth）")
+            self._note(missing=MissingItem("涨跌家数 —— 数据源被人为中断（--break-source breadth）",
+                                          "market.breadth.source_broken"))
             return
         try:
             b = fetch_breadth()
         except SourceError as e:
-            self._note(missing=f"涨跌家数 —— 数据源不可用: {e}")
+            self._note(missing=MissingItem(f"涨跌家数 —— 数据源不可用: {e}",
+                                          "market.breadth.unavailable"))
             return
         with self._lock:
             self.breadth = b
@@ -228,19 +251,33 @@ def build_verdict(
     reported = {k: d.trade_date for k, d in c.daily.items()}
     trade_date: str | None = None
     if len(set(reported.values())) > 1:
-        c.missing.append(
+        c.missing.append(MissingItem(
             f"全部市场指标 —— 两市日线报告的交易日不一致 {sorted(set(reported.values()))}，"
-            "不能当作同一天的事实汇总")
+            "不能当作同一天的事实汇总", "market.index_daily.date_inconsistent"))
         c.daily.clear()
     elif reported:
         trade_date = next(iter(reported.values()))
     else:
-        c.missing.append("全部市场指标 —— 没有任何日线可用，交易日无从确定")
+        c.missing.append(MissingItem("全部市场指标 —— 没有任何日线可用，交易日无从确定",
+                                     "market.trade_date.undetermined"))
 
     result: dict[str, Any] = {}
     evidence: list[Evidence] = []
     retrieved = now_cn()
     as_of: datetime | None = None
+
+    def _raw_hash_for(source: str) -> str | None:
+        """这条证据出自哪份原始响应。
+
+        派生字段（`derived:` 开头）没有单一来源，返回 None ——
+        **不硬凑一个哈希**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。
+        """
+        if source.startswith("derived:"):
+            return None
+        if source in c.hashes:
+            return c.hashes[source]
+        cand = [k for k in c.hashes if source.startswith(k)]
+        return c.hashes[max(cand, key=len)] if cand else None
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
@@ -248,6 +285,7 @@ def build_verdict(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
+            raw_hash=_raw_hash_for(source),
         ))
 
     if trade_date:
@@ -262,9 +300,10 @@ def build_verdict(
             bad = {sym: q.trade_date for sym, q in c.quotes.items()
                    if q.trade_date != trade_date}
             if bad:
-                c.missing.append(
+                c.missing.append(MissingItem(
                     f"成交额 —— 腾讯行情的日期 {sorted(set(bad.values()))} "
-                    f"与日线的 {trade_date} 不一致，两个独立源说的不是同一天")
+                    f"与日线的 {trade_date} 不一致，两个独立源说的不是同一天",
+                    "market.turnover.date_mismatch"))
                 quotes_usable = False
 
         turnover_total = 0.0
@@ -276,13 +315,18 @@ def build_verdict(
             if d is not None:
                 pct = _pct(d)
                 if d.last.close <= 0:
-                    c.missing.append(f"{label}点位 —— 数据源给出 {d.last.close}，不是有效点位")
+                    c.missing.append(MissingItem(
+                        f"{label}点位 —— 数据源给出 {d.last.close}，不是有效点位",
+                        "market.index_quote.invalid_value"))
                 elif pct is None:
-                    c.missing.append(f"{label}涨跌幅 —— 日线不足两根，无法与前收比较")
+                    c.missing.append(MissingItem(
+                        f"{label}涨跌幅 —— 日线不足两根，无法与前收比较",
+                        "market.index_pct.insufficient_bars"))
                 elif abs(pct) > PCT_ABS_LIMIT:
-                    c.missing.append(
+                    c.missing.append(MissingItem(
                         f"{label}点位与涨跌幅 —— 算出的涨跌幅 {pct}% 超出 "
-                        f"±{PCT_ABS_LIMIT}%，是数据源给了垃圾值而不是行情")
+                        f"±{PCT_ABS_LIMIT}%，是数据源给了垃圾值而不是行情",
+                        "market.index_quote.out_of_range"))
                 else:
                     add(f"{key}_close", round(d.last.close, 2), f"{label}点位",
                         f"sina:kline/{symbol}")
@@ -297,9 +341,10 @@ def build_verdict(
             if q is not None and d is not None and d.last.volume > 0:
                 rel = abs(q.volume_hand * 100 - d.last.volume) / d.last.volume
                 if rel > VOLUME_XCHECK_TOL:
-                    c.missing.append(
+                    c.missing.append(MissingItem(
                         f"{label}成交额 —— 腾讯成交量×100 与新浪日线偏离 {rel:.2%}"
-                        f"（>{VOLUME_XCHECK_TOL:.0%}），两源口径或单位已不一致")
+                        f"（>{VOLUME_XCHECK_TOL:.0%}），两源口径或单位已不一致",
+                        "market.turnover.unit_mismatch"))
                     q = None
             elif q is not None and d is None:
                 c.warnings.append(
@@ -314,7 +359,9 @@ def build_verdict(
             add("turnover_total", round(turnover_total, 2), "两市成交额(亿元)",
                 "derived:tencent:quote")
         else:
-            c.missing.append("两市成交额 —— 需要两个市场的成交额同时可用，缺一不能合计")
+            c.missing.append(MissingItem(
+                "两市成交额 —— 需要两个市场的成交额同时可用，缺一不能合计",
+                "market.turnover_total.incomplete"))
 
         # ── 守卫 3：量能需要 21 根，不足不凑 ─────────────────────────
         mas = {k: _ma_volume(d) for k, d in c.daily.items()}
@@ -328,9 +375,9 @@ def build_verdict(
                 f"量能比(今日/{MA_WINDOW}日均)", "derived:sina:kline")
         else:
             short = [MARKETS[k][1] for k, v in mas.items() if v is None]
-            c.missing.append(
+            c.missing.append(MissingItem(
                 f"量能 —— {'、'.join(short) or '两市'}日线不足 {MA_WINDOW + 1} 根，"
-                f"不用更短的窗口凑一个均值")
+                f"不用更短的窗口凑一个均值", "market.volume.insufficient_bars"))
 
         # ── 守卫 5：涨跌家数没有自己的日期 ───────────────────────────
         if c.breadth:
@@ -345,7 +392,8 @@ def build_verdict(
                 add("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
                     "derived:em:push2delay/ulist.np")
             else:
-                c.missing.append("上涨家数占比 —— 涨跌平三项合计为 0，分母为零")
+                c.missing.append(MissingItem("上涨家数占比 —— 涨跌平三项合计为 0，分母为零",
+                                             "market.breadth_ratio.zero_denominator"))
 
     if store and as_of is not None:
         for source, payload in c.raw:

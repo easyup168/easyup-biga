@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
+from .missing import MissingItem
 from .verdict import AgentVerdict
 
 __all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
@@ -47,11 +48,13 @@ class DecisionCard:
     verdicts: list[AgentVerdict]
     synthesis: str
     model_ref: str
-    missing: list[str] = dc_field(default_factory=list)
+    missing: list[MissingItem] = dc_field(default_factory=list)
     generated_at: str = ""
     elapsed_ms: int = 0
 
     def __post_init__(self) -> None:
+        self.missing = [MissingItem.coerce(m) for m in self.missing]
+
         if not DECISION_ID_RE.match(self.decision_id):
             raise ValueError(
                 f"decision_id 必须形如 BIGA-YYYYMMDD-NNN，收到 {self.decision_id!r}"
@@ -134,7 +137,11 @@ class DecisionCard:
             summary = "; ".join(
                 f"{k}={v.result[k]}" for k in sorted(v.result)[:3]
             ) or "—"
-            lines.append(f"{v.agent:<12} {v.verdict:<8} {summary}")
+            # 🔴 verdict 与 stance 并列显示，因为它们回答的是两个不同的问题：
+            #    verdict=数据全不全，stance=市场偏哪边。
+            #    只显示前者，读者会把「PASS」误读成「看好」。
+            lines.append(
+                f"{v.agent:<12} {v.verdict:<8} {(v.stance or '—'):<6} {summary}")
         lines.append("")
         lines.append(f"状态：{self.status}")
         lines.append("")
@@ -146,6 +153,7 @@ class DecisionCard:
             lines.append(f"⚠ 缺失项（{len(self.missing)}）")
             for m in self.missing:
                 lines.append(f"  · {m}")
+                lines.append(f"      [{m.code}]")
         else:
             lines.append("缺失项：无")
 
@@ -178,7 +186,7 @@ class DecisionCard:
             "status": self.status,
             "headline": self.headline,
             "verdicts": [v.to_dict() for v in self.verdicts],
-            "missing": list(self.missing),
+            "missing": [m.to_dict() for m in self.missing],
             "synthesis": self.synthesis,
             "model_ref": self.model_ref,
             "generated_at": self.generated_at,
@@ -194,7 +202,7 @@ class DecisionCard:
             verdicts=[AgentVerdict.from_dict(x) for x in d["verdicts"]],
             synthesis=d.get("synthesis", ""),
             model_ref=d["model_ref"],
-            missing=list(d.get("missing", [])),
+            missing=[MissingItem.coerce(m) for m in d.get("missing", [])],
             generated_at=d.get("generated_at", ""),
             elapsed_ms=d.get("elapsed_ms", 0),
         )

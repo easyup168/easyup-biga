@@ -49,7 +49,8 @@ def db(tmp_path, monkeypatch):
     return p
 
 
-def _verdict(agent="market", missing=None, verdict="PASS", status="completed"):
+def _verdict(agent="market", missing=None, verdict="PASS", status="completed",
+             stance=None):
     from datetime import datetime
     as_of = datetime(2026, 9, 18, 15, 0, tzinfo=CN_TZ)
     got = datetime(2026, 9, 20, 20, 42, 48, tzinfo=CN_TZ)   # 真实采集时刻
@@ -59,7 +60,7 @@ def _verdict(agent="market", missing=None, verdict="PASS", status="completed"):
     return AgentVerdict(
         task_id="BIGA-20260918-001", agent=agent, status=status, verdict=verdict,
         result={"sh_close": 3911.87}, confidence=1.0, evidence=ev,
-        warnings=[], missing=list(missing or []), elapsed_ms=1234)
+        warnings=[], missing=list(missing or []), elapsed_ms=1234, stance=stance)
 
 
 class TestRoundTrip:
@@ -116,7 +117,8 @@ class TestAmendCLI:
 
     def test_追加缺失项写新行原件不动(self, db):
         vid = save_verdict(_verdict(), path=db)
-        r = self._run("--ref", str(vid), "--add-missing", "趋势判不了",
+        r = self._run("--ref", str(vid),
+                      "--add-missing", "market.trend.no_history", "趋势判不了",
                       "--verdict", "WARNING", db=db)
         assert r.returncode == 0, r.stderr
         new = int(r.stderr.split("verdict_ref=")[1].split()[0])
@@ -124,6 +126,7 @@ class TestAmendCLI:
         original, amended = load_verdict(vid, path=db), load_verdict(new, path=db)
         assert original.missing == [] and original.verdict == "PASS"
         assert amended.missing == ["趋势判不了"] and amended.verdict == "WARNING"
+        assert amended.missing[0].code == "market.trend.no_history"
         assert amended.status == "partial"
         # 证据一条不少，且仍是采集时刻
         assert len(amended.evidence) == len(original.evidence)
@@ -132,7 +135,8 @@ class TestAmendCLI:
 
     def test_加缺失项不给verdict时给出指路报错(self, db):
         vid = save_verdict(_verdict(), path=db)
-        r = self._run("--ref", str(vid), "--add-missing", "x", db=db)
+        r = self._run("--ref", str(vid),
+                      "--add-missing", "market.trend.no_history", "x", db=db)
         assert r.returncode == 2
         assert "WARNING" in r.stderr and "UNKNOWN" in r.stderr, \
             "报错必须说清下一步怎么做，否则 agent 要花几轮去猜"
@@ -142,7 +146,7 @@ class TestAmendCLI:
         assert self._run("--ref", str(vid), db=db).returncode == 2
 
     def test_ref不存在时报错说清原因(self, db):
-        r = self._run("--ref", "999", "--add-missing", "x",
+        r = self._run("--ref", "999", "--add-missing", "market.trend.no_history", "x",
                       "--verdict", "WARNING", db=db)
         assert r.returncode == 2 and "--no-store" in r.stderr
 
@@ -154,12 +158,21 @@ class TestSynthesizeByIds:
                               capture_output=True, text=True, env=env)
 
     def test_按id合成(self, db):
-        a = save_verdict(_verdict("market"), path=db)
-        b = save_verdict(_verdict("emotion"), path=db)
+        a = save_verdict(_verdict("market", stance="放量上涨"), path=db)
+        b = save_verdict(_verdict("emotion", stance="修复"), path=db)
         r = self._run("--verdict-ids", f"{a},{b}", "--status", "WAIT",
                       "--headline", "h", "--model-ref", "m", "--no-store", db=db)
         assert r.returncode == 0, r.stderr
         assert "market" in r.stdout and "emotion" in r.stdout
+
+    def test_没提交stance时拒绝出卡并指路(self, db):
+        """🔴 方向判断只写在自然语言里，等于每跑一次丢一次。"""
+        a = save_verdict(_verdict("market"), path=db)      # 没有 stance
+        r = self._run("--verdict-ids", str(a), "--status", "WAIT",
+                      "--headline", "h", "--model-ref", "m", "--no-store", db=db)
+        assert r.returncode != 0
+        assert "stance" in r.stderr and "amend_verdict.py" in r.stderr, \
+            "报错必须说清下一步跑什么命令"
 
     def test_两种来源互斥(self, db):
         r = self._run("--verdict-ids", "1", "--verdicts", "x.json",

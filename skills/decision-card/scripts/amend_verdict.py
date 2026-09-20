@@ -20,8 +20,9 @@
 用法::
 
     python3 amend_verdict.py --ref 17 \\
-      --add-missing "情绪周期趋势 —— 只有单日快照，无法区分衰退与修复" \\
-      --verdict WARNING
+      --add-missing emotion.cycle.no_history "情绪周期趋势 —— 只有单日快照，无法区分衰退与修复" \\
+      --verdict WARNING \\
+      --stance 修复
     # → stderr: verdict_ref=18
 """
 
@@ -36,7 +37,7 @@ import sys
 _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _contract import AgentVerdict  # noqa: E402
+from _contract import STANCE_VOCAB, AgentVerdict, MissingItem  # noqa: E402
 from _store import load_verdict, load_verdict_meta, save_verdict  # noqa: E402
 
 
@@ -45,10 +46,15 @@ def main(argv: list[str] | None = None) -> int:
         description="追加缺失项并降级 verdict —— 原件不改，写一行修订")
     ap.add_argument("--ref", type=int, required=True,
                     help="要修订的 verdict_id（skill 在 stderr 上打印 verdict_ref=NN）")
-    ap.add_argument("--add-missing", action="append", default=[], metavar="TEXT",
-                    help="追加一条缺失项，可重复")
+    ap.add_argument("--add-missing", action="append", default=[], nargs=2,
+                    metavar=("CODE", "TEXT"),
+                    help="追加一条缺失项：机器可读代码 + 人话，可重复。"
+                         "代码形如 market.trend.no_history —— 它要能被聚合")
     ap.add_argument("--verdict", choices=["PASS", "WARNING", "UNKNOWN"],
-                    help="降级后的 verdict")
+                    help="降级后的 verdict（数据完整度）")
+    ap.add_argument("--stance", metavar="WORD",
+                    help="方向判断，必须取自本 agent 的词表。"
+                         "它与 --verdict 回答的是两个不同的问题")
     ap.add_argument("--add-warning", action="append", default=[], metavar="TEXT",
                     help="追加一条 warning，可重复")
     ap.add_argument("--reason", help="为什么修订。缺省用追加的第一条缺失项")
@@ -61,12 +67,25 @@ def main(argv: list[str] | None = None) -> int:
               f"—— 加了就不会落原件，也就没有 id 可引用。", file=sys.stderr)
         return 2
 
-    if not args.add_missing and not args.add_warning:
-        print("没有要追加的东西。修订一份原件却什么都不改，只会多一行噪音。",
-              file=sys.stderr)
+    if args.stance is not None:
+        vocab = STANCE_VOCAB.get(original.agent)
+        if vocab and args.stance not in vocab:
+            print(f"stance={args.stance!r} 不在 {original.agent} 的词表里。可选："
+                  f"{' / '.join(vocab)}\n"
+                  f"（方向判断必须可聚合 —— 自由发挥的措辞做不了统计）", file=sys.stderr)
+            return 2
+
+    if not args.add_missing and not args.add_warning and args.stance is None:
+        print("没有要追加的东西，也没给 --stance。"
+              "修订一份原件却什么都不改，只会多一行噪音。", file=sys.stderr)
         return 2
 
-    missing = list(original.missing) + list(args.add_missing)
+    try:
+        added = [MissingItem(text, code) for code, text in args.add_missing]
+    except ValueError as e:
+        print(f"缺失项代码不合规：{e}", file=sys.stderr)
+        return 2
+    missing = list(original.missing) + added
     warnings = list(original.warnings) + list(args.add_warning)
 
     # 🔴 追加缺失项就必须降级 —— 契约不允许「有缺失项却说一切正常」。
@@ -87,15 +106,19 @@ def main(argv: list[str] | None = None) -> int:
 
     amended = dataclasses.replace(
         original, missing=missing, warnings=warnings,
-        verdict=verdict, status=status)
+        verdict=verdict, status=status,
+        stance=args.stance if args.stance is not None else original.stance)
 
-    reason = args.reason or (args.add_missing or args.add_warning)[0]
+    reason = args.reason or (added[0] if added
+                             else (args.add_warning[0] if args.add_warning
+                                   else f"stance={args.stance}"))
     new_ref = save_verdict(amended, amends=args.ref, amend_reason=reason)
 
     meta = load_verdict_meta(new_ref) or {}
     print(f"verdict_ref={new_ref}", file=sys.stderr)
     print(f"  {original.agent}  {original.status}/{original.verdict}"
           f"  →  {status}/{verdict}   缺失 {len(original.missing)} → {len(missing)}"
+          f"   stance={amended.stance or '—'}"
           f"   （修订自 #{meta.get('amends')}，原件未改动）", file=sys.stderr)
     if args.json:
         print(json.dumps(amended.to_dict(), ensure_ascii=False, indent=2))
