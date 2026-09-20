@@ -15,6 +15,34 @@
 
 ## [未发布]
 
+### 新增 · agent `market` 与 Supervisor 的并行契约（2.1 第 4 步）
+
+- `agents add market`，并照教程 06 清掉脚手架五件套：嵌套 `.git`（会让父仓
+  当 submodule）、`BOOTSTRAP.md`、`SOUL.md` / `IDENTITY.md`（spawned session
+  不加载）、`USER.md`
+- `agents/market/AGENTS.md` 角色契约。三段是 market 特有的：
+  - **最有价值的判断是「背离」**：指数涨而上涨占比 <40% ⇒ 权重在拉指数、
+    个股在普跌，「大盘涨了」是失真的。这一层只有 market 看得到，要主动说
+  - **「成交额是地量/天量」不许说** —— `turnover_total` 没有历史基线。
+    要谈量的高低只能引用 `volume_ratio`（它有 20 日均量做底）。
+    这是最容易犯的一句话：「2.07 万亿属于温和水平」里的「温和」没有依据
+  - 涨停炸板连板明确划给 emotion，涨跌家数明确划给自己（裁定 15）
+- 配置三处，**两端都要列**（只改一边不会报错，只会「工具不可见」）：
+  `main.allowAgents` 加 `market`、`agentToAgent.allow` 加 `market`、
+  `market.allowAgents: []`（叶子节点）
+- 补上 `announceTimeoutMs: 120000` —— `architecture.md` §3.2 的骨架里有，
+  实际 config 一直缺
+
+### 🔴 Supervisor 契约：多个 spawn 必须在同一条消息里发出
+
+- 分两轮发就是串行，而串行的表现是 **每步成功、Card 照常产出、日志全绿，
+  只是慢了一倍** —— 与此前抓到的三个 bug 同一族：以「慢」表现的正确性问题
+- 判据写死为「两个子会话的时间区间**是否相交**」，不是「这次跑得快不快」。
+  区间相交是结构性证据，快慢会被网络波动掩盖
+- 同时补上「spawn 了几个就要等几个」：少等一个而照常出卡，那张卡会
+  **看起来完整**，而它少了一整个领域的证据，且缺失项里什么都不会写 ——
+  因为你根本没意识到少了
+
 ### 变更 · emotion-calc 移出涨跌家数（2.1 第 3 步，裁定 15 落地）
 
 - `advance_count` / `decline_count` / `flat_count` 与 `collect_breadth` 全部移除，
