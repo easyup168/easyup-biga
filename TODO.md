@@ -62,7 +62,7 @@
 - [x] 配 `main`(Supervisor)：仓库根 `AGENTS.md` / `SOUL.md` / `IDENTITY.md`
       `allowAgents:["emotion"]`（不预填 6 个不存在的 agent = 避免死配置）；
       `emotion.allowAgents:[]`（叶子节点）；`agentToAgent.allow:["main","emotion"]`（两端都要列）
-- [ ] 端到端跑通：`biga agent --agent main -m "今天市场情绪怎么样？"`
+- [x] 端到端跑通：`biga agent --agent main -m "今天市场情绪怎么样？"`
       🔴 **被认证方式卡住 —— 根因已查清**
 
       **现象**：Supervisor 跑起来了，但它找不到 OpenClaw 的跨 agent spawn 工具，
@@ -116,7 +116,7 @@
       - ⚠️ 延迟：当时记的 79.9s 来自 **Supervisor 自报**，不可信（实测它两个方向都偏）。
         真实测量与三个 bug 的修复见下方「验收第 8 条」与教程第 10 章
 
-      教程 07 待写
+      教程：`docs/tutorial/07-end-to-end.md`
 - [x] `replay <decision_id>` —— 与在线路径共用 `card_ops.synthesize()`（纯函数）
       AST 测试钉死「两个 CLI 都不自己构造 DecisionCard」
       `--check` 当场抓到真 bug：回放丢了 Supervisor 的 3 条 `extra_missing`，
@@ -215,7 +215,18 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       用 Host 别名 `github.com-easyup168` 区分 —— 本机另一个账号的默认密钥完全未受影响
       ⚠️ 克隆/remote 必须写别名主机名，写成 `github.com` 会用错密钥
       提交身份：项目账号（仓库级 `git config`，未动全局）
+- [x] **`discipline` 放哪个 Phase** —— 已裁定：**推到 Phase 3**（裁定 13）
+      它的职责是「人的行为风险：FOMO / 追高 / 连亏翻本 / 偏离计划 / 无止损 / 仓位失控」，
+      输入是**人的交易行为史**。而 BigA：不下单、不接账户、按裁定 1 不挂邻居的库
+      ⇒ **它现在没有输入源。** 硬建 = L-1（零消费方）+ L-2（无输入却给得出 PASS）的合体
+      ⇒ Phase 2 只建 7 个，出口条件按 7 个写，**不假装有第 8 个**
+      Phase 3 与「数据层加厚」一起做，届时先定输入源（候选：人每日手填当日计划与持仓，
+      Evidence 的 `source` 就写「人工输入」，缺填 ⇒ `UNKNOWN` 进 `missing[]`，不 fail-open）
+
+- [x] **Phase 2 在哪开发** —— 已裁定：**独立分支 `phase2`**（裁定 14）
+
 - [ ] 要不要装 `gh` CLI
+      ⚠️ 与「转 Public」相关：没有它就得走 GitHub 网页或 API 改可见性
 
 ### 转 Public 之前必须做完
 
@@ -253,11 +264,79 @@ chk "密码赋值"       '(password|passwd|secret)["'"'"'[:space:]]*[:=][[:space
 
 ---
 
-## Phase 2+（不要提前做）
+## Phase 2 · 补齐到 7 个 agent（当前阶段）
+
+> 🔴 **在独立分支 `phase2` 上开发**（裁定 14）—— `main` 保持 Phase 1 已验收的状态。
+>
+> 理由：Phase 1 的 9 项验收是**在 main 的某个具体提交上实测出来的**，
+> 那几个数字（74.8s / $0.2179 / 124 测试）只对那个状态成立。
+> 把半成品的第 3、4 个 agent 混进 main，README 的徽章就开始描述一个
+> **没人验收过的状态** —— 正是 L-6 文档漂移。
+>
+> 合回 main 的条件 = 本节出口条件全过。
+
+目标：**把 Stage 1 扇出与 Stage 2 制衡层跑通**，并在过程中量出延迟随 agent 数增长的斜率。
+
+⚠️ roadmap 原文是「补齐 8 个 agent」。直译成「一次建 6 个 agent」会正面撞上 L-1 ——
+没有 skill 的 agent 只能编数字。Phase 1 已经把成本结构证明了：一个 specialist 的
+工作量几乎全在它的 skill（教程 05 是全系列最长一章，23KB），agent 本身只是一份
+`AGENTS.md` 加两处配置（`allowAgents` + `agentToAgent.allow`，**两端都要列**）。
+
+### 排序：新机制优先，复制其次
+
+| 步 | 做什么 | 新增的机制 | 为什么排在这个位置 |
+|---|---|---|---|
+| 2.1 | `market` skill + agent | Stage 1 **第一次真并行** | `maxConcurrent: 6` 配了但从未被验证过 —— 至今只有 1 个 specialist，并行是零次实测 |
+| 2.2 | `risk` + Stage 2 | 冻结证据传入 + **BLOCK 否决权** | **唯一的结构性新机制。** BLOCK 正是 Phase 4 要检验区分力、Phase 5 下单要依赖的那个东西 —— 越早端到端落库，样本越多 |
+| 2.3 | `sector` / `technical` | 无 | 到这一步才是真正的「复制」，推后不损失任何信息 |
+| 2.4 | `news` | 时间戳 / 来源 / 新鲜度核验 | **先做数据源 spike。** 这台机器的 *** 策略已经拦掉过一次工具通路（教程 07），等做到最后才发现拿不到搜索 = 整章白写 |
+
+### 出口条件（全部满足才能合回 main）
+
+1. [ ] Stage 1 **实测并行**：5 个 specialist 的墙钟 ≈ 最慢那个，不是相加
+2. [ ] Stage 2 拿到的是 Stage 1 的**冻结证据**，不是自己重采（`retrieved_at` 可核对）
+3. [ ] 至少 1 次真实 `BLOCK` 端到端落库，且 `replay --check` 能复现
+4. [ ] `missing[]` 在**真实**缺数据时非空 ≥5 次（不是注入故障）—— 见下方台账
+5. [ ] 延迟预算按实测**重新推导**并写回 `architecture.md` §10.1，**不照抄 105s**
+6. [ ] 成本分解：逐个 agent 的 token / $ 列出（§10.2 的到期项）
+7. [ ] 每一步都有对应教程章节（第 11 章起）——「先写教程再往下做」（裁定 10）
+8. [ ] 隔离自检重跑：agent 数变多 ⇒ 并发变高 ⇒ 重新确认 I-1 / I-2
+
+### 🔴 「≥5 次真实 missing」攒不快 —— 第一天就要开始记
+
+这条出口条件要的是**真实**缺数据，不是注入故障。而 Phase 2 明确**不建 cron**
+（第一条 cron 在 Phase 3）。⇒ 需要手工日跑 + 一份累计台账：
+日期 / 哪个源缺 / missing 几条 / Card 状态。
+**不从第一天开始记，Phase 2 末尾会卡在这一条上干等。**
+
+### ⚠️ 真实的延迟风险在 Stage 3，不在 Stage 1
+
+只有 1 个 specialist 时，Stage 3（Supervisor 合成）就已经压着 30s 上沿（实测 30.0s）。
+verdict 从 1 条变 6 条，它的输入量翻 6 倍 —— 而 Stage 1 是并行，加 agent 只涨「最慢那个」。
+⇒ **每加一个 agent 就跑一次 `tools/verify/latency_report.py`**，攒 3–4 个点再推预算。
+这是「60s 被证伪」那件事的直接教训：**先量，再定数。**
+
+### 附带的两件小事
+
+- [ ] **模型分层 A/B** —— 裁定 8「Phase 1 不做模型分层」的到期项。
+      当前 config 里两个 entry 的 `model` 全是 `null`（跑 defaults 的 sonnet），
+      而 §3.1 roster 写的是 `main=Opus` / `emotion=Haiku`。
+      §3.1 自己标明那是**初始假设不是结论** —— 用同一批问题做 A/B 再定档
+- [ ] `announceTimeoutMs: 120000` 在 §3.2 的配置骨架里，实际 config **没有** ——
+      Stage 1 扇出到 5 个之前补上
+
+### Phase 2 明确不做
+
+`discipline`（裁定 13）/ 任何 cron / 飞书 / 任何下单路径 /
+PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
+
+---
+
+## 路线图（Phase 3+ 不要提前做）
 
 | Phase | 内容 | 出口条件 |
 |---|---|---|
-| 2 | 补齐 8 个 agent + Stage1/2 并行 + 完整 Card | 端到端 <105s；`missing[]` 在真实缺数据时非空 ≥5 次 |
-| 3 | 数据层加厚 + 独立飞书应用 + 第一条 cron | 每条 cron 都有**被证明的**消费方 |
+| 2 | 补齐到 **7** 个 agent（不含 `discipline`）+ Stage1/2 并行 + 完整 Card | `missing[]` 在真实缺数据时非空 ≥5 次；延迟预算按实测重推（**不照抄 105s**） |
+| 3 | 数据层加厚 + `discipline`（含它的输入源）+ 独立飞书应用 + 第一条 cron | 每条 cron 都有**被证明的**消费方 |
 | 4 | 测量层：安慰剂基准 + Card 状态的区分力检验 | `BLOCK/WARNING` 与 T+5 结果按日聚类 t 有区分力 |
 | 5 | （很久以后）自动下单 | **硬前提：Phase 4 通过**。在 Card 的 BLOCK 被证明有区分力之前接下单 = 新增一道空转门 |
