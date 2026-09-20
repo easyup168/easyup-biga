@@ -221,16 +221,15 @@ Phase 1 无 `risk` / `discipline`，跳过。
 `_contract/verdict.py`、`_contract/evidence.py` 来反推参数格式，
 再试错 3 次才调对 —— 一轮多花一百多秒。**这些信息本来就该写在这里。**
 
-```bash
-# ① Specialist 的 AgentVerdict JSON 原样存成临时文件
-#    🔴 存到 /tmp，不要写进仓库（实测往仓库根扔过 v_20260919.json）
-cat > /tmp/biga_verdicts.json <<'JSON'
-[ <把每个 Specialist 返回的整段 AgentVerdict JSON 原样粘进来，逗号分隔，外面套一层数组> ]
-JSON
+🔴 **你不搬运判定数据，只传它们的编号。**
 
-# ② 合成。decision_id 不用管，脚本会自动分配当天下一个未占用的序号
+每个 Specialist 会在回答里给你一行 `verdict_ref=NN` —— 那是它的判定原件在库里的
+编号。你要做的就是把这些编号交给合成脚本。
+
+```bash
+# decision_id 不用管，脚本会自动分配当天下一个未占用的序号
 cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize.py \
-  --verdicts /tmp/biga_verdicts.json \
+  --verdict-ids 17,18 \
   --status WAIT \
   --headline "核心矛盾一句话" \
   --synthesis "两三句说明，数字必须来自上面的 evidence" \
@@ -244,41 +243,43 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
 延迟由 `tools/verify/latency_report.py` 从运行时轨迹里独立测量 ——
 **被考核方不自己报成绩**，这是 Phase 1 学到的。
 
-也可以走管道，省掉临时文件：`... | synthesize.py --verdicts - ...`
+#### 🔴 绝不要把 Specialist 的 JSON 抄进命令里
+
+实测（2026-09-20，`BIGA-20260920-002`）抄写的代价：
+
+| 观察 | 数字 |
+|---|---|
+| 你那一轮里**零工具调用**、纯粹在生成 6460 字符 JSON 的时间 | **47 秒** |
+| 之后 `synthesize.py` 因为缺字段失败、重试、读文档诊断 | **49 秒** |
+| Specialist 转述后 15 条 evidence 里剩下的 `retrieved_at` | **0 条** |
+| 落库 Card 上的 `retrieved_at` 与真实采集时刻的偏差 | **106 秒** |
+
+最后一行是最严重的：`retrieved_at` 本该回答「我们什么时候看到这个数的」，
+抄写之后它变成了「你敲命令的时刻」。**事实可追溯这条地基，就是在这一步塌的。**
+
+走 `--verdict-ids`，数据根本不经过你，也就不可能被改。
 
 **参数速查**（不用去翻源码）：
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
-| `--verdicts` | ✅ | JSON 文件路径，或 `-` 从 stdin |
+| `--verdict-ids` | ✅ | Specialist 给你的编号，逗号分隔，例如 `17,18` |
 | `--status` | ✅ | `BUY` / `WAIT` / `AVOID` / `BLOCK` |
 | `--headline` | ✅ | 核心矛盾，一句话 |
 | `--model-ref` | ✅ | 例如 `anthropic/claude-sonnet-5` |
 | `--synthesis` | | 合成说明 |
 | `--extra-missing` | | 你自己发现的缺失项，可重复 |
-| `--elapsed-ms` | | 端到端毫秒数，**不填则延迟无法测量** |
 | `--decision-id` | | **不要填** —— 脚本自动分配，填了反而可能撞号 |
+
+⚠️ 没有 `--elapsed-ms`，也不要去找它。理由见上。
 
 ⚠️ 数据库在 `data/biga.db`，但**不要自己去 sqlite3 查**（外部 sqlite3 会被运行时拒绝）。
 需要看库就用 `python3 -c "import sys; sys.path.insert(0,'skills'); from _store import ..."`。
 
-调用示例：
-
-```bash
-python3 skills/decision-card/scripts/synthesize.py \
-  --verdicts <specialist 返回的 JSON 文件或 -> \
-  --status WAIT --headline "..." --synthesis "..." \
-  --model-ref anthropic/claude-sonnet-5
-```
-
 你提供的是**判断**（`status` / `headline` / `synthesis`）；
-组装、契约校验、落库、渲染由脚本完成。
+数据、组装、契约校验、落库、渲染都不经过你。
 
-🔴 **必须带 `--elapsed-ms`** —— 从人提问到现在的毫秒数。
-不填的话 Card 的 `elapsed_ms=0`，延迟预算就变成了不可测量的东西，
-而「测不出来」在本项目里等同于「没达标」。
-
-这样做的原因：回放走的是**同一份合成代码**。
+这样做的另一个原因：回放走的是**同一份合成代码**。
 你手写一份 JSON，回放就无法复现你当时的组装逻辑。
 
 #### 回合结束前的自检

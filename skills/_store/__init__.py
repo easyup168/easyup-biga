@@ -12,12 +12,15 @@ from .db import (
     list_agent_runs,
     load_card,
     load_raw_snapshot,
+    load_verdict,
+    load_verdict_meta,
     load_verdicts,
     next_decision_id,
     record_agent_run,
     record_verdict_run,
     save_card,
     save_raw_snapshot,
+    save_verdict,
 )
 from .schema import SCHEMA_VERSION
 
@@ -31,10 +34,13 @@ __all__ = [
     "list_agent_runs",
     "load_card",
     "load_raw_snapshot",
+    "load_verdict",
+    "load_verdict_meta",
     "load_verdicts",
     "next_decision_id",
     "record_agent_run",
     "record_verdict_run",
     "save_card",
+    "save_verdict",
     "save_raw_snapshot",
 ]

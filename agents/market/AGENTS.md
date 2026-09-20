@@ -67,6 +67,10 @@ cd ~/.openclaw-biga/workspace && python3 skills/market-calc/scripts/market_calc.
    cd ~/.openclaw-biga/workspace && python3 skills/market-calc/scripts/market_calc.py
    ```
 
+   🔴 **stderr 最后一行是 `verdict_ref=NN`，记下这个数字。**
+   它是这份判定原件在库里的编号 —— 你交给 Supervisor 的就是它，
+   **不是那一大段 JSON**。
+
    **默认不加 `--date`**（宽松模式）—— 取数据源给出的最近一个交易日。
    只有 Supervisor **明确指定了某一天**才加 `--date YYYYMMDD`（严格模式）。
 
@@ -128,48 +132,58 @@ cd ~/.openclaw-biga/workspace && python3 skills/market-calc/scripts/market_calc.
 市场趋势 —— 只有单日快照，无指数历史序列，无法判断趋势方向
 ```
 
-#### 🔴 往 missing 里加东西，就必须同时降级 verdict 和 status
+#### 🔴 往 missing 里加东西：跑一条命令，**不要重打 JSON**
 
-契约不允许「有缺失项却说一切正常」。你改完 `missing` 之后，**同一份 JSON 里**：
+契约不允许「有缺失项却说一切正常」。但你**不需要**为此把整份 JSON 重抄一遍 ——
+那正是本项目踩过的坑：
 
-| 原值 | 改成 |
+> 实测 2026-09-20：Specialist 转述 skill 的 JSON 时，
+> **15 条 evidence 的 `retrieved_at` 一条不剩**。
+> 落到 Card 上，`retrieved_at` 变成了「敲命令的时刻」而不是采集时刻，
+> 与真实采集差 106 秒。**事实可追溯这条地基，就是在这一步塌的。**
+
+正确做法是追加一行修订（原件不动）：
+
+```bash
+cd ~/.openclaw-biga/workspace && \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+  --add-missing "<缺失项原文>" \
+  --verdict WARNING
+```
+
+它会在 stderr 打出**新的** `verdict_ref=NN`，交给 Supervisor 的是这个新编号。
+
+`--verdict` 怎么选：
+
+| 情况 | 用 |
 |---|---|
-| `"status": "completed"` | `"status": "partial"` |
-| `"verdict": "PASS"` | `"verdict": "WARNING"`（核心三项还在）或 `"UNKNOWN"`（核心三项有缺） |
+| 核心指标（trade_date / sh_close / turnover_total）齐备 | `WARNING` |
+| 核心指标有缺 | `UNKNOWN` |
 
-核心三项 = `trade_date` / `sh_close` / `turnover_total`。
-
-三个字段要一起改，改一个不改另两个，契约会直接拒绝构造：
-
-```
-ValueError: [market] missing=[...] 非空却给出 verdict='PASS'
-            —— UNKNOWN ≠ PASS，算不出来必须说算不出来（铁律 1）
-```
-
-⚠️ 所以「把 skill 的 JSON 原样带上」这句话**有一个例外** ——
-当你要追加缺失项时，这三个字段必须跟着改。其余字段（`evidence`、`result`、
-`task_id`…）仍然原样，**一个数字都不许动**。
+`status` 由脚本自动置为 `partial` —— 那是机械记账，不是判断，不用你管。
 
 ---
 
 ## 输出格式
 
-把 skill 返回的 JSON 带上（**唯一允许改的是上面说的那三个字段**），
-然后附一段自然语言判断：
+🔴 **不要把 skill 的 JSON 贴进回答里。** 你只回两样东西：编号 + 判断。
 
 ```
-<AgentVerdict JSON 原文>
+verdict_ref=<跑 skill（或 amend_verdict）后 stderr 上那个数字>
 
 ── 判断 ──
-状态：{放量上涨 / 缩量上涨 / 缩量调整 / 放量下跌 / 分化 / 无法判定}
-依据：{2-3 句，必须引用具体数字，且数字必须来自上面的 JSON}
+状态：放量上涨 / 缩量上涨 / 缩量调整 / 放量下跌 / 分化 / 无法判定
+依据：{2-3 句，必须引用具体数字，且数字必须来自 skill 的输出}
 背离：{指数与宽度是否背离，有就说清方向；没有就写「无明显背离」}
 需要注意：{缺失项影响了什么 —— 没有就写「无」}
 ```
 
+为什么不贴 JSON：Supervisor 会**按编号**从库里取原件，
+那份原件是 skill 直接落的，一个字节都没经过语言模型。
+你贴一遍、它再抄一遍，中间每一次复述都会丢东西 —— 实测丢的正是 `retrieved_at`。
+
 **`verdict` 字段的含义**：skill 给的 `verdict` 表达的是**数据完整度**
-（`PASS` / `WARNING` / `UNKNOWN`），不是市场判断。
-不要把它解释成「市场没问题」。
+（`PASS` / `WARNING` / `UNKNOWN`），不是市场判断。不要把它解释成「市场没问题」。
 
 ---
 

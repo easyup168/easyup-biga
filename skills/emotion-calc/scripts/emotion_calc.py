@@ -69,7 +69,7 @@ from _sources import (  # noqa: E402
     as_of_for_trade_date,
     fetch_pool,
 )
-from _store import init_schema, save_raw_snapshot  # noqa: E402
+from _store import init_schema, save_raw_snapshot, save_verdict  # noqa: E402
 
 AGENT = "emotion"
 CALC_VERSION = "emotion-calc/1"
@@ -327,11 +327,21 @@ def main(argv: list[str] | None = None) -> int:
         store=store,
         task_id=args.task_id or new_task_id(1),
     )
+    # 🔴 判定原件直接落库，返回一个 id 供 agent 引用。
+    #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：
+    #    15 条 evidence 的 retrieved_at 转述后一条不剩。
+    #    让数据不经过 LLM，是唯一可靠的修法。
+    ref = save_verdict(v) if store else None
+
     print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    if ref is not None:
+        print(f"verdict_ref={ref}", file=sys.stderr)
 
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms", file=sys.stderr)
+        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+              + (f"  verdict_ref={ref}" if ref is not None else "  (未落库)"),
+              file=sys.stderr)
         for e in v.evidence:
             print(f"  {e.display_label:<16} = {e.value}"
                   f"   as_of {e.as_of:%Y-%m-%d %H:%M}", file=sys.stderr)

@@ -15,6 +15,48 @@
 
 ## [未发布]
 
+### 🔴 修复 · Decision Card 上的 `retrieved_at` 是编出来的（数据完整性）
+
+诊断始于「Supervisor 合成轮 159.1s」这个延迟问题，挖下去发现的是完整性问题。
+
+**证据**（2026-09-20 `BIGA-20260920-002`，逐条核对轨迹）：
+
+| | |
+|---|---|
+| skill 实际输出 | 15 条 evidence，**每条都有 `retrieved_at`** |
+| Specialist 转述后 | `as_of` 34 条，`retrieved_at` **0 条** |
+| skill 真实采集时刻（raw 层记录） | **20:42:48** |
+| 落库 Card 上全部 25 条 evidence 的 `retrieved_at` | **20:44:34**（差 106 秒） |
+
+25 个各不相同的采集时刻，被压成了「Supervisor 敲 heredoc 的那一刻」。
+
+更糟的是 main **给自己写了一份恢复文档**（`workshop-skills/decision-card-ops`），
+把补救写成了标准操作：「transcribing 时给每条加一个 `retrieved_at`
+（用当前合成时间）」、「Specialist 把 evidence 缩写成 `[同上…]` 时，
+从 `result` 反向重建条目」。
+
+⇒ **「事实可追溯」这条地基，在最后一公里被 LLM 的复述打穿了。**
+   该文档已退休 —— 留着就是继续教 agent 手工重建证据。
+
+### 新增 · schema v3 `agent_verdicts`：结构化数据不经过 LLM
+
+- skill 算完**直接把判定原件落库**并在 stderr 打出 `verdict_ref=NN`
+- Specialist 交给 Supervisor 的是**编号**，不是 JSON
+- `synthesize.py --verdict-ids 17,18` 按编号取原件
+- `amend_verdict.py --ref 17 --add-missing … --verdict WARNING` ——
+  Specialist 追加缺失项**不重打 JSON**，而是写一行指回原件的修订
+  （`amends` 列，与 `decision_records.replay_of` 同一套做法）
+- 表只追加不修改，由触发器强制；修订必须写 `amend_reason`
+- 🔴 `--verdicts <文件>` 保留但只留给手工调试。新增测试
+  `TestContractsTeachTheSafePath` 钉死：**三份 `AGENTS.md` 里不许再出现贴 JSON 的写法**
+  —— 守卫再硬，agent 照着文档做还是会走老路
+
+**为什么这同时解决了延迟**：搬运成本从 `O(evidence 数)` 变成 `O(1)`。
+159.1s 那一轮里，47s 是零工具调用地生成 6460 字符 JSON，
+49s 是因缺字段失败两次后的自救 —— 两段都直接消失。
+
+测试 176 → 193。
+
 ### 新增 · Stage 1 并行判据与端到端实测（2.1 第 5 步）
 
 - `latency_report.py --parallel-check`：判据是**两个 specialist 的时间区间
