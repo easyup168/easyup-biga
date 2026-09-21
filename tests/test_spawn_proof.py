@@ -41,6 +41,8 @@ sys.path.insert(0, str(REPO / "tools" / "verify"))
 import phase1_acceptance as pa  # noqa: E402
 import spawn_check  # noqa: E402
 
+from _scan import repo_files  # noqa: E402
+
 from _contract import STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 
 ALL = [a for a in list(STAGE1_AGENTS) + list(STAGE2_AGENTS) if a != "discipline"]
@@ -159,6 +161,87 @@ class TestWiredIntoRealPath:
             "spawn_check.py 没有被出卡流程调用 —— \n"
             "  一个不会被跑到的检查，和没有这个检查是一回事。")
 
+    @staticmethod
+    def _seeded_repo(tmp_path, did: str, spawn_stub: str):
+        """造一个能走完出卡路径的沙盒。**不联网、不花钱。**
+
+        两个桩：
+          · `BIGA` → 直接往库里落一张真卡（替掉 agent 调用）
+          · `spawn_check.py` → 由调用方决定退出码
+        """
+        import shutil
+        work = tmp_path / "repo"
+        shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
+            ".git", "__pycache__", "data", ".pytest_cache", ".claude", "memory"))
+        db = tmp_path / "t.db"
+
+        seed = tmp_path / "seed.py"
+        seed.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(work / 'skills')!r})\n"
+            "from _contract import AgentVerdict, DecisionCard, Evidence, now_cn\n"
+            "from _store import init_schema, save_card\n"
+            "t = now_cn()\n"
+            f"TID = {did!r}\n"
+            "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
+            "                 verdict='PASS', result={'x': 1}, confidence=1.0,\n"
+            "                 stance='分化', elapsed_ms=1,\n"
+            "                 evidence=[Evidence(field='x', source='s', value=1,\n"
+            "                                    as_of=t, retrieved_at=t)])\n"
+            f"init_schema({str(db)!r})\n"
+            "save_card(DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
+            "                       verdicts=[v], synthesis='', model_ref='m'),\n"
+            f"          path={str(db)!r})\n", encoding="utf-8")
+
+        stub = tmp_path / "fake-biga"
+        stub.write_text(f"#!/usr/bin/env bash\n{sys.executable} {seed}\n",
+                        encoding="utf-8")
+        stub.chmod(0o755)
+        (work / "tools" / "verify" / "spawn_check.py").write_text(
+            spawn_stub, encoding="utf-8")
+        return work, db, stub
+
+    @staticmethod
+    def _run(work, db, stub):
+        import os
+        import subprocess
+        return subprocess.run(
+            ["bash", str(work / "bin" / "biga-card")],
+            capture_output=True, text=True, cwd=work, timeout=120,
+            env={**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db)})
+
+    @pytest.mark.parametrize("rc,why", [(1, "有伪造"), (2, "判不了")])
+    def test_核验失败时出卡命令必须失败(self, tmp_path, rc, why):
+        """🔴 **这条才是闸门的判据。** 上面那条只查「字符串在不在」。
+
+        外部深度评审指出：`bin/biga-card` 原来是裸调用 + 无条件 `exit 0`，
+        而脚本用 `set -uo pipefail`（没有 `-e`）⇒ 退出码被整个丢掉：
+
+            spawn_check exit 1  →  biga-card 仍 exit 0
+            spawn_check exit 2  →  biga-card 仍 exit 0
+
+        真实语义是「跑了一次检查并打印结果」，不是验收 Gate。
+
+        ⚠️ **而我的守卫没抓到** —— 调用在、退出码被丢，它照样绿。
+        同一形状第 8 次：**守卫查的地方，和它声称守的地方，不是同一处。**
+        """
+        work, db, stub = self._seeded_repo(
+            tmp_path, "BIGA-20260921-001",
+            f"import sys\nprint('桩：{why}', file=sys.stderr)\nsys.exit({rc})\n")
+        r = self._run(work, db, stub)
+        assert r.returncode != 0, (
+            f"spawn_check 返回 {rc}（{why}），而 biga-card 仍然成功退出 ——\n"
+            f"  那它就只是一句打印，不是闸门。\n  stdout 尾部：{r.stdout[-260:]}")
+        assert "spawn 核验未通过" in r.stderr, r.stderr[-260:]
+        assert "BIGA-20260921-001" in r.stdout, "卡应当照常渲染（钱已经花了，藏起来没意义）"
+
+    def test_核验通过时出卡命令成功(self, tmp_path):
+        """反方向 —— 否则上面那条可以靠「永远失败」平凡通过。"""
+        work, db, stub = self._seeded_repo(
+            tmp_path, "BIGA-20260921-002", "print('桩：全齐')\n")
+        r = self._run(work, db, stub)
+        assert r.returncode == 0, f"核验通过却失败了：rc={r.returncode}\n{r.stderr[-260:]}"
+
     def test_查询按决策号过滤(self):
         """🔴 判据落在 SQL 上：没有 WHERE 就是复查发现的那个洞。
 
@@ -268,3 +351,88 @@ class TestOrphanSpawns:
         assert called, (
             "budget_report.py 没有真的调用 orphan_spawns —— \n"
             "  一个不会被跑到的检查，等于没有这个检查。")
+
+
+# ─────────────────────────── 旧口径不会自己消失
+#
+# 深度评审在**三处代码**里找到已经被推翻的那句「`agent_runs` 是唯一凭证」。
+# 其中 `db.py` 那一处最难看：修订插在旧结论**上面**、没删旧的，
+# 一个 docstring 里两句话互相打脸。
+#
+# 🔴 教训不是「下次改仔细一点」。改口径是个**全仓动作**，
+#    而人只会改自己当时正看着的那个文件。
+#    ⇒ 判据搬进测试：活文档里不许再出现这句话，除非旁边就写着它已被推翻。
+
+#: 旧口径的特征串。用「唯一凭证」而不是整句 —— 复述时措辞每次都不一样，
+#: 但这三个字每次都在。
+_STALE = "唯一凭证"
+
+#: 「旁边写着它已被推翻」的标志。任一命中即算已修正。
+#: ⚠️ 「推翻」是第一次跑这条守卫时补上的 —— `tests/test_store.py` 那段
+#:    明明白白写着「第 7 章推翻了它」，却被判成违规。
+#:    **守卫的第一次红灯里，一部分是守卫自己的问题**，不能直接照着改代码。
+_DEBUNKED = ("不成立", "不是 spawn 的证明", "不能证明", "不是调用证明",
+             "已修正", "曾经写的是相反的", "判断是错的", "执行账本",
+             "推翻")
+
+#: 完全豁免的地方 —— 它们**就是**历史记录，改了反而是篡改。
+#: · `docs/external/` 只读（文档纪律）
+#: · `CHANGELOG.md` 记的是「当时相信什么」
+_HISTORY = ("docs/external/", "CHANGELOG.md")
+
+
+def _stale_hits() -> list[str]:
+    bad = []
+    for path in repo_files(".py", ".md", ".sh"):
+        rel = path.relative_to(REPO).as_posix()
+        if rel.startswith(_HISTORY) or path == pathlib.Path(__file__).resolve():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if not any(_STALE in ln for ln in lines):
+            continue
+        # 过程文档写完即冻结 ⇒ 允许原文留着，但**整份文件**里必须有修正块。
+        whole = "\n".join(lines)
+        if rel.startswith("docs/tutorial/") and any(d in whole for d in _DEBUNKED):
+            continue
+        for i, ln in enumerate(lines):
+            if _STALE not in ln:
+                continue
+            # 🔴 窗口只开 ±2，而且**同一行**就算。
+            #    第一版开了 ±6 —— 探针（把 SKILL.md 的旧句子放回去）
+            #    照样绿，因为下面那段修正块还落在窗口里。
+            #    而那恰好就是 `db.py` 的病：旧断言与修正**同时存在**。
+            #    ⇒ 判据必须是「这一句自己带着历史框」，不是「附近有人澄清过」。
+            near = "\n".join(lines[max(0, i - 2):i + 3])
+            if not any(d in near for d in _DEBUNKED):
+                bad.append(f"{rel}:{i + 1}")
+    return bad
+
+
+def test_旧口径不许再出现在活文档里():
+    """🔴 判据是**上下文**，不是有没有这个词。
+
+    这句话在仓库里出现是正常的 —— `spawn_check.py` 的开头就引了它，
+    紧接着写「**这句话本身不成立**」。被禁的是**孤零零地断言它**。
+
+    ⚠️ 本文件自己豁免：描述一条「不要写 X」的规则就必须写出 X，
+       于是扫描器永远第一个命中自己（`CLAUDE.md` 公开仓库纪律记过四次的形状）。
+    """
+    hits = _stale_hits()
+    assert hits == [], (
+        "这些地方还在断言已被推翻的旧口径（`agent_runs` = 调用证明）：\n"
+        + "".join(f"  · {h}\n" for h in hits)
+        + "  真正的判据是 tools/verify/spawn_check.py：\n"
+          "  `agent_runs`（我们写的）+ 运行时 `subagent_runs`（我们碰不到的）\n"
+          "  两份独立记录都齐，且都绑到同一个决策号，才算证明。\n"
+          "  ⚠️ 修的时候**去删旧的那一句**，不要在它上面再写一句 ——\n"
+          "     `db.py` 就是那么变成自相矛盾的。")
+
+
+def test_扫到了活口径():
+    """上面那条全绿，可能是因为「一个文件都没扫到」。
+
+    这里反过来确认扫描器确实看得见这些文字 —— 否则它是平凡通过。
+    """
+    seen = [p for p in repo_files(".py", ".md")
+            if _STALE in p.read_text(encoding="utf-8")]
+    assert len(seen) >= 3, f"只扫到 {len(seen)} 处，扫描范围可能坏了"

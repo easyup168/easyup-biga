@@ -277,24 +277,92 @@ class TestForeignDecisionUpstream:
         codes = [m.code for m in v.missing]
         assert "risk.upstream.foreign_decision" in codes
 
-    def test_压到UNKNOWN而不是WARNING(self):
-        """🔴 证据归属不成立时，其余指标全部失去意义。
+    @staticmethod
+    def _full(wired, task_id: str):
+        """五个 Stage 1 全齐、交易日一致、还踩了一条阈值。
 
-        `coverage_ratio=1.0` 在这里不是「五个都到齐了」，
-        而是「五个坑里各插了一面旗，但不是同一片地」。
+        `volume_ratio=3.0` 会触发 `risk.market.volume_spike` ——
+        故意加上，为了看「从别人决策的证据里算出来的告警」有没有漏出来。
         """
-        pass  # 由下面那条带 wired 的覆盖
+        rows = [("market", "放量上涨", {"trade_date": "20260918", "volume_ratio": 3.0}),
+                ("emotion", "修复", None), ("sector", "主线明确", None),
+                ("technical", "多头", None), ("news", "平静", None)]
+        for i, (a, st, res) in enumerate(rows, start=1):
+            wired[i] = up(a, stance=st, result=res, task_id=task_id)
+        return list(range(1, 6))
 
     def test_归属不成立时不给倾向(self, wired):
-        for i, (a, st) in enumerate(
-                [("market", "放量上涨"), ("emotion", "修复"), ("sector", "主线明确"),
-                 ("technical", "多头"), ("news", "平静")], start=1):
-            # 全部齐活、交易日一致 —— 唯独 task_id 来自另一次决策
-            wired[i] = up(a, stance=st, task_id="BIGA-20260918-999")
-        v = build(list(range(1, 6)), task_id="BIGA-20260918-001")
-        assert v.result["coverage_ratio"] == 1.0, "覆盖率确实是满的"
+        ids = self._full(wired, "BIGA-20260918-999")
+        v = build(ids, task_id="BIGA-20260918-001")
         assert v.verdict == "UNKNOWN", \
             "覆盖率满 + 交易日一致 ⇒ 原来会给 PASS/WARNING，那正是评审指出的洞"
+        assert v.status == "failed"
+
+    def test_归属不成立时一个派生指标都不许留(self, wired):
+        """🔴 外部深度评审：第一版是**半硬**的 fail-closed。
+
+        它检测到 foreign 之后照样把全套指标算完，最后才把 `verdict`
+        压成 UNKNOWN。落库的判定于是长成这样：
+
+            verdict: UNKNOWN
+            result:  coverage_ratio=1.0, trade_date_consistent=True, …
+            confidence: 0.9
+
+        每个数字都是**把两次决策的证据混在一起**算出来的，而它们和正常
+        判定逐字段同形。任何不去读 `verdict` 的消费方都会照常用它们。
+
+        > `verdict` 说「不知道」，`result` 说得头头是道。
+        > 只要有一个消费方读后者不读前者，fail-closed 就漏了。
+
+        判据是**差分**：同一批上游，只改 `task_id`。
+        正常那次算出的字段，这次一个都不能出现。
+        """
+        ids = self._full(wired, "BIGA-20260918-001")
+        good = build(ids, task_id="BIGA-20260918-001")
+        assert len(good.result) >= 5, f"正常路径本该算出一堆字段：{good.result}"
+
+        ids = self._full(wired, "BIGA-20260918-999")
+        bad = build(ids, task_id="BIGA-20260918-001")
+        leaked = sorted(set(bad.result) & set(good.result))
+        assert leaked == [], (
+            f"归属不成立，却仍然给出了派生指标：{leaked}\n"
+            f"  值：{ {k: bad.result[k] for k in leaked} }\n"
+            "  这些数是把两次决策的证据混起来算的，和正常判定逐字段同形。")
+
+    def test_归属不成立时置信度是零(self, wired):
+        """`confidence` 原来由 `len(result)/_EXPECTED_FIELDS` 算 ——
+        字段算得越多越「自信」，而这里字段越多恰恰意味着污染越深。"""
+        ids = self._full(wired, "BIGA-20260918-999")
+        assert build(ids, task_id="BIGA-20260918-001").confidence == 0.0
+
+    def test_归属不成立时不许发出阈值告警(self, wired):
+        """`volume_ratio=3.0` 来自**别的决策**。
+
+        照样报「异常放量」就是把另一次决策的市场状态说成这一次的 ——
+        而 `warnings` 是直接印在 Card 上的。
+        """
+        ids = self._full(wired, "BIGA-20260918-999")
+        v = build(ids, task_id="BIGA-20260918-001")
+        assert not any("volume_spike" in w or "放量" in w for w in v.warnings), \
+            f"从别人的证据里算出了告警：{v.warnings}"
+        assert "tripped_thresholds" not in v.result
+
+    def test_仍然留下足够排查的信息(self, wired):
+        """🔴 fail-closed 不等于一片空白 —— 报错要指路。
+
+        「谁串进来了」是关于**这次混淆**的事实，不是关于市场的事实，
+        所以它可以留，而且必须留：否则读卡的人只知道「不知道」。
+
+        ⚠️ 它也得有证据（铁律 3）。第一版塞进 `result` 却给了空 evidence，
+           契约层当场拒绝构造 —— 那次报错是对的。
+        """
+        ids = self._full(wired, "BIGA-20260918-999")
+        v = build(ids, task_id="BIGA-20260918-001")
+        assert v.result["foreign_task_ids"] == ["BIGA-20260918-999"]
+        assert v.result["upstream_attribution"]["market"] == "BIGA-20260918-999"
+        assert {e.field for e in v.evidence} == set(v.result), \
+            "result 的每个键都要有证据（铁律 3）"
+        assert any(m.code == "risk.upstream.foreign_decision" for m in v.missing)
 
     def test_同一次决策的上游不受影响(self, wired):
         wired[1] = up("market", task_id="BIGA-20260918-001")

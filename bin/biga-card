@@ -114,9 +114,35 @@ for _ in $(seq 60); do
     #
     #    ⇒ 接在出卡之后，因为**这里是唯一每次都会跑到的地方**。
     #      放进 pytest 不行：它需要一次真实运行。
+    #    🔴 **它的退出码必须被用上，否则它只是一句打印。**
+    #
+    #    外部深度评审指出：这里原来是裸调用，紧接着无条件 `exit 0`，
+    #    而脚本用的是 `set -uo pipefail`（没有 `-e`）⇒
+    #
+    #        spawn_check exit 1  →  biga-card 仍 exit 0
+    #        spawn_check exit 2  →  biga-card 仍 exit 0
+    #
+    #    真实语义是「跑了一次检查并打印结果」，
+    #    不是「spawn 证明是出卡流程的验收 Gate」。
+    #
+    #    ⚠️ 我自己那条守卫也没抓到 —— 它只查脚本里**有没有这个字符串**。
+    #      调用在、退出码被丢，守卫照样绿。
     $PY tools/verify/spawn_check.py "$NOW"
+    SPAWN_RC=$?
     echo
     echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
+    if [ "$SPAWN_RC" -ne 0 ]; then
+      echo >&2
+      echo "🔴 spawn 核验未通过（rc=$SPAWN_RC）。" >&2
+      echo "   卡已落库，但**不能证明 Specialist 真的被调用过** ——" >&2
+      echo "   这张卡不要当证据用。" >&2
+      echo "   rc=1 有伪造 · rc=2 判不了（读不到运行时记录）" >&2
+      echo "   细节：python3 tools/verify/spawn_check.py $NOW" >&2
+      # ⚠️ 仍然把卡渲染出来了（上面已经渲染）——
+      #    出卡这件事已经发生、钱已经花了，藏起来没有意义。
+      #    要变的是**这条命令的成败**，而不是要不要给人看。
+      exit 4
+    fi
     exit 0
   fi
   echo -n "."

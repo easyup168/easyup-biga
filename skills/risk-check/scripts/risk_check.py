@@ -126,6 +126,27 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
     # 处理方式沿用本项目的一贯口径：不崩溃、不静默，
     # **报成缺失并把结论压到 UNKNOWN** —— 出一张标着「不知道」的卡，
     # 比不出卡强得多，也比出一张看起来正常的卡强得多。
+    #
+    # 🔴 但第一版是「半硬」的（外部深度评审）
+    # --------------------------------------
+    # 它检测到 foreign 之后**照样把全套指标算完**，最后才在末尾把
+    # `verdict` 压成 UNKNOWN。于是落库的那条判定长这样：
+    #
+    #     verdict: UNKNOWN
+    #     result:  coverage_ratio=1.0, trade_date_consistent=True,
+    #              max_staleness_sec=…, tripped_thresholds=[…]
+    #     confidence: 0.9          ← 由 len(result) 算出来的
+    #     warnings:  [阈值触发…]    ← 从别的决策的证据里算出来的
+    #
+    # 每一个数字都是**把三次决策的证据混在一起**算出来的，而它们
+    # 看起来和正常判定逐字段同形。任何不去读 `verdict` 字段的消费方
+    # ——回放脚本、台账、将来的模型分层——都会照常用它们。
+    #
+    # > `verdict` 说「不知道」，`result` 说得头头是道。
+    # > 只要有一个消费方读后者不读前者，fail-closed 就漏了。
+    #
+    # ⇒ 改成**硬的**：立刻返回，`result` 里只留「归属本身」这一个事实。
+    #   归属是关于**这次混淆**的事实，不是关于市场的事实，所以它可以留。
     foreign = sorted({v.task_id for v in upstream} - {task_id})
     if foreign:
         names = "、".join(
@@ -135,6 +156,34 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             f"{foreign}：{names}。不同决策的证据不能合在一起审 —— "
             "它们采自不同时刻，甚至可能是不同的市场状态",
             "risk.upstream.foreign_decision"))
+        # ⚠️ 只放归属，不放任何**从混合证据算出来的**数。
+        #    归属是关于「谁串进来了」的事实，risk 就在 `retrieved` 这一刻
+        #    亲眼看到它 —— 所以它有正当的 as_of，不是凭空的数。
+        #
+        # 🔴 第一版把这两个字段直接塞进 `result`、`evidence=[]`，
+        #    契约层当场拒绝构造：
+        #      ValueError: result 字段无证据支撑 …（铁律 3）
+        #    那次报错是对的。绕过它的办法（改成 `result={}`）会把排查
+        #    需要的信息一起扔掉 ⇒ 正确做法是**老实给证据**。
+        attribution = {
+            "foreign_task_ids": foreign,
+            "upstream_attribution": {v.agent: v.task_id for v in upstream},
+        }
+        return AgentVerdict(
+            task_id=task_id, agent=AGENT, status="failed", verdict="UNKNOWN",
+            result=attribution,
+            # 🔴 `confidence` 不能沿用 `len(result)/_EXPECTED_FIELDS` ——
+            #    那个公式衡量的是「算出来多少字段」，在这里会把
+            #    「我拒绝判断」算成一个不低的置信度。
+            confidence=0.0,
+            evidence=[Evidence(
+                field=k, source="derived:risk-check", value=val,
+                as_of=retrieved, retrieved_at=retrieved,
+                calc_version=CALC_VERSION,
+                label="上游判定的决策号归属（不是市场事实）")
+                for k, val in attribution.items()],
+            warnings=warnings, missing=missing,
+            elapsed_ms=int((time.monotonic() - t_start) * 1000))
 
     result: dict[str, Any] = {}
     evidence: list[Evidence] = []
@@ -248,14 +297,14 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             f"上游判断 —— {'、'.join(silent)} 没有给出方向判断，无法审阅其结论",
             "risk.upstream.stance_absent"))
 
+    # ⚠️ 这里原本还有一个 `if foreign:` 分支，把结论压成 UNKNOWN。
+    #    现在 foreign 在上面就返回了 —— 走到这里 `foreign` 必然是空的。
+    #    留一条断言而不是留那个分支：**死代码会让人以为防护还在这儿**，
+    #    下次改这段的人会绕着它走，而真正的防护在两百行之前。
+    assert not foreign, "foreign 应当已在上游归属检查处返回"
+
     core = {"coverage_ratio", "tripped_thresholds", "trade_date_consistent"}
-    if foreign:
-        # 🔴 证据归属不成立时，**其余指标全部失去意义**。
-        #    coverage_ratio=1.0 在这里不是「五个都到齐了」，
-        #    而是「五个坑里各插了一面旗，但不是同一片地」。
-        #    ⇒ 直接压到 UNKNOWN，不让它沿 WARNING 这条路给出任何倾向。
-        status, level = "partial", "UNKNOWN"
-    elif not missing:
+    if not missing:
         status, level = "completed", "PASS"
     elif core <= set(result):
         status, level = "partial", "WARNING"
