@@ -41,10 +41,10 @@ from _contract import (  # noqa: E402
 from _store import db  # noqa: E402
 
 
-def _verdict(agent: str, task_id: str) -> AgentVerdict:
+def _verdict(agent: str, task_id: str, *, stance: str | None = None) -> AgentVerdict:
     return AgentVerdict(
         agent=agent, task_id=task_id, status="completed", verdict="PASS",
-        stance=None,
+        stance=stance,
         result={"trade_date": "2026-09-18"},
         evidence=[Evidence(field="trade_date", value="2026-09-18",
                            source="probe", as_of=now_cn(), retrieved_at=now_cn())],
@@ -143,3 +143,28 @@ class TestSynthesizeRejectsMixedRuns:
                                                  "BIGA_DB_PATH": str(p)})
         assert r.returncode == 1, "两次决策的证据被合成了同一张卡"
         assert "不止一次决策" in r.stderr and "怎么办" in r.stderr
+
+
+class TestSynthesizeReusesUpstreamId:
+    """没给 --decision-id 时，用证据自己带的号，不要另分配一个。
+
+    实测 BIGA-20260921-014：Stage 0 占了 013 并传给五个 specialist，
+    合成时忘了 --decision-id ⇒ 卡是 014、证据全写着 013。
+    混血闸门不会红（号是一致的），但归属仍然断了。
+    """
+
+    def test_沿用上游的号(self, tmp_path):
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        from _contract import STANCE_VOCAB
+        ids = [db.save_verdict(_verdict(a, "BIGA-20260921-013",
+                                        stance=STANCE_VOCAB[a][0]), path=p)
+               for a in ("market", "emotion")]
+        r = subprocess.run(
+            [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
+             "--verdict-ids", ",".join(map(str, ids)), "--status", "WAIT",
+             "--headline", "h", "--synthesis", "s", "--model-ref", "m", "--json"],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "BIGA_DB_PATH": str(p)})
+        assert r.returncode == 0, r.stderr[-600:]
+        assert __import__("json").loads(r.stdout)["decision_id"] == "BIGA-20260921-013"

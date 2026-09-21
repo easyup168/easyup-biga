@@ -137,7 +137,20 @@ def main(argv: list[str] | None = None) -> int:
         init_schema()
     # 🔴 不要硬编码序号。原来写的是 new_task_id(1)，当天第二次决策必撞主键，
     #    Supervisor 只好每次自己查库推序号 —— 一轮多花一百多秒。
-    decision_id = args.decision_id or next_decision_id()
+    # 🔴 没给 --decision-id 时，**用证据自己带的号**，不要另分配一个。
+    #
+    # 实测（BIGA-20260921-014）：Supervisor 在 Stage 0 占了 013、
+    # 一路传给五个 specialist，合成时却忘了 --decision-id ⇒
+    # 脚本又分配了 014，于是**卡是 014、它的证据全写着 013**。
+    #
+    # 混血闸门不会红（所有 verdict 的号是一致的），但归属仍然断了。
+    # 根子还是那一条：**决策的身份在 Stage 0 就定了**，
+    # 合成阶段的职责是用它，不是再造一个。
+    #
+    # next_decision_id() 退化成兜底：只有在完全没有上游号时才会走到。
+    shared = {v.task_id for v in verdicts}
+    decision_id = (args.decision_id
+                   or (shared.pop() if len(shared) == 1 else next_decision_id()))
     stray = {v.task_id for v in verdicts} - {decision_id}
     if args.decision_id and stray:
         print(
