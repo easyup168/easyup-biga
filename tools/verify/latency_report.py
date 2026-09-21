@@ -39,7 +39,7 @@ _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
-from _store import connect  # noqa: E402
+from _store import StoreNotInitialised, connect  # noqa: E402
 from _store.runtime import read_task_runs, read_turns  # noqa: E402
 
 # 🔴 `read_turns()` 返回的时间已经是北京时间（在 `_store.runtime` 的读取边界转好）。
@@ -417,4 +417,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # 🔴 F23：库不存在是**全新环境的正常状态**，不该是一屏 traceback。
+    #    统一在入口转成人话 —— 每个工具各写一遍就又是一份散开的判据。
+    #    退出码 2 = 判不了，与 isolation.py 的三态口径一致。
+    try:
+        raise SystemExit(main())
+    except StoreNotInitialised as e:
+        print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
+        raise SystemExit(2) from None

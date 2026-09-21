@@ -6,6 +6,7 @@
 from .db import (
     DEFAULT_DB_PATH,
     AppendOnlyViolation,
+    StoreNotInitialised,
     connect,
     db_path,
     init_schema,
@@ -30,6 +31,7 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "SCHEMA_VERSION",
     "AppendOnlyViolation",
+    "StoreNotInitialised",
     "connect",
     "db_path",
     "init_schema",

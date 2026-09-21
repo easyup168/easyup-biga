@@ -53,6 +53,14 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = _REPO_ROOT / "data" / "biga.db"
 
 
+class StoreNotInitialised(RuntimeError):
+    """只读打开一个还不存在的库。
+
+    单独一个类型，是为了让调用方能把它与「真的坏了」分开处理 ——
+    全新环境里没有库是**正常**的，不该和数据损坏报同一种脸色。
+    """
+
+
 class AppendOnlyViolation(RuntimeError):
     """试图 UPDATE / DELETE 只追加的表。"""
 
@@ -77,6 +85,22 @@ def connect(path: pathlib.Path | str | None = None, *, readonly: bool = False) -
     p.parent.mkdir(parents=True, exist_ok=True)
 
     if readonly:
+        # 🔴 外部评审 F23：库文件不存在时，`mode=ro` 抛的是
+        #    `sqlite3.OperationalError: unable to open database file` ——
+        #    一个不说路径、不说该做什么的裸异常。全新 clone 里跑任何
+        #    巡检工具都会撞到它（`data/biga.db` 是 .gitignore'd 的）。
+        #
+        #    ⚠️ 修在这里、不修在某个工具里：所有只读消费方共用这一个入口，
+        #      在调用方各写一遍 `if not exists` 就又是一份散开的判据。
+        #
+        #    区分「文件不在」和「schema 建好但零行」—— 后者是正常状态。
+        if not p.exists():
+            raise StoreNotInitialised(
+                f"事实库不存在：{p}\n"
+                f"  它是 .gitignore 的，全新 clone 里本来就没有。\n"
+                f"  先出一张卡把它建起来：`bin/biga-card`\n"
+                f"  只想建空库：`python3 -c \"import sys;sys.path.insert(0,'skills');"
+                f"from _store import db;db.init_schema()\"`")
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     else:
         conn = sqlite3.connect(p)

@@ -246,14 +246,30 @@ class AgentVerdict:
 
         # --- stance：方向判断，与数据完整度分开 ---
         if self.stance is not None:
+            # 🔴 外部评审 F8：原来是 `STANCE_VOCAB.get(self.agent)`，
+            #    **命中才校验，命不中就静默退化成「1~16 字任意词都收」**。
+            #
+            #        agent="market",  stance="超级看多"  → 正确拒绝
+            #        agent="Market",  stance="随便乱写"  → 通过（大小写 typo）
+            #        agent="discipline", stance="瞎编的" → 通过（还没登记）
+            #
+            #    Phase 3 建 discipline 时忘了加一行（纯手工步骤，没有清单强制），
+            #    它的 stance 从那天起完全不受约束 —— 而 `AGENTS.md` 里
+            #    「契约层会直接拒绝表外词」这句话，读者会以为对全系统成立。
+            #
+            #    ⇒ 未登记就是错误，**不是「暂时放宽」**。
+            #      沉默的放宽正是这条红线要防的东西。
             vocab = STANCE_VOCAB.get(self.agent)
-            if vocab is not None and self.stance not in vocab:
+            if vocab is None:
+                raise ValueError(
+                    f"[{self.agent}] 这个 agent 没有登记 stance 词表 —— "
+                    f"在 `_contract/verdict.py` 的 STANCE_VOCAB 里加一行。\n"
+                    f"  已登记：{sorted(STANCE_VOCAB)}\n"
+                    f"  （拼写也算：agent 名大小写要与登记的完全一致）")
+            if self.stance not in vocab:
                 raise ValueError(
                     f"[{self.agent}] stance={self.stance!r} 不在该 agent 的词表里 "
                     f"{list(vocab)} —— 方向判断必须可聚合，自由发挥的措辞没法做统计")
-            if vocab is None and (not self.stance.strip() or len(self.stance) > 16):
-                raise ValueError(
-                    f"[{self.agent}] stance 必须是 1..16 字的短词，收到 {self.stance!r}")
             if self.verdict == "UNKNOWN" and self.stance not in (None, "无法判定"):
                 raise ValueError(
                     f"[{self.agent}] verdict='UNKNOWN' 却给出 stance={self.stance!r} —— "

@@ -31,7 +31,13 @@ from datetime import timedelta
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
 
-from _contract import AgentVerdict, DecisionCard, Evidence, now_cn  # noqa: E402
+from _contract import (  # noqa: E402
+    STANCE_VOCAB,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    now_cn,
+)
 
 #: 无日期字段的实时端点 → 它喂出来的字段必须走 `add_live`。
 #:
@@ -171,14 +177,17 @@ class TestDecisionIdentity:
         t = now_cn()
         return AgentVerdict(
             agent=agent, task_id=task_id, status="completed", verdict="PASS",
-            stance="分化", result={"trade_date": "2026-09-18"},
+            stance=STANCE_VOCAB[agent][0], result={"trade_date": "2026-09-18"},
             evidence=[Evidence(field="trade_date", value="2026-09-18",
                                source="probe", as_of=t, retrieved_at=t)])
 
     def _card(self, did: str, tids: list[str], **kw):
+        # ⚠️ 用**真的 agent 名**，不是 a0/a1 —— F8 之后未登记的 agent
+        #    在契约层就会被拒，而这组测试要验的是决策身份，不该被那条挡住。
+        names = ["market", "emotion", "sector", "technical"]
         return DecisionCard(
             decision_id=did, status="WAIT", headline="h",
-            verdicts=[self._v(f"a{i}", t) for i, t in enumerate(tids)],
+            verdicts=[self._v(names[i], t) for i, t in enumerate(tids)],
             synthesis="s", model_ref="m", **kw)
 
     def test_新造的卡装着别人的判定要被拒(self):
