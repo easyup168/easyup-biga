@@ -369,7 +369,8 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 | 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v5**，五张表，只追加由触发器强制（v4 时这句话是**假的** —— 分配器没有触发器，五取四） |
 | 测试 | 566 条 |
 | 端到端 | 盘中六 Agent 172.6s（预算 **180s**，已按四次实测重推）、$1.20/次 |
-| 隔离 | `tools/verify/isolation.py` 四项全绿 |
+| 隔离 | `tools/verify/isolation.py` **三态**（`UNKNOWN` 不计入通过）；判据由 `tests/test_isolation.py` 钉住 |
+| 外部评审 | 两份，共 29 条，**全部处理完**（见 `TODO.md` 的合并台账）|
 
 🔴 **还差两条出口条件，而它们卡在同一个根上**：盘中 `emotion`/`news` 报「今天」、
 日线类报「上一交易日」⇒ `risk` 每次「无法判定」⇒ 攒不到真实否决，

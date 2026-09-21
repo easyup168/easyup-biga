@@ -149,6 +149,27 @@ Stage 1 并行检查
 
 同一条命令还会给出成本分解（逐 agent 的 token 与 $）。
 
+### 3.5 Specialist 是**真被 spawn 的**，不是有人手工跑了脚本
+
+出卡流程结束时会自动打一行：
+
+```
+▸ spawn 核验：6 个 agent 两份独立记录都齐 ['emotion', 'market', 'news', 'risk', 'sector', 'technical']
+```
+
+🔴 **为什么需要单独一条**：`agent_runs` 是 BigA 自己写的账本 ——
+手工跑一遍 skill、把 verdict_ref 喂给合成脚本，产出的记录与真 spawn
+**逐字节相同**。自己写的东西证明不了自己。
+
+第二份记录来自 OpenClaw 运行时自己记的表，**BigA 的业务代码碰不到它**。
+两份对不上就会报出来。要手工查某一张历史卡：
+
+```bash
+python3 tools/verify/spawn_check.py <决策号>
+```
+
+退出码：`0` 对上 · `1` 有伪造 · `2` 判不了（读不到运行时表 —— 不算通过）。
+
 ### 4. 没有影响同机的其他服务
 
 ```bash
