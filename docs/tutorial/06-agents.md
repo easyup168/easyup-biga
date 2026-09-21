@@ -44,7 +44,7 @@ Updated config: ~/.openclaw-biga/openclaw.json
 「加一个 agent」这个操作，实际上跑了 doctor、装了一个插件、改写了配置文件。
 
 第 01 章说「这个 CLI 从来不是只读的，所以必须用 wrapper 强制 `--profile`」——
-这里是它的现场证据。如果刚才漏了 `--profile biga`，被装插件、被改配置的就是**邻居**。
+这里是它的现场证据。如果刚才漏了 `--profile biga`，被装插件、被改配置的就是**已有实例**。
 
 ---
 

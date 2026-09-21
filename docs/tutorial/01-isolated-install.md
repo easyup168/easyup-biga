@@ -62,7 +62,7 @@ openclaw agents list        # ❌
 
 看起来只是列一下 agent。但 OpenClaw CLI 在启动时会**自动跑 doctor 迁移** ——
 它会按当前版本去升级 state 目录的结构。而不带 `--profile` 时，它操作的是
-`~/.openclaw`，也就是**另一套实例的状态目录**。
+`~/.openclaw`，也就是**已有实例的状态目录**。
 
 于是：用新版本（2026.9.5）的 CLI 去迁移老版本实例的 state。对方下次启动时读到的
 是一份被「升级」过的状态。
@@ -110,7 +110,7 @@ $BIGA agents list           # ✅ --profile biga 不可能漏
 
 ### 现象
 
-另一套实例的几十个定时任务，需要给自己注入 `PATH`。它的选法是这样的逻辑：
+已有实例的定时任务，需要给自己注入 `PATH`。它的选法是这样的逻辑：
 
 ```python
 # 扫 nvm 的所有 node 版本，挑「装了 openclaw 的最高版本」
