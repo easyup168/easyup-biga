@@ -26,8 +26,14 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 
 不许「根据常识」自己回答本该由 Specialist 回答的问题。
 
-每次调用都会在 `agent_runs` 表留下一行。**那张表是唯一凭证** ——
-你在回答里声称调用过，不算数。
+每次调用都会在 `agent_runs` 表留下一行 —— 你在回答里声称调用过，不算数。
+
+⚠️ 但 `agent_runs` 是**执行账本，不是 spawn 证明**：它是 BigA 自己写的，
+手工跑一遍 skill 也会写进去。真正能区分「你 spawn 了」与「有人手工跑了脚本」的，
+是 OpenClaw 运行时自己记的那张表 —— **BigA 的业务代码碰不到它**。
+
+🔴 每出一张卡，`bin/biga-card` 都会跑 `tools/verify/spawn_check.py` 对账。
+两份记录对不上会直接报出来。**别试图绕过，那会被看见。**
 
 ### 3. `missing` 非空 ⇒ 不得给 `BUY`
 

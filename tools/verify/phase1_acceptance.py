@@ -91,41 +91,70 @@ def _runtime_spawn_records() -> list[dict] | None:
             pass
 
 
-def check_1_spawned(decision_id: str | None) -> Check:
-    """🔴 这一条要证明的是「Supervisor **真的**调了 emotion」，不是「有人跑过 emotion」。
+def spawn_proof(decision_id: str) -> dict[str, tuple[bool, bool]]:
+    """`agent -> (在 agent_runs 里, 在运行时 subagent_runs 里)`。
 
-    只查 BigA 自己的 `agent_runs` 是不够的 —— 人手工跑一遍合成脚本也会写进那张表。
-    所以必须同时命中 OpenClaw 运行时自己记的 `subagent_runs`：
-    那张表由 spawn 机制写入，BigA 的业务代码碰不到它。
+    🔴 两份记录的性质完全不同，这正是本函数存在的全部理由：
+
+    ======================  ==============================================
+    `agent_runs`            **BigA 自己写的**。手工跑一遍 skill 也会写进去
+    `subagent_runs`         **OpenClaw 运行时写的**。BigA 业务代码碰不到它
+    ======================  ==============================================
+
+    只有第二份能区分「Supervisor 真的 spawn 了」与「有人手工跑了脚本」。
+
+    外部评审 F3：这套核验原来**只认 `"emotion"` 一个字面量**，
+    Phase 2 新增的五个 specialist 完全没有对应版本 ——
+    也就是说 Phase 2 产出的每一张 Card，「Specialist 真的被调用过」
+    这条最硬的约束**事实上没有任何机器在管**。
+
+    ⚠️ 返回 `{}` 表示读不到运行时状态库 ⇒ 调用方必须报 PENDING / UNKNOWN，
+       **不是 PASS**（红线 R-3）。
     """
-    c = Check("1", "Supervisor 确实 spawn 了 emotion（两份独立记录都要有）")
-    if not decision_id:
-        return c.pending("未提供 --decision-id") or c
+    from _contract import STAGE1_AGENTS, STAGE2_AGENTS
     from _store import list_agent_runs
 
-    rows = list_agent_runs(decision_id=decision_id)
-    agents = {r["agent"] for r in rows}
-    if "emotion" not in agents:
-        return c.fail(f"agent_runs 里没有 emotion（现有 {sorted(agents) or '空'}）") or c
-
+    ours = {r["agent"] for r in list_agent_runs(decision_id=decision_id)}
     spawns = _runtime_spawn_records()
     if spawns is None:
+        return {}
+
+    out = {}
+    # 判据取自契约里的 stage 名单，**不是手写的一个名字** ——
+    # 名单会随 agent 增加而自己长大，手写的那个不会。
+    for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
+        if agent == "discipline":          # 裁定 13：故意不建
+            continue
+        spawned = any(
+            agent in (r.get("payload_json") or "")
+            or agent in (r.get("child_session_key") or "")
+            for r in spawns)
+        out[agent] = (agent in ours, spawned)
+    return out
+
+
+def check_1_spawned(decision_id: str | None) -> Check:
+    """Supervisor 真的 spawn 了**每一个** specialist —— 两份独立记录都要有。"""
+    c = Check("1", "Supervisor 确实 spawn 了各 Specialist（两份独立记录都要有）")
+    if not decision_id:
+        return c.pending("未提供 --decision-id") or c
+
+    proof = spawn_proof(decision_id)
+    if not proof:
         return c.pending(
-            f"agent_runs 有 emotion（{len(rows)} 行），"
-            "但读不到运行时的 subagent_runs，无法证明是 Supervisor spawn 的"
+            "读不到运行时的 subagent_runs，无法证明任何一个是 Supervisor spawn 的"
         ) or c
 
-    hits = [r for r in spawns if "emotion" in (r.get("payload_json") or "")
-            or "emotion" in (r.get("child_session_key") or "")]
-    if hits:
-        c.ok(f"agent_runs 有 emotion；运行时 subagent_runs 亦有 {len(hits)} 条 "
-             f"(controller={hits[0]['controller_session_key']})")
-    else:
-        c.fail(
-            f"agent_runs 有 emotion（{len(rows)} 行），"
-            f"但运行时 subagent_runs 共 {len(spawns)} 条、无一条涉及 emotion —— "
-            "这说明那行是被直接写入的，**不是 Supervisor spawn 出来的**"
-        )
+    forged = [a for a, (ours, spawned) in proof.items() if ours and not spawned]
+    absent = [a for a, (ours, _) in proof.items() if not ours]
+    if forged:
+        return c.fail(
+            f"这些 agent 在 agent_runs 里有行，但运行时 subagent_runs 里没有："
+            f"{sorted(forged)} —— 那些行是被直接写入的，"
+            "**不是 Supervisor spawn 出来的**") or c
+    if absent:
+        return c.pending(f"本次决策没有这些 agent 的记录：{sorted(absent)}") or c
+    c.ok(f"{len(proof)} 个 agent 两份记录都齐：{sorted(proof)}")
     return c
 
 

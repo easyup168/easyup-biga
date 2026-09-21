@@ -92,6 +92,19 @@ for _ in $(seq 60); do
     echo
     $PY skills/decision-card/scripts/replay.py "$NOW"
     echo
+    # 🔴 外部评审 F3：「Specialist 真的被调用过」这条最硬的约束，
+    #    此前**没有任何机器在管** —— 唯一能做真区分的核验只认
+    #    "emotion" 一个名字，而且从不在任何自动化流程里。
+    #
+    #    ⚠️ 手工跑 skill 再把 verdict_ref 喂给 synthesize.py，产出的
+    #      Card 与 agent_runs 记录，和「真的 spawn 了」逐字节相同 ——
+    #      两份都是 BigA 自己写的。区分它们只能靠 OpenClaw 运行时
+    #      自己记的那张表，而那张表 BigA 业务代码碰不到。
+    #
+    #    ⇒ 接在出卡之后，因为**这里是唯一每次都会跑到的地方**。
+    #      放进 pytest 不行：它需要一次真实运行。
+    $PY tools/verify/spawn_check.py "$NOW"
+    echo
     echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
     exit 0
   fi
