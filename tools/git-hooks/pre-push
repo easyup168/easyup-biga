@@ -11,6 +11,11 @@
 #
 # 临时绕过（只在确认误报时用）：
 #   git push --no-verify
+#
+# 🔴 三种扫描口径，对应三种推送
+#   普通推送   增量（远端..本地）
+#   新分支     相对所有远端引用的增量
+#   **强推**   **整条新历史** —— 因为旧 commit 不可达，增量会是空区间
 
 set -uo pipefail
 ROOT=$(git rev-parse --show-toplevel)
@@ -28,6 +33,19 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   echo "── 审查 ${local_ref#refs/heads/} → ${remote_ref#refs/heads/}"
   if [ "$remote_sha" = "$ZERO" ]; then
     "$AUDIT" "$local_sha" --not --remotes || FAIL=1      # 新分支：相对所有远端引用的增量
+  elif ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    # 🔴 强推 / 历史被重写 ⇒ 增量口径失效，改扫**整条新历史**。
+    #
+    #    这不是假想。2026-09-21 做 filter-repo 强推时，本 hook 打出的是：
+    #      （git log <旧>..<新>：没有内容可扫，无需审查）
+    #    因为旧 commit 被重写后不可达，`旧..新` 是空区间 ——
+    #    **恰恰在最危险的那次推送上，守卫静默放行了。**
+    #
+    #    增量口径的前提是「新历史包含旧历史」。这个前提一旦不成立，
+    #    省下来的那点扫描时间换来的是一个假绿。
+    echo "   ⚠️  远端 $remote_sha 不是本地 $local_sha 的祖先 —— 这是强推/历史重写。"
+    echo "      增量口径在这里会得到空区间（假绿），改为扫描整条新历史。"
+    "$AUDIT" "$local_sha" || FAIL=1
   else
     "$AUDIT" "$remote_sha..$local_sha" || FAIL=1
   fi
