@@ -16,6 +16,24 @@
 排查方向天生是错的。
 
 ⇒ 名册这种「两处各写一遍」的东西，必须有人对账。
+
+🔴 外部评审 F10：上面这条守卫只补了 `allowAgents`。`tools.agentToAgent.allow`
+是同一个形状的第二处名册，当时全仓没有任何测试碰过它，实测它也确实少了 news。
+复查又指出：把这两处各写一条测试，只是把「漏一个」变成「漏两个都补上了，
+但漏第三个」——**清单式检查只加固了具体报出的那几个字段**。
+
+⇒ 改成数据驱动：`_MUST_COVER_BUILT` 登记"所有理应覆盖已建好 agent 的配置
+字段"，新增第三个这样的字段时，在字典里加一行就够了，不需要再写一条新测试
+方法；`test_每个字段都覆盖已建好的agent` 会自动把它纳入。
+
+⚠️ 这一版删掉了一条曾经写出来又删掉的测试，如实记一笔：曾经想额外加一条
+"这几个字段必须彼此完全相等"，实测直接报错——`agents.entries` 天然比
+`allowAgents`/`agentToAgent.allow` 多一个 `"main"` 自己（entries 回答的是
+"谁被注册了"，另外两个回答的是"main 能碰到谁"，main 不会把自己列进
+自己能 spawn 的对象里）。这不是 bug，是三个字段本来就不是同一个问题的
+三份答案。而"每个字段都必须覆盖已建好的 agent"这条本身已经完整复现了
+F10 要防的事故（`news` 是已建好的 agent，任何一个字段漏了它都会被
+直接抓到）——不需要再加一条"彼此相等"的检查去做同一件事，还做错了方向。
 """
 
 from __future__ import annotations
@@ -23,23 +41,44 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+from typing import Callable
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
+sys.path.insert(0, str(REPO / "tests"))
 
 from _contract import STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
+from _consistency import assert_subset_of_source, built_agents  # noqa: E402
 
 CONFIG = pathlib.Path.home() / ".openclaw-biga" / "openclaw.json"
 
 
-def _built() -> set[str]:
-    """已经建好的 Specialist —— 有 workspace 目录就算建了。
+def _entries(cfg: dict) -> set[str] | None:
+    entries = (cfg.get("agents") or {}).get("entries") or {}
+    return set(entries) or None
 
-    `discipline` 推到 Phase 3（裁定 13），不该出现在任何名册里。
-    """
-    return {p.name for p in (REPO / "agents").iterdir() if p.is_dir()}
+
+def _allow_agents(cfg: dict) -> set[str] | None:
+    main = ((cfg.get("agents") or {}).get("entries") or {}).get("main", {})
+    allow = (main.get("subagents") or {}).get("allowAgents")
+    return None if allow is None else set(allow)
+
+
+def _agent_to_agent_allow(cfg: dict) -> set[str] | None:
+    allow = ((cfg.get("tools") or {}).get("agentToAgent") or {}).get("allow")
+    return None if allow is None else set(allow)
+
+
+#: 🔴 运行时配置里，所有"理应覆盖已建好 agent 名单"的字段。
+#: 加第三个这样的字段（同一个形状的第三处名册）时，在这里加一行 ——
+#: 不需要再写一条新测试方法，下面这条测试会自动把它纳入。
+_MUST_COVER_BUILT: dict[str, Callable[[dict], set[str] | None]] = {
+    "agents.entries": _entries,
+    "agents.entries.main.subagents.allowAgents": _allow_agents,
+    "tools.agentToAgent.allow": _agent_to_agent_allow,
+}
 
 
 @pytest.mark.skipif(not CONFIG.exists(), reason="本机没有 BigA 运行时配置")
@@ -48,60 +87,27 @@ class TestRosterConsistency:
     def _cfg() -> dict:
         return json.loads(CONFIG.read_text(encoding="utf-8"))
 
-    def test_已建的specialist都注册了(self):
-        entries = set((self._cfg().get("agents") or {}).get("entries") or {})
-        missing = _built() - entries
-        assert not missing, (
-            f"这些 agent 有 workspace 却没注册进 agents.entries：{sorted(missing)}\n"
-            "  后果：spawn 时找不到它")
-
-    def test_已建的specialist都在main的白名单里(self):
-        """🔴 本文件存在的理由。"""
-        main = ((self._cfg().get("agents") or {}).get("entries") or {}).get("main", {})
-        allow = (main.get("subagents") or {}).get("allowAgents")
-        if allow is None:
-            return                      # 没有白名单 = 不限制，也行
-        missing = _built() - set(allow)
-        assert not missing, (
-            f"这些 agent 建好了却不在 main.subagents.allowAgents 里："
-            f"{sorted(missing)}\n"
-            "  后果：Supervisor 照契约 spawn 它会被拒，而且**不报错** ——\n"
-            "        Card 照常产出，只是少了一个领域。\n"
-            "  怎么办：把它加进 ~/.openclaw-biga/openclaw.json 的该数组")
-
-    def test_两处名册必须一致(self):
-        """🔴 外部评审 F10：**姊妹配置已经出过事故，另一半至今没人管。**
-
-        上面那条守卫是为 `allowAgents` 漏了 news 那次事故专门写的。
-        但 `tools.agentToAgent.allow` 是**同一个形状**的第二处名册 ——
-        全仓没有任何测试碰过它（grep 不到一处引用），实测它确实少了 news。
-
-        > 清单类约定第一次踩坑后，团队本能地去补**那一个**，
-        > 而不去问「还有哪些地方是同样的结构」。—— 评审的原话。
-
-        ⚠️ 这类 json 配置**不受版本控制**，漂移天然不出现在 git diff 里
-        被 review 到 —— 所以只能靠测试对账。
-        """
-        cfg = self._cfg()
-        main = ((cfg.get("agents") or {}).get("entries") or {}).get("main", {})
-        allow_agents = set((main.get("subagents") or {}).get("allowAgents") or [])
-        a2a = set(((cfg.get("tools") or {}).get("agentToAgent") or {}).get("allow") or [])
-        if not allow_agents or not a2a:
-            pytest.skip("有一处没设白名单 = 不限制，无从对账")
-        missing = allow_agents - a2a
-        assert not missing, (
-            f"这些 agent 在 allowAgents 里，却不在 tools.agentToAgent.allow："
-            f"{sorted(missing)}\n"
-            "  两处名册各写一遍，改一处忘另一处 —— 与 2026-09-21 10:37 那次同型。\n"
-            "  怎么办：把它加进 ~/.openclaw-biga/openclaw.json 的该数组")
+    @pytest.mark.parametrize("field", sorted(_MUST_COVER_BUILT))
+    def test_每个字段都覆盖已建好的agent(self, field):
+        """🔴 本文件存在的理由，现在对**全部**登记字段都成立，不只是某一个。"""
+        claimed = _MUST_COVER_BUILT[field](self._cfg())
+        if claimed is None:
+            pytest.skip(f"{field} 没设 = 不限制，也行")
+        assert_subset_of_source(
+            built_agents(), claimed,
+            what=f"已建好的 agent vs {field}",
+            fix_hint=(
+                "后果：Supervisor 照契约 spawn 它会被拒，而且**不报错**——"
+                "Card 照常产出，只是少了一个领域。\n"
+                f"  怎么办：把它加进 ~/.openclaw-biga/openclaw.json 的 {field}"))
 
     def test_契约里的stage名单都建好了(self):
         """反方向：契约说有，实际没建。
 
         `discipline` 是唯一允许的例外（裁定 13：没有输入源）。
         """
-        declared = set(STAGE1_AGENTS) | set(STAGE2_AGENTS)
-        unbuilt = declared - _built() - {"discipline"}
-        assert not unbuilt, (
-            f"契约里的 {sorted(unbuilt)} 还没建 —— "
-            "risk 会把它算进覆盖率分母，拉低每一张卡的可信度")
+        declared = (set(STAGE1_AGENTS) | set(STAGE2_AGENTS)) - {"discipline"}
+        assert_subset_of_source(
+            declared, built_agents(),
+            what="契约里声明的 stage 名单 vs 已建好的 agent",
+            fix_hint="risk 会把没建好的 agent 算进覆盖率分母，拉低每一张卡的可信度")

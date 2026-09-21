@@ -293,6 +293,44 @@ def test_无日期端点必须显式声明None():
         assert cls.server_as_of is None, f"{cls.__name__} 不该声称自己有服务端时刻"
 
 
+def _no_date_source_names() -> set[str]:
+    """无日期端点的结果类型名——这份集合**从源头结构性派生**
+    （复用上面的 `_source_result_classes()`），不是手抄的。"""
+    return {name.rsplit(".", 1)[-1] for name, cls in _source_result_classes()
+            if cls.server_as_of is None}
+
+
+def test_用到无日期源的calc脚本都登记进了_LIVE_FIELDS():
+    """🔴 外部评审 F16 的残留部分：`_LIVE_FIELDS` 仍是手写的
+    ``{文件: {字段}}`` 字典。**字段级别**的粒度没法从"这个源有没有日期"
+    自动派生——一个 calc 脚本可能同时消费好几个源，也可能把无日期源的值
+    拿去做别的用途，而不直接暴露成一个 Evidence 字段。复查因此把这一条
+    标成"实例修好、模式还在"：修好的是 F4 炸掉的那两个文件，
+    不是这份清单本身会不会漏第三个文件。
+
+    但**文件级别**是可以结构性核对的：只要一个 calc 脚本 import 了
+    某个无日期源的结果类型，它就必须在 `_LIVE_FIELDS` 里出现——哪怕
+    具体字段还得靠人确认。这堵住的是最严重的那种遗漏：**一整个文件**
+    开始消费无日期源，却从未在这份清单里出现过一次，于是它的每一个
+    live 字段的 as_of 处理都完全没有测试覆盖。
+
+    对照 F7 的 `_FIELD_OWNER` + AST 核对：同样是"允许手写映射，
+    但持续核对映射是否还成立"这个折中，不是假装能全自动派生。
+    """
+    no_date = _no_date_source_names()
+    offenders = []
+    for script in sorted(REPO.glob("skills/*-calc/scripts/*.py")):
+        rel = str(script.relative_to(REPO))
+        src = script.read_text(encoding="utf-8")
+        if any(name in src for name in no_date) and rel not in _LIVE_FIELDS:
+            offenders.append(rel)
+    assert not offenders, (
+        f"这些脚本用到了无日期源（{sorted(no_date)}）却没有出现在 "
+        f"_LIVE_FIELDS 里：{offenders}\n"
+        "  至少加一个条目（哪怕字段集合需要人工确认哪些该走 add_live）——\n"
+        "  否则这个文件对无日期字段的 as_of 处理完全没有测试覆盖。")
+
+
 # ─────────────────────────────── staleness 对共模误差免疫（F15）
 #
 # 外部评审 F15：`Evidence` 唯一的时间校验是「两者都带 tzinfo」和
