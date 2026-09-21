@@ -198,3 +198,58 @@ class TestContractShape:
     def test_否决这个词与契约层同源(self):
         text = (REPO / "agents" / "risk" / "AGENTS.md").read_text(encoding="utf-8")
         assert VETO_STANCE in text, "契约里必须出现否决这个词，否则 Agent 不知道能填"
+
+
+class TestStageTopology:
+    """Stage 拓扑只有一处定义，且并行判据必须认得 Stage 2。"""
+
+    @staticmethod
+    def _lr():
+        p = REPO / "tools" / "verify" / "latency_report.py"
+        spec = importlib.util.spec_from_file_location("latency_report", p)
+        m = importlib.util.module_from_spec(spec)
+        sys.modules["latency_report"] = m
+        spec.loader.exec_module(m)
+        return m
+
+    @staticmethod
+    def _turn(agent, start_s, dur_s):
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class T:
+            agent_id: str
+            started_at: datetime
+            ended_at: datetime
+        base = datetime(2026, 9, 18, 10, 0, tzinfo=CN_TZ)
+        return T(agent, base + timedelta(seconds=start_s),
+                 base + timedelta(seconds=start_s + dur_s))
+
+    def test_risk在stage1之后不算串行(self, capsys):
+        """🔴 这是误报过的形状：risk 本就该在 Stage 1 之后，
+        把它算进 Stage 1 会让并行判据在**正确行为**上报红 ——
+        而一个在正确行为上报红的检查，很快就没人看了。"""
+        lr = self._lr()
+        turns = [self._turn("market", 0, 30), self._turn("emotion", 0, 25),
+                 self._turn("risk", 40, 17)]
+        assert lr._parallel_report(turns) is True
+        out = capsys.readouterr().out
+        assert "真并行" in out and "Stage 2" in out
+
+    def test_risk与stage1重叠要报红(self, capsys):
+        """重叠 = 它读的是还没冻结的证据。这不是性能问题，是正确性问题。"""
+        lr = self._lr()
+        turns = [self._turn("market", 0, 30), self._turn("emotion", 0, 25),
+                 self._turn("risk", 10, 17)]
+        lr._parallel_report(turns)
+        out = capsys.readouterr().out
+        assert "尚未冻结" in out
+
+    def test_拓扑只有一处定义(self):
+        """risk-check 与 latency_report 都用它 —— 各写一份就会漂。"""
+        from _contract import STAGE1_AGENTS, STAGE2_AGENTS
+        src = (SCRIPTS / "risk_check.py").read_text(encoding="utf-8")
+        assert "STAGE1_AGENTS" in src
+        assert '"market", "sector"' not in src, "不许在 skill 里再抄一份名单"
+        assert set(STAGE1_AGENTS) & set(STAGE2_AGENTS) == set()
+        assert "risk" in STAGE2_AGENTS

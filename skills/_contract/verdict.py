@@ -23,6 +23,8 @@ from .evidence import Evidence
 from .missing import MissingItem
 
 __all__ = [
+    "STAGE1_AGENTS",
+    "STAGE2_AGENTS",
     "STANCE_VOCAB",
     "VETO_STANCE",
     "AgentVerdict",
@@ -55,6 +57,16 @@ TASK_ID_RE = re.compile(r"^BIGA-\d{8}-\d{3}$")
 #: ⚠️ 这张表与各 agent `AGENTS.md` 里的判断表是同一套口径，
 #:    由 `tests/test_stance_vocab.py` 钉死两边一致 —— 否则改了一边忘了另一边，
 #:    agent 会给出一个契约层拒绝的词，然后花几轮去猜。
+#: Stage 拓扑 —— **唯一定义**。
+#:
+#: Stage 1 并行扇出（分析层），Stage 2 读 Stage 1 的**冻结证据**做制衡。
+#: 放在契约层而不是各自的 skill 里：判断「谁该和谁并行」「谁必须在谁之后」
+#: 的地方不止一处（risk-check 算覆盖率、latency_report 判并行），
+#: 各写一份就会漂 —— 而漂开的表现是**并行判据在正确行为上报红**，
+#: 然后那个检查就被忽略了。
+STAGE1_AGENTS = ("market", "sector", "news", "technical", "emotion")
+STAGE2_AGENTS = ("risk", "discipline")
+
 #: 🔴 制衡层的否决。它是一个**权限**，不是一句措辞 ——
 #:    `DecisionCard` 用它拦住 BUY，所以这个字面量只许有一处定义。
 #:    写死成常量而不是散在各处的字符串：改了词表却忘了改判据，

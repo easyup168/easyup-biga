@@ -40,6 +40,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    STAGE1_AGENTS,
     AgentVerdict,
     Evidence,
     MissingItem,
@@ -50,10 +51,6 @@ from _store import init_schema, load_verdict, save_verdict  # noqa: E402
 
 AGENT = "risk"
 CALC_VERSION = "risk-check/1"
-
-#: Stage 1 应到的 Specialist。少一个就是覆盖不足 —— 这是**事实**，
-#: 「覆盖不足要不要否决」由 Agent 判断。
-STAGE1_EXPECTED = ("market", "sector", "news", "technical", "emotion")
 
 #: 写死的风险阈值。`(字段, 比较, 阈值, 代码, 人话)`
 #:
@@ -138,10 +135,10 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
     present = sorted(v.agent for v in upstream)
     add("upstream_agents", present, "到场的上游 Agent")
     add("coverage_ratio",
-        round(len([a for a in present if a in STAGE1_EXPECTED]) / len(STAGE1_EXPECTED), 4),
-        f"Stage 1 覆盖率(应到 {len(STAGE1_EXPECTED)})")
+        round(len([a for a in present if a in STAGE1_AGENTS]) / len(STAGE1_AGENTS), 4),
+        f"Stage 1 覆盖率(应到 {len(STAGE1_AGENTS)})")
 
-    absent = [a for a in STAGE1_EXPECTED if a not in present]
+    absent = [a for a in STAGE1_AGENTS if a not in present]
     if absent:
         missing.append(MissingItem(
             f"风险面不完整 —— Stage 1 缺席：{'、'.join(absent)}，"
