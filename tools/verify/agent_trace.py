@@ -31,18 +31,14 @@ OpenClaw 的 trajectory 里 `ts` 是 UTC。转换在 `_store.runtime` 的读取�
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
-import sqlite3  # store-exempt: 读 OpenClaw 运行时的外部库，与 _store.runtime 同源
 import sys
 from collections import defaultdict
-from datetime import datetime
 
 _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
-from _contract import CN_TZ  # noqa: E402
-from _store.runtime import OPENCLAW_HOME  # noqa: E402
+from _store.runtime import list_agents, read_tool_calls  # noqa: E402
 
 #: 这些形状一出现基本就是「在找东西」，值得直接标出来。
 SMELLS = (
@@ -53,43 +49,6 @@ SMELLS = (
 )
 
 
-def _sessions(agent: str) -> dict[str, list[dict]]:
-    db = OPENCLAW_HOME / "agents" / agent / "agent" / "openclaw-agent.sqlite"
-    if not db.is_file():
-        return {}
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    out: dict[str, list[dict]] = defaultdict(list)
-    try:
-        for row in conn.execute(
-                "SELECT event_json FROM trajectory_runtime_events ORDER BY seq"):
-            ev = json.loads(row["event_json"])
-            if ev.get("type") in ("tool.call", "tool.result"):
-                out[ev.get("sessionKey") or "?"].append(ev)
-    except sqlite3.Error:
-        return {}
-    finally:
-        conn.close()
-    return out
-
-
-def _ts(ev: dict) -> datetime | None:
-    v = ev.get("ts")
-    if not isinstance(v, str):
-        return None
-    try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone(CN_TZ)
-    except ValueError:
-        return None
-
-
-def _agents() -> list[str]:
-    root = OPENCLAW_HOME / "agents"
-    return sorted(d.name for d in root.iterdir()
-                  if (d / "agent" / "openclaw-agent.sqlite").is_file()) \
-        if root.is_dir() else []
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Agent 工具调用序列（北京时间）")
     ap.add_argument("--agent", help="只看某个 agent")
@@ -98,23 +57,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sessions", type=int, default=4, help="每个 agent 列几次会话")
     args = ap.parse_args(argv)
 
-    agents = [args.agent] if args.agent else _agents()
+    agents = [args.agent] if args.agent else list_agents()
     if not agents:
         print("没有找到任何 agent 库。")
         return 1
 
     for agent in agents:
-        sess = _sessions(agent)
-        if not sess:
+        calls, why = read_tool_calls(agent)
+        for w in why:
+            print(f"⚠️  {w}")
+        if not calls:
             continue
-        rows = []
-        for key, evs in sess.items():
-            calls = [e for e in evs if e["type"] == "tool.call"]
-            if not calls:
-                continue
-            times = [t for t in (_ts(e) for e in evs) if t]
-            rows.append((min(times), max(times), key, calls))
-        rows.sort()
+        by_session: dict[str, list] = defaultdict(list)
+        for c in calls:
+            by_session[c.session_key].append(c)
+        rows = sorted((min(c.at for c in cs), max(c.at for c in cs), key, cs)
+                      for key, cs in by_session.items())
         print(f"── {agent}")
         for start, end, key, calls in rows[-args.sessions:]:
             span = (end - start).total_seconds()
@@ -124,18 +82,12 @@ def main(argv: list[str] | None = None) -> int:
 
         for start, end, key, calls in rows[-args.expand:] if args.expand else []:
             print(f"   ══ 展开 {start:%m-%d %H:%M:%S}（{key}）")
-            for e in calls:
-                d = e.get("data") or {}
-                name = d.get("name") or d.get("toolName") or "?"
-                arg = json.dumps(d.get("args") or d.get("input") or {},
-                                 ensure_ascii=False)
-                t = _ts(e)
-                line = f"      {t:%H:%M:%S}  {name:<10} {len(arg):>6} 字符"
-                hit = [why for pat, why in SMELLS if pat in arg]
-                print(line + ("   " + hit[0] if hit else ""))
-                if name == "exec" and len(arg) > 120:
-                    cmd = (d.get("args") or {}).get("command", "")
-                    print(f"                 {cmd[:110]}")
+            for c in calls:
+                hit = [why for pat, why in SMELLS if pat in c.command]
+                print(f"      {c.at:%H:%M:%S}  {c.name:<10} {c.args_len:>6} 字符"
+                      + ("   " + hit[0] if hit else ""))
+                if c.command and c.args_len > 120:
+                    print(f"                 {c.command[:110]}")
             print()
     return 0
 

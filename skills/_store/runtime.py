@@ -35,7 +35,8 @@ from typing import Any
 
 from _contract import CN_TZ
 
-__all__ = ["RuntimeProbe", "AgentTurn", "read_turns", "read_task_runs", "OPENCLAW_HOME"]
+__all__ = ["RuntimeProbe", "AgentTurn", "ToolCall", "read_turns", "read_tool_calls",
+           "read_task_runs", "list_agents", "OPENCLAW_HOME"]
 
 OPENCLAW_HOME = pathlib.Path.home() / ".openclaw-biga"
 
@@ -69,6 +70,24 @@ class AgentTurn:
     @property
     def total_tokens(self) -> int:
         return self.tokens_in + self.tokens_out + self.cache_read + self.cache_write
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """一次工具调用。诊断「它到底在干什么」用的最小单位。
+
+    🔴 为什么值得单独读出来：本项目两次最有价值的诊断都来自拆开调用序列 ——
+    Supervisor 那 159 秒里有 47 秒零工具调用（在重打 JSON）；
+    Specialist 加 stance 后慢一倍，是因为 62 秒都在 grep 源码找词表。
+    两次的第一反应都是「提示词写得不好」，两次都错。
+    """
+
+    agent_id: str
+    session_key: str
+    at: datetime          # 北京时间（在 `_parse_ts` 统一转好）
+    name: str
+    args_len: int
+    command: str          # exec 类调用的命令原文，其余为空
 
 
 @dataclass
@@ -207,6 +226,51 @@ class TaskRun:
     status: str
     started_at: datetime | None
     ended_at: datetime | None
+
+
+def list_agents() -> list[str]:
+    """有轨迹库的 agent 名单。"""
+    return [name for name, _ in _agent_dbs()]
+
+
+def read_tool_calls(agent: str) -> tuple[list[ToolCall], list[str]]:
+    """读出某个 agent 的全部工具调用。返回 (调用, 不可用原因)。"""
+    db = OPENCLAW_HOME / "agents" / agent / "agent" / "openclaw-agent.sqlite"
+    if not db.is_file():
+        return [], [f"{agent}: 找不到 {db.name}"]
+    out: list[ToolCall] = []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as e:
+        return [], [f"{agent}: 打不开 {db.name} —— {e}"]
+    try:
+        for row in conn.execute(
+                "SELECT event_json FROM trajectory_runtime_events ORDER BY seq"):
+            try:
+                ev = json.loads(row["event_json"])
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") != "tool.call":
+                continue
+            at = _parse_ts(ev.get("ts"))
+            if at is None:
+                continue
+            d = ev.get("data") or {}
+            raw = d.get("args") or d.get("input") or {}
+            out.append(ToolCall(
+                agent_id=agent,
+                session_key=ev.get("sessionKey") or "?",
+                at=at,
+                name=d.get("name") or d.get("toolName") or "?",
+                args_len=len(json.dumps(raw, ensure_ascii=False)),
+                command=str(raw.get("command", "")) if isinstance(raw, dict) else "",
+            ))
+    except sqlite3.Error as e:
+        return out, [f"{agent}: 读 trajectory 出错 —— {e}"]
+    finally:
+        conn.close()
+    return out, []
 
 
 def read_task_runs(*, since: datetime | None = None) -> tuple[list[TaskRun], list[str]]:

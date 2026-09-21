@@ -11,7 +11,14 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
+from _contract import (
+    VETO_STANCE,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    new_task_id,
+    now_cn,
+)
 
 T0 = now_cn()
 TID = new_task_id(1, day="20260919")
@@ -226,14 +233,40 @@ class TestCardIronLaw2:
 
 
 class TestCardVeto:
-    def test_BLOCK不可被合成阶段绕过(self):
-        blocked = verdict(agent="risk", verdict="BLOCK")
+    """制衡层的否决权。
+
+    🔴 判据是 `stance == VETO_STANCE`，不是 `verdict`。
+    `verdict` 只说数据全不全 —— 一个字段装不下「数据完整」和「我要否决」两件事：
+    risk 数据完整且要否决时，`verdict` 填 BLOCK 就再也说不出它的数据是全的，
+    而「凭什么否决」恰恰需要知道。
+    """
+
+    def test_否决不可被合成阶段绕过(self):
+        blocked = verdict(agent="risk", stance=VETO_STANCE)
         with pytest.raises(ValueError, match="否决权"):
             card(status="BUY", verdicts=[blocked])
 
-    def test_BLOCK配AVOID是合法的(self):
-        blocked = verdict(agent="risk", verdict="BLOCK")
+    def test_否决配AVOID是合法的(self):
+        blocked = verdict(agent="risk", stance=VETO_STANCE)
         assert card(status="AVOID", verdicts=[blocked]).status == "AVOID"
+
+    def test_否决配WAIT被拒(self):
+        """WAIT 是「再看看」，否决是「不要做」。把后者显示成前者就是软化制衡层。"""
+        blocked = verdict(agent="risk", stance=VETO_STANCE)
+        with pytest.raises(ValueError, match="否决必须体现"):
+            card(status="WAIT", verdicts=[blocked])
+
+    def test_否决这个词只有一处定义(self):
+        """改了词表却忘了改判据，否决权会**静默失效** —— 那是最怕的 fail-open。"""
+        from _contract import STANCE_VOCAB
+        assert VETO_STANCE in STANCE_VOCAB["risk"]
+
+    def test_数据不全的risk同样拦不住BUY(self):
+        """L-2 买入侧 fail-closed：risk 说不上话时，不许当作放行。"""
+        unknown = verdict(agent="risk", verdict="UNKNOWN", status="partial",
+                          stance="无法判定", missing=["风险面 —— 上游证据不足"])
+        with pytest.raises(ValueError, match="铁律 2"):
+            card(status="BUY", verdicts=[unknown], missing=["风险面 —— 上游证据不足"])
 
 
 class TestCardBasics:

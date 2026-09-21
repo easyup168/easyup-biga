@@ -16,7 +16,7 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
 from .missing import MissingItem
-from .verdict import AgentVerdict
+from .verdict import VETO_STANCE, AgentVerdict
 
 __all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
 
@@ -97,11 +97,22 @@ class DecisionCard:
                 "证据不完整时不得给买入结论（铁律 2）"
             )
 
-        # --- Risk Agent 的否决权 ---
-        blockers = [v.agent for v in self.verdicts if v.verdict == "BLOCK"]
+        # --- 制衡层的否决权 ---
+        # 🔴 判据是 stance 而不是 verdict：verdict 只说数据全不全。
+        #    一个字段装不下「数据完整」和「我要否决」两件事。
+        blockers = [v.agent for v in self.verdicts if v.stance == VETO_STANCE]
         if blockers and self.status == "BUY":
             raise ValueError(
-                f"{blockers} 给出 BLOCK 却仍然 status='BUY' —— 制衡层的否决权不可被合成阶段绕过"
+                f"{blockers} 给出 stance={VETO_STANCE!r} 却仍然 status='BUY' —— "
+                "制衡层的否决权不可被合成阶段绕过"
+            )
+        # 🔴 反向：有人否决，Card 的状态就必须体现出来。
+        #    允许 AVOID / BLOCK，不允许 WAIT —— WAIT 的意思是「再看看」，
+        #    而否决的意思是「不要做」，把后者显示成前者就是软化了制衡层。
+        if blockers and self.status not in ("AVOID", "BLOCK"):
+            raise ValueError(
+                f"{blockers} 给出 stance={VETO_STANCE!r}，Card 状态却是 "
+                f"{self.status!r} —— 否决必须体现为 AVOID 或 BLOCK"
             )
 
     # --- 便捷查询 ---
