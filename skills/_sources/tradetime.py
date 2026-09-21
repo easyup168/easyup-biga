@@ -36,10 +36,42 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 
 from _contract import CN_TZ  # noqa: E402
 
-__all__ = ["MARKET_CLOSE", "as_of_for_trade_date", "session_in_progress"]
+__all__ = ["MARKET_CLOSE", "as_of_for_trade_date", "market_is_open",
+           "session_in_progress"]
 
 #: A 股收盘时刻。收盘后，当日数据描述的是「全天结果」。
 MARKET_CLOSE = dtime(15, 0, 0)
+
+#: 连续竞价时段。早盘 9:30–11:30，午盘 13:00–15:00。
+_SESSIONS = ((dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0)))
+
+
+def market_is_open(now: datetime) -> bool:
+    """此刻**真的**在连续竞价时段内吗。
+
+    与 `session_in_progress` 的区别 —— 两者回答的不是同一个问题：
+
+    * `session_in_progress`：**这批数据**所属的交易日还没过完吗
+      （用途：区分「这个数真的是 0」与「这一天还没产生这个数」）
+    * `market_is_open`：**此刻**市场在不在交易
+      （用途：只在市场活着时才启用「源静默 = 故障」这类判据）
+
+    前者在周六上午也会是 True（那天的数据确实还没「过完」），
+    所以不能拿它当后者用。
+
+    ⚠️ **已知边界：不认节假日。** 本系统还没有交易日历
+    （Phase 3 的数据层加厚才会有）。
+
+    后果是可控的、且朝安全方向：节假日这里会返回 True，
+    依赖它的静默判据可能多报一条缺失项 ——
+    **多一条缺失项只会让 Card 更保守，不会让它更激进**（红线 R-3）。
+    调用方在写缺失项文案时要把「也可能是休市日」一并说出来，
+    否则读的人会去查一个不存在的故障。
+    """
+    n = now.astimezone(CN_TZ)
+    if n.weekday() >= 5:            # 周六 / 周日
+        return False
+    return any(a <= n.time() < b for a, b in _SESSIONS)
 
 
 def as_of_for_trade_date(
