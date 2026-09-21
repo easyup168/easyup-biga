@@ -125,9 +125,10 @@ class Collector:
             if warning:
                 self.warnings.append(warning)
 
-    def _keep_raw(self, source: str, payload: Any) -> None:
+    def _keep_raw(self, source: str, payload: Any, as_of: datetime) -> None:
+        """记一份原始响应。**`as_of` 必须是这个源自己的时刻**（F4，同 market）。"""
         with self._lock:
-            self.raw.append((source, payload))
+            self.raw.append((source, payload, as_of))
             self.hashes[source] = payload_sha256(payload)
 
     def collect_board(self, kind: str, label: str) -> None:
@@ -162,7 +163,8 @@ class Collector:
 
         with self._lock:
             self.boards[kind] = r
-        self._keep_raw(f"em:clist/{kind}", r.raw)
+        # `server_as_of is None` ⇒ 板块榜不带日期，它说的就是「此刻」
+        self._keep_raw(f"em:clist/{kind}", r.raw, r.server_as_of or now_cn())
 
     def collect_date(self) -> None:
         if "date" in self.break_source:
@@ -177,7 +179,8 @@ class Collector:
                 f"交易日 —— 无法从日线确定（{e}），板块数据将无从定位到哪一天",
                 "sector.trade_date.unavailable"))
             return
-        self._keep_raw(f"sina:kline/{_DATE_SYMBOL}", self.daily.raw)
+        self._keep_raw(f"sina:kline/{_DATE_SYMBOL}", self.daily.raw,
+                       self.daily.server_as_of or now_cn())
 
 
 def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> AgentVerdict:
@@ -296,9 +299,9 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
             c.missing.append(MissingItem(
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))
 
-    if store and as_of is not None:
-        for source, payload in c.raw:
-            save_raw_snapshot(source=source, as_of=as_of.isoformat(),
+    if store:
+        for source, payload, src_as_of in c.raw:
+            save_raw_snapshot(source=source, as_of=src_as_of.isoformat(),
                               retrieved_at=retrieved.isoformat(), payload=payload)
 
     core = {"trade_date", "industry_top", "industry_advance_ratio"}

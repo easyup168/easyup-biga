@@ -133,6 +133,16 @@ class NewsFeed:
     raw: dict[str, Any]
 
     @property
+    def server_as_of(self) -> datetime | None:
+        """**服务端自己声明的时刻**；`None` = 这个端点不带日期。
+
+        统一接口的理由见 `_sources/__init__.py` 顶部的「F16」一节：
+        由端点自己声明，调用方就不必逐处判断「这个源有没有日期」——
+        而那个判断一旦分散，就必然有某一处判错（F4 就是这么来的）。
+        """
+        return self.newest_at
+
+    @property
     def newest_at(self) -> datetime | None:
         return self.items[0].at if self.items else None
 

@@ -223,3 +223,115 @@ class TestDecisionIdentity:
                        from_store=True)
         with pytest.raises(ValueError, match="拒绝落库"):
             db.save_card(c, path=p)
+
+
+# ───────────────────────────────────────── 新源默认纳入，例外自己举手（F16）
+#
+# 外部评审 F16：上面那份 `_LIVE_FIELDS` 是**按文件路径 + 字面量字段名**
+# 枚举的显式字典。未来任何新 skill、或现有 skill 的新字段，只要产出一个
+# 无日期端点的事实，而开发者没主动想起改这份白名单，就不会有任何测试提醒。
+#
+# 🔴 而这不是假想：F4 本身就是「同一次提交里修了 Evidence 层、
+#    却在 raw 层重新犯了同一个错」——因为那条路径不在白名单的视野里。
+#
+# ⇒ 把「这个端点有没有服务端日期」的知识放回**源自己身上**
+#   （`server_as_of`），调用方就不必逐处判断。判断一旦分散，
+#   必然有某一处判错。
+#
+# 这条测试守的是那个统一接口：**新加一个源，必须回答这个问题。**
+
+
+def _source_result_classes() -> list[tuple[str, type]]:
+    """`_sources` 里所有「一次抓取的结果」类型 —— 判据是它带 `raw` 字段。"""
+    import dataclasses
+    import importlib
+    import pkgutil
+
+    import _sources
+
+    out = []
+    for m in pkgutil.iter_modules(_sources.__path__):
+        mod = importlib.import_module(f"_sources.{m.name}")
+        for name, obj in vars(mod).items():
+            if (isinstance(obj, type) and dataclasses.is_dataclass(obj)
+                    and obj.__module__ == mod.__name__
+                    and any(f.name == "raw" for f in dataclasses.fields(obj))):
+                out.append((f"{m.name}.{name}", obj))
+    return sorted(set(out), key=lambda x: x[0])
+
+
+def test_扫到了源结果类型():
+    """判据非空自检 —— 否则下一条会因为「一个都没扫到」而平凡通过。"""
+    assert len(_source_result_classes()) >= 5
+
+
+def test_每个源都要声明自己有没有服务端时刻():
+    missing = [n for n, cls in _source_result_classes()
+               if not hasattr(cls, "server_as_of")]
+    assert not missing, (
+        f"这些源没有声明 `server_as_of`：{missing}\n"
+        "  每个端点都必须回答「你自己带不带时刻」——\n"
+        "  不带就显式写 `server_as_of = None`，**不实现会让人以为是漏了**。\n"
+        "  调用方据此统一写 `r.server_as_of or now_cn()`，不必逐处判断。"
+    )
+
+
+def test_无日期端点必须显式声明None():
+    """两个已知的无日期端点 —— 它们是 BIGA-20260921-017 那次事故的源头。"""
+    import _sources
+
+    for cls in (_sources.BreadthResult, _sources.BoardResult):
+        assert cls.server_as_of is None, f"{cls.__name__} 不该声称自己有服务端时刻"
+
+
+# ─────────────────────────────── staleness 对共模误差免疫（F15）
+#
+# 外部评审 F15：`Evidence` 唯一的时间校验是「两者都带 tzinfo」和
+# 「as_of <= retrieved_at」，**从不与真实当前时刻比较**。
+#
+# 构造一对都比现在晚 3 天、但彼此只差 60 秒的时间戳：
+#
+#     staleness_sec = 60      # 1 分钟 —— 看起来非常新鲜
+#     而 as_of 实际比现在晚了 3 天
+#
+# 🔴 要害不在「少查了一项」，而在 `staleness_sec` 是个**差值**：
+#    只要上游的两个时刻由同一段错误逻辑派生，它对那个错误免疫。
+#    F4 那类错位恰好就是这种形状。
+
+
+class TestF15ClockAnchor:
+    def test_未来的取回时刻被拒绝(self):
+        import pytest
+
+        t = now_cn() + timedelta(days=3)
+        with pytest.raises(ValueError, match="在未来"):
+            Evidence(field="x", source="s", value=1,
+                     as_of=t - timedelta(seconds=60), retrieved_at=t)
+
+    def test_差值看起来新鲜也救不了它(self):
+        """判的是「有没有被拒」，不是 staleness 算得对不对 ——
+        staleness 在这个输入下**本来就是 60**，断言它没有意义。"""
+        import pytest
+
+        t = now_cn() + timedelta(days=3)
+        try:
+            Evidence(field="x", source="s", value=1,
+                     as_of=t - timedelta(seconds=60), retrieved_at=t)
+        except ValueError as e:
+            assert "共模" in str(e) or "差值" in str(e), "报错要指出为什么差值救不了"
+        else:
+            pytest.fail("未来时刻被放行了")
+
+    def test_正常的过去时刻照常通过(self):
+        t = now_cn() - timedelta(hours=2)
+        e = Evidence(field="x", source="s", value=1,
+                     as_of=t - timedelta(seconds=60), retrieved_at=t)
+        assert e.staleness_sec == 60
+        assert e.age_sec > 7000, "age_sec 锚在真实时钟上，不是两个数之差"
+
+    def test_时钟抖动的小幅超前仍然允许(self):
+        """容差只为机器间的时钟抖动留口子。定成 0 会在正常运行时偶发报红，
+        而偶发报红的检查最后会被当成噪音关掉。"""
+        t = now_cn() + timedelta(seconds=30)
+        Evidence(field="x", source="s", value=1,
+                 as_of=t - timedelta(seconds=1), retrieved_at=t)
