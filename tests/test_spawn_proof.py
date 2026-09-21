@@ -26,6 +26,9 @@
 from __future__ import annotations
 
 import ast
+import os
+import time
+import re
 import pathlib
 import sqlite3  # store-exempt: 造的是 **OpenClaw 运行时**状态库的仿件，
                 # 不是 BigA 事实层。`_store` 单一入口规则是为了「将来切 PG
@@ -172,6 +175,10 @@ class TestWiredIntoRealPath:
         import shutil
         work = tmp_path / "repo"
         shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
+            # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
+            #    被原样复制进沙盒，于是三条出卡路径测试全部拿到 rc=3。
+            #    沙盒要复制的是**代码**，不是这台机器此刻的运行状态。
+            ".biga-card-stop", ".biga-card.lock",
             ".git", "__pycache__", "data", ".pytest_cache", ".claude", "memory"))
         db = tmp_path / "t.db"
 
@@ -260,6 +267,125 @@ class TestWiredIntoRealPath:
             "  而机器上本来就会反复跑别的决策，这个条件几乎总成立。")
         assert not any("LIMIT" in q for q in sqls), (
             "按决策号取不该有条数上限 —— 一天跑得多了，早先的决策会悄悄查不到。")
+
+
+# ─────────────────────────── 2026-09-21 21:03 事故：出卡递归
+#
+# `AGENTS.md` 当时写着「🔴 要出卡？跑这一条」并贴出 `bin/biga-card`。
+# 而那条命令做的事就是把编排提示词喂给 `main` —— 读到那句话的正是它。
+#
+#   bin/biga-card → $BIGA agent --agent main → 新 main 会话
+#                                                ↓ 读 AGENTS.md
+#                                          bin/biga-card → …
+#
+# 实测：187 个 main 会话 / 约 195 次调用，92 次是那行命令的逐字复制。
+# 预算闸门在占号处拦下约 58 次（省约 $48），但每次被拦前已付掉一个
+# main 轮次 —— 实账 $8.99。
+#
+# 🔴 递归的每一层都**没有任何异常信号**：每一层都在「照文档做」。
+
+
+class TestNoCardRecursion:
+    """契约侧 + 机器侧两道，缺一不可。"""
+
+    def test_契约不许叫supervisor去跑出卡命令(self):
+        """判据是「命令有没有作为**可执行行**出现」，不是「文件里提没提它」。
+
+        ⚠️ 不能简单断言 `"biga-card" not in text` —— 这一节**必须**提到它
+           才能说「不要运行它」。描述一条「不要做 X」的规则就得写出 X，
+           `CLAUDE.md` 记过四次同样的形状。
+        ⇒ 只禁**代码块里的裸调用**，因为那才是会被照抄的东西。
+        """
+        text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+        bad = []
+        in_block = False
+        for i, ln in enumerate(text.splitlines(), 1):
+            if ln.startswith("```"):
+                in_block = not in_block
+                continue
+            if not in_block:
+                continue
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            # 画递归示意图的那几行带箭头，不是可执行命令
+            if "→" in s or "↓" in s:
+                continue
+            if re.search(r"(^|[;&|]\s*|/)biga-card(\s|$)", s) and not re.search(
+                    r"--(list|show|check)\b", s):
+                bad.append(f"AGENTS.md:{i}  {s}")
+        assert bad == [], (
+            "Supervisor 的契约里出现了可直接照抄的出卡命令：\n"
+            + "".join(f"  · {b}\n" for b in bad)
+            + "  🔴 `bin/biga-card` 做的事就是把编排提示词喂给 `main`。\n"
+              "     叫 `main` 去跑它 = 让系统再造一个自己，**无条件无限递归**。\n"
+              "     2026-09-21 21:03–21:50 实际发生过：187 个会话 / $8.99。\n"
+              "  那条命令是**给人敲的**。契约里要写的是「绝对不要运行它」。")
+
+    def test_契约明确写了不要运行它(self):
+        """反向：上面那条可以靠「一个字都不提」平凡通过，那也是错的 ——
+        不提，下一个模型就会自己发明这个调用。"""
+        text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+        assert "绝对不要运行" in text and "biga-card" in text, \
+            "契约必须**点名**禁止，而不是回避这个命令"
+
+    def test_出卡命令自己有单实例锁(self):
+        """🔴 契约那一侧靠不住 —— 这是本项目的第一课。
+
+        同一天 19:31 那次「四个 spawn 无归属」，规则也一条不缺地写在契约里。
+        ⇒ 机器这一侧必须自己拦。判据是**真的并发跑两次**，不是「源码里有 flock」。
+        """
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            work, db, stub = TestWiredIntoRealPath._seeded_repo(
+                td, "BIGA-20260921-701", "print('桩：全齐')\n")
+            # 桩掉 agent：慢一点，好让第二次撞上锁
+            stub.write_text("#!/usr/bin/env bash\nsleep 8\n", encoding="utf-8")
+            stub.chmod(0o755)
+            env = {**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db),
+                   "BIGA_CARD_FORCE": "1"}
+            first = subprocess.Popen(["bash", str(work / "bin" / "biga-card")],
+                                     cwd=work, env=env,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            try:
+                time.sleep(2)
+                second = subprocess.run(
+                    ["bash", str(work / "bin" / "biga-card")],
+                    cwd=work, env=env, capture_output=True, text=True, timeout=60)
+                assert second.returncode != 0, (
+                    "第二次并发出卡没有被拦下 —— 递归/并发就还能重演。\n"
+                    f"  stdout: {second.stdout[-200:]}")
+                assert "单实例锁" in second.stderr, second.stderr[-200:]
+            finally:
+                first.terminate()
+                first.wait(timeout=30)
+
+    def test_总闸能一键停掉出新卡(self):
+        """事故止血用的。判据：存在闸门文件 ⇒ 出新卡拒绝，且**看卡不受影响**。"""
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            work, db, stub = TestWiredIntoRealPath._seeded_repo(
+                td, "BIGA-20260921-702", "print('桩：全齐')\n")
+            (work / ".biga-card-stop").write_text("测试用\n", encoding="utf-8")
+            env = {**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db),
+                   "BIGA_CARD_FORCE": "1"}
+            r = subprocess.run(["bash", str(work / "bin" / "biga-card")],
+                               cwd=work, env=env, capture_output=True,
+                               text=True, timeout=60)
+            assert r.returncode == 3, f"总闸没拦住：rc={r.returncode}"
+            assert "总闸" in r.stderr
+            # 🔴 只拦花钱的动作 —— 事故排查时必须还能看已有的卡
+            r2 = subprocess.run(["bash", str(work / "bin" / "biga-card"), "--list", "3"],
+                                cwd=work, env=env, capture_output=True,
+                                text=True, timeout=60)
+            assert r2.returncode == 0, (
+                "总闸把 --list 也拦了 —— 事故当中最需要的就是看现状。\n"
+                f"  {r2.stderr[-200:]}")
 
 
 class TestOrphanSpawns:

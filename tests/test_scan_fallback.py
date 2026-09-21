@@ -97,7 +97,11 @@ def test_把仓库剥掉git之后守卫仍然全绿(tmp_path):
     """
     work = tmp_path / "repo"
     shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
-        ".git", "__pycache__", ".pytest_cache", "data", ".claude", "memory"))
+            # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
+            #    被原样复制进沙盒，于是三条出卡路径测试全部拿到 rc=3。
+            #    沙盒要复制的是**代码**，不是这台机器此刻的运行状态。
+            ".biga-card-stop", ".biga-card.lock",
+            ".git", "__pycache__", ".pytest_cache", "data", ".claude", "memory"))
     assert not (work / ".git").exists(), "副本里还有 .git，这条测试等于没测"
 
     r = subprocess.run(
