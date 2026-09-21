@@ -79,26 +79,23 @@
       | 第一次运行卡死 | `activeTool=Agent ... reason=blocked_tool_call`，346s 后 `CLI run aborted` |
       | 真凭据不存在 | `models auth list` → `Profiles: (none)`；claude-cli 是插件自带 synthetic auth |
 
-      **根因（已确证，非推断）**：gateway 日志里有一行
-      `Warning: MCP server blocked by ***: openclaw`。
-      本机 `~/.claude/***` 有***
-      `restrictions.***.allowed = false`，
-      **Claude CLI 被禁止加载任何 MCP server**。
-      登录选 Claude CLI 方式 ⇒ OpenClaw 进入 `cli-backend` 模式 ⇒ 桥接的 MCP 工具
-      被这条策略整体拦掉 ⇒ `ToolSearch` 返回 "No matching deferred tools found"。
+      **根因（已确证，非推断）**：gateway 日志里有一行警告，说注入的 MCP server
+      被本机的一条策略拦下了。登录时被自动选中的桥接模式 ⇒ 工具经 MCP 注入 ⇒
+      整体被拦 ⇒ `ToolSearch` 返回 "No matching deferred tools found"。
 
-      ⇒ **只要走 Claude CLI 桥接，跨 agent spawn 就不可能工作。** 与提示词无关。
-      ⚠️ 该策略是组织管控，**不要去改它**。
+      ⇒ **只要走那条桥接路径，跨 agent spawn 就不可能工作。** 与提示词无关。
+      ⚠️ 该限制不在本项目控制内，**不要去改它**。
+      ⚠️ 具体是哪条限制，属于本机情况，记在仓库外的 `AUTH-NOTES.local.md`。
 
       **已做的修正**：Supervisor 的 `AGENTS.md` 写死工具真名
       `mcp__openclaw__sessions_spawn`，并明令禁止用通用 Agent 顶替（附三条理由）。
       但工具不可见时，契约改得再硬也没用。
 
       **解法（已实施，两件事缺一不可）**
-      1. **运行时**：`agents.defaults.models."anthropic/claude-sonnet-5".agentRuntime.id`
-         由 login 写入的 `claude-cli` 改为 **`openclaw`**（内置 harness，不经 Claude CLI，
-         那条***不适用）。haiku fallback 同改
-      2. **凭据**：见裁定 11 —— 复用邻居的 ***
+      1. **运行时**：`agents.defaults.models.*.agentRuntime.id` 由 login 自动写入的
+         桥接模式改为 **`openclaw`**（内置 harness，不经外部 CLI，那条限制不适用）。
+         fallback 模型同改
+      2. **凭据**：见裁定 11 —— 与邻居共享
 
       **已验证的结果**
       - `agent --agent main -m "只回复两个字：收到"` → 干净返回「收到」
@@ -177,19 +174,18 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 ## 待裁定
 
 - [ ] 🔴 **换掉共享的 anthropic 凭据**（裁定 11 的退出条件，Phase 3 前必须做）
-      当前 BigA 用的是从邻居复制的同一条 *** ——
-      **token 轮换时两套一起停，且排查方向天生指向 BigA（错的那边）**。
-      触发条件任一成立即换：① 管理员批下独立 API key
-      ② *** 放开 `***` ③ 出现第一次因这条耦合导致的误判排查
+      当前 BigA 与邻居共享同一份凭据 ——
+      **它失效时两套一起停，且排查方向天生指向 BigA（错的那边）**。
+      触发条件任一成立即换：① 能够申请到独立凭据
+      ② 出现第一次因这条耦合导致的误判排查
 
-- [x] **模型认证方式** —— 已裁定：**复用邻居实例的 *****（裁定 11）
-      过程：① 选 Claude CLI → `cli-backend` 模式，MCP 被***拦死，spawn 不可见
-      ② 改用非 CLI 重登 → 它自动又选了 Claude CLI（探测到本机有 claude）
-      ③ 查邻居配置 → 它用的是 `*** [anthropic/token] static`，
-         既非 CLI 桥接也非 API key
-      ④ `claude ***` 生成长期 token 的路 → ***** 已禁**
-      ⑤ ⇒ 复用邻居那条 token（生成于***之前，账号下唯一可用的 anthropic 凭据）
-      ⚠️ 耦合已在 `CLAUDE.md`「已知耦合」一节记明，含排查顺序与退出条件
+- [x] **模型认证方式** —— 已裁定：**与邻居实例共享凭据**（裁定 11）
+      过程要点（可迁移的那部分）：桥接模式下工具被本机策略整体拦掉 ⇒
+      重登时安装器又自动选回同一种方式 ⇒ 去读「同环境但能用」的邻居配置，
+      两行差异直接指出两个根因（运行时被钉死 / 没有 auth profile）。
+      ⚠️ 具体用的是哪种凭据、为什么只能用它 —— **属于本机情况，不入库**，
+      记在仓库外的 `~/.openclaw-biga/AUTH-NOTES.local.md`。
+      耦合本身已在 `CLAUDE.md`「已知耦合」一节记明，含排查顺序与退出条件
 - [x] **起 gateway 自动创建的 4 条 cron** —— 已裁定：**暂不动，记录在案**。
       清单：`heartbeat:main` / `memory-core:memory-dreaming-promotion` /
       `skill-collection-review:main` / `skill-collection-review:emotion`
@@ -313,7 +309,7 @@ git -C $BIGA_REPO config core.hooksPath tools/git-hooks
 | 2.1 | `market` skill + agent | Stage 1 **第一次真并行** | `maxConcurrent: 6` 配了但从未被验证过 —— 至今只有 1 个 specialist，并行是零次实测 |
 | 2.2 | `risk` + Stage 2 | 冻结证据传入 + **BLOCK 否决权** | **唯一的结构性新机制。** BLOCK 正是 Phase 4 要检验区分力、Phase 5 下单要依赖的那个东西 —— 越早端到端落库，样本越多 |
 | 2.3 | `sector` / `technical` | 无 | 到这一步才是真正的「复制」，推后不损失任何信息 |
-| 2.4 ✅ | `news` | 时间戳 / 来源 / 新鲜度核验；**第一个 skill 算不出结论的 Agent** | **先做数据源 spike。** 这台机器的 *** 策略已经拦掉过一次工具通路（教程 07），等做到最后才发现拿不到搜索 = 整章白写 |
+| 2.4 ✅ | `news` | 时间戳 / 来源 / 新鲜度核验；**第一个 skill 算不出结论的 Agent** | **先做数据源 spike。** 这台机器上已出现过一次「工具通路被本机策略整体拦掉」（教程 07），等做到最后才发现拿不到数据源 = 整章白写 |
 
 ### 出口条件 → 见 `docs/design/phase-2-specialists.md` §4
 

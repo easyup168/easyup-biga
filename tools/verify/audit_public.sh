@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 公开仓库敏感内容审查 —— 八项检查的**唯一实现**
+# 公开仓库敏感内容审查 —— 九项检查的**唯一实现**
 #
 # 用法
 #   tools/verify/audit_public.sh                      # 全历史（手工审查）
@@ -59,13 +59,23 @@ chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z
 chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
 chk "家目录路径"     '/home/[a-z][a-z0-9_-]*'
 chk "个人邮箱"       '[a-zA-Z0-9._%-]+@(gmail|qq|163|126|outlook|hotmail|foxmail|sina)\.'
-chk "邻居可识别细节" '(EASYUP|\bQMT\b|market\.db|nodeenv|find_node_bin|[0-9]+ 个 systemd)'
+chk "邻居可识别细节" '(EASYUP|\bQMT\b|market\.db|nodeenv|find_node_bin|[0-9]+ 个 systemd|***)'
 chk "IP 地址"        '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
 chk "旧用户名"       '\b***\b'
 chk "密码赋值"       '(password|passwd|secret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
+# 🔴 第 9 项加于 2026-09-21。触发它的不是某次事故，是一次人工 review ——
+#    作者读教程第 7 章时指出：「如何接通 claude」属于个人/组织的特殊情况。
+#
+#    前八项一项都没抓到它，因为它既不是密钥，也不是路径，也不是邻居的模块名。
+#    它是**这台机器与这个账号的认证安排**：***、账号层级、
+#    哪条命令被禁、凭据从哪来。
+#
+#    ⚠️ 这类内容的危险在于它读起来像「踩坑记录」，所以会被顺手写进教程 ——
+#    而教程恰恰是最鼓励写细节的地方。
+chk "环境/账号策略" '(***|***|***|***|***|***|***|***|***|***)'
 
 if [ "$FAIL" -eq 0 ]; then
-  echo "══ 八项全绿 ══"
+  echo "══ 九项全绿 ══"
   exit 0
 fi
 echo "══ 有命中，不要 push ══"
