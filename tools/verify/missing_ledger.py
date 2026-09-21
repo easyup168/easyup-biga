@@ -35,6 +35,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "skills"))
 
 from _store import StoreNotInitialised, db  # noqa: E402
 
+# 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _verdict as _v  # noqa: E402
+
 #: 演练注入的标记。
 #:
 #: 🔴 用的是 **CLI 开关的字面量**，不是中文散文。
@@ -117,8 +121,9 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = collect()
     if not rows:
-        print("库里一张卡都没有。")
-        return 1
+        # 🔴 判不了。空库是全新环境的正常状态，不是「缺失项台账不合格」。
+        print("🔶 判不了 —— 库里一张卡都没有。先跑一次 bin/biga-card。")
+        return _v.UNKNOWN
 
     print("═" * 78)
     print("缺失项台账 · Phase 2 出口条件 4")
@@ -156,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
               "而同一天的\n   多次运行往往缺的是**同一个东西** —— "
               "它证明的是「这个源今天不好使」，\n   而不是「系统能发现各种缺失」。"
               "⇒ 需要跨天累积。")
-    return 0
+    return _v.PASS
 
 
 if __name__ == "__main__":
@@ -167,4 +172,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except StoreNotInitialised as e:
         print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit(_v.UNKNOWN) from None

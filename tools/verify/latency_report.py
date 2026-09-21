@@ -26,6 +26,20 @@
    串行的表现是：每步成功、Card 照常产出、日志全绿，**只是慢了一倍**。
    而「慢了一倍」会被网络波动掩盖 —— 区间相交才是结构性证据。
    只有一个 specialist 时结论是「判不了」，**不是「通过」**（R-3 对验证工具本身同样适用）。
+
+🔴 退出码 —— 与 `isolation.py` 同一套口径
+   ====  ============================================================
+   0     通过
+   1     **真的不达标**：Stage 1 确实串行了
+   2     **判不了**：读不到轮次 / 找不到决策 / 窗口里没有 Supervisor
+   ====  ============================================================
+
+   ⚠️ 这里原来是两处不一致，外部深度评审点了出来：
+      · 读不到数据退 `1` —— 与「真的串行」同码，排查方向一开始就是错的
+      · 并行检查不分 `False`（串行）与 `None`（判不了），一律退 `4`
+      而这个脚本**自己打印的结论**一直是三态的（「⚠️ 判不了」）。
+      ⇒ 打印对了、退出码没跟上，是本仓库第 10 次同形状问题：
+        **守卫查的地方，和它声称守的地方，不是同一处。**
 """
 
 from __future__ import annotations
@@ -41,6 +55,10 @@ sys.path.insert(0, str(_REPO / "skills"))
 from _contract import CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 from _store import StoreNotInitialised, connect  # noqa: E402
 from _store.runtime import read_task_runs, read_turns  # noqa: E402
+
+# 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _verdict as _v  # noqa: E402
 
 # 🔴 `read_turns()` 返回的时间已经是北京时间（在 `_store.runtime` 的读取边界转好）。
 #    这里不再逐处 `.astimezone(CN_TZ)` —— 那种「人人都要记得」的义务迟早漏一个，
@@ -241,16 +259,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    · {u}")
         print()
     if not probe.turns:
-        print("没有读到任何 LLM 轮次。")
-        return 1
+        # 🔴 判不了，不是不达标。运行时库为空是**全新环境的正常状态**。
+        print("🔶 判不了 —— 没有读到任何 LLM 轮次。")
+        print("   运行时还没产生 trajectory（全新环境），或者读不到它的库。")
+        print("   先跑一次真实出卡：bin/biga-card")
+        return _v.UNKNOWN
 
     turns = probe.turns
     title, approx = "全部轮次", False
     if not args.all:
         got = _decision_window(args.decision_id)
         if not got:
-            print("找不到决策记录。用 --all 看全部轮次。")
-            return 1
+            print("🔶 判不了 —— 找不到决策记录。用 --all 看全部轮次。")
+            return _v.UNKNOWN
         did, end, elapsed = got
         floor = _previous_card_time(did)
         if elapsed > 0:
@@ -278,8 +299,9 @@ def main(argv: list[str] | None = None) -> int:
                  if t.ended_at >= start
                  and t.started_at <= end]
         if not turns:
-            print(f"{title} 内没有轮次。")
-            return 1
+            print(f"🔶 判不了 —— {title} 内没有轮次。")
+            print("   常见成因是测量太早：Supervisor 那一轮还没写进 trajectory。")
+            return _v.UNKNOWN
 
     print("═" * 78)
     print(f"延迟与成本分解 · {title}")
@@ -411,9 +433,15 @@ def main(argv: list[str] | None = None) -> int:
         print("   输出 token 高通常意味着思考档位（thinking）占了大头 —— "
               "优化要先动它，而不是先动技能。")
 
-    if args.parallel_check and (parallel is not True or no_supervisor):
-        return 4
-    return 0
+    if args.parallel_check:
+        # 🔴 `False`（真串行）与 `None`（判不了）必须是不同的退出码。
+        #    合成一个 `4` 的后果：看到非零就去查提示词，
+        #    而真实原因可能只是「报告跑早了」。
+        if no_supervisor or parallel is None:
+            return _v.UNKNOWN
+        if parallel is False:
+            return _v.FAIL
+    return _v.PASS
 
 
 if __name__ == "__main__":
@@ -424,4 +452,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except StoreNotInitialised as e:
         print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit(_v.UNKNOWN) from None

@@ -41,6 +41,10 @@ import pathlib
 import re
 import sys
 
+# 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _verdict as _v  # noqa: E402
+
 HOME = pathlib.Path.home()
 NEIGHBOUR = HOME / ".openclaw"
 BIGA = HOME / ".openclaw-biga"
@@ -362,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     db = NEIGHBOUR / "state" / "openclaw.sqlite"
     if a.print_mtime:
         print(db.stat().st_mtime_ns if db.exists() else "")
-        return 0
+        return _v.PASS
 
     res = Result()
     check_i1(res)
@@ -375,8 +379,8 @@ def main(argv: list[str] | None = None) -> int:
     #    否则「跑完没报错」这个最常用的读法会把它读成通过。
     #    2 与 1 分开，是为了让调用方能区分「坏了」和「没验到」。
     if res.failed:
-        return 1
-    return 2 if res.unknowns else 0
+        return _v.FAIL
+    return _v.UNKNOWN if res.unknowns else _v.PASS
 
 
 if __name__ == "__main__":
