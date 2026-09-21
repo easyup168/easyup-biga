@@ -34,13 +34,29 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from _store import db  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from budget import check_budget, explain  # noqa: E402
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="占一个决策编号（Stage 0）")
     ap.add_argument("--by", default="supervisor",
                     help="谁占的号。排查「这个号哪来的」时唯一有用的线索")
     ap.add_argument("--day", help="YYYYMMDD，缺省为今天（北京时间）")
+    ap.add_argument("--force", action="store_true",
+                    help="越过预算闸门。**要有理由** —— 它拦的是误触，不是你")
     a = ap.parse_args()
+
+    # 🔴 闸门在**占号之前** —— 占号是整条链路的第一步，
+    #    也是唯一一处所有触发路径（CLI / 飞书 / 将来的 cron）都绕不过去的地方。
+    #    接飞书之后手机上一句话就能花掉 $1.37，而在那之前误触代价是零。
+    if not a.force:
+        reasons = check_budget(day=a.day)
+        if reasons:
+            print(explain(reasons), file=sys.stderr)
+            return 3
+
     print(db.reserve_decision_id(by=a.by, day=a.day))
     return 0
 
