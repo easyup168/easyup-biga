@@ -90,6 +90,8 @@ Phase 1 的设计原本是 `architecture.md` 的 §11 —— 一段**历史**躺
 | [`design/phase-2-specialists.md`](design/phase-2-specialists.md) | 阶段 · 进行中 | Phase 2：范围、步骤、关键取舍、出口条件 |
 | [`guide/install.md`](guide/install.md) | 操作 | 在已有 OpenClaw 实例旁并排装第二套 |
 | [`guide/phase1-kickoff-prompt.md`](guide/phase1-kickoff-prompt.md) | 操作 | Phase 1 启动提示词（自包含，可直接粘贴） |
+| [`guide/usage.md`](guide/usage.md) | 操作 | 怎么用：出卡、读卡、四个「确认它没骗你」的检查 |
+| [`guide/review-prompt.md`](guide/review-prompt.md) | 操作 | 对抗性评审提示词（自包含，粘到新会话） |
 | [`tutorial/`](tutorial/README.md) | 过程 | 开发教程 13 章，与代码同步推进 |
 | [`external/`](external/) | 只读 | 上游需求文档、外部设计评审 |
 
