@@ -431,7 +431,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       CHANGELOG/TODO 条目里，把邮箱本身写进去了。
       **文档里描述一个敏感值时，不要把那个值抄进去。**
 
-- [x] 转 Public 当天（2026-09-20）：八项全绿后转公开
+- [x] 转 Public 当天（2026-09-20）：八项全绿后转公开（<!-- 冻结：当时确实是八项 -->）
 
 - [x] 🔴 **触发条件已经变了 —— 现在是「每次 push 前」，不再是「转可见性前」**
 
@@ -457,7 +457,7 @@ $BIGA_REPO/tools/verify/audit_public.sh
 git -C $BIGA_REPO config core.hooksPath tools/git-hooks
 ```
 
-🔴 **八项检查只有一份实现**：`tools/verify/audit_public.sh`。
+🔴 **这些检查只有一份实现**：`tools/verify/audit_public.sh`。
 之前它是 `TODO.md` 里的一段字面量 —— 一旦 hook 里再抄一份，
 就有了两套口径，而**改了一份忘了另一份时，剩下那份仍然报绿**（L-3）。
 

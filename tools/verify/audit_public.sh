@@ -88,8 +88,21 @@ chk "密码赋值"       '([p]assword|[p]asswd|[s]ecret)["'"'"'[:space:]]*[:=][[
 #    而教程恰恰是最鼓励写细节的地方。
 chk "环境/账号策略" '([p]olicy-limits|[s]etup-token|[E]nterprise|[企]业策略|[组]织策略|[账]号级策略|[策]略禁止|[策]略收紧|[s]tatic token|[s]hared-from-neighbour)'
 
+# 🔴 第 10 项加于 2026-09-21，在 **IM 凭据进入本机之后、代码引用它之前**。
+#
+#    不是事后补的：飞书配好那天先加检查，再动代码。
+#    理由是仓库 Public ⇒ **推即发布**，而 appId 这类东西的特点是
+#    「看起来不像密钥」—— 它是个标识符，很容易被当成无害的配置贴进文档。
+#
+#    ⚠️ appSecret 目前存在 OpenClaw 的密钥库里（配置文件只有引用 id），
+#    所以真正的风险面是 **appId 与各类 token 被顺手抄进说明文字**。
+#
+#    覆盖：飞书/Lark 应用标识与四类密钥，以及通用的 webhook 地址。
+#    与前九项一样用 [a]bc 写法，保证脚本自己不会匹配自己。
+chk "IM 应用凭据"   '([c]li_[a-z0-9]{16}|[F]EISHU_APP_(ID|SECRET)|[F]EISHU_(VERIFICATION_TOKEN|ENCRYPT_KEY)|[a]pp_?[sS]ecret["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{8,}|open\.[f]eishu\.cn/open-apis/bot/v2/hook/)'
+
 if [ "$FAIL" -eq 0 ]; then
-  echo "══ 九项全绿 ══"
+  echo "══ 十项全绿 ══"
   exit 0
 fi
 echo "══ 有命中，不要 push ══"

@@ -127,7 +127,7 @@ def test_没有歧义的目录名():
 #
 # 问题是这些属于**本机的特殊情况**，而教程是公开的。
 # 而且它们读起来像「踩坑记录」—— 教程恰恰是最鼓励写踩坑的地方，
-# 所以这类内容会被顺手写进来，八项审查一项都抓不到。
+# 所以这类内容会被顺手写进来，而当时的八项审查一项都抓不到。
 #
 # 边界：**隔离本身要写**（独立目录 / 独立端口 / 崩溃不波及是通用工程问题），
 #       **那套系统是什么、怎么配的、我怎么读了它 —— 不写。**
@@ -340,4 +340,68 @@ def test_每个入口都在设计文档里被提过(path: pathlib.Path):
         "  ⚠️ 这不是「补一行文件名」就完了 —— 要写清楚**它解决什么问题**，\n"
         "     否则三个月后没人知道能不能删它。\n"
         "  真的只是内部实现？改名加 `_` 前缀，它就不算入口了。"
+    )
+
+
+# ─────────────────────────── 审查项数也会漂移（F22 换了个地方）
+#
+# 加第 10 项时，四处文档还写着「八项」「九项」——
+# 与测试条数是**同一个形状**：一个每次改动都要手工同步的数字，
+# 最后一定会不同步。
+#
+# 🔴 判据取自脚本里 `chk "…"` 的真实调用数，不另写一个计数器。
+
+_CN_NUM = "零一二三四五六七八九十"
+
+
+def _audit_check_count() -> int:
+    src = (REPO / "tools" / "verify" / "audit_public.sh").read_text(encoding="utf-8")
+    return len(re.findall(r'^chk "', src, re.M))
+
+
+def test_扫到了审查项():
+    assert _audit_check_count() >= 9, "一项都没数到的话下面那条等于没测"
+
+
+#: 说「N 项检查」的两种语序，外加 markdown 强调符要先剥掉 ——
+#: 🔴 第一版没剥，`**十项**检查` 里的 `**` 把两半隔开，于是这条守卫
+#:    **一处都没匹配到**：删掉第 10 项之后它照样绿。
+#:    与 F5/F4/F3/F7 那几次同一个形状，这次是在写守卫的当场被探针抓到的。
+_COUNT_SAYINGS = (
+    re.compile(r"([零一二三四五六七八九十]|\d+)项(检查|审查|全绿)"),
+    re.compile(r"(检查|审查)[（(]([零一二三四五六七八九十]|\d+)项[)）]"),
+)
+
+
+def _sayings(line: str) -> list[str]:
+    plain = re.sub(r"[*`_]", "", line)
+    out = []
+    for pat in _COUNT_SAYINGS:
+        for m in pat.finditer(plain):
+            num = next(g for g in m.groups() if g and g not in ("检查", "审查", "全绿"))
+            out.append((m.group(0), num))
+    return out
+
+
+#: ⚠️ `TODO.md` **故意不在这张表里** —— 它那句已经改成「这些检查」，
+#:    根本不提数字。**最好的防漂移是不写那个数**，写了才需要守卫。
+@pytest.mark.parametrize("rel", ["CLAUDE.md", "docs/design/architecture.md"])
+def test_文档里写的审查项数与脚本一致(rel: str):
+    n = _audit_check_count()
+    want = _CN_NUM[n] if n < len(_CN_NUM) else str(n)
+    text = (REPO / rel).read_text(encoding="utf-8")
+    seen, bad = 0, []
+    for line in text.splitlines():
+        # 只看**当下的**说法；历史快照（带日期的验收记录）用「冻结」豁免
+        if _FROZEN_MARK in line or "项验收" in line:
+            continue
+        for whole, num in _sayings(line):
+            seen += 1
+            if num != want:
+                bad.append(f"「{whole}」")
+    # 🔴 没找到 ≠ 通过 —— 这正是第一版翻车的地方
+    assert seen, f"{rel} 里找不到「N 项检查」的说法 —— 是被删了，还是换了写法？"
+    assert not bad, (
+        f"{rel} 写着 {bad}，而脚本里实际是 {want}项（{n} 条 chk）。\n"
+        f"  历史快照请在同一行标注「{_FROZEN_MARK}」豁免。"
     )
