@@ -262,6 +262,68 @@ def check_ports(res: Result) -> None:
                     "⇒ 两边 gateway 都起着的时候再跑。")
 
 
+#: systemd 用户单元目录 —— 两套实例共用的命名空间之一。
+SYSTEMD_USER = HOME / ".config/systemd/user"
+
+#: BigA 的单元必须带这个后缀（openclaw 按 profile 推导）。
+BIGA_UNIT_SUFFIX = "-biga.service"
+
+
+def check_namespaces(res: Result) -> None:
+    """R-2 第 2 处：systemd 用户单元名。
+
+    🔴 为什么它和 nvm bin 是同一条红线
+    ----------------------------------
+    端口分开了、状态目录分开了，**名字还是共享的**。
+    凡是「按约定取默认名」的地方都可能互相顶掉，而顶掉是**静默**的：
+    文件被覆写，服务照常起来，只是指向了另一套。
+
+    实测（2026-09-21 装服务时）：默认名 `openclaw-gateway.service`
+    正被同机已有实例用着，而且旁边有个 `.bak` —— **有人已经覆写过一次**。
+    更隐蔽的是 `OPENCLAW_SYSTEMD_UNIT` 这个环境变量会覆盖 profile
+    推导出来的名字，一旦从别处漏进 shell 就会写到生产那个文件上。
+
+    判据
+    ----
+    **引用了 BigA 路径的单元，名字必须带 `-biga`。** 反过来就是覆写的签名：
+    一个不叫 `-biga` 的单元里出现 BigA 的路径 ⇒ 我们顶掉了别人的。
+
+    ⚠️ 没有任何单元引用 BigA ⇒ 服务没装 ⇒ **判不了**，不是通过
+    （什么都没装的时候「没占别人名字」是平凡成立的）。
+    """
+    if not SYSTEMD_USER.is_dir():
+        res.unknown("共享命名空间 · 判不了 —— 没有 systemd 用户单元目录",
+                    str(SYSTEMD_USER))
+        return
+
+    ours, stolen = [], []
+    for f in sorted(SYSTEMD_USER.glob("*.service")):
+        try:
+            body = f.read_text(errors="replace")
+        except OSError:
+            continue
+        if str(BIGA) not in body:
+            continue                       # 不引用 BigA，与我们无关
+        (ours if f.name.endswith(BIGA_UNIT_SUFFIX) else stolen).append(f.name)
+
+    leak = os.environ.get("OPENCLAW_SYSTEMD_UNIT", "").strip()
+    hint = (f"\n⚠️ 当前环境里 OPENCLAW_SYSTEMD_UNIT={leak!r} —— "
+            f"它会覆盖 profile 推导的名字，装服务前先清掉" if leak else "")
+
+    if stolen:
+        res.fail("共享命名空间 · BigA 占用了不属于它的单元名",
+                 f"这些单元引用 BigA 路径却不叫 *{BIGA_UNIT_SUFFIX}：{stolen}\n"
+                 f"多半是 `gateway install` 写到了默认名上，"
+                 f"而默认名正被同机已有实例用着。" + hint)
+    elif ours:
+        res.ok(f"共享命名空间 · systemd 单元名不重叠（{len(ours)} 个）",
+               f"{ours}{hint}")
+    else:
+        # 🔴 没装服务时「没占别人名字」是平凡成立的 —— 不算证据。
+        res.unknown("共享命名空间 · 判不了 —— BigA 没有安装 systemd 服务",
+                    f"{SYSTEMD_USER} 下没有任何单元引用 {BIGA}{hint}")
+
+
 def check_i2(res: Result, before: str | None) -> None:
     """I-2：邻居的状态库没有被我们改动。
 
@@ -306,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     check_i1(res)
     check_i2(res, a.before)
     check_r2(res)
+    check_namespaces(res)
     check_ports(res)
     print(res.render())
     # 🔴 R-3：`UNKNOWN` ≠ `PASS` ⇒ 判不了也必须是非零退出码，

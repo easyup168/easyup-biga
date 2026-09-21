@@ -153,3 +153,79 @@ class TestSingleImplementation:
             "  同一判据两份实现，两边都报绿时你不知道该信哪一份 ——\n"
             "  这正是 architecture.md §9 L-3 点名的失败模式。"
         )
+
+
+class TestSharedNamespace:
+    """R-2 第 2 处：systemd 用户单元名也是共享命名空间。
+
+    端口分开了、状态目录分开了，**名字还是共享的**。
+
+    实测（2026-09-21 装服务时发现）：默认名 `openclaw-gateway.service`
+    正被同机已有实例用着，旁边还有个 `.bak` —— **有人已经覆写过一次**。
+
+    🔴 当时 R-2 只写了 nvm bin 一处，差点按「R-2 说的是 nvm，这里不是」放行。
+    ⇒ 红线已改写成**模式级**：共享命名空间里不许占默认名，
+      已知三处（nvm bin / systemd 单元名 / 端口）列成一张表。
+    """
+
+    def _units(self, tmp_path, monkeypatch, files: dict[str, str]):
+        d = tmp_path / "systemd" / "user"
+        d.mkdir(parents=True)
+        for name, body in files.items():
+            (d / name).write_text(body, encoding="utf-8")
+        monkeypatch.setattr(isolation, "SYSTEMD_USER", d)
+        res = isolation.Result()
+        isolation.check_namespaces(res)
+        return res.rows[0]
+
+    def _body(self, path_str: str) -> str:
+        return f"[Service]\nExecStart=/usr/bin/node {path_str}/runtime/x.js\n"
+
+    def test_带后缀的单元是合规的(self, tmp_path, monkeypatch):
+        got = self._units(tmp_path, monkeypatch, {
+            "openclaw-gateway-biga.service": self._body(str(isolation.BIGA))})
+        assert got[0] == isolation.PASS, got
+
+    def test_占了默认名就是覆写(self, tmp_path, monkeypatch):
+        """🔴 一个不叫 `-biga` 的单元里出现 BigA 路径 = 我们顶掉了别人的。"""
+        got = self._units(tmp_path, monkeypatch, {
+            "openclaw-gateway.service": self._body(str(isolation.BIGA))})
+        assert got[0] == isolation.FAIL, got
+        assert "openclaw-gateway.service" in got[2]
+
+    def test_别人的单元不受影响(self, tmp_path, monkeypatch):
+        """同机已有实例的单元不引用 BigA ⇒ 与我们无关，不该被算进来。"""
+        # ⚠️ 假路径故意不写成家目录形态 —— 公开审查会抓 `/home/...`
+        got = self._units(tmp_path, monkeypatch, {
+            "openclaw-gateway.service": self._body("/opt/other-instance"),
+            "openclaw-gateway-biga.service": self._body(str(isolation.BIGA))})
+        assert got[0] == isolation.PASS, got
+
+    def test_没装服务是判不了_不是通过(self, tmp_path, monkeypatch):
+        """🔴 什么都没装的时候「没占别人名字」是**平凡成立**的。"""
+        got = self._units(tmp_path, monkeypatch, {
+            "unrelated.service": "[Service]\nExecStart=/bin/true\n"})
+        assert got[0] == isolation.UNKNOWN, got
+
+    def test_目录不存在也是判不了(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(isolation, "SYSTEMD_USER", tmp_path / "nope")
+        res = isolation.Result()
+        isolation.check_namespaces(res)
+        assert res.rows[0][0] == isolation.UNKNOWN
+
+    def test_环境变量泄漏会被提示(self, tmp_path, monkeypatch):
+        """`OPENCLAW_SYSTEMD_UNIT` 会覆盖 profile 推导的名字 ——
+        它一旦漏进 shell，`gateway install` 就会写到生产那个文件上。"""
+        monkeypatch.setenv("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service")
+        got = self._units(tmp_path, monkeypatch, {
+            "openclaw-gateway-biga.service": self._body(str(isolation.BIGA))})
+        assert "OPENCLAW_SYSTEMD_UNIT" in got[2], "泄漏没被提示出来"
+
+    def test_红线写成了模式级而不是三条规则(self):
+        """判据落在 `CLAUDE.md` 上 —— 下次发现第四处该补进表，不该新开红线。"""
+        text = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        i = text.index("### R-2")
+        section = text[i:text.index("### R-3")]
+        assert "共享命名空间" in section
+        for kind in ("nvm", "systemd", "端口"):
+            assert kind in section, f"R-2 的实例表里少了 {kind}"
