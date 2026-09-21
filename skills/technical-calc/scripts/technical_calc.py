@@ -56,6 +56,7 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _sources import (  # noqa: E402
+    implausible_bars,
     SourceError,
     as_of_for_trade_date,
     fetch_index_daily,
@@ -230,14 +231,31 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
 
             if len(closes) >= HL_WINDOW:
                 win = [b for b in daily.bars[-HL_WINDOW:]]
-                hi, lo = max(b.high for b in win), min(b.low for b in win)
+                # 🔴 外部评审 F5：窗口里**任意一根**坏 tick 都会污染这两个数，
+                #    而唯一的守卫只查最新一根的收盘价。实测把第 91 根的 low
+                #    改成 0.01（正数，不触发任何「≤0」检查），算出
+                #    dist_to_low60_pct = 3118.99 万 %，verdict 仍然 PASS。
+                sick = implausible_bars(win)
+                if sick:
+                    missing.append(MissingItem(
+                        f"距 {HL_WINDOW} 日高低点 —— 窗口里有 {len(sick)} 处坏值："
+                        + "；".join(sick[:3])
+                        + "。这是数据源给了垃圾值，不是行情",
+                        "technical.range.bad_bars"))
+                    hi = lo = None
+                else:
+                    hi, lo = max(b.high for b in win), min(b.low for b in win)
+            else:
+                hi = lo = None
+
+            if hi is not None and lo is not None:
                 add("dist_to_high60_pct",
                     round((daily.last.close / hi - 1) * 100, 2),
                     f"距 {HL_WINDOW} 日高点(%)", f"derived:{src}")
                 add("dist_to_low60_pct",
                     round((daily.last.close / lo - 1) * 100, 2),
                     f"距 {HL_WINDOW} 日低点(%)", f"derived:{src}")
-            else:
+            elif len(closes) < HL_WINDOW:
                 missing.append(MissingItem(
                     f"距 {HL_WINDOW} 日高低点 —— 日线只有 {len(closes)} 根",
                     "technical.range.insufficient_bars"))

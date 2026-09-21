@@ -72,6 +72,7 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _sources import (  # noqa: E402
+    INDEX_PCT_LIMIT,
     BreadthResult,
     IndexDaily,
     IndexQuote,
@@ -100,9 +101,10 @@ MARKETS = {"sh": ("sh000001", "上证指数"), "sz": ("sz399106", "深证综指"
 BAR_COUNT = 25
 MA_WINDOW = 20
 
-#: 守卫 1：A 股单日涨跌幅的物理上限远小于 20%，指数更不可能接近。
-#: 这个阈值不是为了抓行情，是为了抓**垃圾值**。
-PCT_ABS_LIMIT = 20.0
+#: 守卫：涨跌幅围栏。**判据在 `_sources/sanity.py`，这里只取别名。**
+#: 原来两个 skill 各写一个 `PCT_ABS_LIMIT`，值还不一样（20 / 15）——
+#: 看起来像抄漏了。搬到一处并分开命名，让「不同」变成明示的决定。
+PCT_ABS_LIMIT = INDEX_PCT_LIMIT
 
 #: 守卫 4：两源成交量的允许偏离。
 #: 🔴 不用「完全相等」：盘中两个源的刷新时刻不同，必然有微小差异

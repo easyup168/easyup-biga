@@ -63,6 +63,7 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _sources import (  # noqa: E402
+    BOARD_PCT_LIMIT,
     BoardResult,
     IndexDaily,
     SourceError,
@@ -88,7 +89,10 @@ TOP_N = 5
 BOTTOM_N = 3
 
 #: 板块涨跌幅的量级上限。板块是一篮子股票的加权，不可能接近个股涨停幅度。
-PCT_ABS_LIMIT = 15.0
+#: 守卫：涨跌幅围栏。**判据在 `_sources/sanity.py`，这里只取别名。**
+#: 原来两个 skill 各写一个 `PCT_ABS_LIMIT`，值还不一样（20 / 15）——
+#: 看起来像抄漏了。搬到一处并分开命名，让「不同」变成明示的决定。
+PCT_ABS_LIMIT = BOARD_PCT_LIMIT
 
 _YI = 1e8
 _EXPECTED_FIELDS = 9
@@ -96,7 +100,9 @@ _EXPECTED_FIELDS = 9
 
 def _brief(b) -> dict[str, Any]:
     return {"name": b.name, "pct": round(b.pct, 2),
-            "inflow_yi": round(b.main_inflow / _YI, 2), "leader": b.leader}
+            "inflow_yi": (round(b.main_inflow / _YI, 2)
+                          if b.main_inflow is not None else None),
+            "leader": b.leader}
 
 
 class Collector:
@@ -258,12 +264,29 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
             if tag == "industry":
                 add_live("industry_bottom", [_brief(b) for b in ranked[-BOTTOM_N:]],
                     f"{label}跌幅前 {BOTTOM_N}", src)
-                by_money = sorted(r.boards, key=lambda b: b.main_inflow, reverse=True)
-                add_live("main_inflow_top", [_brief(b) for b in by_money[:TOP_N]],
-                    "主力净流入前 5（行业）", src)
-                add_live("main_inflow_total_yi",
-                    round(sum(b.main_inflow for b in r.boards) / _YI, 2),
-                    "行业主力净流入合计(亿元)", f"derived:{src}")
+                # 🔴 外部评审 F6：资金字段可以**独立于 pct** 失效。
+                #    上面那条 pre_session 守卫只看 pct，放行之后资金侧
+                #    若是全缺或全零，排序结果是任意的 —— 而「第一名」
+                #    读起来毫无破绽，带着「0.0 亿」直接上卡。
+                known = [b for b in r.boards if b.main_inflow is not None]
+                if len(known) < len(r.boards):
+                    c.missing.append(MissingItem(
+                        f"主力净流入 —— {len(r.boards) - len(known)}/{len(r.boards)} "
+                        f"个板块接口未给该字段，排名不成立",
+                        "sector.inflow.field_absent"))
+                elif not r.inflow_nonzero_count:
+                    c.missing.append(MissingItem(
+                        f"主力净流入 —— 全部 {len(r.boards)} 个板块均为 0，"
+                        f"这是盘前/资金流统计未开始，**不是「没有资金进出」**；"
+                        f"此时「前 5」取到谁纯属排序偶然",
+                        "sector.inflow.all_zero"))
+                else:
+                    by_money = sorted(known, key=lambda b: b.main_inflow, reverse=True)
+                    add_live("main_inflow_top", [_brief(b) for b in by_money[:TOP_N]],
+                        "主力净流入前 5（行业）", src)
+                    add_live("main_inflow_total_yi",
+                        round(sum(b.main_inflow for b in known) / _YI, 2),
+                        "行业主力净流入合计(亿元)", f"derived:{src}")
             if any(b.leader is None for b in ranked[:TOP_N]):
                 c.warnings.append(f"{label}榜前 {TOP_N} 中有板块未返回领涨股")
 
