@@ -23,6 +23,7 @@ from .evidence import Evidence
 from .missing import MissingItem
 
 __all__ = [
+    "CROSS_CHECK_PAIRS",
     "STAGE1_AGENTS",
     "STAGE2_AGENTS",
     "STANCE_VOCAB",
@@ -57,6 +58,24 @@ TASK_ID_RE = re.compile(r"^BIGA-\d{8}-\d{3}$")
 #: ⚠️ 这张表与各 agent `AGENTS.md` 里的判断表是同一套口径，
 #:    由 `tests/test_stance_vocab.py` 钉死两边一致 —— 否则改了一边忘了另一边，
 #:    agent 会给出一个契约层拒绝的词，然后花几轮去猜。
+#: 🔴 **被声明的重复事实** —— 裁定 15 的受控例外。
+#:
+#: 裁定 15 说「同一个事实只能有一个生产方」。但有两种情况必须重复：
+#:
+#: 1. **溯源字段**（`trade_date`）—— 每个 skill 都要自报它说的是哪一天
+#: 2. **跨源校验点**（本表）—— 两个 agent 从同一个源独立取同一个值，
+#:    **不一致本身就是信息**：它说明两者看到的不是同一份数据
+#:
+#: ⚠️ 允许重复的**前提是有人核对**。声明在这里却没人查，
+#:    就退化成裁定 15 要防的那种情况：两个数悄悄不一样，没人知道。
+#:    由 `tests/test_field_single_producer.py` 钉死：
+#:    出现在本表里的字段，必须同时出现在 risk 的核对清单里。
+#:
+#: 格式：``(agentA, fieldA, agentB, fieldB, 说明)``
+CROSS_CHECK_PAIRS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("market", "sh_close", "technical", "close", "上证收盘价"),
+)
+
 #: Stage 拓扑 —— **唯一定义**。
 #:
 #: Stage 1 并行扇出（分析层），Stage 2 读 Stage 1 的**冻结证据**做制衡。
