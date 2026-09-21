@@ -245,17 +245,30 @@ class Board:
 
     Attributes:
         pct: 涨跌幅（%）。
-        main_inflow: 主力净流入，单位**元**。
-        advance/decline: 板块内上涨 / 下跌的个股数。
+        main_inflow: 主力净流入，单位**元**。`None` = 接口没给。
+        advance/decline: 板块内上涨 / 下跌的个股数。`None` = 接口没给。
         leader: 领涨股名称。接口偶尔为空，由上层记 warning。
+
+    🔴 为什么这三个是 `| None` 而不是 0（外部评审 F6）
+    ------------------------------------------------
+    原来写的是 `float(r.get("f62") or 0.0)` —— 把「字段缺失」和
+    「数值真的是 0」合并成同一个结果。而**同一份代码对 `f3` 的处理是相反的**：
+    为 `None` 或 `"-"` 时直接 `raise`，绝不吞成 0。
+
+    后果：资金字段被吞成全零时，「主力净流入前 5」会给出一个
+    **任意但格式完整**的第一名（排序全相等，取谁都行），
+    带着「0.0 亿」上卡，verdict 仍然 PASS、没有 warning。
+
+    ⚠️ 这不是假想的组合：同一时刻不同字段的新鲜度**可以相反**
+    （集合竞价阶段指示价已变、而资金流统计尚未开始）。
     """
 
     code: str
     name: str
     pct: float
-    main_inflow: float
-    advance: int
-    decline: int
+    main_inflow: float | None
+    advance: int | None
+    decline: int | None
     leader: str | None
 
 
@@ -265,6 +278,21 @@ class BoardResult:
     total: int
     boards: list[Board]
     raw: dict[str, Any]
+
+    @property
+    def inflow_known(self) -> int:
+        """给出了主力净流入的板块数。
+
+        🔴 `pre_session` 那条守卫的判据硬编码在 `pct` 上，
+        从设计上没考虑同一响应里**其它字段可以独立失效**（F6）。
+        这个属性是给资金侧的同型判据。
+        """
+        return sum(1 for b in self.boards if b.main_inflow is not None)
+
+    @property
+    def inflow_nonzero_count(self) -> int:
+        """主力净流入非零的板块数。全零 ⇒ 与 `nonzero_count == 0` 同理。"""
+        return sum(1 for b in self.boards if b.main_inflow)
 
     @property
     def nonzero_count(self) -> int:
@@ -284,6 +312,13 @@ class BoardResult:
         由上层据此记 `missing`，**不要当成平盘**。
         """
         return sum(1 for b in self.boards if b.pct != 0.0)
+
+
+def _num(v: Any, cast: Any) -> Any:
+    """缺失 → `None`，有值 → 转换。**绝不把缺失吞成 0。**"""
+    if v is None or v in ("", "-"):
+        return None
+    return cast(v)
 
 
 def fetch_boards(kind: str) -> BoardResult:
@@ -371,8 +406,8 @@ def fetch_boards(kind: str) -> BoardResult:
             out.append(Board(
                 code=str(r.get("f12") or ""), name=str(r["f14"]),
                 pct=float(r["f3"]),
-                main_inflow=float(r.get("f62") or 0.0),
-                advance=int(r.get("f104") or 0), decline=int(r.get("f105") or 0),
+                main_inflow=_num(r.get("f62"), float),
+                advance=_num(r.get("f104"), int), decline=_num(r.get("f105"), int),
                 leader=(str(r["f204"]) if r.get("f204") not in (None, "", "-") else None),
             ))
         except (TypeError, ValueError) as e:

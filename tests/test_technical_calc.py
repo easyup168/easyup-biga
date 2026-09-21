@@ -171,3 +171,33 @@ class TestR3Paths:
         wired["daily"] = series([3000 + i for i in range(40)])
         assert build().verdict == "WARNING"
         assert build(break_source={"daily"}).verdict == "UNKNOWN"
+
+
+class TestF5BadTickInWindow:
+    """外部评审 F5：60 日窗口里**任意一根**坏 tick 都会污染高低点距离。
+
+    🔴 这个类存在的理由，是一次探针失败：
+    `tests/test_sanity_fence.py` 已经把围栏函数本身测得很细，
+    但把 `technical_calc` 里那行调用删掉之后，**一条测试都没红** ——
+    围栏被测了，「它有没有被用上」没被测。
+
+    > 测函数，和测「产品线上真的走了这个函数」，是两件事。
+    """
+
+    def test_窗口内坏tick导致报缺失而不是荒谬数字(self, wired):
+        closes = [3000 + i for i in range(120)]
+        highs = [c * 1.01 for c in closes]
+        lows = [c * 0.99 for c in closes]
+        lows[90] = 0.01          # 正数，不触发任何「≤0」守卫
+        wired["daily"] = series(closes, highs, lows)
+
+        v = build()
+        codes = [m.code for m in v.missing]
+        assert "technical.range.bad_bars" in codes, codes
+        assert "dist_to_low60_pct" not in v.result
+        assert "dist_to_high60_pct" not in v.result
+
+    def test_干净数据照常给出两个距离(self, wired):
+        r = build().result
+        assert "dist_to_high60_pct" in r and "dist_to_low60_pct" in r
+        assert abs(r["dist_to_low60_pct"]) < 100, "量级应当是个位到两位数的百分比"
