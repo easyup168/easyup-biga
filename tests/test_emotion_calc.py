@@ -331,3 +331,50 @@ class TestTradeTimeHelper:
     def test_非法日期格式抛错(self):
         with pytest.raises(ValueError):
             sources.as_of_for_trade_date("2026-09-18", retrieved_at=self._dt("20260921", 10))
+
+
+class TestPreSessionZeros:
+    """🔴 盘中/盘前三个池全为 0 —— 这是「还没形成」，不是「涨停 0 家」。
+
+    实测 2026-09-21 周一 09:05：股池 `tc=0` 而 `qdate=今天`。
+    当成事实上卡，读者看到的是「冰点」这种极端读数。
+    """
+
+    def test_全零且未收盘时不作为事实(self, wired, monkeypatch):
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = pool(k, 0, [], qdate=today)
+        monkeypatch.setattr(ec, "now_cn",
+                            lambda: datetime(2026, 9, 21, 9, 5, tzinfo=CN_TZ))
+        v = build()
+        assert v.result == {}, "尚未形成的数据不许作为事实产出"
+        assert any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)
+        assert v.verdict == "UNKNOWN"
+
+    def test_收盘后全零仍按事实处理(self, wired, monkeypatch):
+        """收盘后真出现全 0 是另一回事（多半是数据源问题），不套这条守卫。"""
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = pool(k, 0, [], qdate=today)
+        monkeypatch.setattr(ec, "now_cn",
+                            lambda: datetime(2026, 9, 21, 16, 0, tzinfo=CN_TZ))
+        v = build()
+        assert not any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)
+
+    def test_历史交易日全零不套这条守卫(self, wired, monkeypatch):
+        """查一个过去的交易日，时段早就结束了。"""
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        monkeypatch.setattr(ec, "now_cn",
+                            lambda: datetime(2026, 9, 21, 9, 5, tzinfo=CN_TZ))
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = pool(k, 0, [], qdate="20260918")
+        v = build()
+        assert not any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)

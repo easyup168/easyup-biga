@@ -380,6 +380,18 @@ def build_verdict(
                 f"不用更短的窗口凑一个均值", "market.volume.insufficient_bars"))
 
         # ── 守卫 5：涨跌家数没有自己的日期 ───────────────────────────
+        if c.breadth and (c.breadth.advance + c.breadth.decline
+                          + c.breadth.flat) == 0:
+            # 🔴 涨跌平三项全为 0 在任何真实交易时段都不可能 ——
+            #    这是新一天开盘前数据源被清零。更糟的是它会被贴上**日线的交易日**，
+            #    于是 Card 上出现「9-18 上涨家数 0」，而那天真实是 4277。
+            c.missing.append(MissingItem(
+                f"涨跌家数 —— 三项合计为 0，任何真实交易时段都不会这样："
+                f"这是新一天尚未开始、数据源已清零，"
+                f"而它会被误贴到 {trade_date} 上",
+                "market.breadth.not_yet_formed"))
+            c.breadth = None
+
         if c.breadth:
             b = c.breadth
             c.warnings.append(
@@ -387,13 +399,12 @@ def build_verdict(
             add("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
             add("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
             add("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
+            # 分母不可能为 0 —— 上面的 not_yet_formed 守卫已经把那种情况挡掉了。
+            # 🔴 原来这里有个 `else: 分母为零` 分支，加了守卫之后它**永远走不到** ——
+            #    恒假分支就是 L-7，留着只会让人以为还有一条路。
             total = b.advance + b.decline + b.flat
-            if total:
-                add("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
-                    "derived:em:push2delay/ulist.np")
-            else:
-                c.missing.append(MissingItem("上涨家数占比 —— 涨跌平三项合计为 0，分母为零",
-                                             "market.breadth_ratio.zero_denominator"))
+            add("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
+                "derived:em:push2delay/ulist.np")
 
     if store and as_of is not None:
         for source, payload in c.raw:
