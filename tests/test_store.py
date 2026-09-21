@@ -28,6 +28,7 @@ from _store import (
     next_decision_id,
     record_agent_run,
     record_verdict_run,
+    reserve_decision_id,
     save_card,
     save_raw_snapshot,
 )
@@ -129,6 +130,41 @@ class TestAppendOnly:
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute("DELETE FROM raw_market_snapshot")
+
+    def test_每张表都有只追加触发器(self, db):
+        """🔴 判据取自**数据库里实际有哪些表**，不是手写清单。
+
+        v4 加 `decision_ids` 时漏了触发器，上面那份 parametrize 清单
+        当然也不会提到它 —— 手写清单只覆盖「你想到过的」，
+        而漏掉的恰恰是没想到的那张。外部评审 F1 就是这么找到的。
+
+        ⇒ 反过来：**新表默认就该受保护，例外必须在 EXEMPT 里自己举手。**
+        """
+        # 版本号走 `PRAGMA user_version`，不占表 ⇒ 目前只有 SQLite 自己的表豁免
+        EXEMPT = {"sqlite_sequence"}
+        with connect(db, readonly=True) as c:
+            tables = {r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")} - EXEMPT
+            guarded = {r[0].rsplit("_no_", 1)[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'")}
+        assert tables, "一张表都没扫到，这个测试等于没测"
+        assert tables <= guarded, f"这些表可被改写：{sorted(tables - guarded)}"
+
+    def test_决策编号发出去不能收回(self, db):
+        """F1：号被 DELETE 之后会被重新分配，两次运行共用一个身份。
+
+        为什么这比「少了个触发器」严重：FIX-01 / FIX-02 校验的都是
+        「这些判定的 task_id 是不是同一个」。号回收之后两次运行**真实自洽**，
+        两道闸门一致放行 —— 正好是 v4 要防的那种混卡。
+        """
+        first = reserve_decision_id(by="run-A", path=db)
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("DELETE FROM decision_ids WHERE decision_id=?", (first,))
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("UPDATE decision_ids SET reserved_by='伪造'")
+        assert reserve_decision_id(by="run-B", path=db) != first
 
     def test_只读连接拒绝写入(self, db):
         with pytest.raises(Exception):

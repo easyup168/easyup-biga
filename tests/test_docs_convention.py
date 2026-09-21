@@ -147,3 +147,66 @@ def test_教程不写与既存系统相关的内容(path: pathlib.Path):
         "  「那套系统是什么、怎么配的、我怎么读了它」不写。\n"
         "  中性措辞用「同机已有实例」。"
     )
+
+
+# ───────────────────────────────────────────────────────────── 测试条数不漂移
+#
+# 外部评审 F22：同一个事实（跑出来多少条测试）在四处手写，实测 475 时
+# 三处写着 417、一处写着 445。这是 L-3 的标准形状 ——
+# **改了一份忘了另一份，剩下那份仍然看起来很自信。**
+#
+# 🔴 为什么不是「记得同步」就能解决：
+# 这个数**每加一条测试就变**，而加测试的人没有任何理由想到去翻 README 的徽章。
+# 靠记性的约定在高频变化的事实上必然失守。
+#
+# 判据取自 `request.session.items` —— pytest 自己收集到的条目数，
+# 不是另写一个计数器（那就是第二套口径了）。
+
+#: 必须与实测一致的文档。**不含**三类：
+#:   · `docs/tutorial/` —— 过程文档写完即冻结，里面的数字是当时的快照
+#:   · `CHANGELOG.md`   —— 历史记录，改它等于篡改历史
+#:   · `docs/external/` —— 只读
+_LIVE_TEST_COUNT_DOCS = ("README.md", "CLAUDE.md", "docs/guide/review-prompt.md")
+
+_TEST_COUNT_PATTERNS = (
+    r"(\d+)%20TESTS",            # README 的徽章
+    r"(\d+)\s*条测试",            # 正文散文
+    r"测试\s*\|\s*(\d+)\s*条",     # CLAUDE.md 的状态表
+)
+
+
+#: 行内豁免标记。历史快照（某次验收当时是多少条）本来就不该跟着涨。
+#: 🔴 默认必须是最新的，**例外要自己举手** —— 和只追加触发器那条同一个道理：
+#:    手工维护「哪些要查」的名单，漏掉的永远是没想到的那个。
+_FROZEN_MARK = "冻结"
+
+
+def test_文档里的测试条数与实测一致(request):
+    collected = len(request.session.items)
+    # 只在**全量**跑时校验：跑子集时条数本来就对不上，那不是文档的错
+    got = {item.path for item in request.session.items}
+    if got != set((REPO / "tests").glob("test_*.py")):
+        pytest.skip("跑的是子集，条数无从比较")
+
+    bad = []
+    for rel in _LIVE_TEST_COUNT_DOCS:
+        seen = 0
+        for line in (REPO / rel).read_text(encoding="utf-8").splitlines():
+            nums = [int(m) for pat in _TEST_COUNT_PATTERNS
+                    for m in re.findall(pat, line)]
+            if not nums:
+                continue
+            seen += 1
+            if _FROZEN_MARK in line:
+                continue
+            bad += [(rel, n) for n in nums if n != collected]
+        # 🔴 没找到 ≠ 通过。文档把这句话删了，这条检查就变成「无事可查」——
+        #    而那正是本项目反复栽的「通过是因为什么都没查」。
+        assert seen, f"{rel} 里找不到测试条数 —— 是被删了，还是换了写法？"
+
+    assert not bad, (
+        f"实测 {collected} 条，文档里写着 {bad}。\n"
+        f"  改掉这些数字；如果某处是历史快照（某次验收当时的数），\n"
+        f"  在同一行加注释标记「{_FROZEN_MARK}」把它排除掉。\n"
+        "  教程 / CHANGELOG / external 不在校验范围内。"
+    )
