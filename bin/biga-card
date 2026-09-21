@@ -24,6 +24,16 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT" || exit 2
+
+# ══ 🔴 总闸（2026-09-21 21:47 事故期间加的紧急止血）══════════════════
+#
+# 存在这个文件就一律拒绝出新卡。放在**最前面**，在任何花钱的动作之前。
+# 只拦「出新卡」，不拦 --show / --list / --check（那些不花钱，事故排查要用）。
+#
+# 为什么是文件而不是环境变量：环境变量只对「记得导出它的那个 shell」有效，
+# 而雪崩的触发源是**几十个各自独立的进程组**，它们的 env 我控制不了。
+# 文件是所有路径都绕不过去的同一个事实。
+BIGA_STOP_FILE="${BIGA_STOP_FILE:-$ROOT/.biga-card-stop}"
 # ⚠️ 可覆盖**只为测试**：验「取不到提示词就停」时必须能证明
 #    那条昂贵的 agent 调用**根本没被走到**（一次真跑 3 分钟 / $1.3）。
 #    第一版测试没这个缝，探针把守卫改成 fail-open 之后，
@@ -71,6 +81,87 @@ case "${1:-}" in
 esac
 
 # ── 出新卡 ───────────────────────────────────────────────────────
+
+# 🔴 总闸优先于一切 —— 它必须在第一个花钱的动作**之前**。
+if [ -e "$BIGA_STOP_FILE" ]; then
+  echo "🔴 出新卡已被总闸拦下。" >&2
+  echo "   闸门文件：$BIGA_STOP_FILE" >&2
+  sed 's/^/   │ /' "$BIGA_STOP_FILE" >&2 2>/dev/null
+  echo "   解除：rm $BIGA_STOP_FILE（解除前先确认触发源已经停了）" >&2
+  echo "   看已有的卡不受影响：bin/biga-card --list / --show <决策号>" >&2
+  exit 3
+fi
+
+# 🔴 单实例锁 —— 递归与并发的止损（2026-09-21 21:03–21:50 事故）
+# ------------------------------------------------------------------
+# 那次雪崩的形状是**递归**，不是误触：
+#
+#   bin/biga-card → $BIGA agent --agent main → 新的 main 会话
+#                                                 ↓ 读 AGENTS.md
+#                                           bin/biga-card → …
+#
+# 因为 `AGENTS.md` 当时写着「🔴 要出卡？跑这一条」并贴出了这条命令，
+# 而这条命令做的事就是把编排提示词喂给 `main` —— 也就是那个读到这句话的人。
+# 实测 187 个 main 会话 / 约 195 次调用，其中 92 次是那行命令的逐字复制。
+#
+# 契约那一侧已经改了（`AGENTS.md` 现在写「绝对不要运行它」）。
+# 但本项目的第一课就是**契约写了不等于会被遵守** ——
+# 同一天 19:31 那次「四个 spawn 无归属」，规则也一条不缺地写在契约里。
+# ⇒ 机器这一侧必须自己拦。
+#
+# 为什么用 flock 而不是环境变量：
+#   env 传不过网关。`$BIGA agent` 起的会话在**另一个进程树**里，
+#   `BIGA_CARD_DEPTH=1` 这种标记根本到不了下一层。
+#   而文件锁是所有层都看得见的同一个事实。
+#
+# ⚠️ 锁**不替代** `AGENTS.md` 那条规则 —— 它只保证「照抄了也只死一次」。
+if [ "${BIGA_CARD_NOLOCK:-0}" != "1" ]; then
+  exec 9>"$ROOT/.biga-card.lock" || exit 2
+  if ! flock -n 9; then
+    echo "🔴 已经有一次出卡在跑，这次不再起（单实例锁）。" >&2
+    echo "   锁文件：$ROOT/.biga-card.lock" >&2
+    echo "   如果你是 agent：**不要调这条命令**，见 AGENTS.md「绝对不要运行」一节。" >&2
+    echo "   看在跑的那次：bin/biga-card --list 3" >&2
+    exit 3
+  fi
+fi
+
+# 🔴 预算闸门要在**第一个花钱的动作之前**跑一次（2026-09-21 21:42 事故）
+# ------------------------------------------------------------------
+# 闸门本来就在路上 —— `new_decision.py` 的 Stage 0 占号之前。
+# 事故当天它**开火了约 58 次**，今天只放行了 2 个号，挡住的正是贵的那部分
+# （58 × 一次 fan-out ≈ $48）。
+#
+# ⚠️ 但它漏掉了一笔：`bin/biga-card` 先把一整个 `main` LLM 轮次付掉，
+#    才走到闸门那里被拒。实账：雪崩窗口 32 个 main 轮次 = **$8.99**，
+#    而同期只出了一张卡。
+#
+# > 闸门装在**身份**的咽喉点（占号），而**成本**的边界比它早一步。
+# > 「唯一入口」这个原则是对的，选错的是「哪一处才算入口」——
+# > 对花钱的事，入口是**第一次花钱的地方**，不是第一次产生事实的地方。
+#
+# ⇒ 同一个判据在这里预跑一次。不是第二套口径：它 import 的是同一个
+#   `check_budget()`，阈值只有一份（L-3）。这里拒绝的代价是 $0。
+if [ "${BIGA_CARD_FORCE:-0}" != "1" ]; then
+  GATE=$($PY - <<'EOF' 2>&1
+import sys
+sys.path.insert(0, "skills")
+sys.path.insert(0, "skills/decision-card/scripts")
+from budget import check_budget, explain
+r = check_budget()
+if r:
+    print(explain(r)); sys.exit(3)
+EOF
+  )
+  if [ $? -ne 0 ]; then
+    echo "$GATE" >&2
+    echo >&2
+    echo "   ⓘ 这次拦下的代价是 \$0 —— 闸门在 agent 调用**之前**。" >&2
+    echo "     确实要跑：BIGA_CARD_FORCE=1 bin/biga-card" >&2
+    exit 3
+  fi
+fi
+
 BEFORE=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
 SESS="card-$(date +%H%M%S)"
 echo "▸ 会话 $SESS   起 $(date +%T)"

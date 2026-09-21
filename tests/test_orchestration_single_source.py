@@ -109,6 +109,10 @@ class TestScriptExtracts:
         import shutil
         work = tmp_path / "repo"
         shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
+            # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
+            #    被原样复制进沙盒，于是三条出卡路径测试全部拿到 rc=3。
+            #    沙盒要复制的是**代码**，不是这台机器此刻的运行状态。
+            ".biga-card-stop", ".biga-card.lock",
             ".git", "__pycache__", "data", ".pytest_cache", ".claude"))
         target = work / "skills" / "decision-card" / "ORCHESTRATION.md"
         if break_it == "删文件":
