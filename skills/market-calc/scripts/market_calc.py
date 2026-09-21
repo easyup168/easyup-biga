@@ -289,6 +289,31 @@ def build_verdict(
             raw_hash=_raw_hash_for(source),
         ))
 
+
+    # 🔴 无日期端点的 as_of 不能沿用日线的收盘时刻。
+    #
+    #    实测（BIGA-20260921-017，周一 12:41 午休）：涨跌家数取回的是
+    #    **今天此刻**的 4385/1100/145，而卡面上写着 `as_of 09-18 15:00`
+    #    —— 周五收盘。一个今天的数，挂着上周五的时间戳。
+    #
+    #    代码其实知道（它发了一条 warning），但 warning 当时不上卡，
+    #    于是卡面看起来板上钉钉。
+    #
+    #    根子是 as_of 只算了一次就被所有证据共用。而这个端点连日期字段都没有
+    #    ⇒ 我们能诚实声明的只有「取回它的时刻」。
+    #
+    #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
+    #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
+    #    而它恰恰是最可能对不上的。
+    def add_live(field: str, value: Any, label: str, source: str) -> None:
+        """实时快照类证据：as_of = 取回时刻。"""
+        result[field] = value
+        evidence.append(Evidence(
+            field=field, source=source, value=value,
+            as_of=retrieved, retrieved_at=retrieved,
+            calc_version=CALC_VERSION, label=label,
+            raw_hash=_raw_hash_for(source)))
+
     if trade_date:
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
@@ -397,14 +422,14 @@ def build_verdict(
             b = c.breadth
             c.warnings.append(
                 "涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的")
-            add("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
-            add("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
-            add("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
+            add_live("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
+            add_live("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
+            add_live("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
             # 分母不可能为 0 —— 上面的 not_yet_formed 守卫已经把那种情况挡掉了。
             # 🔴 原来这里有个 `else: 分母为零` 分支，加了守卫之后它**永远走不到** ——
             #    恒假分支就是 L-7，留着只会让人以为还有一条路。
             total = b.advance + b.decline + b.flat
-            add("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
+            add_live("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
                 "derived:em:push2delay/ulist.np")
 
     if store and as_of is not None:

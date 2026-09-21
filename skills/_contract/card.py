@@ -194,6 +194,22 @@ class DecisionCard:
         else:
             lines.append("缺失项：无")
 
+        # 🔴 warning 必须上卡。
+        #
+        #    实测（BIGA-20260921-017）：四个 Agent 各发了一条 warning，
+        #    **一条都没显示**。其中一条是
+        #    「涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的」——
+        #    而卡面上那行证据写着 `as_of 09-18 15:00`，看起来像板上钉钉。
+        #
+        #    warning 与 missing 的分工是「这个数能用但要注意」vs「这个数没有」。
+        #    把前者藏起来，等于只保留了它的名字。
+        warns = [(v.agent, w) for v in self.verdicts for w in v.warnings]
+        if warns:
+            lines.append("")
+            lines.append(f"⚠ 提请注意（{len(warns)}）")
+            for agent, w in warns:
+                lines.append(f"  · [{agent}] {w}")
+
         lines.append("")
         lines.append("证据")
         any_ev = False

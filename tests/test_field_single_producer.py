@@ -26,8 +26,11 @@ emotion 取自股池的 `qdate`，market 取自日线每行的 `day`。
 
 扫描范围与已知局限
 ------------------
-扫的是各 skill 里 ``add("<field>", …)`` 与 ``Evidence(field="<field>", …)``
-的**字面量**字段名。
+扫的是各 skill 里 ``add("<field>", …)`` / ``add_live("<field>", …)``
+与 ``Evidence(field="<field>", …)`` 的**字面量**字段名。
+
+⚠️ **每加一个登记入口，都要同步这个列表** —— 否则那批字段会静默地
+退出守卫的视野（`add_live` 加进来时就发生过，好在有另一条断言兜住）。
 
 ⚠️ 用 f-string 拼出来的字段名（`market-calc` 的 ``f"{key}_close"``）扫不到。
 那类字段天然带市场前缀（`sh_` / `sz_`），跨 skill 撞名的可能性极低；
@@ -68,8 +71,16 @@ def _literal_fields(path: pathlib.Path) -> set[str]:
             continue
         fn = node.func
         name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
-        # add("<field>", …)
-        if name == "add" and node.args:
+        # add("<field>", …) / add_live("<field>", …)
+        #
+        # 🔴 `add_live` 是 2026-09-21 加的第二个登记函数（实时快照类证据，
+        #    as_of = 取回时刻）。加它的时候这个扫描器只认 `add` ——
+        #    **于是九个字段一瞬间从守卫的视野里消失了。**
+        #    测试当场红了，因为另有一条断言「涨跌家数归 market」。
+        #
+        #    ⇒ 每加一个登记入口，都要同步这里。
+        #      这正是「扫字面量」这种做法的固有代价，写下来免得下次忘。
+        if name in ("add", "add_live") and node.args:
             a0 = node.args[0]
             if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
                 found.add(a0.value)
