@@ -23,7 +23,11 @@
 """
 
 from .eastmoney import (
+    BOARD_KINDS,
     POOL_ENDPOINTS,
+    Board,
+    BoardResult,
+    fetch_boards,
     BreadthResult,
     PoolResult,
     fetch_breadth,
@@ -35,6 +39,9 @@ from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import MARKET_CLOSE, as_of_for_trade_date
 
 __all__ = [
+    "BOARD_KINDS",
+    "Board",
+    "BoardResult",
     "MARKET_CLOSE",
     "POOL_ENDPOINTS",
     "SINA_SYMBOLS",
@@ -46,6 +53,7 @@ __all__ = [
     "PoolResult",
     "SourceError",
     "as_of_for_trade_date",
+    "fetch_boards",
     "fetch_breadth",
     "fetch_index_daily",
     "fetch_index_quote",

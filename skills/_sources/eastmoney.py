@@ -51,6 +51,10 @@ from typing import Any
 from .http import SourceError, get_json
 
 __all__ = [
+    "BOARD_KINDS",
+    "Board",
+    "BoardResult",
+    "fetch_boards",
     "PoolResult",
     "BreadthResult",
     "fetch_pool",
@@ -202,3 +206,140 @@ def fetch_breadth() -> BreadthResult:
 
     return BreadthResult(advance=adv, decline=dec, flat=flat,
                          per_market=per_market, raw=payload)
+
+
+# ────────────────────────────────────────────────────────── 板块榜
+
+#: 板块榜。key 是本项目内部名，value 是接口的 `fs` 参数。
+BOARD_KINDS: dict[str, str] = {
+    "industry": "m:90+t:2",   # 行业板块
+    "concept": "m:90+t:3",    # 概念板块
+}
+
+_CLIST_PATH = "/api/qt/clist/get"
+#: 🔴 **`pz` 大于 100 会被静默忽略**（实测：请求 600，返回 100 行，
+#:    而 `total` 照报 496）。这与 kline 的 `lmt` 被忽略是同一类陷阱 ——
+#:    接口不报错，只是少给你。所以必须分页，并核对总数：
+#:    悄悄少几十个板块，涨跌分布就是错的，而且不会报错。
+_BOARD_PAGE = 100
+#: 分页上限。496/100 ≈ 5 页，给到 12 页足够且不会失控。
+_BOARD_MAX_PAGES = 12
+
+
+@dataclass(frozen=True)
+class Board:
+    """一个板块的当前快照。
+
+    Attributes:
+        pct: 涨跌幅（%）。
+        main_inflow: 主力净流入，单位**元**。
+        advance/decline: 板块内上涨 / 下跌的个股数。
+        leader: 领涨股名称。接口偶尔为空，由上层记 warning。
+    """
+
+    code: str
+    name: str
+    pct: float
+    main_inflow: float
+    advance: int
+    decline: int
+    leader: str | None
+
+
+@dataclass(frozen=True)
+class BoardResult:
+    kind: str
+    total: int
+    boards: list[Board]
+    raw: dict[str, Any]
+
+    @property
+    def nonzero_count(self) -> int:
+        """涨跌幅非零的板块数。
+
+        🔴 **全为 0 不等于「所有板块都平盘」，而是「这一天还没开始」。**
+
+        实测 2026-09-21（周一）08:48 盘前：本端点 496 行全部 `pct=0.0`、
+        `主力净流入=0.0`、`领涨股=None`；而同一时刻腾讯行情与新浪日线
+        **仍然保留上一交易日的数据**（3911.87 / 20260918）。
+
+        ⇒ 同一时刻，不同端点对「新一天还没开始」的表现是**相反**的。
+          一个保留旧值，一个清零。
+
+        更危险的是榜单按涨跌幅排序：全 0 时「第一名」是任意的一行，
+        照着它说「今日领涨板块是 X」完全是编造。
+        由上层据此记 `missing`，**不要当成平盘**。
+        """
+        return sum(1 for b in self.boards if b.pct != 0.0)
+
+
+def fetch_boards(kind: str) -> BoardResult:
+    """取一个板块榜（行业 / 概念），按涨跌幅降序。
+
+    ⚠️ **这个端点不带任何日期字段**，与涨跌家数同款 ——
+    它的 `as_of` 只能由调用方结合交易日推断，上层必须为此记一条 warning。
+
+    ⚠️ 形状陷阱：同一主机的 `ulist` 返回 ``data.diff`` 是**数组**，
+    而这里是**字典**（键为 "0","1",…）。两处都写成数组解析，
+    第二处会静默拿到空列表 —— 于是「今天没有板块上涨」。
+    """
+    if kind not in BOARD_KINDS:
+        raise ValueError(f"未知的板块榜 {kind!r}，可选 {sorted(BOARD_KINDS)}")
+
+    rows: list[dict[str, Any]] = []
+    total = 0
+    pages: list[dict[str, Any]] = []
+    for pn in range(1, _BOARD_MAX_PAGES + 1):
+        qs = urllib.parse.urlencode({
+            "pn": pn, "pz": _BOARD_PAGE, "po": 1, "fltt": 2, "fid": "f3",
+            "fs": BOARD_KINDS[kind],
+            "fields": "f12,f14,f3,f62,f104,f105,f204",
+        }, safe="+:")
+        errors: list[str] = []
+        payload: dict[str, Any] | None = None
+        for host in _BREADTH_HOSTS:
+            try:
+                payload = get_json(f"https://{host}{_CLIST_PATH}?{qs}", referer=_REFERER)
+                break
+            except SourceError as e:
+                errors.append(f"{host}: {e}")
+        if payload is None:
+            raise SourceError(
+                f"boards/{kind} 第 {pn} 页: 全部备选主机失败 —— " + " | ".join(errors))
+        if payload.get("rc") != 0:
+            raise SourceError(f"boards/{kind} 第 {pn} 页: 接口返回 rc={payload.get('rc')}")
+
+        data = payload.get("data") or {}
+        diff = data.get("diff")
+        # ⚠️ 形状陷阱见 docstring：这里是 dict，ulist 那边是 list
+        page = list(diff.values()) if isinstance(diff, dict) else (diff or [])
+        total = int(data.get("total") or total)
+        pages.append(payload)
+        rows.extend(page)
+        if not page or len(rows) >= total:
+            break
+
+    if not rows:
+        raise SourceError(f"boards/{kind}: 一行都没取到")
+    if total and len(rows) < total:
+        raise SourceError(
+            f"boards/{kind}: 接口声称 total={total} 但翻完 {len(pages)} 页只拿到 "
+            f"{len(rows)} 行 —— 分页没取全，涨跌分布会算错")
+    payload = {"pages": pages}
+
+    out: list[Board] = []
+    for r in rows:
+        if r.get("f3") in (None, "-") or r.get("f14") in (None, ""):
+            raise SourceError(f"boards/{kind}: 某一行缺名称或涨跌幅（{r}）")
+        try:
+            out.append(Board(
+                code=str(r.get("f12") or ""), name=str(r["f14"]),
+                pct=float(r["f3"]),
+                main_inflow=float(r.get("f62") or 0.0),
+                advance=int(r.get("f104") or 0), decline=int(r.get("f105") or 0),
+                leader=(str(r["f204"]) if r.get("f204") not in (None, "", "-") else None),
+            ))
+        except (TypeError, ValueError) as e:
+            raise SourceError(f"boards/{kind}: 数值解析失败 {r} —— {e}") from e
+
+    return BoardResult(kind=kind, total=total or len(out), boards=out, raw=payload)

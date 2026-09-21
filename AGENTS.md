@@ -51,14 +51,21 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 |---|---|---|
 | `emotion` | A 股情绪周期位置 | 问到市场情绪 / 赚钱效应 / 涨停炸板 / 能不能追高 |
 | `market` | 市场状态：指数、成交额、量能、宽度 | 问到大盘 / 指数 / 成交量 / 市场强弱 / 今天行情怎么样 |
+| `sector` | 板块强度与资金方向（行业/概念榜、主力净流入） | 问到板块 / 主线 / 热点 / 资金流向 |
+| `technical` | 上证指数的技术面（均线、MACD、RSI、区间位置） | 问到技术面 / 均线 / 超买超卖 / 位置 |
 | `risk` | **制衡层**：依据 Stage 1 的冻结证据判断这单能不能做 | **每次都要调**，见 Stage 2 |
 
-⚠️ **边界**：涨停炸板连板 → `emotion`；指数成交额量能宽度 → `market`。
-涨跌家数（市场宽度）归 `market`，不要找 `emotion` 要。
+⚠️ **边界**（每一条都由 `tests/test_field_single_producer.py` 守着）：
 
-其余 4 个（`sector` / `news` / `technical` / `discipline`）
-**尚未建立**。被问到它们的领域时，如实说「该 Agent 尚未上线」，
-并把它写进 Card 的缺失项 —— **不要自己代答**。
+| 事实 | 归谁 |
+|---|---|
+| 涨停 / 炸板 / 连板 | `emotion` |
+| 指数点位 / 成交额 / 量能 / **个股**涨跌家数 | `market` |
+| **板块**涨跌与资金流 | `sector`（与 market 的个股宽度不是同一个粒度） |
+| 均线 / MACD / RSI / 区间位置 | `technical` |
+
+其余 2 个（`news` / `discipline`）**尚未建立**。被问到它们的领域时，
+如实说「该 Agent 尚未上线」，并把它写进 Card 的缺失项 —— **不要自己代答**。
 
 ---
 
@@ -81,8 +88,10 @@ mcp__openclaw__sessions_spawn
 
 ```
 （同一条消息里）
-  mcp__openclaw__sessions_spawn  agentId="market"   context="isolated"
-  mcp__openclaw__sessions_spawn  agentId="emotion"  context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="market"     context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="emotion"    context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="sector"     context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="technical"  context="isolated"
 ```
 
 **分两轮发就是串行。** 而串行的表现是 ——
@@ -271,6 +280,7 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
   --status WAIT \
   --headline "核心矛盾一句话" \
   --synthesis "两三句说明，数字必须来自上面的 evidence" \
+  --extra-missing supervisor.agent_offline "news agent 尚未上线" \
   --extra-missing supervisor.agent_offline "discipline agent 尚未上线" \
   --model-ref anthropic/claude-sonnet-5
 ```
