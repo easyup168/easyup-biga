@@ -56,8 +56,11 @@
 ```
 
 **不变式 I-1**：BigA 的任何进程**不得以写模式**打开现系统的任何文件。
-由 `tools/verify/isolation.py` 钉住 —— 是**脚本，不在 pytest 里**，要手工跑。
-⚠️ 原文写的是 `tests/test_isolation.py`（一个从未存在的文件），而且说判据是「路径前缀白名单」—— 那正是后来造成 64 个误报的前缀陷阱，真实实现用的是 `PurePath.is_relative_to()`。
+判据在 `tools/verify/isolation.py`（要手工跑），而**这个判据本身**由 `tests/test_isolation.py` 钉住。
+
+⚠️ 原文把这句写成「由 `tests/test_isolation.py` 用路径前缀白名单钉住」，两处都不对：那个文件当时并不存在；「路径前缀白名单」也说反了 —— 那正是造成 64 个误报的前缀陷阱，真实实现用的是 `PurePath.is_relative_to()`。
+
+🔴 **自检工具自己也要被测。** 它一度只有「过 / 不过」两态，于是「什么都没扫到」与「扫了，没问题」写出来一模一样（F2 / F18）。现在是三态，`UNKNOWN` 不计入通过、退出码非零。
 
 **不变式 I-2**：BigA 崩溃、写坏自己的库、把端口占死 —— 现系统必须毫发无伤。
 验收方式：Phase 1 结束时做一次 `kill -9` 演练，确认生产 gateway pid 不变。
