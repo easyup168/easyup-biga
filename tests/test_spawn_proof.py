@@ -177,3 +177,94 @@ class TestWiredIntoRealPath:
             "  而机器上本来就会反复跑别的决策，这个条件几乎总成立。")
         assert not any("LIMIT" in q for q in sqls), (
             "按决策号取不该有条数上限 —— 一天跑得多了，早先的决策会悄悄查不到。")
+
+
+class TestOrphanSpawns:
+    """孤儿 spawn：**钱花了，结果进不了任何卡**。
+
+    实测（2026-09-21 19:31:52，飞书触发的那次）：
+
+        emotion     无决策号
+        technical   无决策号
+        market      无决策号
+        sector      BIGA-20260921-000   ← 临时号，`save_verdict` 会直接拒
+
+    四个白跑，约 $0.4 / 2.5 分钟。根因是 Supervisor 在**占号之前**
+    就 spawn 了 Stage 1 —— L-11「身份晚于证据」，而 schema v4
+    那整套机制正是为了防它。
+
+    🔴 **`spawn_proof()` 查不到它们** —— 它按决策号查，
+    而孤儿的特征恰恰是**没有号可查**。两个检查方向相反，缺一不可：
+
+        spawn_proof    这张卡上的 agent，真的被 spawn 了吗
+        orphan_spawns  被 spawn 的 agent，最后进卡了吗
+    """
+
+    DAY = "20260921"
+
+    def _db(self, tmp_path, runs):
+        """`runs = [(agent, payload_里的决策号 或 None), …]`"""
+        import datetime
+        from _contract import CN_TZ
+        base = int(datetime.datetime(2026, 9, 21, 10, 0,
+                                     tzinfo=CN_TZ).timestamp() * 1000)
+        p = tmp_path / "rt.db"
+        # store-exempt: 外部运行时库的仿件，不是 BigA 事实层
+        conn = sqlite3.connect(p)
+        conn.execute("CREATE TABLE subagent_runs (run_id TEXT, child_session_key TEXT,"
+                     " controller_session_key TEXT, requester_session_key TEXT,"
+                     " created_at INTEGER, payload_json TEXT)")
+        for i, (agent, did) in enumerate(runs):
+            body = f'本次决策编号 {did}' if did else '请分析一下'
+            conn.execute("INSERT INTO subagent_runs VALUES (?,?,?,?,?,?)",
+                         (f"r{i}", f"agent:{agent}:subagent:u{i}", "agent:main:main",
+                          "agent:main:main", base + i * 1000,
+                          f'{{"prompt":"{body}"}}'))
+        conn.commit()
+        conn.close()
+        return p
+
+    def test_带号的不算孤儿(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(self._db(tmp_path, [("market", "BIGA-20260921-007")])))
+        assert pa.orphan_spawns(self.DAY) == []
+
+    def test_无号的是孤儿(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(self._db(tmp_path, [("market", None)])))
+        got = pa.orphan_spawns(self.DAY)
+        assert len(got) == 1 and got[0][1] == "market" and "无决策号" in got[0][2]
+
+    def test_临时号也是孤儿(self, tmp_path, monkeypatch):
+        """🔴 `-000` 是临时号，落库会被 `save_verdict` 直接拒 ——
+        带着它 spawn，等于确定要白跑。"""
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(self._db(tmp_path, [("sector", "BIGA-20260921-000")])))
+        got = pa.orphan_spawns(self.DAY)
+        assert len(got) == 1 and "临时号" in got[0][2]
+
+    def test_非specialist不计入(self, tmp_path, monkeypatch):
+        """别的 agent 不在本检查范围 —— 扩大范围只会制造噪音。"""
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(self._db(tmp_path, [("some-helper", None)])))
+        assert pa.orphan_spawns(self.DAY) == []
+
+    def test_读不到运行时库是判不了(self, monkeypatch):
+        """R-3：读不到 ≠ 没问题。"""
+        monkeypatch.setenv("BIGA_RUNTIME_DB", "/nonexistent/nope.db")
+        assert pa.orphan_spawns(self.DAY) is None
+
+    def test_巡检工具真的会报它(self):
+        """L-1：新增检查必须有被证明的消费方，判据是命令的字面量。"""
+        # ⚠️ 判的是**有没有真的调用**，不是「源码里出现过这个词」——
+        #    第一版查字符串，把调用换成 `orphans = []` 之后 import 行
+        #    还在，于是照样绿。又一次「通过是因为查错了地方」。
+        src = (REPO / "tools" / "verify" / "budget_report.py").read_text(
+            encoding="utf-8")
+        called = any(
+            isinstance(n, ast.Call)
+            and (getattr(n.func, "id", "") or getattr(n.func, "attr", "")) == "orphan_spawns"
+            for n in ast.walk(ast.parse(src)))
+        assert called, (
+            "budget_report.py 没有真的调用 orphan_spawns —— \n"
+            "  一个不会被跑到的检查，等于没有这个检查。")

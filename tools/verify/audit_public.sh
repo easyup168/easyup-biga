@@ -34,6 +34,7 @@ if [ "${1:-}" = "--worktree" ]; then
   # ':!tools/verify/audit_public.sh' —— 排除本脚本自己，否则它的正则字面量必然自匹配。
   DIFF=$(git ls-files -co --exclude-standard -- . ':!tools/verify/audit_public.sh' \
          | xargs -r -d'\n' grep -nHI '' 2>/dev/null | sed 's/^/+/')
+
   SCOPE="工作区（含未提交与未跟踪）"
 else
   REVS=("$@")
@@ -88,8 +89,53 @@ chk "密码赋值"       '([p]assword|[p]asswd|[s]ecret)["'"'"'[:space:]]*[:=][[
 #    而教程恰恰是最鼓励写细节的地方。
 chk "环境/账号策略" '([p]olicy-limits|[s]etup-token|[E]nterprise|[企]业策略|[组]织策略|[账]号级策略|[策]略禁止|[策]略收紧|[s]tatic token|[s]hared-from-neighbour)'
 
+# 🔴 第 10 项加于 2026-09-21，在 **IM 凭据进入本机之后、代码引用它之前**。
+#
+#    不是事后补的：飞书配好那天先加检查，再动代码。
+#    理由是仓库 Public ⇒ **推即发布**，而 appId 这类东西的特点是
+#    「看起来不像密钥」—— 它是个标识符，很容易被当成无害的配置贴进文档。
+#
+#    ⚠️ appSecret 目前存在 OpenClaw 的密钥库里（配置文件只有引用 id），
+#    所以真正的风险面是 **appId 与各类 token 被顺手抄进说明文字**。
+#
+#    覆盖：飞书/Lark 应用标识与四类密钥，以及通用的 webhook 地址。
+#    与前九项一样用 [a]bc 写法，保证脚本自己不会匹配自己。
+chk "IM 应用凭据"   '([c]li_[a-z0-9]{16}|[F]EISHU_APP_(ID|SECRET)|[F]EISHU_(VERIFICATION_TOKEN|ENCRYPT_KEY)|[a]pp_?[sS]ecret["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{8,}|open\.[f]eishu\.cn/open-apis/bot/v2/hook/)'
+
+# audit-check: 运行时产物不进仓库
+#
+# 🔴 第 11 项加于 2026-09-21。它不是「内容检查」，是**范围检查** ——
+#    有些东西的问题不在于「这次的内容有没有问题」，
+#    而在于**它是自动长出来的，下次长成什么样你不知道**。
+#
+# 两类，都是实际在仓库里发现的：
+#
+#   1. 归档（zip/tar）—— 上面那十项用 `grep -I` 跳过二进制
+#      ⇒ 压缩包里的内容**一个字都扫不到**
+#   2. `memory/` —— OpenClaw 自己写的记忆/做梦产物，
+#      其中 `.dreams/session-corpus/*.txt` 是**会话逐字记录**
+#      ⇒ 今天内容无害，不代表明天无害（凭据讨论、环境细节都会进去）
+#
+# 一度想给归档做「展开后扫描」。放弃了，两个理由：
+#   ① 外部设计文档会**合法地**讨论 `FEISHU_APP_*` 这类变量名 ⇒ 6 处误报
+#   ② 全历史口径做不到 —— `git log -p` 对二进制只输出「Binary files differ」
+#
+# ⇒ 换成**不让它进来**。规则更窄，但**可判定且完整**；
+#   而「进了再扫」两头都不完整。
+STRAY=$(git ls-files -- '*.zip' '*.tar.gz' '*.tgz' '*.7z' '*.rar' 'memory/*' 2>/dev/null)
+if [ -n "$STRAY" ]; then
+  echo "⚠️  运行时产物不进仓库 —— $(printf '%s\n' "$STRAY" | grep -c .) 个"
+  printf '%s\n' "$STRAY" | head -6 | sed 's/^/     /'
+  echo "     归档：十项检查用 grep -I 跳过二进制，扫不到里面。"
+  echo "     memory/：OpenClaw 自动写的会话语料，内容不由你决定。"
+  echo "     ⇒ git rm --cached <路径>，并加进 .gitignore。原文留在本机。"
+  FAIL=1
+else
+  echo "✅ 运行时产物不进仓库"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
-  echo "══ 九项全绿 ══"
+  echo "══ 十一项全绿 ══"
   exit 0
 fi
 echo "══ 有命中，不要 push ══"

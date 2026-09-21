@@ -8,10 +8,11 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/619%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/659%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v5%20%C2%B7%205%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-18%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
+![IM](https://img.shields.io/badge/%E9%A3%9E%E4%B9%A6-%E5%B7%B2%E6%8E%A5%E9%80%9A-1f6feb)
 ![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
 
 ***发现共识，锁定核心，让每一笔交易都有逻辑***
@@ -153,6 +154,30 @@ bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相�
 
 ⚠️ **不是交易信号。** 系统不下单、不接账户，最终决定由人做。
 
+### 手机上能看 —— 飞书已接通
+
+用 OpenClaw 官方的 `@openclaw/feishu` 通道（长连接，**不需要公网地址**）。
+gateway 跑成 systemd 用户服务，开机自起：
+
+```bash
+~/.openclaw-biga/bin/biga gateway install   # 单元名带 profile 后缀，见红线 R-2
+~/.openclaw-biga/bin/biga gateway start
+journalctl --user -u openclaw-gateway-biga.service -f
+```
+
+聊天收发已实测通。访问控制与成本闸门都在：
+
+| 项 | 配置 |
+|---|---|
+| 谁能私聊 | `dmPolicy: allowlist` —— 只有名单内 |
+| 群里能不能触发 | `groupPolicy: allowlist` + 空名单 ⇒ **任何群都不响应** |
+| 一次出卡的代价 | 约 3 分钟 / $1.2~1.4 ⇒ 预算闸门在 **Stage 0 占号**处拦 |
+
+🔴 **别用自然语言在飞书里要卡** —— 通道把消息直接交给 Supervisor，
+它会**自己编排**，而实测那么做会出错（4/5 个 agent、顺序反了、$0.4 白花）。
+编排现在只有一份实现（[`ORCHESTRATION.md`](skills/decision-card/ORCHESTRATION.md)），
+契约只说一句「跑 `bin/biga-card`」—— 这条路径的实测收口还没做。
+
 ⚠️ **盘中会一直是 `WAIT`**，这是对的行为不是 bug ——
 实时源说「此刻」、日线源说「上一交易日」，风控拒绝把两者当同一天审。
 🔴 **「收盘后就对齐」是错的 —— 实测证伪。**
@@ -197,10 +222,13 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v5 —— 决策编号原子分配器 + 只追加保护 | ✅ |
-| 619 条测试 | ✅ |
+| 659 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
 | **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
+| **飞书接入** —— 官方通道 + 长连接 + 私聊/群双白名单 | ✅ 聊天已通 |
+| **出卡预算闸门** —— 最小间隔 / 当日上限 / 上一次还在跑 | ✅ |
+| 飞书里用自然语言要卡 | 🔶 会走错编排，**实测收口未做**（见待裁定）|
 | 两份外部对抗性评审共 29 条发现 | 🔶 15 模式级 / 7 **实例级（模式还在）** / 1 修不干净 |
 | 至少 1 次真实「否决」端到端落库 | ⬜ |
 | 真实缺失项跨天累积 ≥5 次 | 🔶 数够了，但全在同一天 |
@@ -268,7 +296,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 │   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
-├── tests/           619 条测试
+├── tests/           659 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
 │   └── tutorial/    开发教程（18 章，与代码同步）
