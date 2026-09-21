@@ -1,8 +1,12 @@
 # EasyUp for BigA 2.0 — 系统架构设计
 
-> created: 2026-09-19 | author: 小易 | status: **设计中，未开工**（等小飞说「开始」）
-> 上游：`$HOME/references/EasyUp_for_BigA_2.0_...docx`（V1.0 参考文档）
-> 姊妹文档：`docs/design/easyup-biga-2.0-evaluation.md`（评估，结论被小飞覆盖，见 §0.2）
+> 📄 **常青** · 随代码同步
+> **覆盖**：Agent 拓扑、通信契约、数据架构、失败模式清单、延迟预算 ｜ **不覆盖**：阶段进度（见 [`phase-2-specialists.md`](phase-2-specialists.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）
+
+
+> 上游需求：[`../external/2026-09-19-upstream-source-design-v1.md`](../external/2026-09-19-upstream-source-design-v1.md)（只读）
+> ⚠️ 本文**不标 status/日期** —— 常青文档的状态就是「现在」，历史在 git 里。
+> （原来这里写着「设计中，未开工」，而那时 Phase 2 已经做完两步了）
 
 ---
 
@@ -52,7 +56,11 @@
 ```
 
 **不变式 I-1**：BigA 的任何进程**不得以写模式**打开现系统的任何文件。
-由 Phase 1 的 `tests/test_isolation.py` 用路径前缀白名单钉住。
+判据在 `tools/verify/isolation.py`（要手工跑），而**这个判据本身**由 `tests/test_isolation.py` 钉住。
+
+⚠️ 原文把这句写成「由 `tests/test_isolation.py` 用路径前缀白名单钉住」，两处都不对：那个文件当时并不存在；「路径前缀白名单」也说反了 —— 那正是造成 64 个误报的前缀陷阱，真实实现用的是 `PurePath.is_relative_to()`。
+
+🔴 **自检工具自己也要被测。** 它一度只有「过 / 不过」两态，于是「什么都没扫到」与「扫了，没问题」写出来一模一样（F2 / F18）。现在是三态，`UNKNOWN` 不计入通过、退出码非零。
 
 **不变式 I-2**：BigA 崩溃、写坏自己的库、把端口占死 —— 现系统必须毫发无伤。
 验收方式：Phase 1 结束时做一次 `kill -9` 演练，确认生产 gateway pid 不变。
@@ -149,9 +157,21 @@ BigA 哪天不小心装错位置，生产侧当场报红。
     │   ├── technical-calc/  risk-check/  discipline-check/
     ├── data/biga.db                       ← SQLite (WAL)，.gitignore
     ├── tools/
-    │   ├── cron/   registry.yaml  runner.py    ← 单一调度域，Phase 1 为空
-    │   └── verify/ placebo.py  reachability.py  isolation.py
-    ├── tests/
+    │   ├── cron/   registry.yaml  runner.py    ← 单一调度域，⬜ **未建**
+    │   ├── git-hooks/ pre-push                 ← 推送前扫本次新增的提交
+    │   └── verify/                             ← 全部只读，见下表
+    │        isolation.py       I-1/I-2/R-2/端口，三态
+    │        spawn_check.py     Specialist 真被 spawn 了吗（接在出卡之后）
+    │        agent_trace.py     各 agent 的工具调用序列
+    │        latency_report.py  延迟/成本分解 + Stage 1 并行判据
+    │        missing_ledger.py  缺失项台账（出口条件 4）
+    │        audit_public.sh    公开内容审查（九项）
+    │        probe.sh           在一次性库上跑手工探针
+    │        sync_test_count.sh 把文档里的测试条数同步成实测
+    │        phase1_acceptance.py  Phase 1 验收（I-1 判据转调 isolation.py）
+    │                ⚠️ placebo.py / reachability.py **设计中，从未提交过**
+    │                   —— 原文把它们与真实文件并排列出，读起来像已建成
+    ├── tests/      _scan.py 是三个 AST 扫描器共用的**唯一**文件枚举
     └── docs/design/
 ```
 
@@ -172,7 +192,8 @@ specialist 是有界工人，窄 cwd 反而是对的。
 官方：skills 从**每个 agent 的 workspace** + **共享根**加载，再按 allowlist 过滤。
 🔴 `agents.entries.*.skills` 是**替换语义，不与 `agents.defaults.skills` 合并**。
 ⇒ 给某个 agent 配 skills 白名单时，必须把共享基线**整份抄进去**，否则会静默丢技能。
-由 `tests/test_skill_allowlist.py` 钉住（读 config，断言每个 entry ⊇ defaults）。
+⬜ **没有任何东西在钉它。** 原文声称由 `tests/test_skill_allowlist.py` 钉住，该文件从未存在过。
+🔴 这条风险是真实的：替换语义漏抄一个技能**不报错，只是静默少一个能力**。补这条守卫记在 `TODO.md`。
 
 ### 2.6 飞书：Phase 1 不接
 
@@ -259,6 +280,9 @@ Supervisor 做最终合成与矛盾裁定，用 Opus。
 ⚠️ `tools.agentToAgent.allow` **必须把 8 个全列上**（requester 和 target 都要匹配）。
 官方：空 allow 等于未设 = allow-all；只列一半 = 互相够不着。
 
+🔴 **这句话与本机实测矛盾，暂不能当结论用。** 外部评审 F10：`tools.agentToAgent.allow` 少了一个 agent，而 `agent_trace.py` 显示它当天仍被成功调用了至少 3 次。⇒ 要么这句话不准，要么另有生效路径。
+在查清之前**两处名册仍然都要写全** —— 不确定该信哪条时，选代价小的那边。
+
 ⚠️ `delegationMode: "prefer"` **只是 prompt 引导，不是调度器**。
 真正保证 Supervisor 一定去调 specialist 的，是它 AGENTS.md 里的硬性流程约定 + §12 的验收。
 
@@ -294,16 +318,25 @@ Supervisor 做最终合成与矛盾裁定，用 Opus。
 
 ## 四、通信契约
 
-### 4.1 三个数据结构（`skills/_contract/`，唯一实现）
+### 4.1 四个数据结构（`skills/_contract/`，唯一实现）
 
 ```python
+class MissingItem(str):
+    """缺失项 = 机器可读代码 + 人话。字符串值就是人话，代码挂在 .code 上。"""
+    code: str              # '<域>.<对象>.<原因>'，如 market.turnover.unavailable
+                           # 'legacy.unclassified' = Phase 1/2 早期的裸字符串
+
 @dataclass(frozen=True)
 class Evidence:
-    source: str            # 'biga.db:market_daily' / 'cls:12345' / 'em:api/xxx'
+    field: str             # 它支撑 result 的哪个键（铁律 3 靠它执行）
+    source: str            # 'sina:kline/sh000001' / 'em:push2ex/limit_up'
+    value: Any
     as_of: datetime        # 🔴 数据本身的时间，不是取回时间
     retrieved_at: datetime
-    value: Any
     calc_version: str|None = None   # 口径版本；换算法时可清点受影响结论
+    label: str|None = None          # 渲染 Card 用的中文名
+    raw_hash: str|None = None       # 🔴 指回 raw_market_snapshot.content_sha256
+                                    #    派生字段没有单一来源，允许为空
 
     @property
     def staleness_sec(self) -> int: ...
@@ -313,13 +346,15 @@ class AgentVerdict:
     task_id: str           # BIGA-YYYYMMDD-NNN
     agent: str
     status:  Literal['completed','partial','failed']
-    verdict: Literal['PASS','WARNING','BLOCK','UNKNOWN']
+    verdict: Literal['PASS','WARNING','BLOCK','UNKNOWN']   # 数据完整度
     result:  dict
     confidence: float
     evidence: list[Evidence]
     warnings: list[str]
-    missing:  list[str]    # 🔴 强制：任一必填项算不出来就必须列在这里
+    missing:  list[MissingItem]   # 🔴 强制：任一必填项算不出来就必须列在这里
     elapsed_ms: int
+    stance: str|None = None       # 🔴 方向判断，由 Agent 填，skill 不填
+                                  #    取值必须在 STANCE_VOCAB[agent] 里
 
 @dataclass
 class DecisionCard:
@@ -327,10 +362,25 @@ class DecisionCard:
     status: Literal['BUY','WAIT','AVOID','BLOCK']
     headline: str          # 核心矛盾一句话
     verdicts: list[AgentVerdict]
-    missing: list[str]     # 汇总，必须显示
+    missing: list[MissingItem]    # 汇总，必须显示
     synthesis: str
     model_ref: str
 ```
+
+#### 4.1.1 `status` / `verdict` / `stance` —— 三个不能混的问题
+
+| 字段 | 回答 | 谁填 |
+|---|---|---|
+| `status` | 这次执行**跑完了吗** | skill |
+| `verdict` | 这个判断**有效吗**（数据全不全） | skill |
+| `stance` | 判断**是什么**（市场偏哪边） | **Agent** |
+
+🔴 `verdict=PASS` 的意思是「数据完整」，**不是「看好」**。
+两者混在一起，「没发现问题」与「看多」就再也分不开 —— 而这正是 L-2 的形状。
+
+⚠️ `stance` 必须取自 `STANCE_VOCAB[agent]` 这个固定词表。
+今天写「偏强」、明天写「震荡偏强」，三个月后它就是一列自由文本，
+Phase 4 拿它做不了任何相关性检验。**它存在的唯一理由就是能被聚合。**
 
 ### 4.2 🔴 四条契约铁律
 
@@ -394,12 +444,64 @@ Agent（通过 skill 只读查询）
 | 表 | 用途 |
 |---|---|
 | ★ `decision_records` | Decision Card + 全部 Verdict + 证据（回放的唯一真相源） |
-| ★ `agent_runs` | 每次 spawn 的 agent/耗时/token/status（成本与延迟可观测） |
+| ★ `agent_runs` | 每次 spawn 的 agent/耗时/status（成本与延迟可观测） |
 | ★ `raw_market_snapshot` | 采集原样落盘 |
+| ★ `agent_verdicts`（v3） | **判定原件** —— skill 写、synthesize 按 id 读 |
+| ★ `decision_ids`（v4） | **编号分配器** —— Stage 0 原子占号，见 §5.3.2 |
 | `fact_stock_daily` / `fact_index_daily` | 归一化日线 |
 | `d_emotion_daily` | 情绪分 |
 | `d_sector_strength` | 板块强度 |
 | `raw_news` | 带 `published_at` / `source` / `retrieved_at` |
+
+⚠️ **只读打开一个还不存在的库**会抛 `StoreNotInitialised`（v5 加），
+而不是裸的 `sqlite3.OperationalError`。它与「schema 建好但零行」是两回事 ——
+后者是全新环境的**正常状态**，把它也报成错会有人为了消警告去塞假数据。
+巡检工具据此统一退出码 2（判不了），见 §9 的 R-3。
+
+#### 5.3.2 为什么要 `decision_ids`（2.4 前夕加的）
+
+它解决的不是「编号好看」，而是 **L-11：身份晚于证据**。
+
+2026-09-21 盘中，两次端到端相隔两分钟。结果两张卡**共用同一条 `technical`
+判定原件**（result 哈希相同），且对 `sector` 给出相反结论 ——
+而任何一张卡单独看都毫无异常。
+
+两个可以分开修、但只修一个不够的原因：
+
+| 层 | 问题 | 修法 |
+|---|---|---|
+| 表层 | 五个 specialist 都硬编码 `new_task_id(1)` | 换成临时号，并用 AST 测试钉死 |
+| 根本 | 编号在**合成时**才分配 | 提到 Stage 0，沿全链下传 |
+
+🔴 **占号必须原子。** 「先查空位再插入」中间有窗口，两次同时起的运行会拿到
+同一个号 —— 那正是本次事故的机制。主键冲突是唯一可靠的并发仲裁。
+
+🔴 **守卫放在 `save_verdict`（唯一写入口），不是五个调用点。**
+同一个 bug 能同时活在五个文件里，就是因为每个调用点各写一遍默认值。
+
+> 通用原则：**一个实体必须在它产生数据之前就有身份。**
+> 否则那些数据只能事后归属，而事后归属在并发下必然出错。
+
+#### 5.3.1 为什么要 `agent_verdicts`（Phase 2 加的）
+
+它解决的不是「多存一份」，而是**不让 LLM 搬运结构化数据**（见 §9 L-10）。
+
+skill 算完直接把原件落这张表并返回一个 id，Agent 只传 id。
+Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
+与 `decision_records.replay_of` 同一套做法：**原件永不改写**。
+
+**五张表全部只追加不修改，由 SQLite 触发器强制**（schema **v5**）。
+
+⚠️ 这句话在 v4 时期是**假的**：原文写「四张表」，而当时已经有五张，
+且新加的 `decision_ids` 恰恰是唯一没有触发器的那张（外部评审 F1）。
+一条 `DELETE` 就能让同一个号发两次 —— 而 FIX-01 / FIX-02 两道身份闸门
+校验的都是「这些判定的 task_id 是不是同一个」，号回收之后两次运行
+**真实自洽**，两道闸门会一致放行。
+
+⇒ v5 补上触发器，并把判据从「数几张表」换成
+`tests/test_store.py::test_每张表都有只追加触发器` ——
+它扫 `sqlite_master` 里**实际有哪些表**，例外要在 `EXEMPT` 里自己举手。
+**新表默认就该受保护**，而手写的数字只会在下一次加表时再错一遍。
 
 ---
 
@@ -421,6 +523,85 @@ Agent（通过 skill 只读查询）
 🔴 **硬约束 S-2**：skill 不得做判断性归类（"这属于强势板块"）。
 skill 返回事实与分数，判断留给 agent。
 理由：判断逻辑散进 skill = 产生第二套口径。见 §9 L-3 —— 同一判据散落多处实现时，错误比例可以高得惊人，且错法全是静默的。
+
+### 6.1 采集层的两条统一接口（`skills/_sources/`）
+
+它们都不是「工具函数」，是**用结构消灭一类判断**——
+判断一旦分散到各个调用点，必然有某一处判错。
+
+#### `server_as_of` —— 每个源自己声明有没有服务端时刻
+
+```python
+r.server_as_of or now_cn()      # 调用方统一这么写，不必逐处判断
+```
+
+| 返回 | 含义 |
+|---|---|
+| `datetime` | 这个端点自带时刻（日线的交易日、腾讯行情的时间戳、快讯的发布时刻） |
+| `None` | **不带任何日期** —— 它说的就是「此刻」（涨跌家数、板块榜） |
+
+🔴 **为什么必须是统一接口而不是各处 `if`**：外部评审 F4 的成因正是
+「Evidence 层改对了，几十行外的 raw 落盘层没改」——
+两边的测试各自全绿，bug 落在从未被同时检查过的缝隙里。
+
+⚠️ 不带日期的源要**显式写 `server_as_of = None`**，不是不实现 ——
+不实现会让人以为是漏了。守卫：`_sources` 里每个带 `raw` 字段的 dataclass
+都必须声明它（`tests/test_as_of_attribution.py`），**新加一个源不回答这个问题就红**。
+
+### 6.2 四个数据源，各自的脾气
+
+**每个源都只做一件别人做不了的事**，重叠是为了交叉校验，不是为了冗余。
+
+| 模块 | 拿什么 | 🔴 它自己的坑 |
+|---|---|---|
+| `sina.py` | 指数日线（脊梁） | 只声明**交易日**，不声明时刻 ⇒ `as_of` 要按收盘推。当天日线发布**晚于收盘约 35 分钟**（实测 n=1） |
+| `tencent.py` | 指数实时行情 | 唯一**自带完整时间戳**的源（`quoted_at`），这是它存在的主要理由；成交量单位是**手**，与日线的股差 100 倍 |
+| `eastmoney.py` | 涨跌家数 / 板块榜 / 涨停池 | 家数与板块榜**不带任何日期**；同一主机两个端点一个返数组一个返字典；盘前全零 ≠ 全平盘 |
+| `sina_news.py` | 7×24 快讯 | 连续事件流，**没有「收盘」概念** ⇒ `as_of` 只能是最新一条的真实时刻（FIX-03） |
+
+支撑层：
+
+| 模块 | 职责 |
+|---|---|
+| `http.py` | 唯一的取数出口：超时、重试、错误归一成 `SourceError` |
+| `tradetime.py` | 交易日 → 时刻的换算（`as_of_for_trade_date`）、此刻是否连续竞价 |
+| `sanity.py` | 量级围栏（下一节） |
+
+🔴 **`http.py` 的异常清单是六个 skill 共用的单点。** 实测踩过：
+`http.client.IncompleteRead` 继承 `HTTPException` + `ValueError`，
+**不继承 `OSError`** —— 于是截断响应绕过了 `except OSError` 的重试层，
+一次网络抖动直接冒成未捕获异常，六个 skill 全中。
+⇒ 这一层漏一个异常类型，影响面是全系统。
+
+### 6.3 三个契约/存储侧的支撑模块
+
+| 模块 | 为什么单独存在 |
+|---|---|
+| `skills/_contract/missing.py` | `MissingItem` 带**机器可读代码**（`market.turnover.date_mismatch`）—— 缺失项要能统计「哪个源最常缺」，自由文本做不到 |
+| `skills/_store/schema.py` | 按版本号递增的迁移列表。**已发布的条目不许改动** —— 跑过 v4 的库不会重放它，所以补触发器只能开 v5 |
+| `skills/_store/runtime.py` | 读 OpenClaw 运行时自己的 trajectory。🔴 **UTC → 北京时间的转换只在这里做一次**，消费方拿到的已经是北京时间 —— 这类 bug 的形状是「差 8 小时但仍是个合法时刻」，不报错 |
+
+#### `sanity.py` —— 量级围栏，抓垃圾值不抓行情
+
+```python
+implausible_bars(window)        # 相对窗口**中位**收盘价差 5 倍以上 = 坏数据
+INDEX_PCT_LIMIT / BOARD_PCT_LIMIT
+```
+
+🔴 **阈值卡在「物理上不可能」，不卡「看着不像」。** 60 日内腰斩是行情，
+差 5 倍不是。定紧了会在极端行情里报红，而**永远报警的检查会被忽略**。
+
+🔴 **用中位数不用均值**：一根 `low=0.01` 会把均值拉走，
+拉走之后它自己就显得没那么离谱了。
+
+⚠️ 抽成共享模块的理由是 F5：`market_calc` 早就有这类围栏、注释还写着
+「不是为了抓行情，是为了抓垃圾值」，但**只长在那一个文件里**。
+`technical_calc` 的 60 日高低点因此能吃出 3118 万 %，而 verdict 仍是 PASS。
+
+⚠️ 同一层还有一条**反向**约束：解析层**不许把「字段缺失」吞成 0**
+（F6）。缺失返回 `None`，让上层报 `missing` ——
+吞成 0 会让「主力净流入前 5」在资金字段失效时给出一个
+**任意但格式完整**的第一名，带着「0.0 亿」上卡。
 
 ---
 
@@ -474,7 +655,7 @@ biga replay BIGA-20260919-001 [--model <other>]
 🔴 现系统有 **systemd（90 条）** 与 **LLM cron（91 条/39 启用）** 两个互不引用的调度域，
 反复导致「查一个域就断言没有 cron 跑它」的误判。
 
-**BigA 只有一个调度域**：`tools/cron/registry.yaml` → systemd timer。
+**BigA 只有一个调度域**：`tools/cron/registry.yaml` → systemd timer。⬜ **未建**（Phase 3 才有第一条 cron）。
 LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --agent <id> -m "..."`，
 **不使用 OpenClaw 内置 cron**。
 
@@ -485,7 +666,8 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 
 ## 九、🔴 必须带进新系统的失败模式清单
 
-下面九条是从一套**长期运行的量化交易系统**里学到的失败模式。
+L-1 ~ L-9 是从一套**长期运行的量化交易系统**里学到的失败模式，
+L-10 是本项目自己踩出来的。
 它们的共同点是：**失败时不报错**。测试绿、日志绿、监控绿，而事情已经坏了几个月。
 
 因此每一条都不只是「注意事项」，而是配一个**在 Phase 1 就建立的、会报红的机制** ——
@@ -496,18 +678,34 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 | **L-1** | **零消费方**：模块在写数据，但没有任何代码读它；或工具被多处引用为权威，却从未被任何调度器执行 | 写入方本身工作正常，没有报错点。"被引用"看起来就像"在运行" | **产消对账测试**：任何写库的模块必须在调度注册表或调用图中存在读取方，否则红。判据是**调度命令的字面量**，不是"谁调用了它" |
 | **L-2** | **闸 fail-open**：风控/纪律检查在数据缺失或条件算不出来时**静默放行**；未知配置键被忽略，规则退化成无条件命中 | 放行与通过的日志长得一模一样 | **买入侧一律 fail-closed**；`UNKNOWN` 独立于 `PASS`；算不出来必须进 `missing[]` 并显示在 Card 上 |
 | **L-3** | **同一判据多份实现**：代码路由、涨跌停、费率等基础判断在各处各写一遍，其中相当比例是错的 | 错法全是静默的 —— 返回一个看似合理的错值 | **判据单一实现 + AST 扫描钉死**：不许存在第二份。一切走 `_contract` / `_store` |
-| **L-4** | **基准有算术偏差**：超额收益的对照基准本身带正偏（右偏截面下均值≠中位、逐日连乘≠买入持有），导致随机策略也"跑赢" | 结论看起来显著，方向也符合预期 | **任何基准上线前必须过安慰剂检验**：拿随机标的喂同一条生产路径，要求 `\|t\| < 1.96`。`tools/verify/placebo.py` |
+| **L-4** | **基准有算术偏差**：超额收益的对照基准本身带正偏（右偏截面下均值≠中位、逐日连乘≠买入持有），导致随机策略也"跑赢" | 结论看起来显著，方向也符合预期 | **任何基准上线前必须过安慰剂检验**：拿随机标的喂同一条生产路径，要求 `\|t\| < 1.96`。⬜ **未建**（Phase 4，见 `TODO.md`）|
 | **L-5** | **估计量依赖**：同一份数据，换一种标准误算法，显著性就反转 | 只报让结论存活的那一个，读者看不出来 | **报结论必须写明用的哪个估计量**，并同时给出多种；`n < 30` 一律标 underpowered |
 | **L-6** | **文档漂移**：文档里的关键数字（表数量、数据量、测试数）与实际相差数倍 | 文档不会自己报错，而人会照着它做判断 | **关键事实由测试生成或校验**，不手抄 |
-| **L-7** | **死配置**：因子/规则因命名空间不一致而交集恒空，长期零命中；或阈值判断在其作用域内恒真 | 它照常参与计算，只是永远不生效 | **可达性巡检**：每日报告「配了但从未命中」的规则与因子 |
+| **L-7** | **死配置**：因子/规则因命名空间不一致而交集恒空，长期零命中；或阈值判断在其作用域内恒真 | 它照常参与计算，只是永远不生效 | **可达性巡检**：每日报告「配了但从未命中」的规则与因子。⬜ **未建**。6 条阈值的**构建期**可达性已由 `tests/test_risk_check.py` 钉住（parametrize 到 `THRESHOLDS` 自己，新加一条自动纳入），但那不是 L-7 要的东西 —— 生产环境里长期不命中仍然无人察觉 |
 | **L-8** | **账本幻影行**：记录了实际没有发生的事件（提交即记账，而提交不等于成交） | 账本自洽、总额对得上，但对应的事实不存在 | **raw 层永不改写**；状态变更一律追加而非 `UPDATE`，让「当时看到的」可重建 |
-| **L-9** | **下单末端的时序陷阱**：父进程超时预算与子进程下单耗时倒挂、特定时段必须换委托类型、探针失败时继续执行、止损价贴死价格保护带下限 | 症状是"废单"或"没成交"，看不出是架构问题 | **Phase 1 不下单**，但把这四条冻结进 `docs/design/live-order-rules.md`，将来开下单时直接实现 |
+| **L-9** | **下单末端的时序陷阱**：父进程超时预算与子进程下单耗时倒挂、特定时段必须换委托类型、探针失败时继续执行、止损价贴死价格保护带下限 | 症状是"废单"或"没成交"，看不出是架构问题 | **Phase 1 不下单**，但把这四条冻结进 `docs/design/live-order-rules.md`，将来开下单时直接实现（⬜ **未建**，Phase 4+）|
+
+| **L-10** | **结构化数据经 LLM 转述**：让 Agent「把上游的 JSON 原样带上」，再由下游 Agent 抄进命令 | 它不会拒绝也不会报错，只是**漏掉几个字段**。而漏掉的字段往往正是溯源字段 —— 错误要到几个月后做归因时才暴露 | **数据不经过语言模型**：skill 直接落 `agent_verdicts`，Agent 只传 id；修订走 CLI 而不是重打 JSON。并用测试钉死**契约文档里不许再出现贴 JSON 的写法** |
+
+| **L-11** | **身份晚于证据**：决策编号在合成阶段才分配，于是采证时这次决策还没有身份，每个 Specialist 只好自己编一个 | 两次运行的判定原件写着同一个号 ⇒ **证据被合成进同一张卡**，而卡面上完全正常：agent 齐全、时间戳相近、缺失项照常上浮 | **身份先于证据**：Stage 0 原子占号（`decision_ids`，主键冲突仲裁），编号沿全链下传；临时号 `-000` **自曝身份且不得入账**；合成时拒绝混血 |
+
+| **L-12** | **测试双打得太靠上**：回归测试 mock/fake 的对象，正好是**包含被修 bug 的那段逻辑本身**（或它最直接的调用者） | 测试绿、覆盖率数字也好看——双子从不失败，因为它只会返回测试作者手写的期望值。它验证的是"我有没有正确调用这个双"，被测逻辑本身**从没被真正执行过** | **回归测试必须经过真实数据路径**：真文件、真 sqlite 连接、真子进程，不 mock 掉包含 bug 的函数或它的直接调用者。约定一个可注入的"真实但一次性"的外部状态入口（如 `BIGA_RUNTIME_DB` 环境变量），让测试能构造**真实**的外部依赖，而不是伪造被测函数本身 |
+
+⚠️ **L-10 / L-11 / L-12 是这张表里在本项目自己踩出来的三条**，其余九条继承自那套长期运行的系统。
+L-12 的实例：F3 的第一版回归测试 mock 的是 `_runtime_spawn_records`——正是"按决策号过滤"这段
+逻辑本身的容器，于是那段逻辑从没被测试真正执行过，外部复查一次真实攻击就把它的漏洞找了出来。
+重修时把它换成一份真实构造的 sqlite 文件，走完整查询路径，同一类回归才第一次真正被防住。
+实测形状：skill 输出 15 条 evidence 全带 `retrieved_at`，Specialist 转述后**一条不剩**；
+落库 Card 上 25 条证据的 `retrieved_at` 被统一填成「Supervisor 敲命令的时刻」，
+与真实采集时刻差 106 秒。更值得警惕的是，Agent 为此**给自己写了一份恢复文档**，
+把「补一个当前时间当 retrieved_at」写成了标准操作 ——
+**当 Agent 开始给自己写「怎么绕过这个错误」的文档时，那是架构在求救。**
 
 ⚠️ **L-9 是裁定 2「将来都有自动下单」的直接落点** ——
 现在不实现，但先把知识存进去，代价近乎为零；等到要用时再重新踩一遍，代价是真金白银。
 
 > 这张表是本设计里最重要的一节。
-> 架构图可以照着任何一篇文章画，这九条只能靠踩出来。
+> 架构图可以照着任何一篇文章画，这几条只能靠踩出来。
 
 ---
 
@@ -517,14 +715,14 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 
 ### 10.1 延迟预算
 
-| Stage | 内容 | 并行度 | 预估 | Phase 1 实测 |
-|---|---|---|---|---|
-| 0 | Supervisor 拆任务、发出 spawn | — | 5-10s | **8.0s** ✅ |
-| 1 | market / sector / news / technical / emotion | **×5 并行** | 20-40s（取最慢那个） | **36.0s** ✅（只有 emotion） |
-| — | 子 agent 交回到 Supervisor 的空档 | — | 未估 | 1.0s |
-| 2 | risk / discipline | **×2 并行** | 15-25s | 未上线 |
-| 3 | Supervisor 合成 + 渲染 Card | — | 20-30s | **30.0s** ✅（压线） |
-| | **合计** | | **60-105s** | **74.8s** |
+| Stage | 内容 | 并行度 | 预估 | Phase 1 实测 | Phase 2 休市日 | Phase 2 **盘中** |
+|---|---|---|---|---|---|---|
+| 0 | Supervisor 拆任务、发出 spawn | — | 5-10s | **8.0s** ✅ | **9.8s** ✅ | 34.7s |
+| 1 | market / sector / news / technical / emotion | **×5 并行** | 20-40s（取最慢那个） | **36.0s** ✅（只有 emotion） | **31.2s** ✅（4 个并行） | **113.6s** ❌ |
+| — | 子 agent 交回到 Supervisor 的空档 | — | 未估 | 1.0s | 0.0s | 14.0s |
+| 2 | risk / discipline | **×2 并行** | 15-25s | 未上线 | **16.4s** ✅ | **23.7s** ✅ |
+| 3 | Supervisor 合成 + 渲染 Card | — | 20-30s | **30.0s** ✅（压线） | **13.6s** ✅ | 29.0s ✅ |
+| | **合计** | | **60-105s** | **74.8s** | **71.0s** | **214.9s** ❌ |
 
 > 🔴 **「60-105s」是下界之和与上界之和，不是预算区间。**
 > 5+20+15+20 = 60，10+40+25+30 = 105。把 60 拿去当及格线，等于要求
@@ -541,6 +739,112 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 >
 > 实测方法见 `tools/verify/latency_report.py`；结论不依赖 Supervisor 自报的
 > `elapsed_ms`（那个值实测在两个方向上都偏离过，低报 43%、高报 74%）。
+>
+> 🔴 **Phase 2 把 Stage 1 从 1 个 agent 加到 4 个，端到端反而少了 3.8s。**
+> 这正是上一段那条推理的反面验证：Stage 1 的成本是 `max()` 不是 `sum()`
+> （四个串行需 98.5s，实际墙钟 31.2s），而 Stage 0+3 的固定开销才是可压的部分 ——
+> Phase 1 占 51%，Phase 2 降到 33%，靠的是把合成阶段的结构化数据改走
+> `verdict_ref`（§9 L-10），Supervisor 不再逐条重打 JSON。
+>
+> ⚠️ **两次实测都在休市日**，Stage 1 的 agent 大多因数据未形成而早退。
+> 盘中所有源都活着时这张表要重测 —— 在那之前不要把 71.0s 当成能力上限。
+>
+> 🔴 **盘中重测（`BIGA-20260921-009`，周一 09:52）：214.9s，超预算 2.4×。**
+> 休市日那个 71.0s 不代表任何东西 —— 差了 3 倍。
+>
+> 差距**几乎全在 `sector` 一个 agent**：休市日 21.6s，盘中 113.6s。
+> 盘中板块全部活跃 ⇒ 它要翻的页更多、要说的话更多（输出 1492 tok）。
+> Stage 1 是 `max()`，所以一个慢 agent 就决定了整个阶段。
+>
+> ⇒ 出口条件 5 的结论：**预算 90s 在盘中不成立，但不要据此放宽预算。**
+> 先看 `sector` 那 113.6s 里有多少是思考档位、多少是真的在翻页
+> （`agent_trace.py --agent sector -n 1`），**再谈改数字**。
+> 「指标红了就调指标」是本项目明令禁止的（开发流程第 7 条）。
+
+#### 🔴 预算重推（Phase 2 出口条件 5）
+
+四次盘中实测的分解（单位：秒）：
+
+| 运行 | Stage 1 墙钟 | 最慢的那个 | risk | main 模型时间 |
+|---|---|---|---|---|
+| 09:52 · 4 agent | 113.6 | sector 113.6 | 23.7 | 94.4 |
+| 10:40 · 6 agent | 64.2 | news 63.4 | 21.0 | 120.7 |
+| 10:45 · 6 agent | 80.5 | news 80.1 | 22.4 | 94.2 |
+| 11:01 · collect | 78.8 | news 78.3 | 19.9 | **73.9** |
+
+**结论：90s 在当前架构下做不到，而且原因是结构性的。**
+
+即使每一项都取实测最好值：
+
+```
+Stage 1 最好 64.2  +  risk 最好 19.9  +  main 最好 73.9  =  158s
+```
+
+⇒ 新预算 **180s**（留 14% 余量）。
+
+⚠️ **这不是「把红灯调绿」。** 改预算必须同时说清三件事，否则就是作弊：
+
+**1. 旧数字错在哪** —— `60-105s` 是在**一个 agent 都还没有**的时候，
+把四个阶段各拍一个区间再相加得到的。它是一个愿望，不是一个预测。
+（同一段早就记过另一个加法错误：下界之和不是预算下界。）
+
+**2. 哪些部分不在我们控制内** ——
+
+| 组成 | 可控性 |
+|---|---|
+| Stage 1 最慢的那个 | 🔴 **不可控**。它是第三方接口的延迟，而且实测会渐进限流 |
+| `main` 的合成 | ✅ 可控，是当前最大的可优化项 |
+| `risk` | 稳定在 20s 上下，无优化空间 |
+
+**3. 什么时候这条预算该红** —— 超过 180s 时，它说的是
+「某个组成异常了」而不是「今天慢一点」：
+实测四次的最大值是 214.9s（那次 sector 还没优化），
+优化后三次都在 158–173s。180s 会红，意味着有东西真的变了。
+
+#### ⏩ 2026-09-21 17:18 补：**180s 只覆盖盘中，盘后会超**
+
+首次盘后端到端（`BIGA-20260921-020`，日线发布之后）：
+
+| | 盘中（四次实测的基准） | 盘后（本次） |
+|---|---|---|
+| 端到端墙钟 | 172.6s | **198s** 🔴 超预算 |
+| 成本 | $1.20 | **$1.37** |
+| `news` 单轮 | 78.3s / $0.30 | **100.0s / $0.42** ← 最大的一笔 |
+| 60 分钟窗口内快讯 | 67~79 条 | **184 条** |
+
+🔴 **原因不是「今天慢一点」，是收盘后那一小时的快讯量翻倍。**
+窗口同样是 60 分钟，条数从 ~70 涨到 184 —— 而 `news` 的 prompt 长度
+直接跟着条数走。180s 这条预算是用**四次盘中实测**推出来的，
+而当时所有实测都在 15:00 之前（与 F4/FIX-03 躲过一整天是同一个原因：
+**测试窗口系统性地避开了某个时段**）。
+
+⚠️ 顺带暴露第二个问题：184 条超过 `MAX_ITEMS=120` 上限，
+**64 条没有被看过**，如实上浮成缺失项 `news.window.truncated`。
+所以盘后不只是更慢更贵，**看到的还更少**。
+
+⬜ **这条预算怎么改，留作待裁定** —— 不在这里顺手把它调到 210s。
+三个方向各有代价，需要先有更多盘后实测：
+
+| 方向 | 代价 |
+|---|---|
+| 抬高预算到覆盖盘后 | 盘中的异常会不再报红 |
+| 分时段两条预算 | 「什么时候该红」要写两遍，L-3 的形状 |
+| 压 `news`（缩窗口 / 提上限） | 缩窗口会漏消息；提上限更慢更贵 |
+
+> 🔴 **改预算之前先问「什么时候它不该红」。** 现在只有一次盘后实测，
+> 回答不了这个问题 —— 而这正是旧预算 `60-105s` 当初犯的错：
+> 拿一个愿望当预测。
+
+#### 还能往哪压
+
+按可控性排序：
+
+1. **`main` 的合成**（73.9s，其中约 22s 零工具调用在组合 synthesize 命令）——
+   命令模板已经写进契约了，剩下的是 headline/synthesis 的文字生成。
+2. **`news` 的 prompt**（79 条原文 ≈ 6k token，它是最慢的 Specialist）——
+   但缩小窗口就缩小了发言范围，见 `phase-2-specialists.md` §3.12 的权衡。
+   **这是一个诚实性与速度的交换，不是单纯的优化。**
+3. Stage 1 的其余 agent 都在 30s 上下，压它们对 `max()` 没有意义。
 
 **串行做法会是 2-5 分钟** —— 差距全在 Stage 1/2 的并行。
 因此 `agents.defaults.subagents.maxConcurrent ≥ 6` 是**功能要求不是调优**。
@@ -554,68 +858,59 @@ LLM 侧的定时任务也由 systemd 触发 `openclaw --profile biga agent --age
 ### 10.2 成本可观测
 
 `agent_runs` 表逐次记录 agent / model / 耗时 / token。
-Phase 2 结束时出一张「单次决策成本分解」，据此决定要不要降档某个 agent 的模型。
 **不预先优化** —— 但要保证测得出来。
+
+#### Phase 2 成本分解（`BIGA-20260921-016`，盘中六 Agent，全部 sonnet-5）
+
+| agent | 耗时 | 输出 tok | 缓存读 | 缓存写 | 成本 |
+|---|---|---|---|---|---|
+| `main` | 172.6s | 5665 | 746k | 91k | **$0.4373** |
+| `news` | 78.3s | 2444 | 293k | 54k | $0.2189 |
+| `sector` | 61.9s | 3015 | 96k | 37k | $0.1421 |
+| `emotion` | 35.4s | 1349 | 67k | 36k | $0.1166 |
+| `market` | 32.7s | 997 | 68k | 36k | $0.1133 |
+| `technical` | 30.0s | 1287 | 64k | 34k | $0.1114 |
+| `risk` | 19.9s | 846 | 86k | 12k | $0.0560 |
+| | | | | **合计** | **$1.20** |
+
+三条读法：
+
+**1. `main` 一个占 37%。** 它的缓存读 746k 是第二名的 2.5 倍 ——
+因为 Supervisor 要把所有 Specialist 的回答读进上下文。
+Stage 1 再加 agent，涨的主要是这一项。
+
+**2. `news` 是最贵的 Specialist**（$0.22，缓存读 293k）。
+它的 prompt 里有 79 条快讯原文 ≈ 6k token —— 这是**设计选择**
+（见 `phase-2-specialists.md` §3.12 的额度权衡），不是意外。
+
+**3. 🔴 这一轮是冷缓存。** 缓存写 91k 偏高说明刚改过配置。
+**冷热缓存的成本不可横向比较** —— 热缓存下 `main` 通常在 $0.36 左右。
+`latency_report.py` 会自动标注这一点。
+
+#### 要不要降档某个 agent 的模型
+
+**现在不降。** 判据还不够：
+
+- $1.20/次 × 一天几次 = 可接受，还没到要优化的量级
+- 降档会改变结论质量，而**结论质量目前没有度量**（那是 Phase 4 的事）
+- 唯一明显的候选是 `main`，但它恰恰是最不该降档的 —— 合成是判断最密集的一步
+
+⇒ 记录，不动手。**先有区分力检验，再谈降档。**
 
 ---
 
 ## 十一、Phase 1：最简功能验证
 
-> 小飞的原话：「先安装好新版 openclaw，实现最简单的功能验证」。
-> 本节把「最简单」定义清楚，避免范围漂移。
+> 📄 **已完成并冻结** —— 完整内容见
+> [`phase-1-walking-skeleton.md`](phase-1-walking-skeleton.md)。
+>
+> 这里只留指针。本文是**常青**文档（永远描述当前状态），
+> 而 Phase 1 的设计描述的是一个**已经结束的阶段** ——
+> 生命周期不同的东西放在一起，读者就无法判断哪些还作数。
 
-### 11.1 目标：一条最细的、端到端能走通的线
+结论：`main` + `emotion` 两个 agent，九项验收全过，端到端 74.8s / $0.2179。
 
-**只建 2 个 agent**（`main` + `emotion`），不是 8 个。
-
-理由：Phase 1 要验证的是**机制**（跨 agent spawn 能不能通、契约能不能落、能不能回放），
-不是**覆盖面**。机制通了，其余 6 个是复制。
-而且一上来建 8 个空 agent = 6 个零消费方组件，正是 L-1 要防的。
-
-选 `emotion` 做第一个 specialist：它最确定性（阈值+计数），最容易判断「答得对不对」。
-
-### 11.2 步骤
-
-| # | 动作 | 产物 / 验证 |
-|---|---|---|
-| 1 | 装 node **v24.21.0**（增量；不改 `default`、不卸 v24.18.0） | `nvm ls` 见到它；生产 gateway pid 不变 |
-| 2 | `npm i --prefix ~/.openclaw-biga/runtime openclaw@latest` —— 🔴 **不装进 nvm bin**（约束 D-1） | `runtime/node_modules/.bin/openclaw --version` ≥2026.9.5；且 `v24.21.0/bin/` 里**没有** openclaw |
-| 3 | 写 `~/.openclaw-biga/bin/biga` wrapper（强制 `--profile biga`）并加执行位 | `biga --version` 可用 |
-| 4 | 🔴 **生产侧**加一条守卫测试，断言其 PATH 解析 → `v24.18.0` | 绿（这是 D-1 的常驻守卫） |
-| 5 | `biga setup`：端口 **19789**，**跳过飞书** | `~/.openclaw-biga/openclaw.json` 生成 |
-| 6 | 在 `~/.openclaw-biga/workspace/` 建 git 仓库 + §2.4 骨架 + `.gitignore`（`data/`） | `git log` 有首个 commit |
-| 7 | 写 `skills/_contract/`（Evidence / AgentVerdict / DecisionCard） | `tests/test_contract_single_impl.py` 绿 |
-| 8 | 写 `skills/_store/db.py` + 三张表（`decision_records` / `agent_runs` / `raw_market_snapshot`） | `tests/test_no_raw_sqlite.py` 绿 |
-| 9 | 写 `skills/emotion-calc/` —— 真采一次 A 股情绪数据，输出 `AgentVerdict` | 命令行跑出带 `as_of` 的 JSON |
-| 10 | 建 agent `emotion`（`--workspace ~/.openclaw-biga/workspace/agents/emotion`）+ 写它的 AGENTS.md | `biga agents list` 见到它 |
-| 11 | 配 `main`(Supervisor)：AGENTS.md / SOUL.md / IDENTITY.md 落在**仓库根** + `allowAgents:["emotion"]` + `agentToAgent.allow` | |
-| 12 | 跑通：`biga agent --agent main -m "今天市场情绪怎么样？"` | 见 §11.3 |
-| 13 | 实现 `replay <decision_id>`（与在线路径共用同一份合成代码） | 同一 verdicts 重跑出一致结论 |
-| 14 | 隔离演练：`kill -9` BigA gateway 进程 | 生产 gateway pid 不变（不变式 I-2） |
-
-⚠️ 第 1 步只装 **node**；openclaw 在第 2 步用 `--prefix` 装到 profile 目录内。
-把这两步合成「在新 node 下 `npm i -g openclaw`」就会直接踩中 D-1。
-
-### 11.3 Phase 1 验收（全部满足才算过）
-
-1. Supervisor 收到问题后**确实 spawn 了 `emotion`**（`agent_runs` 有该行，不是自己编的）
-2. `emotion` 返回的是**合法 `AgentVerdict`**，含 ≥1 条带 `as_of` 的 `Evidence`
-3. 输出一张 **Decision Card**，含状态 + 证据 + 缺失项三段
-4. `decision_records` 落库 1 行，`biga replay` 能重跑出一致结论
-5. 故意把情绪数据源打断 → Card 显示 `UNKNOWN` + `missing` 非空，**不是 PASS**（L-2）
-6. 生产侧：gateway pid、openclaw 版本、`default` alias、PATH、18789 监听 —— 五项全部未变
-6b. 🔴 生产侧的 PATH 解析仍指向 **v24.18.0**（约束 D-1 未被破坏）
-7. 单次端到端 **< 90s**（热缓存，2 个 agent）—— 判据是 `latency_report.py` 的
-   **等卡墙钟**，不是 Card 上 Supervisor 自报的 `elapsed_ms`。
-   90s = Stage 0/1/3 预估上界之和（10+40+30 = 80s）+ 10s 盘中网络余量。
-   ⚠️ 八 Agent 的 105s 出自同一套「下界相加」的算术，且 Stage 3 在**只有一个**
-   specialist 时就已经压着 30s 上沿 —— 那个数要等 Phase 2 有数据了重新推，
-   **现在不改，也不要拿它当承诺**。
-
-### 11.4 Phase 1 明确不做
-
-装飞书 / 建任何 cron / 接任何下单路径 / 建其余 6 个 agent /
-PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI。
+Phase 2 及以后的设计见 [`phase-2-specialists.md`](phase-2-specialists.md)。
 
 ---
 

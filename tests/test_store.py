@@ -8,9 +8,13 @@
 
 from __future__ import annotations
 
+import pathlib
+import sys
 from datetime import timedelta
 
 import pytest
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
 
 from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
 from _store import (
@@ -25,6 +29,7 @@ from _store import (
     next_decision_id,
     record_agent_run,
     record_verdict_run,
+    reserve_decision_id,
     save_card,
     save_raw_snapshot,
 )
@@ -56,10 +61,20 @@ def make_verdict(**kw) -> AgentVerdict:
 
 
 def make_card(**kw) -> DecisionCard:
+    """默认造出**合法**的卡。
+
+    🔴 改 `decision_id` 时，verdict 的 `task_id` 必须跟着改 ——
+    否则造出来的就是「卡 A 装着 B 的判定」，而契约层现在会拒绝它
+    （外部评审 P1-1）。
+
+    在加那条约束之前，这个 helper 会默默造出非法卡，
+    于是两条测试一直在用不合法的样本跑 —— 它们通过，只是因为没人拦。
+    """
+    did = kw.get("decision_id", TID)
     # contract-exempt: 同上
     base = dict(
-        decision_id=TID, status="WAIT", headline="核心矛盾一句话",
-        verdicts=[make_verdict()], synthesis="",
+        decision_id=did, status="WAIT", headline="核心矛盾一句话",
+        verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
     )
     base.update(kw)
@@ -116,6 +131,41 @@ class TestAppendOnly:
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute("DELETE FROM raw_market_snapshot")
+
+    def test_每张表都有只追加触发器(self, db):
+        """🔴 判据取自**数据库里实际有哪些表**，不是手写清单。
+
+        v4 加 `decision_ids` 时漏了触发器，上面那份 parametrize 清单
+        当然也不会提到它 —— 手写清单只覆盖「你想到过的」，
+        而漏掉的恰恰是没想到的那张。外部评审 F1 就是这么找到的。
+
+        ⇒ 反过来：**新表默认就该受保护，例外必须在 EXEMPT 里自己举手。**
+        """
+        # 版本号走 `PRAGMA user_version`，不占表 ⇒ 目前只有 SQLite 自己的表豁免
+        EXEMPT = {"sqlite_sequence"}
+        with connect(db, readonly=True) as c:
+            tables = {r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")} - EXEMPT
+            guarded = {r[0].rsplit("_no_", 1)[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'")}
+        assert tables, "一张表都没扫到，这个测试等于没测"
+        assert tables <= guarded, f"这些表可被改写：{sorted(tables - guarded)}"
+
+    def test_决策编号发出去不能收回(self, db):
+        """F1：号被 DELETE 之后会被重新分配，两次运行共用一个身份。
+
+        为什么这比「少了个触发器」严重：FIX-01 / FIX-02 校验的都是
+        「这些判定的 task_id 是不是同一个」。号回收之后两次运行**真实自洽**，
+        两道闸门一致放行 —— 正好是 v4 要防的那种混卡。
+        """
+        first = reserve_decision_id(by="run-A", path=db)
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("DELETE FROM decision_ids WHERE decision_id=?", (first,))
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("UPDATE decision_ids SET reserved_by='伪造'")
+        assert reserve_decision_id(by="run-B", path=db) != first
 
     def test_只读连接拒绝写入(self, db):
         with pytest.raises(Exception):
@@ -262,3 +312,86 @@ class TestRawSnapshot:
         assert a != b
         assert load_raw_snapshot(a, path=db)["content_sha256"] == \
                load_raw_snapshot(b, path=db)["content_sha256"]
+
+
+# ══ 外部评审 P2-3：agent_runs 不是 spawn 证明 ═══════════════════
+#
+# 教程第 4 章曾写「`agent_runs` 是 Agent 被调用过的唯一凭证」。
+# 第 7 章在端到端实测时推翻了它（「那行是我手工跑 synthesize.py 插进去的」），
+# 但第 4 章与 schema.py 的注释都没跟着改 —— 两套口径并存了很久（L-3）。
+#
+# 真正的 spawn 证明在运行时自己的库里（`subagent_runs`），
+# 那是被验证方写不到的地方。
+
+
+class TestAgentRunsIsLedgerNotProof:
+    def test_我们自己的代码就在写它(self):
+        """判据是**有非 _store 的业务代码调用它** —— 那就说明它可被自产。"""
+        import ast
+        from _scan import repo_files
+        callers = set()
+        for f in repo_files(".py"):
+            rel = str(f.relative_to(REPO))
+            if rel.startswith(("skills/_store/", "tests/")):
+                continue
+            try:
+                tree = ast.parse(f.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id in ("record_agent_run", "record_verdict_run"):
+                    callers.add(rel)
+        assert callers, (
+            "没有业务代码写 agent_runs 了？那这条测试的前提变了，"
+            "请重新确认它到底能不能当证明")
+
+    def test_源头注释已改正(self):
+        """schema 与 db 的注释是权威处 —— 它们说错了，别处再怎么改都会漂回来。"""
+        for rel in ("skills/_store/schema.py", "skills/_store/db.py"):
+            src = (REPO / rel).read_text(encoding="utf-8")
+            assert "subagent_runs" in src, f"{rel} 没有指向真正的 spawn 证明"
+
+    def test_教程第4章挂了修正指针(self):
+        """过程文档写完即冻结 ⇒ 不改原文，只追加「⏩ 后续变动」。"""
+        t = (REPO / "docs/tutorial/04-store-layer.md").read_text(encoding="utf-8")
+        assert "⏩" in t and "subagent_runs" in t
+
+
+class TestF23MissingDatabase:
+    """库不存在是**全新环境的正常状态**，不该是一屏 traceback。
+
+    外部评审 F23。这条本身不严重（失败很响、退出码非零，没人会误读成成功），
+    但它落在「第一次 clone 下来跑巡检」这个位置上 ——
+    第一印象是一屏 `sqlite3.OperationalError`，既不说路径也不说该做什么。
+    """
+
+    def test_只读打开不存在的库给的是人话(self, tmp_path):
+        from _store import StoreNotInitialised
+        nope = tmp_path / "never" / "created.db"
+        with pytest.raises(StoreNotInitialised) as ei:
+            with connect(nope, readonly=True):
+                pass
+        msg = str(ei.value)
+        assert str(nope) in msg, "报错必须说出是哪个路径"
+        assert "biga-card" in msg, "🔴 报错要指路 —— 只说坏了等于没说"
+
+    def test_建好但零行不算未初始化(self, db):
+        """🔴 区分「文件不在」与「schema 建好但零行」——后者是正常状态，
+        把它也报成错，就会有人为了消警告去塞假数据。"""
+        with connect(db, readonly=True) as c:
+            assert c.execute("SELECT count(*) FROM decision_records").fetchone()[0] == 0
+
+    @pytest.mark.parametrize("tool", ["missing_ledger", "latency_report"])
+    def test_巡检工具不吐traceback(self, tmp_path, tool):
+        """判据是**有没有 traceback**，不是退出码 —— 退出码本来就非零。"""
+        import os
+        import subprocess
+
+        env = {**os.environ, "BIGA_DB_PATH": str(tmp_path / "nope.db")}
+        r = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "verify" / f"{tool}.py")],
+            capture_output=True, text=True, env=env, cwd=REPO)
+        assert "Traceback" not in r.stderr, r.stderr[-500:]
+        assert "判不了" in r.stderr
+        assert r.returncode == 2, f"判不了统一用退出码 2（与 isolation.py 一致）"

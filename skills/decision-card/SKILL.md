@@ -31,7 +31,7 @@ description: Decision Card 的合成、落库、渲染与回放。🔴 在线路
 
 ```bash
 python3 skills/decision-card/scripts/synthesize.py \
-  --verdicts v.json \
+  --verdict-ids 17,18 \
   --status WAIT \
   --headline "核心矛盾一句话" \
   --synthesis "合成说明（可选）" \
@@ -39,11 +39,40 @@ python3 skills/decision-card/scripts/synthesize.py \
   --model-ref anthropic/claude-sonnet-5
 ```
 
-`--verdicts -` 可从 stdin 读，直接接 `emotion_calc.py` 的输出。
+### 🔴 为什么是 id，不是 JSON
+
+`--verdict-ids` 里的数字是 skill 落库时在 stderr 打出的 `verdict_ref=NN`。
+**判定数据直接从库里取，不经过语言模型。**
+
+`--verdicts <文件>` 仍然保留，但它要求 agent 逐字搬运结构化数据。
+实测（2026-09-20，`BIGA-20260920-002`）那条路的代价：
+
+| 观察 | 数字 |
+|---|---|
+| Supervisor 零工具调用、纯粹生成 JSON 的时间 | 47 秒 |
+| 随后因缺字段失败重试 | 49 秒 |
+| Specialist 转述后 15 条 evidence 里剩下的 `retrieved_at` | **0 条** |
+| 落库 `retrieved_at` 与真实采集时刻的偏差 | **106 秒** |
+
+⇒ **agent 走 `--verdict-ids`。** `--verdicts` 只留给手工调试与回放排查。
+
+### 追加缺失项
+
+Specialist 要在 skill 的事实之上补自己的局限时，**不重打 JSON**：
+
+```bash
+python3 skills/decision-card/scripts/amend_verdict.py --ref 17 \
+  --add-missing "市场趋势 —— 只有单日快照，无法判断方向" \
+  --verdict WARNING
+# → stderr: verdict_ref=18（原件 #17 不动，这是一行指回它的修订）
+```
 
 落库时会：
 1. 为每个 Verdict 在 `agent_runs` 记一行 —— **那是「确实调用过」的唯一凭证**
 2. 把整张 Card 冻结进 `decision_records.card_json`
+
+判定原件本身在 `agent_verdicts`（schema v3）：skill 写、synthesize 读，
+只追加不修改，修订用 `amends` 指回原行。
 
 ## 回放
 

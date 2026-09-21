@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -29,6 +30,9 @@ from typing import Literal
 
 _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import isolation  # noqa: E402  —— I-1 的唯一判据，见下方 F19 的注释
 
 Verdict = Literal["PASS", "FAIL", "PENDING"]
 
@@ -56,17 +60,40 @@ class Check:
 # ──────────────────────────────────────────────────────────── 需要跑过一次的项
 
 
-def _runtime_spawn_records() -> list[dict] | None:
-    """读 OpenClaw 运行时自己记的子会话表 —— **BigA 无法伪造的那一份证据**。
+def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
+    """读 OpenClaw 运行时自己记的子会话表，**只取属于这次决策的**。
 
     返回 None 表示读不到（状态库不存在 / 表结构变了），
     调用方必须据此报 PENDING 而不是 PASS。
+
+    🔴 为什么按决策号过滤（复查发现的洞）
+    ------------------------------------
+    第一版取「最近 50 条」然后只问「这个 agent 名字出现过吗」——
+    **完全没有跟决策号绑定**。实测复现：
+
+        伪造决策号 BIGA-20260921-901，用合法 API 写 6 行 agent_runs
+        → spawn 核验：6 个 agent 两份独立记录都齐   ✅ 通过
+
+    因为机器当天确实跑过别的真实决策，伪造的号**蹭上了别人的记录**。
+    而 `bin/biga-card` 正常使用本来就会反复运行 ⇒
+    这个条件在真实机器上**几乎总是成立**，不是刁钻场景。
+
+    ⚠️ 最讽刺的是：决策号**本来就明文写在 `payload_json` 里**（Supervisor
+    的 spawn 指令带着它），只是没被拿来做绑定。
+    ⇒ 这一版用它过滤，同时去掉 LIMIT —— 按号取就不该有条数上限，
+      否则一天跑得多了，早先的决策会悄悄查不到。
     """
     import sqlite3  # store-exempt: 读的是 OpenClaw 运行时状态库，不是 BigA 事实层；
                     # _store 的单一入口规则是为了「将来切 PG 只改一个文件」，
                     # 而这个库永远不会跟着 BigA 迁移。
 
-    db = pathlib.Path.home() / ".openclaw-biga/state/openclaw.sqlite"
+    # ⚠️ 环境变量只为**测试**存在。
+    #    没有它，唯一重要的那条测试（「别人的记录不算我的」）写不出来 ——
+    #    只能去 fake `_runtime_spawn_records` 本身，而那正好把
+    #    「按决策号过滤」这段逻辑**整个绕过去**，等于不测它。
+    #    第一版就是这么写的测试，所以复查发现的洞它一条都没拦住。
+    db = pathlib.Path(os.environ.get("BIGA_RUNTIME_DB")
+                      or pathlib.Path.home() / ".openclaw-biga/state/openclaw.sqlite")
     if not db.exists():
         return None
     try:
@@ -76,7 +103,8 @@ def _runtime_spawn_records() -> list[dict] | None:
         rows = conn.execute(
             "SELECT run_id, child_session_key, controller_session_key, "
             "       requester_session_key, created_at, payload_json "
-            "FROM subagent_runs ORDER BY created_at DESC LIMIT 50"
+            "FROM subagent_runs WHERE payload_json LIKE ? ORDER BY created_at DESC",
+            (f"%{decision_id}%",)
         ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.Error:
@@ -88,41 +116,94 @@ def _runtime_spawn_records() -> list[dict] | None:
             pass
 
 
-def check_1_spawned(decision_id: str | None) -> Check:
-    """🔴 这一条要证明的是「Supervisor **真的**调了 emotion」，不是「有人跑过 emotion」。
+@dataclass
+class SpawnProof:
+    """spawn 核验的三态原料。`per_agent[agent] = (在 agent_runs 里, 被 spawn 过)`。"""
 
-    只查 BigA 自己的 `agent_runs` 是不够的 —— 人手工跑一遍合成脚本也会写进那张表。
-    所以必须同时命中 OpenClaw 运行时自己记的 `subagent_runs`：
-    那张表由 spawn 机制写入，BigA 的业务代码碰不到它。
+    readable: bool
+    rows: int
+    per_agent: dict[str, tuple[bool, bool]]
+
+
+def spawn_proof(decision_id: str) -> SpawnProof:
+    """`agent -> (在 agent_runs 里, 在运行时 subagent_runs 里)`。
+
+    🔴 两份记录的性质完全不同，这正是本函数存在的全部理由：
+
+    ======================  ==============================================
+    `agent_runs`            **BigA 自己写的**。手工跑一遍 skill 也会写进去
+    `subagent_runs`         **OpenClaw 运行时写的**。BigA 业务代码碰不到它
+    ======================  ==============================================
+
+    只有第二份能区分「Supervisor 真的 spawn 了」与「有人手工跑了脚本」。
+
+    外部评审 F3：这套核验原来**只认 `"emotion"` 一个字面量**，
+    Phase 2 新增的五个 specialist 完全没有对应版本 ——
+    也就是说 Phase 2 产出的每一张 Card，「Specialist 真的被调用过」
+    这条最硬的约束**事实上没有任何机器在管**。
+
+    返回 `SpawnProof`。🔴 **`readable` 与「有没有记录」必须分开**：
+
+    ============================  ================================================
+    `readable=False`              读不到运行时库 ⇒ UNKNOWN（R-3：算不出来要说）
+    `readable=True, rows=0`       库能读、这个号一条记录都没有
+                                  —— 若 `agent_runs` 里却有行，那就是**伪造**
+    ============================  ================================================
+
+    第一版把这两种混为一谈，于是伪造被报成「判不了」——
+    而「判不了」是会被忽略的，「伪造」不会。
     """
-    c = Check("1", "Supervisor 确实 spawn 了 emotion（两份独立记录都要有）")
-    if not decision_id:
-        return c.pending("未提供 --decision-id") or c
+    from _contract import STAGE1_AGENTS, STAGE2_AGENTS
     from _store import list_agent_runs
 
-    rows = list_agent_runs(decision_id=decision_id)
-    agents = {r["agent"] for r in rows}
-    if "emotion" not in agents:
-        return c.fail(f"agent_runs 里没有 emotion（现有 {sorted(agents) or '空'}）") or c
-
-    spawns = _runtime_spawn_records()
+    ours = {r["agent"] for r in list_agent_runs(decision_id=decision_id)}
+    spawns = _runtime_spawn_records(decision_id)
     if spawns is None:
+        return SpawnProof(readable=False, rows=0, per_agent={})
+
+    out = {}
+    # 判据取自契约里的 stage 名单，**不是手写的一个名字** ——
+    # 名单会随 agent 增加而自己长大，手写的那个不会。
+    for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
+        if agent == "discipline":          # 裁定 13：故意不建
+            continue
+        # 🔴 `child_session_key` 的形状是 `agent:<name>:subagent:<uuid>` ——
+        #    按**段**比，不按子串包含。子串会让 `news` 命中 `newsflash`
+        #    这类名字，而这类误判从来不会报错。
+        spawned = any(
+            (r.get("child_session_key") or "").split(":")[1:2] == [agent]
+            for r in spawns)
+        out[agent] = (agent in ours, spawned)
+    return SpawnProof(readable=True, rows=len(spawns), per_agent=out)
+
+
+def check_1_spawned(decision_id: str | None) -> Check:
+    """Supervisor 真的 spawn 了**每一个** specialist —— 两份独立记录都要有。"""
+    c = Check("1", "Supervisor 确实 spawn 了各 Specialist（两份独立记录都要有）")
+    if not decision_id:
+        return c.pending("未提供 --decision-id") or c
+
+    proof = spawn_proof(decision_id)
+    if not proof.readable:
         return c.pending(
-            f"agent_runs 有 emotion（{len(rows)} 行），"
-            "但读不到运行时的 subagent_runs，无法证明是 Supervisor spawn 的"
+            "读不到运行时的 subagent_runs，无法证明任何一个是 Supervisor spawn 的"
         ) or c
 
-    hits = [r for r in spawns if "emotion" in (r.get("payload_json") or "")
-            or "emotion" in (r.get("child_session_key") or "")]
-    if hits:
-        c.ok(f"agent_runs 有 emotion；运行时 subagent_runs 亦有 {len(hits)} 条 "
-             f"(controller={hits[0]['controller_session_key']})")
-    else:
-        c.fail(
-            f"agent_runs 有 emotion（{len(rows)} 行），"
-            f"但运行时 subagent_runs 共 {len(spawns)} 条、无一条涉及 emotion —— "
-            "这说明那行是被直接写入的，**不是 Supervisor spawn 出来的**"
-        )
+    ours = [a for a, (o, _) in proof.per_agent.items() if o]
+    forged = [a for a, (o, sp) in proof.per_agent.items() if o and not sp]
+    absent = [a for a, (o, _) in proof.per_agent.items() if not o]
+    if proof.rows == 0 and ours:
+        return c.fail(
+            f"{decision_id} 在运行时 subagent_runs 里一条记录都没有，"
+            f"而 agent_runs 里有 {sorted(ours)} —— 这个号从未被 spawn 过") or c
+    if forged:
+        return c.fail(
+            f"这些 agent 在 agent_runs 里有行，但运行时 subagent_runs 里没有："
+            f"{sorted(forged)} —— 那些行是被直接写入的，"
+            "**不是 Supervisor spawn 出来的**") or c
+    if absent:
+        return c.pending(f"本次决策没有这些 agent 的记录：{sorted(absent)}") or c
+    c.ok(f"{len(proof.per_agent)} 个 agent 两份记录都齐：{sorted(proof.per_agent)}")
     return c
 
 
@@ -316,44 +397,22 @@ def neighbour_state() -> dict:
     }
 
 
-def biga_fds_into_neighbour() -> tuple[int, list[str]]:
-    """🔴 不变式 I-1 的**直接**证据：有没有 BigA 进程打开了邻居目录下的文件。
-
-    比 mtime 强得多 —— mtime 只能说「这个文件被改过」，
-    而 fd 列表直接回答「是谁打开的、以什么模式」。
-    mtime 会因为邻居自己的活动而变化，fd 不会。
-
-    返回 (检查到的 BigA 进程数, 违规描述列表)。
-    """
-    import os
-
-    hits: list[str] = []
-    pids: list[str] = []
-    for d in pathlib.Path("/proc").iterdir():
-        if not d.name.isdigit():
-            continue
-        try:
-            cmd = (d / "cmdline").read_bytes().decode("utf-8", "replace")
-        except OSError:
-            continue
-        if "openclaw-biga" not in cmd:
-            continue
-        pids.append(d.name)
-        fd_dir = d / "fd"
-        try:
-            entries = list(fd_dir.iterdir())
-        except OSError:
-            continue
-        for fd in entries:
-            try:
-                target = os.readlink(fd)
-            except OSError:
-                continue
-            # 只认邻居的 state 根，不误伤 ~/.openclaw-biga
-            if "/.openclaw/" in target:
-                hits.append(f"pid {d.name} fd {fd.name} → {target}")
-    return len(pids), hits
-
+# 🔴 I-1 的判据**不在这个文件里** —— 外部评审 F19。
+#
+# 这里原本有一份独立实现（`biga_fds_into_neighbour()`，判据是 cmdline 含
+# "openclaw-biga"）。同一分钟内与 `isolation.py` 的判据现场对照：
+#
+#     isolation.py 口径        14 个进程 / 412 个 fd
+#     这个文件的口径            4 个进程
+#
+# 两边都报 0 命中、都是 ✅，但**检查对象的集合完全不同**。
+# 如果 I-1 真的被违反、而违反它的进程只满足其中一种判据，
+# 两份实现会给出相反的结论，使用者根本不知道该信哪一份。
+#
+# 这正是 `architecture.md` §9 L-3 点名的失败模式（同一判据多份实现，
+# 错法全是静默的）—— 而它发生在这个项目最看重的那条不变式自己的验证代码里。
+#
+# ⇒ 删掉这一份，统一走 `isolation.py`。**判据只留一处。**
 
 def check_6_neighbour(baseline: dict | None) -> Check:
     c = Check("6", "邻居 gateway pid / 启动时间 / 监听 / config / nvm default 未变")
@@ -380,15 +439,19 @@ def check_6_neighbour(baseline: dict | None) -> Check:
 
 
 def check_6b_no_write_handles() -> Check:
-    """不变式 I-1：BigA 的任何进程不得以写模式打开邻居目录下的文件。"""
-    c = Check("6b", "没有任何 BigA 进程打开邻居目录下的文件（不变式 I-1）")
-    n_procs, hits = biga_fds_into_neighbour()
-    if hits:
-        c.fail(f"🔴 发现 {len(hits)} 个句柄指向邻居目录: " + "; ".join(hits[:3]))
-    elif n_procs == 0:
-        c.pending("当前没有 BigA 进程在跑 —— 这条要在 gateway 运行时查才有意义")
+    """不变式 I-1 —— **判据由 `isolation.py` 提供，这里只做三态转译。**"""
+    c = Check("6b", "没有任何 BigA 进程以写模式打开邻居目录下的文件（不变式 I-1）")
+    res = isolation.Result()
+    isolation.check_i1(res)
+    verdict, name, detail = res.rows[0]
+    if verdict == isolation.FAIL:
+        c.fail(f"🔴 {name}\n{detail}")
+    elif verdict == isolation.UNKNOWN:
+        # 三态在这里能原样传下去 —— 旧脚本本来就有 PENDING，
+        # 反倒是 isolation.py 一度把它丢了（F18）。
+        c.pending(f"{name}\n{detail}")
     else:
-        c.ok(f"检查了 {n_procs} 个 BigA 进程，无一持有邻居目录下的句柄")
+        c.ok(name)
     return c
 
 

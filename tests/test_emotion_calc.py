@@ -20,6 +20,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "emotion-calc" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(REPO / "skills"))
 
 
 def _load(name: str):
@@ -30,7 +31,11 @@ def _load(name: str):
     return mod
 
 
-sources = _load("sources")
+# 采集层已抽到共享包 `skills/_sources/`（2.1 第 1 步）。
+# 局部名仍叫 `sources`，让本文件其余引用零改动 ——
+# 这次重构的信号是「124 条测试一条不变」，改测试就把信号弄脏了。
+import _sources as sources  # noqa: E402
+
 ec = _load("emotion_calc")
 
 QDATE = "20260918"
@@ -45,10 +50,6 @@ def pool(name: str, total: int, rows: list[dict] | None = None, qdate: str = QDA
     )
 
 
-def breadth(a=4277, d=1173, f=180):
-    return sources.BreadthResult(advance=a, decline=d, flat=f, per_market=[], raw={"rc": 0})
-
-
 @pytest.fixture()
 def wired(monkeypatch):
     """把采集层换成可控的桩。返回一个可改的 plan。"""
@@ -57,7 +58,6 @@ def wired(monkeypatch):
                                           [(1, 1)] * 66 + [(2, 0)] * 8 + [(3, 0)] * 2 + [(4, 0)] * 2]),
         "broken_board": pool("broken_board", 25),
         "limit_down": pool("limit_down", 0, []),
-        "breadth": breadth(),
     }
 
     def fake_pool(name, date, **kw):
@@ -68,14 +68,7 @@ def wired(monkeypatch):
         # date，`date_matches` 就永远为真，严格模式那组测试会因为错误的原因通过。
         return dataclasses.replace(v, requested_date=date)
 
-    def fake_breadth():
-        v = plan["breadth"]
-        if isinstance(v, Exception):
-            raise v
-        return v
-
     monkeypatch.setattr(ec, "fetch_pool", fake_pool)
-    monkeypatch.setattr(ec, "fetch_breadth", fake_breadth)
     return plan
 
 
@@ -103,8 +96,24 @@ class TestHappyPath:
         assert r["streak_ladder"] == {"1": 66, "2": 8, "3": 2, "4": 2}
         assert r["broken_rate"] == round(25 / 103, 4)
         assert r["seal_never_broken_rate"] == round(12 / 78, 4)
-        assert r["advance_count"] == 4277
         assert r["trade_date"] == QDATE
+
+    def test_不再产出涨跌家数(self):
+        """裁定 15：涨跌家数归 market。这里守住它不会悄悄长回来。"""
+        import inspect
+        src = inspect.getsource(ec)
+        for field in ("advance_count", "decline_count", "flat_count"):
+            assert field not in src, f"{field} 又出现在 emotion-calc 里了"
+
+    def test_字段数与confidence分母一致(self, wired):
+        """数据齐备时 confidence 必须正好 1.0。
+
+        移出涨跌家数之前这里的分母是 15、实际只有 13 个字段 ——
+        **数据完整时也只读到 0.87，「完整」这件事永远表达不出来**。
+        """
+        v = build()
+        assert len(v.result) == ec._EXPECTED_FIELDS
+        assert v.confidence == 1.0
 
     def test_每个result字段都有证据(self, wired):
         """契约铁律 3 —— 由 AgentVerdict 构造时强制，这里再从外部确认一次。"""
@@ -161,7 +170,7 @@ class TestMissingPaths:
         assert any("连接被重置" in m for m in v.missing)
 
     def test_全断时result为空且missing非空(self, wired):
-        v = build(break_source={"limit_up", "broken_board", "limit_down", "breadth"})
+        v = build(break_source={"limit_up", "broken_board", "limit_down"})
         assert v.result == {}
         assert v.evidence == []
         assert len(v.missing) >= 4
@@ -204,12 +213,13 @@ class TestDateDiscipline:
         v = build()
         assert any("qdate" in m for m in v.missing)
 
-    def test_涨跌家数无可信日期时不被静默丢弃(self, wired):
-        """数据取到了但定不了日期 —— 必须说出来，不能当没发生。"""
+    def test_没有可信交易日时全部作废并说出来(self, wired):
+        """定不了日期就给不了 as_of —— 必须说出来，不能当没发生。"""
         for k in ("limit_up", "broken_board", "limit_down"):
             wired[k] = sources.SourceError("挂了")
         v = build()
-        assert any("涨跌家数" in m and "交易日" in m for m in v.missing)
+        assert v.result == {}
+        assert any("没有任何股池返回可用的交易日" in m for m in v.missing)
 
 
 class TestSources:
@@ -243,3 +253,128 @@ class TestLadder:
 
     def test_排序(self):
         assert list(ec._ladder([{"lbc": 3}, {"lbc": 1}, {"lbc": 2}])) == [1, 2, 3]
+
+
+class TestIntradayAsOf:
+    """🔴 盘中跑不能崩 —— 这是 Phase 1 埋的 bug，2.1 修的。
+
+    原来的换算把交易日一律当成「当日 15:00 收盘」。交易日盘中 10:00 采数据时，
+    `as_of`(今天15:00) > `retrieved_at`(今天10:00)，契约层直接 `ValueError`，
+    **整个 skill 崩掉，连一条 missing 都留不下**。
+
+    Phase 1 没撞上，纯粹因为那几天的实测都在收盘后或非交易日跑 ——
+    而 BigA 是短线系统，盘中才是主场景。
+    """
+
+    @staticmethod
+    def _at(hhmm: tuple[int, int], day: str = "20260921"):
+        """把 now_cn 钉死在某个时刻，并让股池报告同一天。"""
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        d = datetime.strptime(day, "%Y%m%d").date()
+        return datetime(d.year, d.month, d.day, hhmm[0], hhmm[1], tzinfo=CN_TZ)
+
+    def test_盘中不崩且as_of退回取回时刻(self, wired, monkeypatch):
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = dataclasses.replace(wired[k], qdate=today)
+        monkeypatch.setattr(ec, "now_cn", lambda: self._at((10, 0), today))
+
+        v = build()   # 不指定 date ⇒ 宽松模式，目标日就是「今天」
+
+        assert v.evidence, "盘中应当照常产出证据，而不是抛异常"
+        for e in v.evidence:
+            assert e.as_of <= e.retrieved_at, f"{e.field} 的 as_of 晚于 retrieved_at"
+        assert any("尚未收盘" in w for w in v.warnings), \
+            "盘中快照必须标出来 —— 不标就会被当成全天结果"
+
+    def test_收盘后仍按收盘时刻(self, wired, monkeypatch):
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = dataclasses.replace(wired[k], qdate=today)
+        monkeypatch.setattr(ec, "now_cn", lambda: self._at((16, 0), today))
+
+        v = build()
+
+        assert all(e.as_of.hour == 15 and e.as_of.minute == 0 for e in v.evidence)
+        assert not any("尚未收盘" in w for w in v.warnings)
+
+
+class TestTradeTimeHelper:
+    """换算本身的分支 —— 它是两个 skill 共用的判据，单独钉死。"""
+
+    @staticmethod
+    def _dt(day: str, h: int, m: int = 0):
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        d = __import__("datetime").datetime.strptime(day, "%Y%m%d").date()
+        return datetime(d.year, d.month, d.day, h, m, tzinfo=CN_TZ)
+
+    def test_过去的交易日取收盘(self):
+        a, w = sources.as_of_for_trade_date(
+            "20260918", retrieved_at=self._dt("20260920", 20))
+        assert (a.hour, a.minute) == (15, 0) and w is None
+
+    def test_未来的交易日不静默接受(self):
+        rt = self._dt("20260921", 10)
+        a, w = sources.as_of_for_trade_date("20260922", retrieved_at=rt)
+        assert a == rt and w and "晚于当前日期" in w
+
+    def test_四个分支都给出合法的as_of(self):
+        rt = self._dt("20260921", 10)
+        for td in ("20260918", "20260921", "20260922"):
+            a, _ = sources.as_of_for_trade_date(td, retrieved_at=rt)
+            assert a <= rt, f"{td} 算出的 as_of 晚于 retrieved_at —— 契约层会拒绝"
+
+    def test_非法日期格式抛错(self):
+        with pytest.raises(ValueError):
+            sources.as_of_for_trade_date("2026-09-18", retrieved_at=self._dt("20260921", 10))
+
+
+class TestPreSessionZeros:
+    """🔴 盘中/盘前三个池全为 0 —— 这是「还没形成」，不是「涨停 0 家」。
+
+    实测 2026-09-21 周一 09:05：股池 `tc=0` 而 `qdate=今天`。
+    当成事实上卡，读者看到的是「冰点」这种极端读数。
+    """
+
+    def test_全零且未收盘时不作为事实(self, wired, monkeypatch):
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = pool(k, 0, [], qdate=today)
+        monkeypatch.setattr(ec, "now_cn",
+                            lambda: datetime(2026, 9, 21, 9, 5, tzinfo=CN_TZ))
+        v = build()
+        assert v.result == {}, "尚未形成的数据不许作为事实产出"
+        assert any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)
+        assert v.verdict == "UNKNOWN"
+
+    def test_收盘后全零仍按事实处理(self, wired, monkeypatch):
+        """收盘后真出现全 0 是另一回事（多半是数据源问题），不套这条守卫。"""
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        today = "20260921"
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = pool(k, 0, [], qdate=today)
+        monkeypatch.setattr(ec, "now_cn",
+                            lambda: datetime(2026, 9, 21, 16, 0, tzinfo=CN_TZ))
+        v = build()
+        assert not any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)
+
+    def test_历史交易日全零不套这条守卫(self, wired, monkeypatch):
+        """查一个过去的交易日，时段早就结束了。"""
+        from datetime import datetime
+
+        from _contract import CN_TZ
+        monkeypatch.setattr(ec, "now_cn",
+                            lambda: datetime(2026, 9, 21, 9, 5, tzinfo=CN_TZ))
+        for k in ("limit_up", "broken_board", "limit_down"):
+            wired[k] = pool(k, 0, [], qdate="20260918")
+        v = build()
+        assert not any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)

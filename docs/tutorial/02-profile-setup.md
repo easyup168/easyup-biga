@@ -1,5 +1,9 @@
 # 第 02 章 · Profile 初始化：为什么不走 onboarding 向导
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：生成 `openclaw.json`，把端口、模型、并发配好，且全程不接 IM 通道。
 >
 > **本章产出**：`~/.openclaw-biga/openclaw.json`（不进 git）+ 仓库根的四个 bootstrap 文件。
@@ -23,7 +27,7 @@ OpenClaw 提供了三种初始化方式：
 意味着往 systemd 里塞一个常驻 unit，而本阶段明确不建任何常驻任务）。
 一条命令里塞八件事，出问题时你不知道是哪一件。
 
-**深层理由**：这是在一台**有邻居**的机器上施工。
+**深层理由**：这是在一台**已经跑着别的服务**的机器上施工。
 `--baseline` 的产出是可以完整预测的 —— 它只写配置文件和建目录。
 而向导的产出取决于它问了什么、你答了什么、以及它对环境的自动探测结果。
 **在敏感环境里，可预测性比便利性值钱得多。**
@@ -39,11 +43,12 @@ OpenClaw 提供了三种初始化方式：
 BIGA=~/.openclaw-biga/bin/biga
 
 # 施工前先记基线（第 01 章的 ③，每次改环境都要做）
-stat -c '%y' ~/.openclaw/state/openclaw.sqlite
+#   OTHER_STATE = 同机已有实例的状态库路径（本机情况，不写死在教程里）
+stat -c '%y' "$OTHER_STATE"
 
 $BIGA setup --baseline --workspace ~/.openclaw-biga/workspace
 
-stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须与上面相同
+stat -c '%y' "$OTHER_STATE"                        # 必须与上面相同
 ```
 
 输出：
@@ -132,7 +137,7 @@ cat > setup.patch.json5 <<'PATCH'
 {
   gateway: {
     mode: "local",
-    port: 19789,        // 与另一套实例的 18789 间距 1000 ≥ 120（见第 01 章）
+    port: 19789,        // 与同机已有实例的 base 间距 1000 ≥ 120（见第 01 章）
     bind: "loopback",
   },
   agents: {
@@ -211,7 +216,7 @@ Stage 3：Supervisor 合成       → 20-30s
 
 配置里的 `channels` 段是空的。本阶段唯一的交互入口是本地 TUI（`$BIGA chat`）。
 
-这不只是「简化范围」。同机上另一套实例已经占用了一个 IM 机器人应用。
+这不只是「简化范围」。同机上的已有实例已经占用了一个 IM 机器人应用。
 如果两个 gateway 共用同一个应用：
 
 > **同一条消息，两个 bot 都会回。**
@@ -243,8 +248,8 @@ $BIGA agents list
 $BIGA config get channels
 # → Config path is valid but unset: channels.
 
-# ⑤ 端口：19789 归自己，18789 仍归邻居且没被动过
-ss -lntp | grep -E '18789|19789'
+# ⑤ 端口：19789 归自己，已有实例的 base 仍归它且没被动过
+ss -lntp | grep -E "19789|$OTHER_PORT"
 ```
 
 第 ② 步是在防「死配置」：**不要相信命令返回 0 就等于配置生效了，读回来对一遍。**

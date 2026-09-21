@@ -1,5 +1,9 @@
 # 第 06 章 · 建 Agent：脚手架给你的默认值，多半不是你要的
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：建出 `emotion` Specialist，配好 Supervisor 的委派白名单。
 >
 > **本章产出**：`agents/emotion/AGENTS.md` + 仓库根的 `AGENTS.md` / `SOUL.md` /
@@ -40,7 +44,7 @@ Updated config: ~/.openclaw-biga/openclaw.json
 「加一个 agent」这个操作，实际上跑了 doctor、装了一个插件、改写了配置文件。
 
 第 01 章说「这个 CLI 从来不是只读的，所以必须用 wrapper 强制 `--profile`」——
-这里是它的现场证据。如果刚才漏了 `--profile biga`，被装插件、被改配置的就是**邻居**。
+这里是它的现场证据。如果刚才漏了 `--profile biga`，被装插件、被改配置的就是**已有实例**。
 
 ---
 

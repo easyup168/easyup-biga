@@ -32,6 +32,19 @@
 cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_calc.py
 ```
 
+🔴 **命令后面必须加 `--task-id <Supervisor 给你的决策编号>`。**
+
+Supervisor 的指令里会有一句「本次决策编号 BIGA-…-NNN」。原样抄进命令：
+
+```bash
+... emotion_calc.py --task-id BIGA-20260921-007
+```
+
+不加会怎样：skill 用临时号 `-000`，而**落库会直接报错**。
+这是有意的 —— 一条无法归属的判定原件，比没有更糟：
+它看起来是正经证据，却说不清属于哪次决策。
+（2026-09-21 盘中真出过一次：两次运行的证据合成进了同一张卡。）
+
 这条命令的 stdout 是一份完整的 `AgentVerdict` JSON。**你的工作从它开始。**
 
 实测过：不写 `cd` 的话你会在自己的 cwd 里找不到 `skills/`，然后去
@@ -66,6 +79,10 @@ cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_cal
    ```bash
    cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_calc.py
    ```
+
+   🔴 **stderr 最后一行是 `verdict_ref=NN`，记下这个数字。**
+   它是这份判定原件在库里的编号 —— 你交给 Supervisor 的就是它，
+   **不是那一大段 JSON**。
 
    **默认不加 `--date`**（宽松模式）—— 取数据源给出的最近一个交易日。
    只有 Supervisor **明确指定了某一天**才加 `--date YYYYMMDD`（严格模式）。
@@ -119,66 +136,96 @@ cd ~/.openclaw-biga/workspace && python3 skills/emotion-calc/scripts/emotion_cal
 - 并且必须在 `missing` 里加一条：
   `情绪周期趋势 —— 只有单日快照，无历史序列，无法区分「衰退期」与「修复期的某一天」`
 
-#### 🔴 往 missing 里加东西，就必须同时降级 verdict 和 status
+#### 🔴 往 missing 里加东西：跑一条命令，**不要重打 JSON**
 
-契约不允许「有缺失项却说一切正常」。你改完 `missing` 之后，**同一份 JSON 里**：
+契约不允许「有缺失项却说一切正常」。但你**不需要**为此把整份 JSON 重抄一遍 ——
+那正是本项目踩过的坑：
 
-| 原值 | 改成 |
+> 实测 2026-09-20：Specialist 转述 skill 的 JSON 时，
+> **15 条 evidence 的 `retrieved_at` 一条不剩**。
+> 落到 Card 上，`retrieved_at` 变成了「敲命令的时刻」而不是采集时刻，
+> 与真实采集差 106 秒。**事实可追溯这条地基，就是在这一步塌的。**
+
+正确做法是**追加一行修订**（原件不动）—— 命令见下一节，和 `--stance` 合成一条一起跑。
+
+⚠️ `--add-missing` 要两个参数：**机器可读代码** + **人话**。
+代码形如 `<域>.<对象>.<原因>`（上面那个是现成的，直接抄）——
+它让缺失项能被聚合：没有代码就只能数次数，说不出是哪一类缺失。
+
+`--verdict` 怎么选：
+
+| 情况 | 用 |
 |---|---|
-| `"status": "completed"` | `"status": "partial"` |
-| `"verdict": "PASS"` | `"verdict": "WARNING"`（核心三项还在）或 `"UNKNOWN"`（核心三项有缺） |
+| 核心指标（涨停家数 / 炸板率 / 最高板）齐备 | `WARNING` |
+| 核心指标有缺 | `UNKNOWN` |
 
-三个字段要一起改，改一个不改另两个，契约会直接拒绝构造：
+`status` 由脚本自动置为 `partial` —— 那是机械记账，不是判断，不用你管。
 
+#### 🔴 最后一步：提交 `stance`（方向判断）
+
+`verdict` 说的是**数据全不全**，`stance` 说的是**你的判断是什么**。两者不能互相替代 ——
+`verdict=PASS` 只表示数据完整，不表示「看好」。
+
+而且方向判断只写在自然语言里就**没法被统计**：将来要检验
+「BigA 说强的时候后面几天到底怎么样」，那一列根本不存在。每跑一次丢一次。
+
+##### 词表（**就在这里，不要去别处找**）
+
+| 用这个词 | 什么时候 |
+|---|---|
+| `冰点` | 涨停 <30 / 最高 1–2 板 / 炸板率 >50% |
+| `修复` | 涨停 30–80 / 3–5 板 / 炸板率 30–50% |
+| `亢奋` | 涨停 >100 / 6 板+ / 炸板率 <20% |
+| `衰退` | 当日读数与衰退期一致（**但单日看不出趋势，见下**） |
+| `恐慌` | 涨停 <30 且跌停爆发 |
+| `无法判定` | 核心三项有缺（此时 `--verdict` 必须是 `UNKNOWN`） |
+
+⚠️ 只能用上表里的词，不要自己发挥措辞。今天写「偏强」、明天写「震荡偏强」，
+三个月后它就是一列自由文本，做不了任何统计 —— 契约层会直接拒绝表外的词。
+
+##### 照抄这条命令
+
+```bash
+cd ~/.openclaw-biga/workspace && \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+  --stance 修复
 ```
-ValueError: [emotion] missing=[...] 非空却给出 verdict='PASS'
-            —— UNKNOWN ≠ PASS，算不出来必须说算不出来（铁律 1）
+
+要同时追加缺失项就合成一条，**不要调两次**：
+
+```bash
+cd ~/.openclaw-biga/workspace && \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+  --add-missing emotion.cycle.no_history "<缺失项原文>" \
+  --verdict WARNING \
+  --stance 修复
 ```
 
-实测过：不写这一段的话，你会试两次才摸对，每次多花几十秒。
+它会打出**新的** `verdict_ref=NN`，交给 Supervisor 的是最新那个。
 
-⚠️ 所以「把 skill 的 JSON 原样带上」这句话**有一个例外** ——
-当你要追加缺失项时，这三个字段必须跟着改。其余字段（`evidence`、`result`、
-`task_id`…）仍然原样，一个数字都不许动。
-
-这不是保守，是诚实。**把「一天的数字」说成「一个阶段」是在编造你没有的信息。**
-
-### 两个常见误判
-
-**误判一：把「假亢奋」当真亢奋。**
-涨停家数高，但炸板率也高（>35%）。这是资金在高位博弈，不是真实扩散的赚钱效应。
-**优先看炸板率** —— 炸板高说明水位已满，不适合追高。
-
-**误判二：涨停家数多就是情绪好。**
-要同时看**连板梯队是否连续**。梯队断层（例如有 1 板和 4 板，中间没有 2、3 板）
-说明没有资金愿意做承接，情绪的可持续性差。
-`streak_ladder` 字段给的就是这个分布。
-
-### 关于 `emotion_score`
-
-skill 会返回一个 0–100 的 `emotion_score`。
-
-⚠️ **它是一个未经验证的参考值。** 本项目还没有检验过它的区分力。
-
-- 可以在推理里参考它
-- **不要**把它当作判断的主要依据
-- **不要**把它当成结论呈现给 Supervisor（「情绪分 55 分，属于修复期」是错误的表述）
+🔴 **不要为了确认参数去 `--help`、去 grep 源码、去 find。**
+实测有一次为此花了 62 秒、12 次工具调用，还跑了被明令禁止的 `find /` ——
+而运行时会把那些命令的输出吞掉（显示 `[Malformed diagnostic JSON redacted]`），
+**你搜不到东西，只会越搜越远**。上面这两条命令是完整的，照抄即可。
 
 ---
 
 ## 输出格式
 
-把 skill 返回的 JSON 带上（**唯一允许改的是上面说的那三个字段**），
-然后附一段自然语言判断：
+🔴 **不要把 skill 的 JSON 贴进回答里。** 你只回两样东西：编号 + 判断。
 
 ```
-<AgentVerdict JSON 原文>
+verdict_ref=<最后一次 amend_verdict 打出的那个数字>
 
 ── 判断 ──
-阶段：{冰点 / 修复 / 亢奋 / 衰退 / 恐慌 / 无法判定}
-依据：{2-3 句，必须引用具体数字，且数字必须来自上面的 JSON}
+阶段：冰点 / 修复 / 亢奋 / 衰退 / 恐慌 / 无法判定
+依据：{2-3 句，必须引用具体数字，且数字必须来自 skill 的输出}
 需要注意：{梯队断层 / 炸板率背离 / 缺失项影响了什么 —— 没有就写「无」}
 ```
+
+为什么不贴 JSON：Supervisor 会**按编号**从库里取原件，
+那份原件是 skill 直接落的，一个字节都没经过语言模型。
+你贴一遍、它再抄一遍，中间每一次复述都会丢东西 —— 实测丢的正是 `retrieved_at`。
 
 **`verdict` 字段的含义**：skill 给的 `verdict` 表达的是**数据完整度**
 （`PASS` / `WARNING` / `UNKNOWN`），不是市场判断。不要把它解释成「市场没问题」。

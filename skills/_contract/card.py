@@ -15,7 +15,8 @@ import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
-from .verdict import AgentVerdict
+from .missing import MissingItem
+from .verdict import VETO_STANCE, AgentVerdict
 
 __all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
 
@@ -23,6 +24,32 @@ CardStatus = Literal["BUY", "WAIT", "AVOID", "BLOCK"]
 _CARD_STATUSES: frozenset[str] = frozenset(get_args(CardStatus))
 
 DECISION_ID_RE = re.compile(r"^BIGA-\d{8}-\d{3}$")
+
+#: 卡面上单个值的最大宽度。
+#:
+#: 🔴 这不是排版偏好，是**定位**：Card 是给人看的一页纸
+#: （上游文档 §11：优先展示证据项、风险项、缺失项、状态）。
+#:
+#: 实测踩到：`news` 的 `items` 字段装着 67 条快讯原文，
+#: 渲染出来的卡片 **34.5 KB** —— 它在技术上完整，在用途上作废了。
+#: 而且没有任何东西报错，因为「把 result 渲染出来」这件事本身是对的。
+#:
+#: 完整值永远在 `card_json` 与 `agent_verdicts` 里，截断只发生在**显示层**。
+_MAX_VALUE_WIDTH = 72
+
+
+def _brief(value: Any) -> str:
+    """把一个值压成一行。列表只报条数与首项，长文本截断。"""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return "[]"
+        head = _brief(value[0])
+        return f"[{len(value)} 项] {head}" if len(value) > 1 else f"[1 项] {head}"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k}={value[k]}" for k in list(value)[:3]) + (
+            ", …}" if len(value) > 3 else "}")
+    t = str(value)
+    return t if len(t) <= _MAX_VALUE_WIDTH else t[:_MAX_VALUE_WIDTH - 1] + "…"
 
 
 @dataclass
@@ -47,11 +74,21 @@ class DecisionCard:
     verdicts: list[AgentVerdict]
     synthesis: str
     model_ref: str
-    missing: list[str] = dc_field(default_factory=list)
+    missing: list[MissingItem] = dc_field(default_factory=list)
     generated_at: str = ""
     elapsed_ms: int = 0
+    #: 🔴 只有 `from_dict()` 会设成 True —— 表示「这是从库里读回来的历史记录」。
+    #:
+    #: 存在的理由见 `_check_identity()`：身份约束对**新造的卡**必须是硬拒绝，
+    #: 但对**已经落库的旧卡**只能是提示 —— 否则历史卡再也回放不了，
+    #: 而「能不能重建当时看到的东西」比形式一致更重要。
+    from_store: bool = False
+    #: 历史卡的身份问题记在这里，由 `render()` 显示。新卡永远为空（它直接被拒）。
+    identity_warning: str = ""
 
     def __post_init__(self) -> None:
+        self.missing = [MissingItem.coerce(m) for m in self.missing]
+
         if not DECISION_ID_RE.match(self.decision_id):
             raise ValueError(
                 f"decision_id 必须形如 BIGA-YYYYMMDD-NNN，收到 {self.decision_id!r}"
@@ -87,6 +124,8 @@ class DecisionCard:
                 "缺失项必须逐条显示，汇总时丢弃等于静默 fail-open"
             )
 
+        self._check_identity()
+
         # --- 铁律 2 ---
         if self.missing and self.status == "BUY":
             raise ValueError(
@@ -94,12 +133,61 @@ class DecisionCard:
                 "证据不完整时不得给买入结论（铁律 2）"
             )
 
-        # --- Risk Agent 的否决权 ---
-        blockers = [v.agent for v in self.verdicts if v.verdict == "BLOCK"]
+        # --- 制衡层的否决权 ---
+        # 🔴 判据是 stance 而不是 verdict：verdict 只说数据全不全。
+        #    一个字段装不下「数据完整」和「我要否决」两件事。
+        blockers = [v.agent for v in self.verdicts if v.stance == VETO_STANCE]
         if blockers and self.status == "BUY":
             raise ValueError(
-                f"{blockers} 给出 BLOCK 却仍然 status='BUY' —— 制衡层的否决权不可被合成阶段绕过"
+                f"{blockers} 给出 stance={VETO_STANCE!r} 却仍然 status='BUY' —— "
+                "制衡层的否决权不可被合成阶段绕过"
             )
+        # 🔴 反向：有人否决，Card 的状态就必须体现出来。
+        #    允许 AVOID / BLOCK，不允许 WAIT —— WAIT 的意思是「再看看」，
+        #    而否决的意思是「不要做」，把后者显示成前者就是软化了制衡层。
+        if blockers and self.status not in ("AVOID", "BLOCK"):
+            raise ValueError(
+                f"{blockers} 给出 stance={VETO_STANCE!r}，Card 状态却是 "
+                f"{self.status!r} —— 否决必须体现为 AVOID 或 BLOCK"
+            )
+
+    def _check_identity(self) -> None:
+        """🔴 卡上的每一条判定，都必须属于这张卡。
+
+        外部评审 P1-1（2026-09-21）：`synthesize.py` 里已经有一道
+        「所有 verdict 的 task_id 必须一致」的检查，但**契约层没有**。
+        于是可以构造「卡 001 装着 999 的 verdict」并落库 —— 实测通过。
+
+        守卫在编排层就只守得住走编排层的那条路。回放、将来的 API、
+        测试辅助代码、手工构造 —— 每一条都能重新打开这个洞。
+
+        ⚠️ **新卡严格，旧卡可读。**
+        评审建议的验收是「Replay 也无法绕过」，但实测已落库 31 张卡里有
+        **20 张**的 verdict 写着别的号（Stage 0 占号是后来才加的）。
+        一刀切会让那 20 张永远读不出来。
+
+        这与 `synthesize.py` 里 stance 检查的取舍是同一条：
+        **能不能重建「当时看到的东西」优先于形式一致。**
+
+        ⇒ 三段式：
+          · 新造的卡        —— 直接拒绝
+          · 从库里读的旧卡   —— 可读，但把问题记下来并**显示在卡面上**
+          · 落库（`save_card`）—— 永远拒绝，见 `_store/db.py`
+        """
+        foreign = [(v.agent, v.task_id) for v in self.verdicts
+                   if v.task_id != self.decision_id]
+        if not foreign:
+            return
+        detail = "；".join(f"{a} 的判定写着 {t}" for a, t in foreign)
+        if not self.from_store:
+            raise ValueError(
+                f"Card {self.decision_id} 装着不属于它的判定：{detail}\n"
+                "  一张卡上的每一条判定都必须属于同一次决策，否则证据无处归属。\n"
+                "  怎么办：决策编号由 Stage 0 占下（new_decision.py），"
+                "沿 Stage 1/2/3 一路下传。")
+        self.identity_warning = (
+            f"本卡的判定编号与卡号不一致（{detail}）—— "
+            "它早于「Stage 0 统一占号」，证据归属无法核实")
 
     # --- 便捷查询 ---
 
@@ -132,9 +220,13 @@ class DecisionCard:
         # 而回放 diff 里的每一处差异都应该是真实差异。
         for v in self.verdicts:
             summary = "; ".join(
-                f"{k}={v.result[k]}" for k in sorted(v.result)[:3]
+                f"{k}={_brief(v.result[k])}" for k in sorted(v.result)[:3]
             ) or "—"
-            lines.append(f"{v.agent:<12} {v.verdict:<8} {summary}")
+            # 🔴 verdict 与 stance 并列显示，因为它们回答的是两个不同的问题：
+            #    verdict=数据全不全，stance=市场偏哪边。
+            #    只显示前者，读者会把「PASS」误读成「看好」。
+            lines.append(
+                f"{v.agent:<12} {v.verdict:<8} {(v.stance or '—'):<6} {summary}")
         lines.append("")
         lines.append(f"状态：{self.status}")
         lines.append("")
@@ -146,8 +238,27 @@ class DecisionCard:
             lines.append(f"⚠ 缺失项（{len(self.missing)}）")
             for m in self.missing:
                 lines.append(f"  · {m}")
+                lines.append(f"      [{m.code}]")
         else:
             lines.append("缺失项：无")
+
+        # 🔴 warning 必须上卡。
+        #
+        #    实测（BIGA-20260921-017）：四个 Agent 各发了一条 warning，
+        #    **一条都没显示**。其中一条是
+        #    「涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的」——
+        #    而卡面上那行证据写着 `as_of 09-18 15:00`，看起来像板上钉钉。
+        #
+        #    warning 与 missing 的分工是「这个数能用但要注意」vs「这个数没有」。
+        #    把前者藏起来，等于只保留了它的名字。
+        warns = [(v.agent, w) for v in self.verdicts for w in v.warnings]
+        if self.identity_warning:
+            warns.insert(0, ("card", self.identity_warning))
+        if warns:
+            lines.append("")
+            lines.append(f"⚠ 提请注意（{len(warns)}）")
+            for agent, w in warns:
+                lines.append(f"  · [{agent}] {w}")
 
         lines.append("")
         lines.append("证据")
@@ -156,7 +267,7 @@ class DecisionCard:
             for e in v.evidence:
                 any_ev = True
                 lines.append(
-                    f"  [{v.agent}] {e.display_label} = {e.value}"
+                    f"  [{v.agent}] {e.display_label} = {_brief(e.value)}"
                     f"   as_of {e.as_of.strftime('%m-%d %H:%M')}   src {e.source}"
                 )
         if not any_ev:
@@ -178,7 +289,7 @@ class DecisionCard:
             "status": self.status,
             "headline": self.headline,
             "verdicts": [v.to_dict() for v in self.verdicts],
-            "missing": list(self.missing),
+            "missing": [m.to_dict() for m in self.missing],
             "synthesis": self.synthesis,
             "model_ref": self.model_ref,
             "generated_at": self.generated_at,
@@ -194,7 +305,8 @@ class DecisionCard:
             verdicts=[AgentVerdict.from_dict(x) for x in d["verdicts"]],
             synthesis=d.get("synthesis", ""),
             model_ref=d["model_ref"],
-            missing=list(d.get("missing", [])),
+            missing=[MissingItem.coerce(m) for m in d.get("missing", [])],
             generated_at=d.get("generated_at", ""),
             elapsed_ms=d.get("elapsed_ms", 0),
+            from_store=True,
         )

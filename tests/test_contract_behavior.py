@@ -11,7 +11,14 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
+from _contract import (
+    VETO_STANCE,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    new_task_id,
+    now_cn,
+)
 
 T0 = now_cn()
 TID = new_task_id(1, day="20260919")
@@ -226,14 +233,40 @@ class TestCardIronLaw2:
 
 
 class TestCardVeto:
-    def test_BLOCK不可被合成阶段绕过(self):
-        blocked = verdict(agent="risk", verdict="BLOCK")
+    """制衡层的否决权。
+
+    🔴 判据是 `stance == VETO_STANCE`，不是 `verdict`。
+    `verdict` 只说数据全不全 —— 一个字段装不下「数据完整」和「我要否决」两件事：
+    risk 数据完整且要否决时，`verdict` 填 BLOCK 就再也说不出它的数据是全的，
+    而「凭什么否决」恰恰需要知道。
+    """
+
+    def test_否决不可被合成阶段绕过(self):
+        blocked = verdict(agent="risk", stance=VETO_STANCE)
         with pytest.raises(ValueError, match="否决权"):
             card(status="BUY", verdicts=[blocked])
 
-    def test_BLOCK配AVOID是合法的(self):
-        blocked = verdict(agent="risk", verdict="BLOCK")
+    def test_否决配AVOID是合法的(self):
+        blocked = verdict(agent="risk", stance=VETO_STANCE)
         assert card(status="AVOID", verdicts=[blocked]).status == "AVOID"
+
+    def test_否决配WAIT被拒(self):
+        """WAIT 是「再看看」，否决是「不要做」。把后者显示成前者就是软化制衡层。"""
+        blocked = verdict(agent="risk", stance=VETO_STANCE)
+        with pytest.raises(ValueError, match="否决必须体现"):
+            card(status="WAIT", verdicts=[blocked])
+
+    def test_否决这个词只有一处定义(self):
+        """改了词表却忘了改判据，否决权会**静默失效** —— 那是最怕的 fail-open。"""
+        from _contract import STANCE_VOCAB
+        assert VETO_STANCE in STANCE_VOCAB["risk"]
+
+    def test_数据不全的risk同样拦不住BUY(self):
+        """L-2 买入侧 fail-closed：risk 说不上话时，不许当作放行。"""
+        unknown = verdict(agent="risk", verdict="UNKNOWN", status="partial",
+                          stance="无法判定", missing=["风险面 —— 上游证据不足"])
+        with pytest.raises(ValueError, match="铁律 2"):
+            card(status="BUY", verdicts=[unknown], missing=["风险面 —— 上游证据不足"])
 
 
 class TestCardBasics:
@@ -275,3 +308,44 @@ class TestCardBasics:
     def test_序列化往返(self):
         c = card()
         assert DecisionCard.from_dict(c.to_dict()).to_dict() == c.to_dict()
+
+
+class TestF8UnregisteredAgentStance:
+    """外部评审 F8：词表校验原来是「命中才查，命不中就放行」。
+
+        agent="market",     stance="超级看多"  → 正确拒绝
+        agent="Market",     stance="随便乱写"  → 通过（大小写 typo）
+        agent="discipline", stance="瞎编的"    → 通过（Phase 3 还没登记）
+
+    🔴 这是一颗定时炸弹，不是已经发生的事故 ——
+    6 个已登记 agent 的约束是真实生效的（评审也验证了这点）。
+    但 Phase 3 建 `discipline` 时忘加一行（纯手工步骤，没有清单强制），
+    它的 stance 从那天起完全不受约束，而 `AGENTS.md` 里
+    「契约层会直接拒绝表外词」这句话，读者会以为对全系统成立。
+
+    ⚠️ 原来唯一的交叉校验用 `parametrize("agent", sorted(STANCE_VOCAB))` ——
+    **天然只测「已经正确登记」的 agent**，覆盖不到「忘记登记」这个分支。
+    """
+
+    def test_未登记的agent直接拒绝(self):
+        with pytest.raises(ValueError, match="没有登记 stance 词表"):
+            verdict(agent="discipline", stance="瞎编的方向")
+
+    def test_大小写typo也算未登记(self):
+        """`Market` 不是 `market` —— 静默放行时这种错最难查：
+        agent 名在日志里长得几乎一样。"""
+        with pytest.raises(ValueError, match="没有登记 stance 词表"):
+            verdict(agent="Market", stance="随便乱写的词")
+
+    def test_已登记的照常工作(self):
+        v = verdict(agent="market", stance="分化")
+        assert v.stance == "分化"
+        with pytest.raises(ValueError, match="不在该 agent 的词表里"):
+            verdict(agent="market", stance="超级看多")
+
+    def test_报错要指出去哪加(self):
+        """🔴 报错要指路 —— 只说「不行」的守卫会被绕过，不会被修好。"""
+        try:
+            verdict(agent="discipline", stance="瞎编的方向")
+        except ValueError as e:
+            assert "STANCE_VOCAB" in str(e) and "已登记" in str(e)
