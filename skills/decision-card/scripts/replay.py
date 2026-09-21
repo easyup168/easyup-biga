@@ -82,7 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         extra_missing=extra_missing,
     )
 
+    # 回放历史卡：Stage 0 统一占号之前的卡，判定编号与卡号不一致。
+    # 让契约层降级为提示而不是拒绝 —— 否则历史读不出来。详见 card_ops.synthesize。
     replayed = synthesize(
+        historical=True,
         decision_id=original.decision_id,
         verdicts=original.verdicts,      # 冻结的证据，不重新采集
         judgment=judgment,
@@ -93,7 +96,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         a, b = comparable(original), comparable(replayed)
         if a == b:
-            print(f"✅ 一致：{args.decision_id} 用冻结证据重跑，结论逐字段相同。")
+            print(f"✅ 组装一致：{args.decision_id} 用冻结证据重跑，"
+                  f"逐字段相同。")
+            # 🔴 外部评审 F14：这条命令**验证范围比名字暗示的小**，
+            #    所以把边界印在输出里，而不是只写在文档某处。
+            #
+            #    评审的构造：把 headline 改成「外星人今日登陆陆家嘴，沪指熔断」，
+            #    --check 照样报「一致」—— 因为 status/headline/synthesis
+            #    在 --check 模式下 100% 照抄原卡，两侧本质是同一个纯函数
+            #    喂入被证明相等的输入，**数学上必然相等**。
+            #
+            #    ⚠️ 但它并非测了个寂寞：评审把 extra_missing 的计算改坏之后，
+            #      --check 正确报出了不一致。它守的是「落库→取回→再拼一次」
+            #      这条管线无损、且 synthesize() 没有隐藏的非确定性。
+            print("   ⚠️ 它验的是**组装管线无损**（落库→取回→再拼一次），"
+                  "不是「这个结论能被独立复算出来」。")
+            print("   判断本身（status / headline / synthesis）在 --check 下"
+                  "照抄原卡，不参与比对。")
             return 0
         print("❌ 不一致 —— 在线与回放的组装结果不同：", file=sys.stderr)
         for k in sorted(set(a) | set(b)):

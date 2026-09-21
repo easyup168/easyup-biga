@@ -1,9 +1,13 @@
 # 第 01 章 · 隔离安装：在已有实例旁边装第二套 OpenClaw
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：在一台已经跑着 OpenClaw 的机器上，装出第二套完全独立的实例，
 > 且让第一套**毫无感知**。
 >
-> 命令级的完整步骤在 [`docs/design/install-guide.md`](../design/install-guide.md)。
+> 命令级的完整步骤在 [`docs/guide/install.md`](../guide/install.md)。
 > 本章讲的是**为什么** —— 两个陷阱，都属于「默认行为在共享资源上悄悄生效」。
 
 ---
@@ -19,15 +23,15 @@
 │  node    : v24.18.0        │   │  node    : v24.21.0        │
 │  openclaw: 较早版本         │   │  openclaw: 2026.9.5        │
 │  profile : default         │   │  profile : biga            │
-│  port    : 18789           │   │  port    : 19789           │
-│  state   : ~/.openclaw     │   │  state   : ~/.openclaw-biga│
+│  port    : <它的 base>      │   │  port    : 19789           │
+│  state   : <它的 state 目录> │   │  state   : ~/.openclaw-biga│
 └────────────────────────────┘   └────────────────────────────┘
         唯一的交集是宿主机资源（CPU / 内存 / 磁盘 / 端口空间）
 ```
 
 由此得到本项目的**第一条不变式**：
 
-> **I-1**：BigA 的任何进程**不得以写模式**打开 `~/.openclaw/` 下的任何文件。
+> **I-1**：BigA 的任何进程**不得以写模式**打开同机已有实例的状态目录下的任何文件。
 
 注意措辞是「写模式」。读是允许的 —— 真正会造成伤害的是写。
 
@@ -41,9 +45,10 @@ OpenClaw 一个实例实际占**一片**端口，不是一个：
 | Browser control | `base + 2` |
 | CDP 自动分配 | `base + 11` ~ `base + 110` |
 
-所以两个 base 之间**至少要隔 120**。本项目取 18789 / 19789，间距 1000，宽裕。
+所以两个 base 之间**至少要隔 120**。本项目把自己的 base 定在 19789，
+与同机已有实例相隔 1000，宽裕。
 
-随手挑 18800 会怎样？它正好落在第一套的 CDP 区间里，
+随手挑一个「看起来没被占用」的端口会怎样？它可能正好落在对方的 CDP 区间里，
 平时相安无事，直到某天对方开了第 12 个浏览器标签页 —— 然后两边都开始诡异地失败。
 
 ---
@@ -58,7 +63,7 @@ openclaw agents list        # ❌
 
 看起来只是列一下 agent。但 OpenClaw CLI 在启动时会**自动跑 doctor 迁移** ——
 它会按当前版本去升级 state 目录的结构。而不带 `--profile` 时，它操作的是
-`~/.openclaw`，也就是**另一套实例的状态目录**。
+`~/.openclaw`，也就是**已有实例的状态目录**。
 
 于是：用新版本（2026.9.5）的 CLI 去迁移老版本实例的 state。对方下次启动时读到的
 是一份被「升级」过的状态。
@@ -106,7 +111,7 @@ $BIGA agents list           # ✅ --profile biga 不可能漏
 
 ### 现象
 
-另一套实例的几十个定时任务，需要给自己注入 `PATH`。它的选法是这样的逻辑：
+已有实例的定时任务，需要给自己注入 `PATH`。它的选法是这样的逻辑：
 
 ```python
 # 扫 nvm 的所有 node 版本，挑「装了 openclaw 的最高版本」
@@ -129,7 +134,7 @@ npm i -g openclaw        # ❌ 装进 ~/.nvm/versions/node/v24.21.0/bin/
 with_oc = [v24.18.0, v24.21.0]   →   max = v24.21.0
 ```
 
-**另一套实例的所有定时任务，PATH 会静默切到 BigA 的 binary。**
+**同机已有实例的所有定时任务，PATH 会静默切到 BigA 的 binary。**
 而那些定时命令是不带 `--profile` 的 —— 于是新版本 CLI 开始操作旧实例的 state。
 
 ### 为什么它特别危险
@@ -157,8 +162,11 @@ npm i --prefix ~/.openclaw-biga/runtime openclaw@latest
 
 这是本章最值得抄走的一个做法。
 
-守卫测试不写在 BigA 仓库里，而是写在**另一套实例的仓库**里，断言它的
-PATH 解析结果仍然指向 `v24.18.0`。
+守卫测试不写在 BigA 仓库里，而是写在**受影响的那个项目的仓库**里，
+断言它的 PATH 解析结果没有被改掉。
+
+> 通用原则：**守卫写在受害者那边。** 加害方可以被删掉、被重装、被换人维护，
+> 而受害方才是那个需要一直知道「我还安全吗」的人。
 
 为什么？因为**风险的承受方才是应该报警的一方**。
 如果 BigA 哪天不小心装错位置，BigA 自己一切正常 —— 它感觉不到任何异常。
@@ -183,10 +191,11 @@ $BIGA --version
 # ② nvm 的 bin 里没有 openclaw
 [ ! -e ~/.nvm/versions/node/v24.21.0/bin/openclaw ] && echo "✅ 陷阱二未被触发"
 
-# ③ 跑 BigA 命令不会改到另一套实例的状态
-stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 记下
+# ③ 跑 BigA 命令不会改到同机已有实例的状态
+#    OTHER_STATE = 它的状态库路径（本机情况，不写死在教程里）
+stat -c '%y' "$OTHER_STATE"     # 记下
 $BIGA agents list
-stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须逐位相同
+stat -c '%y' "$OTHER_STATE"     # 必须逐位相同
 ```
 
 第 ③ 条是整章的兜底验证。mtime 有任何变化都说明隔离没做到位，**停下来查清楚，别往下走**。

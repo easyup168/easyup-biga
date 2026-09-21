@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# biga-card —— 出一张决策卡，或看已有的卡。
+#
+# 为什么要有这个脚本
+# ------------------
+# 在它之前，出一张卡要手敲一段很长的提示词，而且**漏一句就会出问题**：
+#
+#   · 漏 `--session-key`  ⇒ 用默认会话，一轮 end_turn 就返回，卡不出来
+#   · 漏「带上决策编号」  ⇒ Specialist 用临时号，落库直接报错
+#   · 漏「等全部结算」    ⇒ 两次运行交叠（2026-09-21 真出过一次）
+#
+# 这些都属于「靠人记得」的约定 —— 而本项目反复证明那类约定会失效。
+# ⇒ 固化成一条命令。
+#
+# 用法
+#   bin/biga-card                 出一张新卡（等它跑完，然后渲染）
+#   bin/biga-card --show <决策号>  看一张已有的卡
+#   bin/biga-card --list [n]      列出最近 n 张（默认 10）
+#   bin/biga-card --check <决策号> 用冻结证据重跑，断言**组装结果**逐字段相同
+#                                （验的是管线无损，不是「结论能被独立复算」——见 F14）
+#
+# ⚠️ 出一张新卡实测需要 **3 分钟左右**、约 $1.2。不是瞬时操作。
+
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+BIGA="$HOME/.openclaw-biga/bin/biga"
+PY=python3
+
+_sql() { $PY - "$@" <<'EOF'
+import sys, pathlib
+sys.path.insert(0, "skills")
+from _store import db
+with db.connect(readonly=True) as c:
+    for r in c.execute(sys.argv[1]):
+        print("\t".join("" if x is None else str(x) for x in r))
+EOF
+}
+
+case "${1:-}" in
+  --show)
+    [ -n "${2:-}" ] || { echo "用法: biga-card --show <决策号>" >&2; exit 2; }
+    exec $PY skills/decision-card/scripts/replay.py "$2"
+    ;;
+  --check)
+    [ -n "${2:-}" ] || { echo "用法: biga-card --check <决策号>" >&2; exit 2; }
+    exec $PY skills/decision-card/scripts/replay.py "$2" --check
+    ;;
+  --list)
+    n=${2:-10}
+    printf '%-22s %-7s %-14s %s\n' "决策号" "状态" "生成时间" "缺失项"
+    _sql "SELECT decision_id, status, generated_at, missing_count
+          FROM decision_records ORDER BY rowid DESC LIMIT $n" |
+      while IFS=$'\t' read -r id st at mc; do
+        printf '%-22s %-7s %-14s %s\n' "$id" "$st" "${at:5:5} ${at:11:5}" "$mc"
+      done
+    exit 0
+    ;;
+  -h|--help)
+    sed -n '2,25p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  "") : ;;
+  *)
+    echo "未知参数 $1（-h 看用法）" >&2; exit 2
+    ;;
+esac
+
+# ── 出新卡 ───────────────────────────────────────────────────────
+BEFORE=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
+SESS="card-$(date +%H%M%S)"
+echo "▸ 会话 $SESS   起 $(date +%T)"
+echo "  （实测 3 分钟左右、约 \$1.2；期间可以做别的事）"
+
+# 🔴 这段提示词的每一句都对应一个踩过的坑，不要随手删。
+"$BIGA" agent --agent main --session-key "agent:main:$SESS" --timeout 900 -m \
+"请出一张决策卡，严格按 AGENTS.md 的工作流程：
+Stage 0 先跑 new_decision.py 占一个决策编号；
+Stage 1 在**同一条消息里**并行 spawn market / sector / technical / emotion / news，
+  每条 spawn 都要带 collect=true，指令里都要写明本次决策编号；
+Stage 1.5 用 agents_wait 同步等待，**不要 sessions_yield**；
+Stage 2 全部返回后再 spawn risk（同样 collect=true + 决策编号）；
+Stage 3 用 synthesize.py 合成，**必须带 --decision-id**（就是 Stage 0 那个号）。
+全部 subagent 结算完再结束本轮。" >/dev/null 2>&1
+
+# agent 命令返回时卡未必已落库（Supervisor 可能还会被唤醒几轮）
+echo -n "▸ 等待落库 "
+for _ in $(seq 60); do
+  NOW=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
+  if [ "$NOW" != "$BEFORE" ]; then
+    echo "→ $NOW  $(date +%T)"
+    echo
+    $PY skills/decision-card/scripts/replay.py "$NOW"
+    echo
+    # 🔴 外部评审 F3：「Specialist 真的被调用过」这条最硬的约束，
+    #    此前**没有任何机器在管** —— 唯一能做真区分的核验只认
+    #    "emotion" 一个名字，而且从不在任何自动化流程里。
+    #
+    #    ⚠️ 手工跑 skill 再把 verdict_ref 喂给 synthesize.py，产出的
+    #      Card 与 agent_runs 记录，和「真的 spawn 了」逐字节相同 ——
+    #      两份都是 BigA 自己写的。区分它们只能靠 OpenClaw 运行时
+    #      自己记的那张表，而那张表 BigA 业务代码碰不到。
+    #
+    #    ⇒ 接在出卡之后，因为**这里是唯一每次都会跑到的地方**。
+    #      放进 pytest 不行：它需要一次真实运行。
+    $PY tools/verify/spawn_check.py "$NOW"
+    echo
+    echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
+    exit 0
+  fi
+  echo -n "."
+  sleep 5
+done
+
+echo
+echo "⚠️  5 分钟内没有新卡落库。" >&2
+echo "   这**不代表失败** —— 按契约，一次提问要么出卡、要么说清为什么出不了。" >&2
+echo "   查这两处：" >&2
+echo "     python3 tools/verify/agent_trace.py --agent main -n 1   # 它最后在做什么" >&2
+echo "     bin/biga-card --list                                     # 卡是不是晚到了" >&2
+exit 1

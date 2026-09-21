@@ -33,7 +33,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-__all__ = ["RuntimeProbe", "AgentTurn", "read_turns", "read_task_runs", "OPENCLAW_HOME"]
+from _contract import CN_TZ
+
+__all__ = ["RuntimeProbe", "AgentTurn", "ToolCall", "read_turns", "read_tool_calls",
+           "read_task_runs", "list_agents", "OPENCLAW_HOME"]
 
 OPENCLAW_HOME = pathlib.Path.home() / ".openclaw-biga"
 
@@ -69,6 +72,24 @@ class AgentTurn:
         return self.tokens_in + self.tokens_out + self.cache_read + self.cache_write
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    """一次工具调用。诊断「它到底在干什么」用的最小单位。
+
+    🔴 为什么值得单独读出来：本项目两次最有价值的诊断都来自拆开调用序列 ——
+    Supervisor 那 159 秒里有 47 秒零工具调用（在重打 JSON）；
+    Specialist 加 stance 后慢一倍，是因为 62 秒都在 grep 源码找词表。
+    两次的第一反应都是「提示词写得不好」，两次都错。
+    """
+
+    agent_id: str
+    session_key: str
+    at: datetime          # 北京时间（在 `_parse_ts` 统一转好）
+    name: str
+    args_len: int
+    command: str          # exec 类调用的命令原文，其余为空
+
+
 @dataclass
 class RuntimeProbe:
     """一次读取的结果 + 它有多可信。"""
@@ -95,10 +116,20 @@ def _agent_dbs() -> list[tuple[str, pathlib.Path]]:
 
 
 def _parse_ts(v: Any) -> datetime | None:
+    """把运行时的时间戳解析成**北京时间**。
+
+    🔴 OpenClaw 的 trajectory 里 `ts` 是 UTC（带 `Z`），而本项目对外一律北京时间。
+    转换放在**读取边界这一处**，不让每个消费方各自记得 `.astimezone(CN_TZ)` ——
+    那种「人人都要记得」的义务迟早会漏一个，而漏掉的表现是
+    **时间差了 8 小时却仍然是个合法时刻**，不报错。
+
+    实测踩过：手写的临时脚本直接打 `ts`，于是同一件事在延迟报告里是 08:00、
+    在脚本里是 00:00，白白花时间对不上号。
+    """
     if not isinstance(v, str):
         return None
     try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone(CN_TZ)
     except ValueError:
         return None
 
@@ -197,6 +228,51 @@ class TaskRun:
     ended_at: datetime | None
 
 
+def list_agents() -> list[str]:
+    """有轨迹库的 agent 名单。"""
+    return [name for name, _ in _agent_dbs()]
+
+
+def read_tool_calls(agent: str) -> tuple[list[ToolCall], list[str]]:
+    """读出某个 agent 的全部工具调用。返回 (调用, 不可用原因)。"""
+    db = OPENCLAW_HOME / "agents" / agent / "agent" / "openclaw-agent.sqlite"
+    if not db.is_file():
+        return [], [f"{agent}: 找不到 {db.name}"]
+    out: list[ToolCall] = []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as e:
+        return [], [f"{agent}: 打不开 {db.name} —— {e}"]
+    try:
+        for row in conn.execute(
+                "SELECT event_json FROM trajectory_runtime_events ORDER BY seq"):
+            try:
+                ev = json.loads(row["event_json"])
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") != "tool.call":
+                continue
+            at = _parse_ts(ev.get("ts"))
+            if at is None:
+                continue
+            d = ev.get("data") or {}
+            raw = d.get("args") or d.get("input") or {}
+            out.append(ToolCall(
+                agent_id=agent,
+                session_key=ev.get("sessionKey") or "?",
+                at=at,
+                name=d.get("name") or d.get("toolName") or "?",
+                args_len=len(json.dumps(raw, ensure_ascii=False)),
+                command=str(raw.get("command", "")) if isinstance(raw, dict) else "",
+            ))
+    except sqlite3.Error as e:
+        return out, [f"{agent}: 读 trajectory 出错 —— {e}"]
+    finally:
+        conn.close()
+    return out, []
+
+
 def read_task_runs(*, since: datetime | None = None) -> tuple[list[TaskRun], list[str]]:
     """读运行时调度器的执行记录。返回 (记录, 不可用原因)。"""
     db = OPENCLAW_HOME / "state" / "openclaw.sqlite"
@@ -216,7 +292,8 @@ def read_task_runs(*, since: datetime | None = None) -> tuple[list[TaskRun], lis
 
         def ms(v: Any) -> datetime | None:
             try:
-                return datetime.fromtimestamp(int(v) / 1000).astimezone()
+                # 显式 CN_TZ，不用系统本地时区 —— 换台机器就会变
+                return datetime.fromtimestamp(int(v) / 1000, tz=CN_TZ)
             except (TypeError, ValueError):
                 return None
 

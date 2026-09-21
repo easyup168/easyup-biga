@@ -22,7 +22,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from _contract import AgentVerdict, DecisionCard, now_cn
+from _contract import (
+    AgentVerdict,
+    DecisionCard,
+    is_adhoc_task_id,
+    new_task_id,
+    now_cn,
+)
 
 from .schema import MIGRATIONS, SCHEMA_VERSION
 
@@ -35,6 +41,7 @@ __all__ = [
     "load_card",
     "load_verdicts",
     "next_decision_id",
+    "reserve_decision_id",
     "record_agent_run",
     "list_agent_runs",
     "save_raw_snapshot",
@@ -44,6 +51,14 @@ __all__ = [
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = _REPO_ROOT / "data" / "biga.db"
+
+
+class StoreNotInitialised(RuntimeError):
+    """只读打开一个还不存在的库。
+
+    单独一个类型，是为了让调用方能把它与「真的坏了」分开处理 ——
+    全新环境里没有库是**正常**的，不该和数据损坏报同一种脸色。
+    """
 
 
 class AppendOnlyViolation(RuntimeError):
@@ -70,6 +85,22 @@ def connect(path: pathlib.Path | str | None = None, *, readonly: bool = False) -
     p.parent.mkdir(parents=True, exist_ok=True)
 
     if readonly:
+        # 🔴 外部评审 F23：库文件不存在时，`mode=ro` 抛的是
+        #    `sqlite3.OperationalError: unable to open database file` ——
+        #    一个不说路径、不说该做什么的裸异常。全新 clone 里跑任何
+        #    巡检工具都会撞到它（`data/biga.db` 是 .gitignore'd 的）。
+        #
+        #    ⚠️ 修在这里、不修在某个工具里：所有只读消费方共用这一个入口，
+        #      在调用方各写一遍 `if not exists` 就又是一份散开的判据。
+        #
+        #    区分「文件不在」和「schema 建好但零行」—— 后者是正常状态。
+        if not p.exists():
+            raise StoreNotInitialised(
+                f"事实库不存在：{p}\n"
+                f"  它是 .gitignore 的，全新 clone 里本来就没有。\n"
+                f"  先出一张卡把它建起来：`bin/biga-card`\n"
+                f"  只想建空库：`python3 -c \"import sys;sys.path.insert(0,'skills');"
+                f"from _store import db;db.init_schema()\"`")
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     else:
         conn = sqlite3.connect(p)
@@ -131,6 +162,21 @@ def save_card(
         raise TypeError(
             f"save_card 只接受 _contract.DecisionCard，收到 {type(card).__name__}"
         )
+    # 🔴 第三道：**落库永远拒绝身份不一致的卡。**
+    #
+    # 契约层对「新造的卡」是硬拒绝，但对 `from_dict()` 读回来的历史卡放行
+    # （否则 31 张里有 20 张再也读不出来）。那个放行口在这里必须堵上 ——
+    # 否则「读一张旧卡 → 原样存回去」就把非法状态重新写进了库。
+    #
+    # ⇒ 读可以宽，**写必须严**。
+    foreign = [(v.agent, v.task_id) for v in card.verdicts
+               if v.task_id != card.decision_id]
+    if foreign:
+        raise ValueError(
+            f"拒绝落库：Card {card.decision_id} 装着不属于它的判定 —— "
+            + "；".join(f"{a} 写着 {t}" for a, t in foreign) + "\n"
+            "  一张卡上的每一条判定都必须属于同一次决策。\n"
+            "  历史卡可以读（回放），但不能再写回库。")
     payload = json.dumps(card.to_dict(), ensure_ascii=False, sort_keys=True)
     try:
         return _insert_card(card, payload, replay_of, path)
@@ -184,21 +230,65 @@ def next_decision_id(
 
     只看「Card 出来了没有」永远发现不了它 —— 得看耗时分解。
     """
-    from _contract import new_task_id, now_cn
-
     day = day or now_cn().strftime("%Y%m%d")
-    with connect(path, readonly=True) as conn:
-        rows = conn.execute(
-            "SELECT decision_id FROM decision_records WHERE decision_id LIKE ?",
-            (f"BIGA-{day}-%",),
-        ).fetchall()
+    return new_task_id(_next_free_seq(day, path), day=day)
+
+
+def _next_free_seq(day: str, path: pathlib.Path | str | None) -> int:
+    """当天第一个没被占用的序号。
+
+    🔴 两张表都要看：已出的卡 **和** 已占但还没出卡的号。
+    只看前者，Stage 0 占了号而 Stage 3 还没落卡的那段窗口里，
+    第二次运行会拿到同一个号 —— 这正是 v4 要消灭的竞态。
+    """
     used = set()
-    for r in rows:
-        tail = r["decision_id"].rsplit("-", 1)[-1]
-        if tail.isdigit():
-            used.add(int(tail))
-    seq = next(i for i in range(1, 1000) if i not in used)
-    return new_task_id(seq, day=day)
+    with connect(path, readonly=True) as conn:
+        for tbl in ("decision_records", "decision_ids"):
+            for r in conn.execute(
+                f"SELECT decision_id FROM {tbl} WHERE decision_id LIKE ?",
+                (f"BIGA-{day}-%",),
+            ):
+                tail = r["decision_id"].rsplit("-", 1)[-1]
+                if tail.isdigit():
+                    used.add(int(tail))
+    # 从 1 开始：0 是临时号，永远不分配给真决策
+    return next(i for i in range(1, 1000) if i not in used)
+
+
+def reserve_decision_id(
+    *, by: str | None = None, day: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> str:
+    """**原子地**占一个决策编号。Stage 0 调用，把它传给所有 specialist。
+
+    🔴 为什么必须原子：主键冲突是唯一可靠的并发仲裁。
+    「先查空位再插入」中间有窗口 —— 两次同时起的运行会拿到同一个号，
+    然后它们的证据合进同一张卡，事后**没有任何字段能把它们分开**。
+    这不是假想：2026-09-21 盘中的两次端到端就是这么混的。
+
+    🔴 会自己建 schema。
+    外部评审 P2-2：`new_decision.py` 在**全新的库**上直接抛
+    `sqlite3.OperationalError: unable to open database file` ——
+    因为算下一个序号走的是 readonly 连接，而文件还不存在。
+
+    Stage 0 是整条链路的**第一步**，它必须能在空环境里独立跑起来 ——
+    否则「自包含的入口」这个说法不成立。
+    ⇒ 建 schema 放在这里而不是 CLI 里：任何调用方都受益，
+    而放在 CLI 就只有那一个入口受益。
+    """
+    init_schema(path)
+    for _ in range(1000):
+        cand = new_task_id(_next_free_seq(day or now_cn().strftime("%Y%m%d"), path),
+                           day=day)
+        try:
+            with connect(path) as conn:
+                conn.execute(
+                    "INSERT INTO decision_ids (decision_id, reserved_at, reserved_by)"
+                    " VALUES (?,?,?)", (cand, now_cn().isoformat(), by))
+            return cand
+        except sqlite3.IntegrityError:
+            continue  # 被人抢先，重算下一个
+    raise RuntimeError("当天 1000 个决策编号全被占用 —— 这不正常，先查 decision_ids 表")
 
 
 def load_card(
@@ -230,6 +320,85 @@ def load_verdicts(
     return list(card.verdicts) if card else []
 
 
+# ────────────────────────────────────────────────────────── agent_verdicts
+
+
+def save_verdict(
+    v: AgentVerdict,
+    *,
+    amends: int | None = None,
+    amend_reason: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """把一份 `AgentVerdict` 原件落库，返回 `verdict_id`。
+
+    🔴 **这张表存在的意义是：结构化数据不经过 LLM。**
+
+    skill 算完直接写这里并返回一个 id，agent 只传 id。
+    在此之前，契约要求 Specialist「把 JSON 原样带上」、Supervisor 再抄一遍 ——
+    实测两层复述之后，15 条 evidence 的 `retrieved_at` 一条不剩，
+    落库 Card 上的 `retrieved_at` 变成了「Supervisor 敲命令的时刻」。
+
+    Args:
+        amends: 本行修订的是哪一行。Specialist 追加缺失项时用 ——
+            **写新行，不覆盖原行**（与 `decision_records.replay_of` 同一套做法）。
+        amend_reason: 为什么修订。没有它，修订链读起来只是「有两行」。
+    """
+    if not isinstance(v, AgentVerdict):
+        raise TypeError(
+            f"save_verdict 只接受 _contract.AgentVerdict，收到 {type(v).__name__}")
+    if amends is not None and amend_reason is None:
+        # 修订不写理由，三个月后没人知道这一行为什么存在。
+        raise ValueError("amends 非空时必须给 amend_reason —— 修订要写为什么")
+    # 🔴 临时号不得入账。守卫放在这里而不是五个 specialist 里 ——
+    #    调用点会越来越多，而这里是**唯一**的写入口（铁律 2）。
+    if is_adhoc_task_id(v.task_id):
+        raise ValueError(
+            f"[{v.agent}] task_id={v.task_id} 是临时号（序号 000），不能落库。\n"
+            "  原因：决策编号归 Supervisor 所有，specialist 自己编的号无法归属。\n"
+            "  怎么办：\n"
+            "    · 由 Supervisor 在 Stage 0 占号并用 --task-id 传下来；\n"
+            "      占号命令 python3 skills/decision-card/scripts/new_decision.py\n"
+            "    · 只是手工看一眼输出 ⇒ 加 --no-store")
+    blob = json.dumps(v.to_dict(), ensure_ascii=False, sort_keys=True)
+    with connect(path) as conn:
+        cur = conn.execute(
+            """INSERT INTO agent_verdicts
+               (task_id, agent, amends, amend_reason,
+                verdict_json, content_sha256, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (v.task_id, v.agent, amends, amend_reason, blob,
+             hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+             now_cn().isoformat()),
+        )
+        return int(cur.lastrowid)
+
+
+def load_verdict(
+    verdict_id: int, *, path: pathlib.Path | str | None = None
+) -> AgentVerdict | None:
+    """按 id 取回判定原件。找不到返回 None —— 由调用方决定这算不算缺失。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT verdict_json FROM agent_verdicts WHERE verdict_id=?",
+            (int(verdict_id),),
+        ).fetchone()
+    return AgentVerdict.from_dict(json.loads(row["verdict_json"])) if row else None
+
+
+def load_verdict_meta(
+    verdict_id: int, *, path: pathlib.Path | str | None = None
+) -> dict[str, Any] | None:
+    """取回一行的元信息（含修订链），不构造契约对象。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT verdict_id, task_id, agent, amends, amend_reason, "
+            "content_sha256, created_at FROM agent_verdicts WHERE verdict_id=?",
+            (int(verdict_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 # ───────────────────────────────────────────────────────────────── agent_runs
 
 
@@ -248,7 +417,15 @@ def record_agent_run(
     error: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
-    """记一次 Agent 执行，返回 `run_id`。
+    """
+    ⚠️ **这不是 spawn 的证明**（外部评审 P2-3）。
+
+    BigA 自己的代码就在写这张表 —— 人手工跑一遍 `synthesize.py`，
+    它照样多出几行。它能证明的只有「我们记下了一次执行」。
+
+    要证明「运行时真的起过那个 Agent」，看**运行时自己的库**：
+    `subagent_runs` / `task_runs`，读取方是 `tools/verify/agent_trace.py`。
+记一次 Agent 执行，返回 `run_id`。
 
     🔴 这张表是「Supervisor 确实调用了 Specialist」的唯一凭证。
     Agent 在回答里声称自己调用过，不算数 —— LLM 完全可以把整段调用编出来。
@@ -315,6 +492,19 @@ def list_agent_runs(
 # ──────────────────────────────────────────────────────── raw_market_snapshot
 
 
+def payload_sha256(payload: Any) -> str:
+    """原始响应的内容哈希 —— **唯一实现**。
+
+    `save_raw_snapshot` 用它算入库的 `content_sha256`，
+    采集层用它给 `Evidence.raw_hash` 赋值。两边必须是同一个函数：
+    各算各的，某天序列化参数改了一处，`raw_hash` 就再也对不上 raw 层 ——
+    而那种失效是静默的（两串 sha 都「看起来正常」）。
+    """
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def save_raw_snapshot(
     *,
     source: str,
@@ -335,7 +525,7 @@ def save_raw_snapshot(
     而归一化规则是各数据源特有的，不属于通用存储层。
     """
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    sha = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    sha = payload_sha256(payload)
     with connect(path) as conn:
         cur = conn.execute(
             """INSERT INTO raw_market_snapshot

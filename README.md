@@ -6,12 +6,12 @@
 
 ### 基于 OpenClaw 的 Multi-Agent A 股短线决策辅助系统
 
-![Phase](https://img.shields.io/badge/PHASE-1%20walking%20skeleton-555)
-![Agents](https://img.shields.io/badge/AGENTS-2%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/124%20TESTS-PASSING-2ea043)
-![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%203%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-10%20%E7%AB%A0-8957e5)
-![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-74.8s%20%C2%B7%20%E9%A2%84%E7%AE%97%2090s-2ea043)
+![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
+![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
+![Tests](https://img.shields.io/badge/619%20TESTS-PASSING-2ea043)
+![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v5%20%C2%B7%205%20tables-555)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-18%20%E7%AB%A0-8957e5)
+![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
 ![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
 
 ***发现共识，锁定核心，让每一笔交易都有逻辑***
@@ -104,7 +104,7 @@ Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附
 | 06 | [建 Agent](docs/tutorial/06-agents.md) | 脚手架默认值多半不是你要的；角色契约写在 AGENTS.md |
 | 07 | [端到端](docs/tutorial/07-end-to-end.md) | 三层认证迷宫；怎么**证明** Specialist 真的被调用过 |
 | 08 | [回放](docs/tutorial/08-replay.md) | 冻结证据；在线与回放共用同一份组装代码 |
-| 09 | [隔离演练](docs/tutorial/09-isolation-drill.md) | `kill -9` 自己，逐项核对邻居毫发无伤 |
+| 09 | [隔离演练](docs/tutorial/09-isolation-drill.md) | `kill -9` 自己，逐项核对已有实例毫发无伤 |
 | 10 | [延迟与成本](docs/tutorial/10-latency-and-cost.md) | 216s→75s；延迟其实是正确性 bug 的症状 |
 
 配套抖音系列同步更新 · **关注 易涨EasyUp** 不迷路
@@ -126,8 +126,8 @@ Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附
 | `emotion-calc` Skill（真采 A 股情绪数据） | ✅ |
 | `emotion` Agent + Supervisor 委派配置 | ✅ |
 | 合成与回放（两条路径共用同一份组装代码） | ✅ |
-| 隔离演练（`kill -9` 自己，邻居六项未变） | ✅ |
-| 124 条测试全绿 | ✅ |
+| 隔离演练（`kill -9` 自己，已有实例六项未变） | ✅ |
+| 124 条测试全绿 | ✅ |<!-- 冻结：Phase 1 验收当时的数 -->
 | 端到端 74.8s（预算 90s） | ✅ |
 
 Phase 1 的验收标准由机器逐条核对，`PENDING` 不计为通过：
@@ -136,15 +136,123 @@ Phase 1 的验收标准由机器逐条核对，`PENDING` 不计为通过：
 python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.json --live
 ```
 
+---
+
+## 快速开始
+
+```bash
+cd ~/.openclaw-biga/workspace
+
+bin/biga-card              # 出一张决策卡（约 3 分钟、$1.2）
+bin/biga-card --list       # 最近出过哪些
+bin/biga-card --show <号>   # 看某一张
+bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相同
+```
+
+完整用法与「怎么确认它没骗你」见 [`docs/guide/usage.md`](docs/guide/usage.md)。
+
+⚠️ **不是交易信号。** 系统不下单、不接账户，最终决定由人做。
+
+⚠️ **盘中会一直是 `WAIT`**，这是对的行为不是 bug ——
+实时源说「此刻」、日线源说「上一交易日」，风控拒绝把两者当同一天审。
+🔴 **「收盘后就对齐」是错的 —— 实测证伪。**
+
+15:21（收盘 21 分钟后）跑了一次，交易日**仍然分裂**：
+
+```
+technical/market/sector  20260918     ← 日线
+emotion/news             20260921     ← 实时源
+```
+
+查源：15:22 时新浪日线的最后一根还是 `20260918`。
+**当天的日线不在 15:00 发布，有一段未知长度的延迟。**
+
+⚠️ 这条「收盘后跑就好了」是**没有验证就写下的推断**，
+写进了 README、操作手册和教程三处。现在全部改掉。
+
+> 通用原则：**「应该会……」和「实测是……」之间隔着一次运行。**
+> 而这类推断特别危险，因为它听起来太合理了 —— 谁会怀疑「收盘后日线就有了」。
+
+⇒ 正确的说法是：**要等当天日线真正发布之后**。
+具体时刻正在实测（见 `TODO.md` 的待测项），在测出来之前，
+判断方法是直接看：
+
+```bash
+python3 -c "
+import sys;sys.path.insert(0,'skills')
+from _sources.sina import fetch_index_daily
+print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
+```
+
+打印出今天的日期，才是出卡的时机。
+
+---
+
+## Phase 2 · Specialists（进行中，在 `phase2` 分支）
+
+| 项 | 状态 |
+|---|---|
+| Agent **7 / 8** —— Stage 1 五个 + Stage 2 `risk` + Supervisor | ✅ |
+| 第 8 个 `discipline` —— **故意不建**（没有输入源，见裁定 13） | — |
+| Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
+| Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
+| schema v5 —— 决策编号原子分配器 + 只追加保护 | ✅ |
+| 619 条测试 | ✅ |
+| 成本分解 $1.20/次（`main` 占 37%） | ✅ |
+| 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
+| **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
+| 两份外部对抗性评审共 29 条发现 | 🔶 15 模式级 / 7 **实例级（模式还在）** / 1 修不干净 |
+| 至少 1 次真实「否决」端到端落库 | ⬜ |
+| 真实缺失项跨天累积 ≥5 次 | 🔶 数够了，但全在同一天 |
+
+🔴 **最后两条曾经卡在同一个架构问题上**：`emotion`/`news` 报「今天」、
+日线类报「上一交易日」，`risk` 正确地拒绝合并审 ⇒ 每次「无法判定」。
+这是**对的行为**，但它意味着那段时间出不了有把握的卡。
+
+⏩ **2026-09-21 17:18 更新**：当天日线发布之后（实测收盘后约 35 分钟）
+跑的 `BIGA-20260921-020`，**六个 Agent 首次报同一个交易日**，
+`risk` 第一次真的裁决（`放行`），缺失项从 8~9 条降到 3 条。
+
+⇒ **前置条件解决了，但这两条出口条件仍未达成**：
+「放行」不是「否决」—— 要攒到真实否决得等一个真的触发阈值的行情；
+跨天累积同样要等下一个交易日。**别把前置条件当成达成。**
+
+详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11。
+
 ### 关于「徽章全绿」的说明
 
-这里必须说清楚，否则就是粉饰。
+这里必须说清楚，否则就是粉饰。**端到端徽章绿过两次，两次都改过预算。**
 
-端到端徽章从橙变绿，是因为**把预算从 60s 改成了 90s**。60s 从来不是合理的预算——
-它是四个阶段预估**下界**之和，等于要求所有阶段同时命中最优。
-实测每个阶段都落在自己的预估区间内，超的是那个不合理的加法，不是系统本身。
+**第一次 60s → 90s。** 60s 从来不是合理的预算 —— 它是四个阶段预估**下界**之和，
+等于要求所有阶段同时命中最优。实测每个阶段都落在自己的区间内，
+超的是那个加法，不是系统本身。
 
-完整推导见[第 10 章 · 延迟与成本](docs/tutorial/10-latency-and-cost.md)。
+**第二次 90s → 180s。** 这次更需要说清楚，因为**数字变差了**：
+Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大多因数据未形成早退。
+盘中六 Agent 实测 172.6s。
+
+改预算的三个必答问题（缺一条就是作弊）：
+
+1. **旧数字错在哪** —— 在一个 agent 都没有时把四个区间相加得到的，是愿望不是预测
+2. **新数字怎么来的** —— 四次盘中实测，每项取最好值仍需 158s，180s 留 14% 余量
+3. **什么时候它该红** —— 优化后三次都在 158–173s；超 180s 说明有组成异常了
+
+而且要指出**哪部分不在我们控制内**：Stage 1 的最慢项是第三方接口延迟，
+实测并发度调到 4 会触发渐进限流（7.2 → 25.2 → 60.1s）。
+
+**第三次：还没改，因为回答不了第 3 问。** 首次盘后实测 **198s / $1.37**，
+超了 180s。原因清楚 —— 收盘后一小时快讯 **184 条**（盘中约 70 条），
+`news` 单轮从 78.3s 涨到 100.0s。
+
+🔴 但只有一次盘后数据，**说不出「什么时候它不该红」** ——
+而那正是前两次改预算时反复强调的必答问题。
+顺手调到 210s 会让盘中的异常不再报红。⇒ 留作待裁定，先攒实测。
+
+> 注意这三次的共同点：**旧数字之所以不对，都是因为测量窗口没覆盖到某个情形。**
+> 第一次没有 agent，第二次是休市日，第三次是所有实测都在 15:00 之前。
+
+完整推导见[第 10 章](docs/tutorial/10-latency-and-cost.md)与
+[第 17 章](docs/tutorial/17-closing-phase-2.md)。
 
 ---
 
@@ -155,13 +263,15 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 ├── agents/          各 Agent 的 workspace（AGENTS.md = 角色契约唯一载体）
 ├── skills/
 │   ├── _contract/   Evidence / AgentVerdict / DecisionCard（唯一实现）
-│   └── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
+│   ├── _sources/    采集层：四个数据源 + 重试 + 交易日 + 量级围栏
+│   ├── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
+│   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
-├── tools/           cron 调度 + 验证工具
-├── tests/           124 条测试
+├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
+├── tests/           619 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（10 章，与代码同步）
+│   └── tutorial/    开发教程（18 章，与代码同步）
 └── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 
@@ -171,10 +281,14 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/design/architecture.md`](docs/design/architecture.md) | 系统架构：Agent 拓扑、通信契约、数据架构、延迟预算、路线图 |
-| [`docs/design/install-guide.md`](docs/design/install-guide.md) | 环境安装：在已有 OpenClaw 实例的机器上并排装第二套隔离实例 |
-| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：10 章，真实建造过程 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本与变更历史（每条写「为什么」，不只是「做了什么」） |
+| [`docs/README.md`](docs/README.md) | **文档规约**：放哪、叫什么、谁该更新它（由测试强制） |
+| [`docs/design/architecture.md`](docs/design/architecture.md) | 架构 SSOT：Agent 拓扑、通信契约、数据架构、失败模式清单 |
+| [`docs/design/phase-1-walking-skeleton.md`](docs/design/phase-1-walking-skeleton.md) | Phase 1 设计与验收结果（已冻结） |
+| [`docs/design/phase-2-specialists.md`](docs/design/phase-2-specialists.md) | Phase 2 设计：范围、步骤、关键取舍、出口条件 |
+| [`docs/guide/usage.md`](docs/guide/usage.md) | **怎么用**：出卡、读卡、以及四个「确认它没骗你」的检查 |
+| [`docs/guide/install.md`](docs/guide/install.md) | 环境安装：在已有 OpenClaw 实例旁并排装第二套 |
+| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：13 章，真实建造过程 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 变更历史（每条写「为什么」，不只是「做了什么」） |
 
 ---
 
