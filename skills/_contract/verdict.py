@@ -23,7 +23,9 @@ from .evidence import Evidence
 from .missing import MissingItem
 
 __all__ = [
+    "ADHOC_TASK_SEQ",
     "CROSS_CHECK_PAIRS",
+    "is_adhoc_task_id",
     "STAGE1_AGENTS",
     "STAGE2_AGENTS",
     "STANCE_VOCAB",
@@ -102,8 +104,31 @@ STANCE_VOCAB: dict[str, tuple[str, ...]] = {
 }
 
 
+#: 🔴 **临时号** —— 序号 0 保留给「不属于任何决策」的运行。
+#:
+#: 一个 specialist **不该自己编决策号**：决策的身份归 Supervisor 所有。
+#: 但手工跑一次 skill 看看输出是常事，那时又确实需要一个合法的 task_id。
+#:
+#: 所以给它一个**自曝身份**的号：`BIGA-YYYYMMDD-000`。
+#: `next_decision_id()` 从 1 开始分配，000 永远不会被真决策占用；
+#: 而 `save_verdict()` 拒绝落这种号 —— 临时结果可以看，不可以入账。
+#:
+#: 原来的默认值是 `new_task_id(1)`，它**看起来像个正经决策号**。
+#: 实测后果：五个 specialist 的 verdict 全部写着 `-001`，
+#: 两次并发运行的证据混进同一张卡，事后无法分辨。
+ADHOC_TASK_SEQ: int = 0
+
+
+def is_adhoc_task_id(task_id: str) -> bool:
+    """这个号是不是「不属于任何决策」的临时号。"""
+    return task_id.rsplit("-", 1)[-1] == f"{ADHOC_TASK_SEQ:03d}"
+
+
 def new_task_id(seq: int, *, day: str | None = None) -> str:
-    """生成 ``BIGA-YYYYMMDD-NNN`` 形式的任务号。"""
+    """生成 ``BIGA-YYYYMMDD-NNN`` 形式的任务号。
+
+    ⚠️ 不要用它给 specialist 造决策号 —— 见 `ADHOC_TASK_SEQ`。
+    """
     from .evidence import now_cn
 
     day = day or now_cn().strftime("%Y%m%d")

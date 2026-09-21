@@ -22,7 +22,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from _contract import AgentVerdict, DecisionCard, now_cn
+from _contract import (
+    AgentVerdict,
+    DecisionCard,
+    is_adhoc_task_id,
+    new_task_id,
+    now_cn,
+)
 
 from .schema import MIGRATIONS, SCHEMA_VERSION
 
@@ -35,6 +41,7 @@ __all__ = [
     "load_card",
     "load_verdicts",
     "next_decision_id",
+    "reserve_decision_id",
     "record_agent_run",
     "list_agent_runs",
     "save_raw_snapshot",
@@ -184,21 +191,54 @@ def next_decision_id(
 
     只看「Card 出来了没有」永远发现不了它 —— 得看耗时分解。
     """
-    from _contract import new_task_id, now_cn
-
     day = day or now_cn().strftime("%Y%m%d")
-    with connect(path, readonly=True) as conn:
-        rows = conn.execute(
-            "SELECT decision_id FROM decision_records WHERE decision_id LIKE ?",
-            (f"BIGA-{day}-%",),
-        ).fetchall()
+    return new_task_id(_next_free_seq(day, path), day=day)
+
+
+def _next_free_seq(day: str, path: pathlib.Path | str | None) -> int:
+    """当天第一个没被占用的序号。
+
+    🔴 两张表都要看：已出的卡 **和** 已占但还没出卡的号。
+    只看前者，Stage 0 占了号而 Stage 3 还没落卡的那段窗口里，
+    第二次运行会拿到同一个号 —— 这正是 v4 要消灭的竞态。
+    """
     used = set()
-    for r in rows:
-        tail = r["decision_id"].rsplit("-", 1)[-1]
-        if tail.isdigit():
-            used.add(int(tail))
-    seq = next(i for i in range(1, 1000) if i not in used)
-    return new_task_id(seq, day=day)
+    with connect(path, readonly=True) as conn:
+        for tbl in ("decision_records", "decision_ids"):
+            for r in conn.execute(
+                f"SELECT decision_id FROM {tbl} WHERE decision_id LIKE ?",
+                (f"BIGA-{day}-%",),
+            ):
+                tail = r["decision_id"].rsplit("-", 1)[-1]
+                if tail.isdigit():
+                    used.add(int(tail))
+    # 从 1 开始：0 是临时号，永远不分配给真决策
+    return next(i for i in range(1, 1000) if i not in used)
+
+
+def reserve_decision_id(
+    *, by: str | None = None, day: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> str:
+    """**原子地**占一个决策编号。Stage 0 调用，把它传给所有 specialist。
+
+    🔴 为什么必须原子：主键冲突是唯一可靠的并发仲裁。
+    「先查空位再插入」中间有窗口 —— 两次同时起的运行会拿到同一个号，
+    然后它们的证据合进同一张卡，事后**没有任何字段能把它们分开**。
+    这不是假想：2026-09-21 盘中的两次端到端就是这么混的。
+    """
+    for _ in range(1000):
+        cand = new_task_id(_next_free_seq(day or now_cn().strftime("%Y%m%d"), path),
+                           day=day)
+        try:
+            with connect(path) as conn:
+                conn.execute(
+                    "INSERT INTO decision_ids (decision_id, reserved_at, reserved_by)"
+                    " VALUES (?,?,?)", (cand, now_cn().isoformat(), by))
+            return cand
+        except sqlite3.IntegrityError:
+            continue  # 被人抢先，重算下一个
+    raise RuntimeError("当天 1000 个决策编号全被占用 —— 这不正常，先查 decision_ids 表")
 
 
 def load_card(
@@ -260,6 +300,16 @@ def save_verdict(
     if amends is not None and amend_reason is None:
         # 修订不写理由，三个月后没人知道这一行为什么存在。
         raise ValueError("amends 非空时必须给 amend_reason —— 修订要写为什么")
+    # 🔴 临时号不得入账。守卫放在这里而不是五个 specialist 里 ——
+    #    调用点会越来越多，而这里是**唯一**的写入口（铁律 2）。
+    if is_adhoc_task_id(v.task_id):
+        raise ValueError(
+            f"[{v.agent}] task_id={v.task_id} 是临时号（序号 000），不能落库。\n"
+            "  原因：决策编号归 Supervisor 所有，specialist 自己编的号无法归属。\n"
+            "  怎么办：\n"
+            "    · 由 Supervisor 在 Stage 0 占号并用 --task-id 传下来；\n"
+            "      占号命令 python3 skills/decision-card/scripts/new_decision.py\n"
+            "    · 只是手工看一眼输出 ⇒ 加 --no-store")
     blob = json.dumps(v.to_dict(), ensure_ascii=False, sort_keys=True)
     with connect(path) as conn:
         cur = conn.execute(

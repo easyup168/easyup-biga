@@ -36,6 +36,19 @@
 cd ~/.openclaw-biga/workspace && python3 skills/market-calc/scripts/market_calc.py
 ```
 
+🔴 **命令后面必须加 `--task-id <Supervisor 给你的决策编号>`。**
+
+Supervisor 的指令里会有一句「本次决策编号 BIGA-…-NNN」。原样抄进命令：
+
+```bash
+... market_calc.py --task-id BIGA-20260921-007
+```
+
+不加会怎样：skill 用临时号 `-000`，而**落库会直接报错**。
+这是有意的 —— 一条无法归属的判定原件，比没有更糟：
+它看起来是正经证据，却说不清属于哪次决策。
+（2026-09-21 盘中真出过一次：两次运行的证据合成进了同一张卡。）
+
 这条命令的 stdout 是一份完整的 `AgentVerdict` JSON。**你的工作从它开始。**
 
 ⚠️ **任何情况下都不要 `find /`。** 它会扫遍整个文件系统，慢且会留下后台进程。

@@ -1,0 +1,145 @@
+"""决策编号的归属 —— 一次真实事故的回归测试。
+
+事故（2026-09-21 盘中）
+------------------------
+09:37 与 09:39 各起了一次端到端。结果：
+
+* 五个 specialist 的 verdict **全部**写着 `BIGA-20260921-001`
+* 合成出来的卡却是 `BIGA-20260921-006`
+* 两次运行的证据混进同一张卡，**没有任何字段能把它们分开**
+
+两层原因：
+
+1. 五个 specialist 都写着 `new_task_id(1)` —— 序号硬编码。
+   这个 bug 在 `synthesize.py` 上修过一次，**兄弟模块一个没查**。
+2. 更根本的：编号在**合成时**才分配，而那时证据早采完了。
+   一个决策在收集证据之前就该有身份，否则证据无处归属。
+
+本文件钉死修复后的三条性质。
+"""
+
+from __future__ import annotations
+
+import ast
+import pathlib
+import subprocess
+import sys
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "skills"))
+
+from _contract import (  # noqa: E402
+    ADHOC_TASK_SEQ,
+    AgentVerdict,
+    Evidence,
+    is_adhoc_task_id,
+    new_task_id,
+    now_cn,
+)
+from _store import db  # noqa: E402
+
+
+def _verdict(agent: str, task_id: str) -> AgentVerdict:
+    return AgentVerdict(
+        agent=agent, task_id=task_id, status="completed", verdict="PASS",
+        stance=None,
+        result={"trade_date": "2026-09-18"},
+        evidence=[Evidence(field="trade_date", value="2026-09-18",
+                           source="probe", as_of=now_cn(), retrieved_at=now_cn())],
+    )
+
+
+class TestAdhocNotStorable:
+    """临时号可以看，不可以入账。"""
+
+    def test_临时号落库被拒(self, tmp_path):
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        with pytest.raises(ValueError) as e:
+            db.save_verdict(_verdict("market", new_task_id(ADHOC_TASK_SEQ)), path=p)
+        msg = str(e.value)
+        # 报错要指路（开发流程第 8 条）：不只说错了，还要说怎么办
+        assert "--no-store" in msg and "new_decision.py" in msg, \
+            f"报错没有指路：{msg}"
+
+    def test_正经号可以落库(self, tmp_path):
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        assert db.save_verdict(_verdict("market", "BIGA-20260921-007"), path=p) > 0
+
+    def test_守卫在唯一写入口而不是五个调用点(self):
+        """🔴 这条是本次修复的要点。
+
+        原来的 bug 之所以能同时存在于五个 specialist，就是因为每个调用点
+        各写一遍默认值。守卫必须放在 `save_verdict` 里 —— 调用点会越来越多。
+        """
+        src = (REPO / "skills/_store/db.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "save_verdict")
+        calls = {n.func.id for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "is_adhoc_task_id" in calls, "守卫不在唯一写入口里"
+
+
+class TestNoHardcodedSeq:
+    """兄弟模块检查 —— 教程 14 要点 9 的机器版。"""
+
+    def test_没有人再硬编码序号1(self):
+        bad = []
+        for f in (REPO / "skills").glob("*/scripts/*.py"):
+            src = f.read_text(encoding="utf-8")
+            for i, line in enumerate(src.splitlines(), 1):
+                if "new_task_id(1)" in line and not line.lstrip().startswith("#"):
+                    bad.append(f"{f.relative_to(REPO)}:{i}")
+        assert not bad, (
+            f"又出现硬编码序号：{bad}\n"
+            "  当天第二次决策会撞号，且多个 specialist 会写出同一个 task_id。\n"
+            "  手工运行用 new_task_id(ADHOC_TASK_SEQ)，真决策由 Stage 0 下发。")
+
+
+class TestReservationIsAtomic:
+    """占号靠主键冲突仲裁，不靠「先查再插」。"""
+
+    def test_连续占号不重复且从1开始(self, tmp_path):
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        got = [db.reserve_decision_id(by="t", path=p) for _ in range(5)]
+        assert len(set(got)) == 5
+        assert got[0].endswith("-001"), "序号 0 是临时号，不能分配给真决策"
+        assert not any(is_adhoc_task_id(g) for g in got)
+
+    def test_已出的卡也算占用(self, tmp_path):
+        """两张表都要看 —— 只看一张就会重号。"""
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        first = db.reserve_decision_id(by="t", path=p)
+        # 直接往 decision_records 塞一张卡，绕过分配器
+        from _contract import DecisionCard
+        card = DecisionCard(
+            decision_id=new_task_id(9), status="WAIT", headline="h",
+            verdicts=[_verdict("market", new_task_id(9))],
+            synthesis="s", model_ref="m")
+        db.save_card(card, path=p)
+        nxt = db.reserve_decision_id(by="t", path=p)
+        assert nxt not in (first, new_task_id(9))
+
+
+class TestSynthesizeRejectsMixedRuns:
+    """合成阶段的闸门：不同决策的证据不得合成一张卡。"""
+
+    def test_混血被拒绝并指路(self, tmp_path):
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        a = db.save_verdict(_verdict("market", "BIGA-20260921-007"), path=p)
+        b = db.save_verdict(_verdict("emotion", "BIGA-20260921-008"), path=p)
+        r = subprocess.run(
+            [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
+             "--verdict-ids", f"{a},{b}", "--status", "WAIT",
+             "--headline", "h", "--synthesis", "s", "--model-ref", "m"],
+            capture_output=True, text=True, env={**__import__("os").environ,
+                                                 "BIGA_DB_PATH": str(p)})
+        assert r.returncode == 1, "两次决策的证据被合成了同一张卡"
+        assert "不止一次决策" in r.stderr and "怎么办" in r.stderr
