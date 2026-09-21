@@ -366,8 +366,8 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 | | 状态 |
 |---|---|
 | Agent | **7 / 8**。`main` + Stage 1 五个（market/sector/technical/emotion/news）+ Stage 2 `risk`。<br>第 8 个 `discipline` **故意不建**（裁定 13：没有输入源） |
-| 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v4**，五张表，只追加由触发器强制 |
-| 测试 | 476 条 |
+| 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v5**，五张表，只追加由触发器强制（v4 时这句话是**假的** —— 分配器没有触发器，五取四） |
+| 测试 | 479 条 |
 | 端到端 | 盘中六 Agent 172.6s（预算 **180s**，已按四次实测重推）、$1.20/次 |
 | 隔离 | `tools/verify/isolation.py` 四项全绿 |
 

@@ -8,7 +8,7 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/476%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/479%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v4%20%C2%B7%205%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-17%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-172.6s%20%C2%B7%20%E9%A2%84%E7%AE%97%20180s-2ea043)
@@ -197,7 +197,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v4 —— 决策编号原子分配器 | ✅ |
-| 476 条测试 | ✅ |
+| 479 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` 四项全绿 | ✅ |
 | 至少 1 次真实「否决」端到端落库 | ⬜ |
@@ -244,7 +244,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 │   └── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
 ├── data/            SQLite 事实层（不入库）
 ├── tools/           cron 调度 + 验证工具
-├── tests/           476 条测试
+├── tests/           479 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
 │   └── tutorial/    开发教程（17 章，与代码同步）
