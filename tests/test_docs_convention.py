@@ -351,12 +351,35 @@ def test_每个入口都在设计文档里被提过(path: pathlib.Path):
 #
 # 🔴 判据取自脚本里 `chk "…"` 的真实调用数，不另写一个计数器。
 
-_CN_NUM = "零一二三四五六七八九十"
+_CN_DIGITS = "零一二三四五六七八九"
+
+
+def _cn(n: int) -> str:
+    """1..99 的汉字写法。
+
+    ⚠️ 第一版是 `_CN_NUM[n]` 下标取字 —— 到 11 就越界，回退成了 `"11"`，
+    于是守卫拿 `"11"` 去比文档里的「十一」，永远对不上。
+    **单字符表只够用到十。**
+    """
+    if n < 10:
+        return _CN_DIGITS[n]
+    if n == 10:
+        return "十"
+    tens, ones = divmod(n, 10)
+    return ("十" if tens == 1 else _CN_DIGITS[tens] + "十") + (_CN_DIGITS[ones] if ones else "")
 
 
 def _audit_check_count() -> int:
+    """脚本里实际有几项检查。
+
+    ⚠️ 不能只数 `chk "` —— 第 11 项是**范围检查**（哪些文件不该进仓库），
+    不走正则那条路。第一版只数 `chk`，于是脚本自己打印「十一项全绿」、
+    文档写「十项」，而守卫两边都觉得对得上。
+    ⇒ 非 `chk` 的检查用 `# audit-check:` 显式标记，一起数。
+    """
     src = (REPO / "tools" / "verify" / "audit_public.sh").read_text(encoding="utf-8")
-    return len(re.findall(r'^chk "', src, re.M))
+    return (len(re.findall(r'^chk "', src, re.M))
+            + len(re.findall(r'^# audit-check:', src, re.M)))
 
 
 def test_扫到了审查项():
@@ -368,8 +391,10 @@ def test_扫到了审查项():
 #:    **一处都没匹配到**：删掉第 10 项之后它照样绿。
 #:    与 F5/F4/F3/F7 那几次同一个形状，这次是在写守卫的当场被探针抓到的。
 _COUNT_SAYINGS = (
-    re.compile(r"([零一二三四五六七八九十]|\d+)项(检查|审查|全绿)"),
-    re.compile(r"(检查|审查)[（(]([零一二三四五六七八九十]|\d+)项[)）]"),
+    # ⚠️ `+` 不可省 —— 「十一」是**两个字**。第一版是单字符类，
+    #    把「十一项」截成「一项」，于是报「文档写着一项」。
+    re.compile(r"([零一二三四五六七八九十]+|\d+)项(检查|审查|全绿)"),
+    re.compile(r"(检查|审查)[（(]([零一二三四五六七八九十]+|\d+)项[)）]"),
 )
 
 
@@ -388,7 +413,7 @@ def _sayings(line: str) -> list[str]:
 @pytest.mark.parametrize("rel", ["CLAUDE.md", "docs/design/architecture.md"])
 def test_文档里写的审查项数与脚本一致(rel: str):
     n = _audit_check_count()
-    want = _CN_NUM[n] if n < len(_CN_NUM) else str(n)
+    want = _cn(n)
     text = (REPO / rel).read_text(encoding="utf-8")
     seen, bad = 0, []
     for line in text.splitlines():

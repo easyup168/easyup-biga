@@ -307,7 +307,7 @@ git config core.hooksPath tools/git-hooks # 装 pre-push（克隆后每人执行
 那句话隐含一个不再存在的窗口（先推上去、等转公开时再检查）。
 已公开的内容撤不回来 —— 删分支也可能留在 fork、缓存与镜像里。
 
-⚠️ 这**十项**检查**只有一份实现**（`tools/verify/audit_public.sh`）。
+⚠️ 这**十一项**检查**只有一份实现**（`tools/verify/audit_public.sh`）。
 本节曾另有一段「快速自查」用另一套正则，那就是 L-3 的第二套口径 ——
 **改了一份忘了另一份时，剩下那份仍然报绿。**
 
