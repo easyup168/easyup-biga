@@ -61,19 +61,22 @@ echo "扫描范围：$SCOPE"
 #
 #    这就是 `ps aux | grep [b]ash` 那个老把戏，用在同一个问题上。
 #
+#    ⚠️ **九项模式全部这么写**，不只是新加的那一项 ——
+#       否则下次谁去清理别的类目（比如密钥前缀），就会改坏另一条检查。
+#
 FAIL=0
 # grep -v '^+chk "' 仍然保留：模式之外的说明文字也可能撞上关键词。
 chk() { c=$(printf '%s' "$DIFF" | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
         [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
 
-chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z ]*PRIVATE KEY|ssh-(ed25519|rsa) AAAA)'
-chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
-chk "家目录路径"     '/home/[a-z][a-z0-9_-]*'
-chk "个人邮箱"       '[a-zA-Z0-9._%-]+@(gmail|qq|163|126|outlook|hotmail|foxmail|sina)\.'
+chk "凭据/私钥"      '([s]k-ant|[o]at[0-9]{2}_|[g]hp_|[g]ithub_pat_|[t]vly-|[B]EGIN [A-Z ]*PRIVATE KEY|[s]sh-(ed25519|rsa) AAAA)'
+chk "Gateway token" '([b]ootstrapToken=|[g]ateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
+chk "家目录路径"     '/[h]ome/[a-z][a-z0-9_-]*'
+chk "个人邮箱"       '[a-zA-Z0-9._%-]+@([g]mail|[q]q|163|126|[o]utlook|[h]otmail|[f]oxmail|[s]ina)\.'
 chk "邻居可识别细节" '([E]ASYUP|\b[Q]MT\b|[m]arket\.db|[n]odeenv|[f]ind_node_bin|[0-9]+ 个 systemd|[a]nthropic:openclaw)'
 chk "IP 地址"        '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
 chk "旧用户名"       '\b[r]engydl\b'
-chk "密码赋值"       '(password|passwd|secret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
+chk "密码赋值"       '([p]assword|[p]asswd|[s]ecret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
 # 🔴 第 9 项加于 2026-09-21。触发它的不是某次事故，是一次人工 review ——
 #    作者读教程第 7 章时指出：「如何接通 claude」属于个人/组织的特殊情况。
 #
