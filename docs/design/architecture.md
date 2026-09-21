@@ -158,10 +158,20 @@ BigA 哪天不小心装错位置，生产侧当场报红。
     ├── data/biga.db                       ← SQLite (WAL)，.gitignore
     ├── tools/
     │   ├── cron/   registry.yaml  runner.py    ← 单一调度域，⬜ **未建**
-    │   └── verify/ isolation.py  audit_public.sh  agent_trace.py …
+    │   ├── git-hooks/ pre-push                 ← 推送前扫本次新增的提交
+    │   └── verify/                             ← 全部只读，见下表
+    │        isolation.py       I-1/I-2/R-2/端口，三态
+    │        spawn_check.py     Specialist 真被 spawn 了吗（接在出卡之后）
+    │        agent_trace.py     各 agent 的工具调用序列
+    │        latency_report.py  延迟/成本分解 + Stage 1 并行判据
+    │        missing_ledger.py  缺失项台账（出口条件 4）
+    │        audit_public.sh    公开内容审查（九项）
+    │        probe.sh           在一次性库上跑手工探针
+    │        sync_test_count.sh 把文档里的测试条数同步成实测
+    │        phase1_acceptance.py  Phase 1 验收（I-1 判据转调 isolation.py）
     │                ⚠️ placebo.py / reachability.py **设计中，从未提交过**
     │                   —— 原文把它们与真实文件并排列出，读起来像已建成
-    ├── tests/
+    ├── tests/      _scan.py 是三个 AST 扫描器共用的**唯一**文件枚举
     └── docs/design/
 ```
 
@@ -443,6 +453,11 @@ Agent（通过 skill 只读查询）
 | `d_sector_strength` | 板块强度 |
 | `raw_news` | 带 `published_at` / `source` / `retrieved_at` |
 
+⚠️ **只读打开一个还不存在的库**会抛 `StoreNotInitialised`（v5 加），
+而不是裸的 `sqlite3.OperationalError`。它与「schema 建好但零行」是两回事 ——
+后者是全新环境的**正常状态**，把它也报成错会有人为了消警告去塞假数据。
+巡检工具据此统一退出码 2（判不了），见 §9 的 R-3。
+
 #### 5.3.2 为什么要 `decision_ids`（2.4 前夕加的）
 
 它解决的不是「编号好看」，而是 **L-11：身份晚于证据**。
@@ -475,7 +490,18 @@ skill 算完直接把原件落这张表并返回一个 id，Agent 只传 id。
 Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 与 `decision_records.replay_of` 同一套做法：**原件永不改写**。
 
-四张表全部只追加不修改，由 SQLite 触发器强制。
+**五张表全部只追加不修改，由 SQLite 触发器强制**（schema **v5**）。
+
+⚠️ 这句话在 v4 时期是**假的**：原文写「四张表」，而当时已经有五张，
+且新加的 `decision_ids` 恰恰是唯一没有触发器的那张（外部评审 F1）。
+一条 `DELETE` 就能让同一个号发两次 —— 而 FIX-01 / FIX-02 两道身份闸门
+校验的都是「这些判定的 task_id 是不是同一个」，号回收之后两次运行
+**真实自洽**，两道闸门会一致放行。
+
+⇒ v5 补上触发器，并把判据从「数几张表」换成
+`tests/test_store.py::test_每张表都有只追加触发器` ——
+它扫 `sqlite_master` 里**实际有哪些表**，例外要在 `EXEMPT` 里自己举手。
+**新表默认就该受保护**，而手写的数字只会在下一次加表时再错一遍。
 
 ---
 
@@ -497,6 +523,85 @@ Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 🔴 **硬约束 S-2**：skill 不得做判断性归类（"这属于强势板块"）。
 skill 返回事实与分数，判断留给 agent。
 理由：判断逻辑散进 skill = 产生第二套口径。见 §9 L-3 —— 同一判据散落多处实现时，错误比例可以高得惊人，且错法全是静默的。
+
+### 6.1 采集层的两条统一接口（`skills/_sources/`）
+
+它们都不是「工具函数」，是**用结构消灭一类判断**——
+判断一旦分散到各个调用点，必然有某一处判错。
+
+#### `server_as_of` —— 每个源自己声明有没有服务端时刻
+
+```python
+r.server_as_of or now_cn()      # 调用方统一这么写，不必逐处判断
+```
+
+| 返回 | 含义 |
+|---|---|
+| `datetime` | 这个端点自带时刻（日线的交易日、腾讯行情的时间戳、快讯的发布时刻） |
+| `None` | **不带任何日期** —— 它说的就是「此刻」（涨跌家数、板块榜） |
+
+🔴 **为什么必须是统一接口而不是各处 `if`**：外部评审 F4 的成因正是
+「Evidence 层改对了，几十行外的 raw 落盘层没改」——
+两边的测试各自全绿，bug 落在从未被同时检查过的缝隙里。
+
+⚠️ 不带日期的源要**显式写 `server_as_of = None`**，不是不实现 ——
+不实现会让人以为是漏了。守卫：`_sources` 里每个带 `raw` 字段的 dataclass
+都必须声明它（`tests/test_as_of_attribution.py`），**新加一个源不回答这个问题就红**。
+
+### 6.2 四个数据源，各自的脾气
+
+**每个源都只做一件别人做不了的事**，重叠是为了交叉校验，不是为了冗余。
+
+| 模块 | 拿什么 | 🔴 它自己的坑 |
+|---|---|---|
+| `sina.py` | 指数日线（脊梁） | 只声明**交易日**，不声明时刻 ⇒ `as_of` 要按收盘推。当天日线发布**晚于收盘约 35 分钟**（实测 n=1） |
+| `tencent.py` | 指数实时行情 | 唯一**自带完整时间戳**的源（`quoted_at`），这是它存在的主要理由；成交量单位是**手**，与日线的股差 100 倍 |
+| `eastmoney.py` | 涨跌家数 / 板块榜 / 涨停池 | 家数与板块榜**不带任何日期**；同一主机两个端点一个返数组一个返字典；盘前全零 ≠ 全平盘 |
+| `sina_news.py` | 7×24 快讯 | 连续事件流，**没有「收盘」概念** ⇒ `as_of` 只能是最新一条的真实时刻（FIX-03） |
+
+支撑层：
+
+| 模块 | 职责 |
+|---|---|
+| `http.py` | 唯一的取数出口：超时、重试、错误归一成 `SourceError` |
+| `tradetime.py` | 交易日 → 时刻的换算（`as_of_for_trade_date`）、此刻是否连续竞价 |
+| `sanity.py` | 量级围栏（下一节） |
+
+🔴 **`http.py` 的异常清单是六个 skill 共用的单点。** 实测踩过：
+`http.client.IncompleteRead` 继承 `HTTPException` + `ValueError`，
+**不继承 `OSError`** —— 于是截断响应绕过了 `except OSError` 的重试层，
+一次网络抖动直接冒成未捕获异常，六个 skill 全中。
+⇒ 这一层漏一个异常类型，影响面是全系统。
+
+### 6.3 三个契约/存储侧的支撑模块
+
+| 模块 | 为什么单独存在 |
+|---|---|
+| `skills/_contract/missing.py` | `MissingItem` 带**机器可读代码**（`market.turnover.date_mismatch`）—— 缺失项要能统计「哪个源最常缺」，自由文本做不到 |
+| `skills/_store/schema.py` | 按版本号递增的迁移列表。**已发布的条目不许改动** —— 跑过 v4 的库不会重放它，所以补触发器只能开 v5 |
+| `skills/_store/runtime.py` | 读 OpenClaw 运行时自己的 trajectory。🔴 **UTC → 北京时间的转换只在这里做一次**，消费方拿到的已经是北京时间 —— 这类 bug 的形状是「差 8 小时但仍是个合法时刻」，不报错 |
+
+#### `sanity.py` —— 量级围栏，抓垃圾值不抓行情
+
+```python
+implausible_bars(window)        # 相对窗口**中位**收盘价差 5 倍以上 = 坏数据
+INDEX_PCT_LIMIT / BOARD_PCT_LIMIT
+```
+
+🔴 **阈值卡在「物理上不可能」，不卡「看着不像」。** 60 日内腰斩是行情，
+差 5 倍不是。定紧了会在极端行情里报红，而**永远报警的检查会被忽略**。
+
+🔴 **用中位数不用均值**：一根 `low=0.01` 会把均值拉走，
+拉走之后它自己就显得没那么离谱了。
+
+⚠️ 抽成共享模块的理由是 F5：`market_calc` 早就有这类围栏、注释还写着
+「不是为了抓行情，是为了抓垃圾值」，但**只长在那一个文件里**。
+`technical_calc` 的 60 日高低点因此能吃出 3118 万 %，而 verdict 仍是 PASS。
+
+⚠️ 同一层还有一条**反向**约束：解析层**不许把「字段缺失」吞成 0**
+（F6）。缺失返回 `None`，让上层报 `missing` ——
+吞成 0 会让「主力净流入前 5」在资金字段失效时给出一个
+**任意但格式完整**的第一名，带着「0.0 亿」上卡。
 
 ---
 
