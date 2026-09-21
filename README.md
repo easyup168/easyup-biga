@@ -172,6 +172,7 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 | 文档 | 内容 |
 |---|---|
 | [`docs/design/architecture.md`](docs/design/architecture.md) | 系统架构：Agent 拓扑、通信契约、数据架构、延迟预算、路线图 |
+| [`docs/design/phase2.md`](docs/design/phase2.md) | Phase 2 设计：范围、步骤、每步的关键取舍、出口条件 |
 | [`docs/design/install-guide.md`](docs/design/install-guide.md) | 环境安装：在已有 OpenClaw 实例的机器上并排装第二套隔离实例 |
 | [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：10 章，真实建造过程 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本与变更历史（每条写「为什么」，不只是「做了什么」） |

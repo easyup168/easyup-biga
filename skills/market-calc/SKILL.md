@@ -62,4 +62,4 @@ python3 skills/market-calc/scripts/market_calc.py --render
 4. 腾讯量×100 与新浪量偏离 > 1% —— 新浪按**股**、腾讯按**手**，跨源做比值是静默错 100 倍
 5. 涨跌家数端点无日期 —— 发 `warning` 说明 `as_of` 是推断的
 
-完整设计与实测记录见 [`docs/design/phase2-market.md`](../../docs/design/phase2-market.md)。
+设计取舍见 [`docs/design/phase2.md`](../../docs/design/phase2.md) §3.2，施工过程见[教程第 11 章](../../docs/tutorial/11-second-specialist.md)。
