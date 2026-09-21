@@ -181,6 +181,7 @@ python3 tools/verify/isolation.py --before "$B"
 ✅ I-1 · BigA 无写模式打开已有实例的文件（15 个进程，其中真运行时 2 个 / 438 个 fd）
 ✅ I-2 · 已有实例状态库在 BigA 操作前后未变
 ✅ R-2 · nvm bin 里没有 openclaw
+✅ 共享命名空间 · systemd 单元名不重叠（1 个）
 ✅ 端口 · BigA 与已有实例不重叠
 
 ══ 隔离自检全绿 ══
