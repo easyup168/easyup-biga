@@ -1,24 +1,35 @@
-"""「Specialist 真的被调用过」——外部评审 F3。
+"""「Specialist 真的被调用过」——外部评审 F3 + 复查发现的洞。
 
-根 `AGENTS.md` 写着：「那张表是唯一凭证 —— 你在回答里声称调用过，不算数。」
+根 `AGENTS.md` 原本写着：「`agent_runs` 那张表是唯一凭证。」
+**这句话不成立** —— 那张表是 BigA 自己写的，手工跑一遍 skill 也会写进去。
+真正能区分的是 OpenClaw 运行时自己记的 `subagent_runs`。
 
-🔴 **这句话本身不成立。** 写那行的代码只是把 verdict JSON 自带的 agent
-字段抄进 `agent_runs`；`started_at`/`finished_at` 还被写死成 Card 生成的
-同一时刻。于是这两种情况产出的记录**逐字节相同**：
+🔴 第一版修复的洞（外部复查发现，已实测复现）
+---------------------------------------------
+新机制**不按决策号绑定**，只问「这个 agent 名字有没有出现在最近 50 条里」：
 
-  1. Supervisor 真的 spawn 了 market
-  2. 有人手工跑 `market_calc.py --task-id …`，把 verdict_ref 喂给 synthesize
+    伪造决策号 BIGA-20260921-901，用合法 API 写 6 行 agent_runs
+    → spawn 核验：6 个 agent 两份独立记录都齐   ✅ 通过
 
-两份都是 BigA 自己写的 —— **自己写的东西证明不了自己**。
+伪造的号**蹭上了别的决策的真实记录**。而 `bin/biga-card` 正常使用就会
+反复运行 ⇒ 这个条件在真实机器上**几乎总是成立**，不是刁钻场景。
 
-唯一能做真区分的是 OpenClaw 运行时自己记的 `subagent_runs`，
-而此前那套核验①只认 `"emotion"` 一个字面量，②不在任何自动化流程里。
+⚠️ 最讽刺的是：决策号本来就明文写在 `payload_json` 里，只是没被用来绑定。
+
+🔴 而本文件的第一版**结构上不可能发现它** —— 它去 fake
+`_runtime_spawn_records` 本身，正好把「按决策号过滤」那段整个绕过去。
+⇒ 这一版改成造一个**真的 sqlite**，让被测代码走完整的查询路径。
+
+> 假的东西造得太靠上，测的就是自己写的假货，不是产品代码。
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
+import sqlite3  # store-exempt: 造的是 **OpenClaw 运行时**状态库的仿件，
+                # 不是 BigA 事实层。`_store` 单一入口规则是为了「将来切 PG
+                # 只改一个文件」，而这个库永远不会跟着 BigA 迁移。
 import sys
 
 import pytest
@@ -32,65 +43,114 @@ import spawn_check  # noqa: E402
 
 from _contract import STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 
-DID = "BIGA-20260921-777"
-
-
-def _wire(monkeypatch, ours: list[str], spawned: list[str]):
-    monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: [{"agent": a} for a in ours],
-                        raising=False)
-    import _store
-    monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: [{"agent": a} for a in ours])
-    monkeypatch.setattr(
-        pa, "_runtime_spawn_records",
-        lambda: [{"payload_json": f'{{"agent":"{a}"}}', "child_session_key": a,
-                  "controller_session_key": "main"} for a in spawned])
-
-
 ALL = [a for a in list(STAGE1_AGENTS) + list(STAGE2_AGENTS) if a != "discipline"]
+MINE, OTHER = "BIGA-20260921-777", "BIGA-20260921-778"
 
 
-class TestSpawnProof:
-    def test_覆盖契约里的每一个agent(self, monkeypatch):
-        """🔴 F3 的要害：原来只认 "emotion" 一个名字。
+def fake_runtime_db(path: pathlib.Path, runs: list[tuple[str, str]]) -> pathlib.Path:
+    """造一份运行时状态库。`runs = [(agent, decision_id), …]`。
 
-        判据取自契约的 stage 名单 —— 名单会随 agent 增加自己长大，
-        手写的那个不会。
+    字段形状照抄真库：`child_session_key` 是 `agent:<name>:subagent:<uuid>`，
+    决策号明文出现在 `payload_json` 里。
+    """
+    # store-exempt: 同上 —— 外部运行时库的仿件
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE subagent_runs (run_id TEXT, child_session_key TEXT,"
+                 " controller_session_key TEXT, requester_session_key TEXT,"
+                 " created_at INTEGER, payload_json TEXT)")
+    for i, (agent, did) in enumerate(runs):
+        conn.execute("INSERT INTO subagent_runs VALUES (?,?,?,?,?,?)", (
+            f"run-{i}", f"agent:{agent}:subagent:uuid-{i}",
+            "agent:main:card-1", "agent:main:card-1", 1000 + i,
+            f'{{"prompt":"本次决策编号 {did}，请…"}}'))
+    conn.commit()
+    conn.close()
+    return path
+
+
+@pytest.fixture()
+def wire(tmp_path, monkeypatch):
+    """`wire(agent_runs里的, 运行时记录)` —— 两侧分别给。"""
+    def _w(ours: list[str], runtime: list[tuple[str, str]]):
+        monkeypatch.setattr(
+            pa, "list_agent_runs",
+            lambda **kw: [{"agent": a} for a in ours], raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs",
+                            lambda **kw: [{"agent": a} for a in ours])
+        monkeypatch.setenv(
+            "BIGA_RUNTIME_DB",
+            str(fake_runtime_db(tmp_path / "rt.db", runtime)))
+    return _w
+
+
+class TestBoundToDecisionId:
+    """🔴 复查那条洞的正面回归。"""
+
+    def test_别人的记录不算我的(self, wire):
+        """机器上跑过别的真实决策 —— 那些记录不能给这次背书。
+
+        这是复查实测的场景，也是第一版**唯一没设想到**的场景。
         """
-        _wire(monkeypatch, ALL, ALL)
-        proof = pa.spawn_proof(DID)
-        assert set(proof) == set(ALL)
-        assert len(proof) >= 6, "Phase 2 有 6 个，只认一个就是 F3 本身"
+        wire(ALL, [(a, OTHER) for a in ALL])       # 运行时全是另一个号的
+        assert spawn_check.main([MINE]) == 1, "蹭上别人的记录被判通过了"
 
-    def test_手工跑脚本会被识破(self, monkeypatch):
-        """agent_runs 里有、运行时 subagent_runs 里没有 = 那行是直接写进去的。"""
-        _wire(monkeypatch, ALL, [a for a in ALL if a != "market"])
-        proof = pa.spawn_proof(DID)
-        assert proof["market"] == (True, False)
-        assert spawn_check.main([DID]) == 1
+    def test_自己的记录才算(self, wire):
+        wire(ALL, [(a, MINE) for a in ALL])
+        assert spawn_check.main([MINE]) == 0
 
-    def test_全都对上时通过(self, monkeypatch):
-        _wire(monkeypatch, ALL, ALL)
-        assert spawn_check.main([DID]) == 0
+    def test_两个决策混在库里也能分开(self, wire):
+        """真实机器上本来就是这样 —— 一天跑很多次。"""
+        wire(ALL, [(a, OTHER) for a in ALL] + [(a, MINE) for a in ALL])
+        assert spawn_check.main([MINE]) == 0
 
-    def test_读不到运行时表时判不了而不是通过(self, monkeypatch):
-        """🔴 红线 R-3。读不到 ≠ 没问题。"""
-        monkeypatch.setattr(pa, "_runtime_spawn_records", lambda: None)
-        assert pa.spawn_proof(DID) == {}
-        assert spawn_check.main([DID]) == 2
+    def test_部分伪造(self, wire):
+        """五个真 spawn，risk 那行是手工塞的。"""
+        wire(ALL, [(a, MINE) for a in ALL if a != "risk"])
+        assert spawn_check.main([MINE]) == 1
 
-    def test_缺席不算伪造(self, monkeypatch):
-        """本次决策压根没跑某个 agent，与「跑了但是假的」是两回事。"""
-        _wire(monkeypatch, [a for a in ALL if a != "news"], ALL)
-        assert spawn_check.main([DID]) == 0
+    def test_按名字分段比_不按子串(self, wire):
+        """`news` 不该被 `newsflash` 顶替 —— 子串包含的误判从来不报错。"""
+        wire(["news"], [("newsflash", MINE)])
+        assert spawn_check.main([MINE]) == 1
+
+
+class TestThreeState:
+    def test_读不到运行时库是判不了(self, wire, monkeypatch):
+        wire(ALL, [])
+        monkeypatch.setenv("BIGA_RUNTIME_DB", "/nonexistent/nope.db")
+        assert pa.spawn_proof(MINE).readable is False
+        assert spawn_check.main([MINE]) == 2
+
+    def test_两边都空是判不了_不是通过(self, wire):
+        """🔴 「无事可查却报绿」—— 第一版在这里退出 0。"""
+        wire([], [])
+        assert spawn_check.main([MINE]) == 2
+
+    def test_库能读但本决策零记录是伪造_不是判不了(self, wire):
+        """这两种必须分开：**「判不了」会被忽略，「伪造」不会。**"""
+        wire(ALL, [(a, OTHER) for a in ALL])
+        proof = pa.spawn_proof(MINE)
+        assert proof.readable is True and proof.rows == 0
+        assert spawn_check.main([MINE]) == 1
+
+
+class TestCoverage:
+    def test_覆盖契约里的每一个agent(self, wire):
+        """F3 原本的要害：只认 "emotion" 一个名字。"""
+        wire(ALL, [(a, MINE) for a in ALL])
+        assert set(pa.spawn_proof(MINE).per_agent) == set(ALL)
+        assert len(ALL) >= 6
+
+    def test_缺席不算伪造(self, wire):
+        """本次压根没跑某个 agent，与「跑了但是假的」是两回事。"""
+        sub = [a for a in ALL if a != "news"]
+        wire(sub, [(a, MINE) for a in sub])
+        assert spawn_check.main([MINE]) == 0
 
 
 class TestWiredIntoRealPath:
-    """L-1：新增任何检查，必须存在**被证明的调用方**。
-
-    判据是**调度命令的字面量**，不是「谁调用了它」——
-    `architecture.md` §9 L-1 要防的头号失败模式就是
-    「建好了但没有消费方，于是永远不会跑」。
-    """
+    """L-1：新增任何检查，必须存在**被证明的调用方**。"""
 
     def test_出卡流程真的会调它(self):
         text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
@@ -99,19 +159,21 @@ class TestWiredIntoRealPath:
             "spawn_check.py 没有被出卡流程调用 —— \n"
             "  一个不会被跑到的检查，和没有这个检查是一回事。")
 
-    def test_核验不依赖BigA自己写的表(self):
-        """🔴 被验证方控制不到的地方，才算证据。
+    def test_查询按决策号过滤(self):
+        """🔴 判据落在 SQL 上：没有 WHERE 就是复查发现的那个洞。
 
-        判据用 AST 找那个表名的字面量 —— 改名换字符串都躲不过去。
+        ⚠️ 只看**像 SQL 的**常量 —— docstring 里也会提到那些词，
+        而那会让这条检查退化成「文件里出现过这个字符串吗」。
         """
         src = (REPO / "tools" / "verify" / "phase1_acceptance.py").read_text(
             encoding="utf-8")
-        # ⚠️ 只看**像 SQL 的**常量。第一版没加这条，结果 docstring 里
-        #    提到 subagent_runs 就让它通过了 —— 探针把查询改成读 BigA
-        #    自己的表，测试照样绿。又一个「通过是因为它查错了地方」。
-        consts = {n.value for n in ast.walk(ast.parse(src))
-                  if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                  and "SELECT" in n.value}
-        assert any("subagent_runs" in c for c in consts), (
-            "核验不再读运行时自己记的 subagent_runs —— \n"
-            "  只查 BigA 自己写的表，证明不了「是 Supervisor spawn 的」。")
+        sqls = [n.value for n in ast.walk(ast.parse(src))
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and "subagent_runs" in n.value and "SELECT" in n.value]
+        assert sqls, "核验不再读运行时自己记的 subagent_runs"
+        assert all("WHERE" in q for q in sqls), (
+            "取运行时记录时没有按决策号过滤 —— \n"
+            "  那样「最近 N 条里出现过这个 agent 名」就算通过，\n"
+            "  而机器上本来就会反复跑别的决策，这个条件几乎总成立。")
+        assert not any("LIMIT" in q for q in sqls), (
+            "按决策号取不该有条数上限 —— 一天跑得多了，早先的决策会悄悄查不到。")
