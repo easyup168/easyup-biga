@@ -149,7 +149,8 @@ def build_verdict(
     feed = None
     if "feed" in break_source:
         missing.append(MissingItem(
-            "全部快讯 —— 演练：人为中断数据源", "news.feed.unavailable"))
+            "全部快讯 —— 数据源被人为中断（--break-source feed）",
+            "news.feed.source_broken"))
     else:
         try:
             feed = fetch_feed(pages=FETCH_PAGES)
