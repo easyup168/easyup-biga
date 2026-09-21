@@ -139,7 +139,7 @@ tools/verify/probe.sh <命令>                           # 在一次性库上跑
 | # | 已知 | 记在哪 |
 |---|---|---|
 | 1 | 盘中六个 Agent 报出两个交易日 ⇒ risk 永远「无法判定」⇒ 盘中出不了有把握的卡 | `phase-2-specialists.md` §3.11 |
-| 2 | 端到端 172.6s，预算 180s。Stage 1 最慢项是第三方接口延迟，不可控 | `architecture.md` §10.1 |
+| 2 | 端到端盘中 172.6s / 预算 180s；**盘后 198s 超预算**（快讯量翻倍）。Stage 1 最慢项是第三方接口延迟，不可控 | `architecture.md` §10.1 |
 | 3 | `discipline`（第 8 个 Agent）未建 —— 没有输入源 | 裁定 13 |
 | 4 | `Evidence.raw_hash` 暂时没有消费方 | `phase-2-specialists.md` §3.9 |
 | 5 | anthropic 凭据与同机另一实例共享 | `CLAUDE.md`「已知耦合」 |
