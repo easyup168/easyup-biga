@@ -92,6 +92,51 @@ if [ -e "$BIGA_STOP_FILE" ]; then
   exit 3
 fi
 
+# 🔴 Ownership 守卫 —— 顶层入口只能由人 / CLI / cron 启动
+# ------------------------------------------------------------------
+# 外部评审对事故当天那两道修复（改契约文字 + 单实例锁）的评价是对的：
+#
+#   > AGENTS.md = Intent / Behavior Guidance
+#   > Code Guard = Safety Invariant   —— 两者职责必须分开。
+#
+# 锁只保证「照抄了也只死一次」，它拦的是**并发**，不是**越权**：
+# 一次**串行**的递归（上一层退出后下一层才起）锁根本拦不住。
+#
+# ⇒ 把「谁有权启动顶层流水线」变成代码判据。判据与理由在
+#   `skills/decision-card/scripts/entry_guard.py`（两个信号，各自补对方的漏）。
+if [ "${BIGA_CARD_ALLOW_AGENT:-0}" != "1" ]; then
+  CALLER=$($PY - <<'EOF'
+import sys
+sys.path.insert(0, "skills/decision-card/scripts")
+from entry_guard import AGENT, classify_caller
+kind, why = classify_caller()
+print(f"{kind}\t{why}")
+sys.exit(3 if kind == AGENT else 0)
+EOF
+  )
+  CALLER_RC=$?
+  # 🔴 判不了也要把依据打出来 —— 静默放行才是红线 R-3 要防的东西。
+  #    这一道判不了时**放行**（它是入口不是巡检，拒绝就等于人也用不了）；
+  #    兜底交给紧接着的单实例锁与预算闸门。
+  case "$CALLER" in
+    UNKNOWN*) echo "🔶 发起方判不了 —— ${CALLER#*	}" >&2
+              echo "   本道守卫放行，并依赖单实例锁与预算闸门兜底。" >&2 ;;
+  esac
+  if [ "$CALLER_RC" -eq 3 ]; then
+    echo "🔴 这条命令不能从 agent 会话里调用。" >&2
+    echo "   依据：${CALLER#*	}" >&2
+    echo >&2
+    echo "   它做的事就是**把编排提示词喂给 main** —— 你去调它，" >&2
+    echo "   等于让系统再造一个自己。2026-09-21 21:03–21:50 真的发生过：" >&2
+    echo "   187 个 main 会话、约 195 次调用、\$8.99。" >&2
+    echo >&2
+    echo "   如果你收到了「请出一张决策卡，严格按以下步骤」那段消息：" >&2
+    echo "   **你就是执行者**，照那段步骤做，不要调这条命令。" >&2
+    echo "   见 AGENTS.md「绝对不要运行」一节。" >&2
+    exit 3
+  fi
+fi
+
 # 🔴 单实例锁 —— 递归与并发的止损（2026-09-21 21:03–21:50 事故）
 # ------------------------------------------------------------------
 # 那次雪崩的形状是**递归**，不是误触：
@@ -182,12 +227,36 @@ if [ -z "${PROMPT// /}" ]; then
   exit 2
 fi
 
-"$BIGA" agent --agent main --session-key "agent:main:$SESS" --timeout 900 \
-  -m "$PROMPT" >/dev/null 2>&1
+# 🔴 硬超时 —— 必须与单实例锁**配套**（外部评审 §16/§17）
+# ------------------------------------------------------------------
+# 锁保证同时只有一次。但如果持锁的那一次**永久卡死**，
+# 锁会正确地拦住后续所有调用 —— 于是整个出卡入口永久不可用。
+#
+# 实测卡死场景（2026-09-21 journal）::
+#
+#     stalled session: sessionKey=agent:main:card-214144
+#       state=processing age=886s reason=blocked_tool_call
+#       activeTool=ask_user recovery=none
+#
+# `$BIGA agent` 是**非交互**调用 ⇒ 没有人能回答 `ask_user` ⇒ 确定性死锁。
+# ⚠️ 今天卡住的是 `ask_user`，以后可能是别的工具。所以兜底不能针对某个工具，
+#    要针对「这一次运行最多活多久」。
+#
+# ⇒ 总预算写成**一个数**，而不是散落的 `--timeout 900` 加 `seq 60` 乘 5s：
+#    那种写法的真实上限是 1200s，而没有任何一处写着 1200。
+CARD_DEADLINE_SEC="${BIGA_CARD_DEADLINE_SEC:-780}"
+#: 留给「agent 返回后卡还没落库」的尾巴（Supervisor 可能还会被唤醒几轮）。
+CARD_SETTLE_SEC="${BIGA_CARD_SETTLE_SEC:-180}"
+AGENT_TIMEOUT=$(( CARD_DEADLINE_SEC - CARD_SETTLE_SEC ))
+SETTLE_TRIES=$(( CARD_SETTLE_SEC / 5 ))
+echo "  （总预算 ${CARD_DEADLINE_SEC}s：agent ${AGENT_TIMEOUT}s + 结算 ${CARD_SETTLE_SEC}s）"
 
-# agent 命令返回时卡未必已落库（Supervisor 可能还会被唤醒几轮）
+"$BIGA" agent --agent main --session-key "agent:main:$SESS" \
+  --timeout "$AGENT_TIMEOUT" -m "$PROMPT" >/dev/null 2>&1
+
+TICK=0
 echo -n "▸ 等待落库 "
-for _ in $(seq 60); do
+for _ in $(seq "$SETTLE_TRIES"); do
   NOW=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
   if [ "$NOW" != "$BEFORE" ]; then
     echo "→ $NOW  $(date +%T)"
@@ -236,14 +305,65 @@ for _ in $(seq 60); do
     fi
     exit 0
   fi
+  # 🔴 看门狗 —— 非交互 `ask_user` 死锁（外部评审 ASK-04）
+  # ----------------------------------------------------------------
+  # `$BIGA agent` 是非交互调用。Supervisor 一旦调 `ask_user`，
+  # 没有任何人能回答，而运行时自己说 `recovery=none` —— 它不会救。
+  # 硬超时兜得住，但要等满 ${CARD_DEADLINE_SEC}s；这里 30s 就能认出来。
+  #
+  # ⚠️ 放在**已有的**轮询循环里，不新建守护进程 ——
+  #    那会变成又一个「建了但没人跑」的组件（§9 L-1）。
+  #    而且这样它天然只看**我们自己这一次**：交互式会话里
+  #    `ask_user` 是正常能力，不能连坐。
+  if [ "${BIGA_CARD_NO_WATCHDOG:-0}" != "1" ] && [ $(( TICK % 6 )) -eq 0 ]; then
+    if $PY - "agent:main:$SESS" <<'EOF' >/dev/null 2>&1
+import sys
+sys.path.insert(0, "skills/decision-card/scripts")
+from stall_watchdog import find_blocked
+sys.exit(0 if find_blocked(sys.argv[1]) else 1)
+EOF
+    then
+      echo
+      echo "🔴 INTERACTION_UNAVAILABLE —— 这次运行卡在非交互 ask_user 上。" >&2
+      echo "   Supervisor 调了 ask_user，而 \`$BIGA agent\` 没有能回答的人。" >&2
+      echo "   运行时报 recovery=none —— 它不会自己恢复，所以这里主动收掉。" >&2
+      echo "   ⚠️ **不自动重试**：同一个请求很可能再次 ask_user，那是成本循环。" >&2
+      echo "   会话：agent:main:$SESS" >&2
+      echo "   细节：journalctl --user -u openclaw-gateway-biga.service --since -10min | grep stalled" >&2
+      if [ "${BIGA_CARD_KEEP_STALLED:-0}" != "1" ]; then
+        timeout 60 "$BIGA" sessions delete --agent main --yes "agent:main:$SESS" \
+          >/dev/null 2>&1 && echo "   已收掉该会话。" >&2
+      fi
+      exit 5
+    fi
+  fi
+  TICK=$(( TICK + 1 ))
   echo -n "."
   sleep 5
 done
 
 echo
-echo "⚠️  5 分钟内没有新卡落库。" >&2
+echo "⚠️  ${CARD_DEADLINE_SEC}s 内没有新卡落库。" >&2
 echo "   这**不代表失败** —— 按契约，一次提问要么出卡、要么说清为什么出不了。" >&2
 echo "   查这两处：" >&2
 echo "     python3 tools/verify/agent_trace.py --agent main -n 1   # 它最后在做什么" >&2
 echo "     bin/biga-card --list                                     # 卡是不是晚到了" >&2
+echo >&2
+
+# 🔴 放弃时要把那个会话**真的收掉**，否则它会一直停在 processing。
+#    journal 实测过 `recovery=none` —— 运行时自己不会救它。
+#    留着的后果不是花钱（它阻塞在工具调用上，不烧 token），
+#    而是：① 诊断里永远有一条 stalled session 噪音
+#          ② 下一次 spawn 核验要在一堆孤儿里找自己的记录
+if [ "${BIGA_CARD_KEEP_STALLED:-0}" != "1" ]; then
+  echo "▸ 收掉卡住的会话 agent:main:$SESS" >&2
+  # 🔴 `--yes` 不能省：`sessions delete` 默认会弹**销毁确认提示**。
+  #    在非交互环境里那会挂住 —— 正好又是这一整节在修的那个失败模式。
+  #    （第一版写的是 `--session-key`，实际签名是位置参数 `<keys...>`；
+  #      查一遍 --help 才发现，没查就会静默失败。）
+  timeout 60 "$BIGA" sessions delete --agent main --yes "agent:main:$SESS" \
+    >/dev/null 2>&1 \
+    && echo "   已收掉。" >&2 \
+    || echo "   ⚠️ 收不掉。手工：$BIGA sessions list --agent main --active 60" >&2
+fi
 exit 1

@@ -144,8 +144,27 @@ class TestSingleImplementation:
                 continue
             tree = ast.parse(src, filename=str(path))
             for node in ast.walk(tree):
-                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                        and node.value.startswith("/proc")):
+                # 🔴 判据必须是「走 **fd 表**」，不是「提到 /proc」。
+                #
+                # 原来写的是 `value.startswith("/proc")` —— 而这条测试的名字
+                # 说的是 fd 表。两者不是同一件事：`entry_guard.py` 读
+                # `/proc/<pid>/status` 追进程血缘，与 I-1 的 fd 判据毫无关系，
+                # 却被判成「第二份实现」。
+                #
+                # ⚠️ 那是本仓库的 L-13：**守卫查的地方和它声称守的地方不是同一处。**
+                #    这次的方向是**假阳**（把无关文件算进来）——
+                #    比假阴温和，但同样会逼人去加豁免，而豁免会掩盖真的第二份实现。
+                # ⚠️ 必须同时认 `Constant` 与 `JoinedStr`：真实写法是
+                #    `pathlib.Path(f"/proc/{pid}/fd")` —— f-string 在 AST 里
+                #    被拆成 `"/proc/"` 和 `"/fd"` 两段，按 Constant 查
+                #    **一处都找不到**（第一版缩窄之后就是 0 命中，
+                #    而 0 命中会让这条守卫平凡通过 —— 比假阳危险）。
+                if not isinstance(node, (ast.Constant, ast.JoinedStr)):
+                    continue
+                if isinstance(node, ast.Constant) and not isinstance(node.value, str):
+                    continue
+                text = ast.unparse(node)
+                if "/proc" in text and ("/fd" in text or "fdinfo" in text):
                     walkers.append(path.relative_to(REPO).as_posix())
                     break
         assert walkers == ["tools/verify/isolation.py"], (

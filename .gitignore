@@ -70,3 +70,11 @@ memory/
 #    以及沙盒测试把它复制进去、把三条出卡路径测试全判成「被拦」。
 .biga-card-stop
 .biga-card.lock
+
+# 🔴 例外：测试 fixture 要进仓库，即使它是 `.log`
+# 上面的 `*.log` 会把 `tests/fixtures/stalled-session.log` 一起忽略掉 ——
+# 而那是看门狗解析器的**唯一**真实形状来源。
+# 后果是静默的：本机跑全绿（文件在硬盘上），克隆下来就没有这个文件。
+# ⇒ 由 tests/test_stall_watchdog.py 的「fixture 真的被 git 跟踪」一条钉住。
+!tests/fixtures/
+!tests/fixtures/**
