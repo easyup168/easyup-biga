@@ -297,3 +297,50 @@ class TestStrictDate:
 
     def test_指定日期对得上照常(self, wired):
         assert build(date=TRADE_DATE).verdict == "PASS"
+
+
+class TestF4RawLayerAsOf:
+    """外部评审 F4：raw 落盘层与 Evidence 层的 `as_of` 分裂。
+
+    🔴 这个类存在的理由与 F5 那次一样，是一次**探针失败**：
+    per-source 的 `as_of` 已经手工用 `probe.sh` 验过是对的，
+    但把那行改回「共用日线的 as_of」之后，**一条测试都没红**。
+
+    > 修 `af91a0d` 时只改了 Evidence 构造那一层，没有触及几十行外
+    > 这条并行路径 —— 两边的测试各自全绿，
+    > **bug 正好落在两者之间从未被同时检查过的缝隙里。**
+
+    判据只看**归属对不对**，不看具体数值（数值随桩变）。
+    """
+
+    def _snapshots(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BIGA_DB_PATH", str(tmp_path / "probe.db"))
+        from _store import connect, init_schema
+        init_schema(tmp_path / "probe.db")
+        build(store=True)
+        with connect(tmp_path / "probe.db", readonly=True) as c:
+            return {r["source"]: r["as_of"] for r in
+                    c.execute("SELECT source, as_of FROM raw_market_snapshot")}
+
+    def test_无日期端点落的是取回时刻(self, wired, tmp_path, monkeypatch):
+        snaps = self._snapshots(tmp_path, monkeypatch)
+        # 涨跌家数这个端点不带任何日期 ⇒ 它说的就是「此刻」
+        assert snaps["em:push2delay/ulist.np"].startswith("2026-09-18T18:00")
+
+    def test_带日期的源用自己的时刻(self, wired, tmp_path, monkeypatch):
+        snaps = self._snapshots(tmp_path, monkeypatch)
+        # 腾讯行情 payload 里嵌着 20260918161402 —— 那个数以前被弃之不用
+        assert snaps["tencent:quote"].startswith("2026-09-18T16:14")
+        # 日线只声明交易日 ⇒ 收盘时刻
+        assert snaps["sina:kline/sh000001"].startswith("2026-09-18T15:00")
+
+    def test_三个源的as_of互不相同(self, wired, tmp_path, monkeypatch):
+        """🔴 关键判据：它们**本来就描述不同的时刻**。
+
+        共用一个 as_of 时这三个值会完全相等 —— 而那正是
+        `ix_raw_source_asof` 索引失去意义的时候。
+        """
+        snaps = self._snapshots(tmp_path, monkeypatch)
+        got = {snaps[s] for s in ("em:push2delay/ulist.np", "tencent:quote",
+                                  "sina:kline/sh000001")}
+        assert len(got) == 3, f"三个源共用了同一个 as_of：{got}"

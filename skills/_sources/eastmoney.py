@@ -49,7 +49,10 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
+from _contract import now_cn
+
 from .http import SourceError, get_json
+from .tradetime import as_of_for_trade_date
 
 __all__ = [
     "BOARD_KINDS",
@@ -104,6 +107,17 @@ class PoolResult:
     raw: dict[str, Any]
 
     @property
+    def server_as_of(self) -> datetime | None:
+        """**服务端自己声明的时刻**；`None` = 这个端点不带日期。
+
+        统一接口的理由见 `_sources/__init__.py` 顶部的「F16」一节：
+        由端点自己声明，调用方就不必逐处判断「这个源有没有日期」——
+        而那个判断一旦分散，就必然有某一处判错（F4 就是这么来的）。
+        """
+        return (as_of_for_trade_date(self.qdate, retrieved_at=now_cn())[0]
+                if self.qdate else None)
+
+    @property
     def date_matches(self) -> bool:
         return self.qdate == self.requested_date
 
@@ -117,6 +131,10 @@ class BreadthResult:
     flat: int
     per_market: list[dict[str, Any]]
     raw: dict[str, Any]
+
+    #: 🔴 **这个端点不带任何日期** —— 涨跌家数说的就是「此刻」。
+    #: 显式写出 `None`，而不是不实现：不实现会让人以为是漏了。
+    server_as_of = None
 
 
 def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
@@ -312,6 +330,10 @@ class BoardResult:
         由上层据此记 `missing`，**不要当成平盘**。
         """
         return sum(1 for b in self.boards if b.pct != 0.0)
+
+    #: 🔴 **这个端点不带任何日期** —— 板块榜说的就是「此刻」。
+    #: 显式写出 `None`，而不是不实现：不实现会让人以为是漏了。
+    server_as_of = None
 
 
 def _num(v: Any, cast: Any) -> Any:

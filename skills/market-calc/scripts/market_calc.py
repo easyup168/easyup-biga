@@ -147,9 +147,25 @@ class Collector:
             if warning:
                 self.warnings.append(warning)
 
-    def _keep_raw(self, source: str, payload: Any) -> None:
+    def _keep_raw(self, source: str, payload: Any, as_of: datetime) -> None:
+        """记一份原始响应。**`as_of` 必须是这个源自己的时刻。**
+
+        🔴 外部评审 F4：原来这里不收 `as_of`，落库时统一用一个全局变量
+        （日线的交易日）。于是同一天跑两次，两份**内容不同**的实时快照
+        共用同一个 `(source, as_of)` 键 —— 而这个组合正是
+        `ix_raw_source_asof` 索引存在的理由。
+
+        更糟的是 `tencent:quote`：它 payload 里嵌着自己的时间戳
+        （`20260921144345`），而 raw 层写的是上一个交易日 15:00。
+        那个时间戳在 Evidence 层已经算出来、也已经拿去做交叉校验了，
+        到落 raw 这一步被弃之不用。
+
+        ⚠️ 修 `af91a0d` 时只改了 Evidence 构造那一层，
+        没有触及几十行外这条并行路径 —— 两边的测试各自全绿，
+        **bug 正好落在两者之间从未被同时检查过的缝隙里**。
+        """
         with self._lock:
-            self.raw.append((source, payload))
+            self.raw.append((source, payload, as_of))
             self.hashes[source] = payload_sha256(payload)
 
     # -- 采集 --------------------------------------------------------------
@@ -177,7 +193,7 @@ class Collector:
 
         with self._lock:
             self.daily[key] = d
-        self._keep_raw(f"sina:kline/{symbol}", d.raw)
+        self._keep_raw(f"sina:kline/{symbol}", d.raw, d.server_as_of or now_cn())
 
     def collect_quotes(self) -> None:
         if "tencent" in self.break_source:
@@ -192,7 +208,9 @@ class Collector:
             return
         with self._lock:
             self.quotes = q
-        self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()})
+        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它
+        self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
+                       max(v.server_as_of or now_cn() for v in q.values()))
 
     def collect_breadth(self) -> None:
         if "breadth" in self.break_source:
@@ -207,7 +225,9 @@ class Collector:
             return
         with self._lock:
             self.breadth = b
-        self._keep_raw("em:push2delay/ulist.np", b.raw)
+        # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
+        # 套上日线的交易日，就是把实时数写成上一个交易日的事实。
+        self._keep_raw("em:push2delay/ulist.np", b.raw, b.server_as_of or now_cn())
         # ⚠️ 不在这里发 as_of 警告：它依赖交易日，而交易日要等日线回来才知道。
         #    并行采集下在这里读是竞态，统一放到全部完成后做。
 
@@ -434,9 +454,9 @@ def build_verdict(
             add_live("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
                 "derived:em:push2delay/ulist.np")
 
-    if store and as_of is not None:
-        for source, payload in c.raw:
-            save_raw_snapshot(source=source, as_of=as_of.isoformat(),
+    if store:
+        for source, payload, src_as_of in c.raw:
+            save_raw_snapshot(source=source, as_of=src_as_of.isoformat(),
                               retrieved_at=retrieved.isoformat(), payload=payload)
 
     # verdict 表达的是**数据完整度**，不是市场判断。

@@ -22,6 +22,10 @@ __all__ = ["Evidence", "CN_TZ", "now_cn"]
 # A 股市场时区。证据的时间一律带 tzinfo —— naive datetime 在跨日聚合时会静默错位。
 CN_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 
+#: 允许 `retrieved_at` 超前真实时钟多少秒。
+#: 只为机器间的时钟抖动留口子 —— 不是为了容忍错误的日期推断。
+_FUTURE_TOLERANCE_SEC = 120
+
 
 def now_cn() -> datetime:
     """当前时刻（东八区，带 tzinfo）。"""
@@ -72,11 +76,47 @@ class Evidence:
                 f"Evidence.as_of ({self.as_of.isoformat()}) 晚于 "
                 f"retrieved_at ({self.retrieved_at.isoformat()}) —— 数据不可能早于自身被取回"
             )
+        # 🔴 外部评审 F15：唯一的时间校验是「两者都带 tzinfo」和
+        #    「as_of <= retrieved_at」，**从不与真实当前时刻比较**。
+        #    于是一对系统性错位、但彼此只差 60 秒的时间戳：
+        #
+        #        staleness_sec = 60        # 1 分钟，看起来非常新鲜
+        #        而 as_of 实际比现在晚了 3 天
+        #
+        #    `staleness_sec` 是个差值 —— 差值对**共模误差免疫**。
+        #    只要上游的 as_of 和 retrieved_at 由同一段错误逻辑派生，
+        #    它就会把日期错误完整伪装成「数据是新鲜的」。
+        #
+        #    ⇒ 补一条锚在真实时钟上的检查。未来时刻**永远**不合法。
+        #      只查未来、不查过去：历史证据本来就该是过去的。
+        horizon = now_cn() + timedelta(seconds=_FUTURE_TOLERANCE_SEC)
+        if self.retrieved_at > horizon:
+            raise ValueError(
+                f"Evidence.retrieved_at ({self.retrieved_at.isoformat()}) 在未来 —— "
+                f"当前是 {now_cn().isoformat()}。\n"
+                f"  时间戳整体错位时 staleness_sec 仍会显得很新鲜（它是差值，"
+                f"对共模误差免疫），所以这条必须锚在真实时钟上。\n"
+                f"  容差 {_FUTURE_TOLERANCE_SEC}s，只为机器间的时钟抖动留口子。"
+            )
 
     @property
     def staleness_sec(self) -> int:
-        """数据有多旧：取回时刻 − 数据时刻，单位秒。"""
+        """数据有多旧：取回时刻 − 数据时刻，单位秒。
+
+        ⚠️ **这是个差值，对共模误差免疫**（F15）——
+        as_of 和 retrieved_at 一起被算错时它不会有任何异常表现。
+        真正的「离现在多久」用 `age_sec`。
+        """
         return int((self.retrieved_at - self.as_of).total_seconds())
+
+    @property
+    def age_sec(self) -> int:
+        """这条证据描述的时刻，距**现在**多久。
+
+        与 `staleness_sec` 的区别正是 F15 的要害：
+        前者锚在真实时钟上，后者只是两个可能同时错掉的数之差。
+        """
+        return int((now_cn() - self.as_of).total_seconds())
 
     @property
     def display_label(self) -> str:

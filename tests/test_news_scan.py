@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
+import _contract.evidence as evidence_mod
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
 
@@ -51,6 +53,11 @@ def _feed(now: datetime, *, n: int = 20, step_sec: int = 60,
 
 def _build(monkeypatch, now: datetime, feed: NewsFeed, **kw):
     monkeypatch.setattr(NS, "now_cn", lambda: now)
+    # 🔴 契约层也读时钟（F15 之后 Evidence 会拒绝未来时刻），
+    #    这里的「现在」必须两边一致 —— 否则本文件钉在收盘后的那些
+    #    回归测试，会在真实时刻早于它们时被契约层拒掉。
+    #    假时钟只假一半，比不假更难查。
+    monkeypatch.setattr(evidence_mod, "now_cn", lambda: now)
     monkeypatch.setattr(NS, "fetch_feed", lambda **_: feed)
     return NS.build_verdict(break_source=set(), store=False,
                             task_id=new_task_id(1), **kw)

@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Sequence
 
 from .http import SourceError, get_text
+from .tradetime import CN_TZ
 
 __all__ = ["IndexQuote", "fetch_index_quote", "TENCENT_SYMBOLS"]
 
@@ -66,6 +68,26 @@ class IndexQuote:
     @property
     def trade_date(self) -> str:
         return self.quoted_at[:8]
+
+    @property
+    def server_as_of(self) -> datetime | None:
+        """**服务端自己声明的时刻**；`None` = 这个端点不带日期。
+
+        统一接口的理由见 `_sources/__init__.py` 顶部的「F16」一节：
+        由端点自己声明，调用方就不必逐处判断「这个源有没有日期」——
+        而那个判断一旦分散，就必然有某一处判错（F4 就是这么来的）。
+        """
+        return self.quoted_dt
+
+    @property
+    def quoted_dt(self) -> datetime:
+        """时间戳解析成北京时间。
+
+        🔴 解析放在这里、不放在调用方：`quoted_at` 的格式是本模块的知识，
+        每个消费方各写一遍 `strptime` 就是 L-3 的形状。
+        时区固定 `Asia/Shanghai` —— 源给的本来就是北京时间。
+        """
+        return datetime.strptime(self.quoted_at, "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
 
 
 def fetch_index_quote(codes: Sequence[str]) -> dict[str, IndexQuote]:
