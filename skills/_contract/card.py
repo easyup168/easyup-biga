@@ -25,6 +25,32 @@ _CARD_STATUSES: frozenset[str] = frozenset(get_args(CardStatus))
 
 DECISION_ID_RE = re.compile(r"^BIGA-\d{8}-\d{3}$")
 
+#: 卡面上单个值的最大宽度。
+#:
+#: 🔴 这不是排版偏好，是**定位**：Card 是给人看的一页纸
+#: （上游文档 §11：优先展示证据项、风险项、缺失项、状态）。
+#:
+#: 实测踩到：`news` 的 `items` 字段装着 67 条快讯原文，
+#: 渲染出来的卡片 **34.5 KB** —— 它在技术上完整，在用途上作废了。
+#: 而且没有任何东西报错，因为「把 result 渲染出来」这件事本身是对的。
+#:
+#: 完整值永远在 `card_json` 与 `agent_verdicts` 里，截断只发生在**显示层**。
+_MAX_VALUE_WIDTH = 72
+
+
+def _brief(value: Any) -> str:
+    """把一个值压成一行。列表只报条数与首项，长文本截断。"""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return "[]"
+        head = _brief(value[0])
+        return f"[{len(value)} 项] {head}" if len(value) > 1 else f"[1 项] {head}"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k}={value[k]}" for k in list(value)[:3]) + (
+            ", …}" if len(value) > 3 else "}")
+    t = str(value)
+    return t if len(t) <= _MAX_VALUE_WIDTH else t[:_MAX_VALUE_WIDTH - 1] + "…"
+
 
 @dataclass
 class DecisionCard:
@@ -146,7 +172,7 @@ class DecisionCard:
         # 而回放 diff 里的每一处差异都应该是真实差异。
         for v in self.verdicts:
             summary = "; ".join(
-                f"{k}={v.result[k]}" for k in sorted(v.result)[:3]
+                f"{k}={_brief(v.result[k])}" for k in sorted(v.result)[:3]
             ) or "—"
             # 🔴 verdict 与 stance 并列显示，因为它们回答的是两个不同的问题：
             #    verdict=数据全不全，stance=市场偏哪边。
@@ -175,7 +201,7 @@ class DecisionCard:
             for e in v.evidence:
                 any_ev = True
                 lines.append(
-                    f"  [{v.agent}] {e.display_label} = {e.value}"
+                    f"  [{v.agent}] {e.display_label} = {_brief(e.value)}"
                     f"   as_of {e.as_of.strftime('%m-%d %H:%M')}   src {e.source}"
                 )
         if not any_ev:

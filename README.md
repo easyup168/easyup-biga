@@ -138,6 +138,27 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 
 ---
 
+## 快速开始
+
+```bash
+cd ~/.openclaw-biga/workspace
+
+bin/biga-card              # 出一张决策卡（约 3 分钟、$1.2）
+bin/biga-card --list       # 最近出过哪些
+bin/biga-card --show <号>   # 看某一张
+bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相同
+```
+
+完整用法与「怎么确认它没骗你」见 [`docs/guide/usage.md`](docs/guide/usage.md)。
+
+⚠️ **不是交易信号。** 系统不下单、不接账户，最终决定由人做。
+
+⚠️ **盘中会一直是 `WAIT`**，这是对的行为不是 bug ——
+实时源说「此刻」、日线源说「上一交易日」，风控拒绝把两者当同一天审。
+想看有把握的卡，**15:00 收盘之后跑**。
+
+---
+
 ## Phase 2 · Specialists（进行中，在 `phase2` 分支）
 
 | 项 | 状态 |
@@ -211,6 +232,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 | [`docs/design/architecture.md`](docs/design/architecture.md) | 架构 SSOT：Agent 拓扑、通信契约、数据架构、失败模式清单 |
 | [`docs/design/phase-1-walking-skeleton.md`](docs/design/phase-1-walking-skeleton.md) | Phase 1 设计与验收结果（已冻结） |
 | [`docs/design/phase-2-specialists.md`](docs/design/phase-2-specialists.md) | Phase 2 设计：范围、步骤、关键取舍、出口条件 |
+| [`docs/guide/usage.md`](docs/guide/usage.md) | **怎么用**：出卡、读卡、以及四个「确认它没骗你」的检查 |
 | [`docs/guide/install.md`](docs/guide/install.md) | 环境安装：在已有 OpenClaw 实例旁并排装第二套 |
 | [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：13 章，真实建造过程 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 变更历史（每条写「为什么」，不只是「做了什么」） |
