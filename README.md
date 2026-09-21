@@ -8,7 +8,7 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/417%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/476%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v4%20%C2%B7%205%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-17%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-172.6s%20%C2%B7%20%E9%A2%84%E7%AE%97%20180s-2ea043)
@@ -127,7 +127,7 @@ Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附
 | `emotion` Agent + Supervisor 委派配置 | ✅ |
 | 合成与回放（两条路径共用同一份组装代码） | ✅ |
 | 隔离演练（`kill -9` 自己，已有实例六项未变） | ✅ |
-| 124 条测试全绿 | ✅ |
+| 124 条测试全绿 | ✅ |<!-- 冻结：Phase 1 验收当时的数 -->
 | 端到端 74.8s（预算 90s） | ✅ |
 
 Phase 1 的验收标准由机器逐条核对，`PENDING` 不计为通过：
@@ -155,7 +155,36 @@ bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相�
 
 ⚠️ **盘中会一直是 `WAIT`**，这是对的行为不是 bug ——
 实时源说「此刻」、日线源说「上一交易日」，风控拒绝把两者当同一天审。
-想看有把握的卡，**15:00 收盘之后跑**。
+🔴 **「收盘后就对齐」是错的 —— 实测证伪。**
+
+15:21（收盘 21 分钟后）跑了一次，交易日**仍然分裂**：
+
+```
+technical/market/sector  20260918     ← 日线
+emotion/news             20260921     ← 实时源
+```
+
+查源：15:22 时新浪日线的最后一根还是 `20260918`。
+**当天的日线不在 15:00 发布，有一段未知长度的延迟。**
+
+⚠️ 这条「收盘后跑就好了」是**没有验证就写下的推断**，
+写进了 README、操作手册和教程三处。现在全部改掉。
+
+> 通用原则：**「应该会……」和「实测是……」之间隔着一次运行。**
+> 而这类推断特别危险，因为它听起来太合理了 —— 谁会怀疑「收盘后日线就有了」。
+
+⇒ 正确的说法是：**要等当天日线真正发布之后**。
+具体时刻正在实测（见 `TODO.md` 的待测项），在测出来之前，
+判断方法是直接看：
+
+```bash
+python3 -c "
+import sys;sys.path.insert(0,'skills')
+from _sources.sina import fetch_index_daily
+print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
+```
+
+打印出今天的日期，才是出卡的时机。
 
 ---
 
@@ -168,7 +197,7 @@ bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相�
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v4 —— 决策编号原子分配器 | ✅ |
-| 417 条测试 | ✅ |
+| 476 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` 四项全绿 | ✅ |
 | 至少 1 次真实「否决」端到端落库 | ⬜ |
@@ -215,10 +244,10 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 │   └── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
 ├── data/            SQLite 事实层（不入库）
 ├── tools/           cron 调度 + 验证工具
-├── tests/           124 条测试
+├── tests/           476 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（10 章，与代码同步）
+│   └── tutorial/    开发教程（17 章，与代码同步）
 └── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 
