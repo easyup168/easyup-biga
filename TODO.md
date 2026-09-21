@@ -588,6 +588,44 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 
 ---
 
+## 确定性编排升级（与 Phase 2 收尾并行）
+
+> 🔴 **设计 SSOT 是 [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。**
+> 本节只留勾选状态 —— 「为什么这么设计」写在那边，两处都写必然漂。
+>
+> 分发提示词在 [`docs/guide/orchestration-kickoff-prompt.md`](docs/guide/orchestration-kickoff-prompt.md)。
+> **批 A 在分发时拆成 A-I / A-II 两个会话** —— 那是分发口径，不是设计变更。
+
+与 Phase 2 剩余的两条出口条件**并行**，互不阻塞：那两条是日历问题
+（等一个够极端的交易日、跨天累积），这次是架构问题。
+
+- [x] 方案设计 + 评审断言复核（10/10 成立 + 3 条追加）
+- [x] 🔴 **spike：Python 能否不经 LLM 轮次产生同等的 `subagent_runs` 证据** —— ✅ **能**
+      实测（2026-09-22）：`biga attach --print-config` 铸 grant → MCP-over-HTTP
+      `sessions_spawn` → `subagent_runs` 五项证据全齐、零 `main` LLM 轮次；
+      `agents_wait` 3.3s 同步返回，带 usage。结论与三条硬约束见设计文档 §7
+- [ ] 批 A-I · 写边界重校验 + 严格 JSON（A3 / A4）
+- [ ] 批 A-II · 值对象与不变量（A1 / A2 / A5 / A6 / A7 / A8）
+- [ ] 批 B · 运行身份 + 状态机（schema v6）
+- [ ] 批 C · Runtime Adapter + DecisionOrchestrator ★（spike 已通过，可开工）
+      ⚠️ 开工第一件事：补验 spike 未覆盖的三项（五个并行 fan-out / grant 长跑稳定性 /
+      spawn 失败的结构化错误面）—— 见设计文档 §7 末尾
+- [ ] 批 D · SnapshotCoordinator
+- [ ] 批 E · Facts / Assessment 拆分
+- [ ] 批 F · RiskPolicy 前移
+- [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
+- [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
+
+出口条件 12 条 → 见设计文档 §11。
+
+### ⚠️ `.biga-card-stop` 的解除条件看起来已经满足，但没解除
+
+闸门文件写的条件是「在触发源确认停止、且闸门真的接进路径之前，不要 rm」。
+`3d9ce90` 已经把预算闸门接进 `bin/biga-card`（在第一个花钱的动作之前）。
+⇒ 条件形式上满足，**但解除是人的决定，不自动做**。
+
+---
+
 ## 路线图（Phase 3+ 不要提前做）
 
 | Phase | 内容 | 出口条件 |

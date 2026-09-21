@@ -40,6 +40,19 @@ Phase 1 的设计原本是 `architecture.md` 的 §11 —— 一段**历史**躺
 
 ⇒ 阶段结束时：抽成独立文档、标注「已完成并冻结」、在原处留一行指针。
 
+### 第三种形状：跨阶段迁移，按主题命名
+
+有一类工作既不是常青（它会做完），也对不上某个路线图 Phase（它横跨几个）。
+例如 `deterministic-orchestration.md` —— 它与 Phase 2 收尾并行、延续到 Phase 3。
+
+⇒ **按主题命名，生命周期仍是「阶段」（完成后冻结）。**
+
+🔴 为什么不写成 `phase-2.5-<主题>.md`：
+`test_阶段文档必须带主题` 的判据是 `^phase-\d+-[a-z]`，小数点不匹配；
+而放宽它的代价更大 —— `test_一个阶段只有一份设计文档` 按 `phase-(\d+)-` 计数，
+`phase-2.5-` **压根不会被计入**，于是那条守卫对小数阶段静默失效。
+**给守卫开一个它看不见的口子，比多一种命名形状糟得多。**
+
 ### 为什么只有 `external/` 的文件名带日期
 
 我们自己的文档，历史在 git 里。文件名带日期或版本号，等于邀请别人新建
@@ -88,10 +101,12 @@ Phase 1 的设计原本是 `architecture.md` 的 §11 —— 一段**历史**躺
 | [`design/architecture.md`](design/architecture.md) | 常青 | 架构 SSOT：拓扑、契约、数据层、失败模式清单 |
 | [`design/phase-1-walking-skeleton.md`](design/phase-1-walking-skeleton.md) | 阶段 · **已冻结** | Phase 1：范围、步骤、验收与最终结果 |
 | [`design/phase-2-specialists.md`](design/phase-2-specialists.md) | 阶段 · 进行中 | Phase 2：范围、步骤、关键取舍、出口条件 |
+| [`design/deterministic-orchestration.md`](design/deterministic-orchestration.md) | 阶段 · 进行中 | 确定性编排升级：把工作流从 LLM 拿回程序，七批迁移 A–G |
 | [`guide/install.md`](guide/install.md) | 操作 | 在已有 OpenClaw 实例旁并排装第二套 |
 | [`guide/phase1-kickoff-prompt.md`](guide/phase1-kickoff-prompt.md) | 操作 | Phase 1 启动提示词（自包含，可直接粘贴） |
 | [`guide/usage.md`](guide/usage.md) | 操作 | 怎么用：出卡、读卡、四个「确认它没骗你」的检查 |
 | [`guide/review-prompt.md`](guide/review-prompt.md) | 操作 | 对抗性评审提示词（自包含，粘到新会话） |
+| [`guide/orchestration-kickoff-prompt.md`](guide/orchestration-kickoff-prompt.md) | 操作 | 确定性编排升级的分批开工提示词（自包含，每批一个新会话） |
 | [`tutorial/`](tutorial/README.md) | 过程 | 开发教程 13 章，与代码同步推进 |
 | [`external/`](external/) | 只读 | 上游需求文档、外部设计评审 |
 
