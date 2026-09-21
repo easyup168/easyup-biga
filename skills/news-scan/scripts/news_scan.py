@@ -63,12 +63,12 @@ from _contract import (  # noqa: E402
 )
 from _sources import (  # noqa: E402
     SourceError,
-    as_of_for_trade_date,
     market_is_open,
 )
 from _sources.sina_news import STALE_SEC, fetch_feed  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
+    payload_sha256,
     save_raw_snapshot,
     save_verdict,
 )
@@ -128,11 +128,21 @@ def build_verdict(
     #    那个分裂已记在 phase-2-specialists.md §3.11，不在这里现编一个折中。
     live = market_is_open(retrieved)
 
+    # 🔴 外部评审 P2-1：news 已经在落 raw snapshot，但证据**不带 raw_hash**
+    #    ⇒ 拿着一条 `item_count=48` 查不回「它出自哪一份报文」。
+    #
+    #    与 market / sector 的做法对齐：非 `derived:` 的证据指回 raw 层。
+    #    派生字段返回 None —— **不硬凑一个哈希**，凑出来的溯源比没有更糟，
+    #    它会让人以为查得到。
+    raw_hashes: dict[str, str] = {}
+
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
         evidence.append(Evidence(
             field=field, value=value, source=source, label=label,
-            as_of=as_of, retrieved_at=retrieved, calc_version=CALC_VERSION))
+            as_of=as_of, retrieved_at=retrieved, calc_version=CALC_VERSION,
+            raw_hash=None if source.startswith("derived:")
+            else raw_hashes.get(source)))
 
     # 🔴 字段名不能叫 `session_live` —— `risk` 已经有一个同名字段，
     #    但那个问的是「上游数据所属的交易日过完了没」，
@@ -159,10 +169,30 @@ def build_verdict(
                 f"全部快讯 —— 数据源不可用: {e}", "news.feed.unavailable"))
 
     if feed is not None:
-        newest_day = feed.items[0].at.strftime("%Y%m%d")
-        as_of, as_of_warn = as_of_for_trade_date(newest_day, retrieved_at=retrieved)
-        if as_of_warn:
-            warnings.append(as_of_warn)
+        # 🔴 7x24 是**连续事件流**，它没有「收盘」这个概念。
+        #
+        # 原来是把最新一条的日期喂给 `as_of_for_trade_date()` —— 那个函数是
+        # 给**日线**用的：交易日过完了就返回当天 15:00。
+        #
+        # 于是（外部评审 P1-3，已实测量化）：
+        #
+        #   盘中 14:35   as_of=14:35   staleness   0 分钟   ← 碰巧对
+        #   收盘后 20:00 as_of=15:00   staleness 300 分钟   ← 🔴 假陈旧
+        #   深夜 23:50   as_of=15:00   staleness 530 分钟   ← 🔴
+        #
+        # 而真实情况是最新一条通常只有几分钟前。这会污染
+        # `staleness_sec`、risk 的 `max_staleness_sec`、新鲜度判断、
+        # 以及日后所有的数据质量统计。
+        #
+        # ⚠️ 它**盘中是对的** —— 这正是它躲过一整天测试的原因：
+        #    当天所有实测都发生在 15:00 之前。
+        #
+        # ⇒ 对连续事件流，唯一诚实的 as_of 是**最新一条的真实时刻**。
+        as_of = feed.items[0].at
+        newest_day = as_of.strftime("%Y%m%d")
+        # 🔴 哈希**无条件算**，不只在 store 时算 —— 否则 `--no-store` 跑出来的
+        #    证据没有 raw_hash，而那正是人工核对时最常用的一条路径。
+        raw_hashes[src] = payload_sha256(feed.raw)
         # 落 raw 放在 as_of 算出来之后 —— 原样落盘的那份也要标对时刻。
         if store:
             save_raw_snapshot(source=src, as_of=as_of.isoformat(),

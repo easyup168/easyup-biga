@@ -168,3 +168,38 @@ class TestSynthesizeReusesUpstreamId:
             env={**__import__("os").environ, "BIGA_DB_PATH": str(p)})
         assert r.returncode == 0, r.stderr[-600:]
         assert __import__("json").loads(r.stdout)["decision_id"] == "BIGA-20260921-013"
+
+
+# ══ 外部评审 P2-2：Stage 0 必须能在空环境里独立跑 ═════════════
+#
+# `new_decision.py` 在**全新的库**上直接抛
+# `sqlite3.OperationalError: unable to open database file` ——
+# 因为算下一个序号走的是 readonly 连接，而文件还不存在。
+#
+# Stage 0 是整条链路的第一步。它跑不起来，「自包含的入口」这个说法就不成立。
+
+
+class TestStageZeroWorksOnFreshDb:
+    def test_空库上占号不报错(self, tmp_path):
+        p = tmp_path / "never-existed.db"
+        assert not p.exists()
+        got = db.reserve_decision_id(by="t", path=p)
+        assert got.endswith("-001")
+        assert p.exists(), "占号之后库应该被建出来"
+
+    def test_连着占两次序号递增(self, tmp_path):
+        p = tmp_path / "fresh.db"
+        a = db.reserve_decision_id(by="t", path=p)
+        b = db.reserve_decision_id(by="t", path=p)
+        assert (a, b) == (a, a[:-3] + "002")
+
+    def test_CLI在空库上也能跑(self, tmp_path):
+        """判据是**真跑一遍 CLI** —— 库层能跑不代表入口能跑。"""
+        import os
+        p = tmp_path / "cli.db"
+        r = subprocess.run(
+            [sys.executable, str(REPO / "skills/decision-card/scripts/new_decision.py")],
+            capture_output=True, text=True,
+            env={**os.environ, "BIGA_DB_PATH": str(p)})
+        assert r.returncode == 0, r.stderr[-400:]
+        assert r.stdout.strip().endswith("-001")

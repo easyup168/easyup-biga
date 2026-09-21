@@ -18,6 +18,7 @@ L-3 说的「同一判据多份实现」不只针对业务逻辑，也针对这�
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -64,7 +65,19 @@ def get_text(url: str, *, referer: str, encoding: str = "utf-8") -> str:
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 return resp.read().decode(encoding, errors="replace")
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # 🔴 `http.client.HTTPException` 必须在里面。
+        #
+        #    `IncompleteRead` 继承自 `HTTPException` + `ValueError`，
+        #    **不继承 OSError** —— 于是它穿透了这层重试，
+        #    以一个裸 traceback 的形式炸掉整个 skill。
+        #
+        #    实测（2026-09-21 15:14）：新浪 7x24 返回被截断的 chunked 响应，
+        #    `news_scan.py` 直接崩溃 —— 而按本项目的口径它应该产出
+        #    `news.feed.unavailable` 这条缺失项，让卡照常出、只是标着「不知道」。
+        #
+        #    ⚠️ 这条影响**全部六个 skill**，因为重试只此一处。
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as e:
             last = e
             continue
 

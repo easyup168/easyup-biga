@@ -125,6 +125,21 @@ def save_card(card: DecisionCard, *, replay_of: int | None = None) -> int:
 
 ### `agent_runs` —— 兼任「证明 Agent 真的被调用过」
 
+> ⏩ **后续变动（2026-09-21，外部评审 P2-3）：这一节的判断是错的。**
+>
+> `agent_runs` **不能**证明 Agent 被调用过 —— 因为 **BigA 自己的代码就在写它**
+> （`synthesize.py` 按已有 verdict 调 `record_verdict_run()`）。
+> 人手工跑一遍合成脚本，这张表照样多出几行。
+>
+> 第 07 章在端到端实测时就撞到了这件事并记了下来
+> （「那行 `agent_runs` 是我手工跑 `synthesize.py` 插进去的」），
+> 但**本章与 `schema.py` 的注释都没跟着改** —— 两套口径并存了很久（L-3）。
+>
+> 真正的 spawn 证明在**运行时自己的库**里（`subagent_runs` / `task_runs`），
+> 那是被验证方写不到的地方。读取方是 `tools/verify/agent_trace.py`。
+>
+> 下面的原文保留不动（过程文档写完即冻结），读的时候请带着这条修正。
+
 ```sql
 CREATE TABLE agent_runs (
     run_id, decision_id, task_id, agent, model, status, verdict,
@@ -367,7 +382,7 @@ rm -rf skills/_scan_probe    # 恢复全绿
 | 守卫要拦结果不拦路径 | `import` 检查和 `connect` 调用检查是两条独立的规则 |
 | 规则要反向自检 | 断言「`_store/` 里确实有 sqlite3」，否则规则被架空后仍显示绿色 |
 | 反范式不危险，分别写入才危险 | 派生列只由唯一写入口从完整对象生成 |
-| `agent_runs` 是 Agent 被调用过的唯一凭证 | LLM 可以把整段调用编得非常像 |
+| ~~`agent_runs` 是 Agent 被调用过的唯一凭证~~ ⏩ **已修正，见上** | 它是账本，不是证明 —— 我们自己的代码就在写它 |
 | raw 层不去重 | 「这一刻也采到了相同内容」本身是观测 |
 | 规则能下沉就下沉 | 触发器连 `sqlite3` 命令行都绕不过，代码约定只能约束记得它的人 |
 | 部分唯一索引表达业务规则 | 一行 DDL 顶掉一段有竞态的「先查再写」 |

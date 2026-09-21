@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+import pathlib
 from datetime import timedelta
 
 import pytest
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
 
 from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
 from _store import (
@@ -272,3 +275,47 @@ class TestRawSnapshot:
         assert a != b
         assert load_raw_snapshot(a, path=db)["content_sha256"] == \
                load_raw_snapshot(b, path=db)["content_sha256"]
+
+
+# ══ 外部评审 P2-3：agent_runs 不是 spawn 证明 ═══════════════════
+#
+# 教程第 4 章曾写「`agent_runs` 是 Agent 被调用过的唯一凭证」。
+# 第 7 章在端到端实测时推翻了它（「那行是我手工跑 synthesize.py 插进去的」），
+# 但第 4 章与 schema.py 的注释都没跟着改 —— 两套口径并存了很久（L-3）。
+#
+# 真正的 spawn 证明在运行时自己的库里（`subagent_runs`），
+# 那是被验证方写不到的地方。
+
+
+class TestAgentRunsIsLedgerNotProof:
+    def test_我们自己的代码就在写它(self):
+        """判据是**有非 _store 的业务代码调用它** —— 那就说明它可被自产。"""
+        import ast
+        from _scan import repo_files
+        callers = set()
+        for f in repo_files(".py"):
+            rel = str(f.relative_to(REPO))
+            if rel.startswith(("skills/_store/", "tests/")):
+                continue
+            try:
+                tree = ast.parse(f.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id in ("record_agent_run", "record_verdict_run"):
+                    callers.add(rel)
+        assert callers, (
+            "没有业务代码写 agent_runs 了？那这条测试的前提变了，"
+            "请重新确认它到底能不能当证明")
+
+    def test_源头注释已改正(self):
+        """schema 与 db 的注释是权威处 —— 它们说错了，别处再怎么改都会漂回来。"""
+        for rel in ("skills/_store/schema.py", "skills/_store/db.py"):
+            src = (REPO / rel).read_text(encoding="utf-8")
+            assert "subagent_runs" in src, f"{rel} 没有指向真正的 spawn 证明"
+
+    def test_教程第4章挂了修正指针(self):
+        """过程文档写完即冻结 ⇒ 不改原文，只追加「⏩ 后续变动」。"""
+        t = (REPO / "docs/tutorial/04-store-layer.md").read_text(encoding="utf-8")
+        assert "⏩" in t and "subagent_runs" in t

@@ -138,7 +138,9 @@
 > 脚本把「没测」记为 `PENDING` 而不是 `PASS` —— 不带 `--decision-id` 跑只会得到
 > `PASS 2 · PENDING 7`。**这是故意的**：R-3 对验收脚本自己同样适用。
 
-1. [x] Supervisor **确实 spawn 了** `emotion`（`agent_runs` 有该行，不是自己编的）
+1. [x] Supervisor **确实 spawn 了** `emotion`
+       ⚠️ 判据已修正（外部评审 P2-3）：`agent_runs` 有该行**不算证明** ——
+       我们自己的代码就在写它。真正的判据是运行时自己的 `subagent_runs`
        两份独立记录都核：`agent_runs` + 运行时 `subagent_runs`
 2. [x] `emotion` 返回**合法 `AgentVerdict`**，含 ≥1 条带 `as_of` 的 `Evidence` —— 13 条
 3. [x] 输出 Decision Card，含 状态 / 证据 / **缺失项** 三段 —— 缺失项 3 条

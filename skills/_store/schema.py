@@ -64,11 +64,28 @@ CREATE INDEX IF NOT EXISTS ix_decision_id ON decision_records(decision_id);
 CREATE INDEX IF NOT EXISTS ix_decision_created ON decision_records(created_at);
 
 -- ───────────────────────────────────────────────────────────────
--- agent_runs —— 每次 Agent 执行的账本
+-- agent_runs —— 每次 Agent 执行的**账本**
 --
--- 它同时承担两件事：
---   1. 成本与延迟可观测（模型分层要靠它的数据来定，不靠拍脑袋）
---   2. 🔴 证明「Supervisor 确实 spawn 了 Specialist」，而不是自己编了个答案
+-- 用途：成本与延迟可观测（模型分层要靠它的数据来定，不靠拍脑袋）。
+--
+-- 🔴 它**不是** spawn 的证明。这一行原本写的是
+--    「证明 Supervisor 确实 spawn 了 Specialist，而不是自己编了个答案」——
+--    那是错的，外部评审 P2-3 指出的就是它。
+--
+--    因为 **BigA 自己的代码就在写这张表**：`synthesize.py` 会按已有的
+--    verdict 调 `record_verdict_run()`。人手工跑一遍合成脚本，
+--    这张表照样多出几行。
+--
+--    ⇒ 它能证明的只有「我们记下了一次执行」，不能证明「运行时真的起过它」。
+--
+--    真正的 spawn 证明在**运行时自己的库**里（`subagent_runs` / `task_runs`），
+--    那是被验证方写不到的地方。读取方是 `tools/verify/agent_trace.py`
+--    与 `latency_report.py`。
+--
+--    ⚠️ 教程第 7 章早就记下了这个教训（「那行 agent_runs 是我手工插进去的」），
+--       但第 4 章与本注释没跟着改 —— 两套口径并存了很久（L-3）。
+--
+-- （本次只改注释，不改 DDL：追加式那条规则管的是 schema 变更。）
 -- ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS agent_runs (
     run_id        INTEGER PRIMARY KEY AUTOINCREMENT,

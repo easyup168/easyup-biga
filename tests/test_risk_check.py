@@ -31,13 +31,14 @@ GOT = datetime(2026, 9, 18, 15, 1, tzinfo=CN_TZ)
 
 
 def up(agent="market", result=None, stance="放量上涨", missing=None,
-       verdict="PASS", status="completed", as_of=AS_OF, got=GOT):
+       verdict="PASS", status="completed", as_of=AS_OF, got=GOT,
+       task_id="BIGA-20260918-001"):
     result = dict(result or {"trade_date": "20260918"})
     ev = [Evidence(field=k, source=f"derived:{agent}", value=v,
                    as_of=as_of, retrieved_at=got, calc_version="v1")
           for k in result for v in [result[k]]]
     # contract-exempt: 拼的是构造 AgentVerdict 的 kwargs，不是第二套契约
-    return AgentVerdict(task_id="BIGA-20260918-001", agent=agent, status=status,
+    return AgentVerdict(task_id=task_id, agent=agent, status=status,
                         verdict=verdict, result=result, confidence=1.0,
                         evidence=ev, warnings=[], missing=list(missing or []),
                         elapsed_ms=1, stance=stance)
@@ -253,3 +254,50 @@ class TestStageTopology:
         assert '"market", "sector"' not in src, "不许在 skill 里再抄一份名单"
         assert set(STAGE1_AGENTS) & set(STAGE2_AGENTS) == set()
         assert "risk" in STAGE2_AGENTS
+
+
+# ══ 外部评审 P1-2：Stage 边界的身份守卫 ═════════════════════════
+#
+# risk 原本检查覆盖率、交易日、陈旧度、阈值、stance 冲突、跨源校验 ——
+# **唯独没有检查上游判定属不属于这次决策**。
+#
+# 于是可以出现：五个 Specialist 全在、trade_date 一致、coverage_ratio=1.0，
+# 而它们分别来自三个不同的决策。
+#
+# ⚠️ 合成阶段那道闸门拦得住最终的卡，但拦不住这件事：
+#    错误的 risk 判定**已经生成、而且可能已经落库**。
+#    制衡层在污染的输入上得出的结论，事后拒绝那张卡也撤销不了。
+
+
+class TestForeignDecisionUpstream:
+    def test_上游来自别的决策要报缺失(self, wired):
+        wired[1] = up("market", task_id="BIGA-20260918-001")
+        wired[2] = up("emotion", stance="修复", task_id="BIGA-20260918-002")
+        v = build([1, 2], task_id="BIGA-20260918-001")
+        codes = [m.code for m in v.missing]
+        assert "risk.upstream.foreign_decision" in codes
+
+    def test_压到UNKNOWN而不是WARNING(self):
+        """🔴 证据归属不成立时，其余指标全部失去意义。
+
+        `coverage_ratio=1.0` 在这里不是「五个都到齐了」，
+        而是「五个坑里各插了一面旗，但不是同一片地」。
+        """
+        pass  # 由下面那条带 wired 的覆盖
+
+    def test_归属不成立时不给倾向(self, wired):
+        for i, (a, st) in enumerate(
+                [("market", "放量上涨"), ("emotion", "修复"), ("sector", "主线明确"),
+                 ("technical", "多头"), ("news", "平静")], start=1):
+            # 全部齐活、交易日一致 —— 唯独 task_id 来自另一次决策
+            wired[i] = up(a, stance=st, task_id="BIGA-20260918-999")
+        v = build(list(range(1, 6)), task_id="BIGA-20260918-001")
+        assert v.result["coverage_ratio"] == 1.0, "覆盖率确实是满的"
+        assert v.verdict == "UNKNOWN", \
+            "覆盖率满 + 交易日一致 ⇒ 原来会给 PASS/WARNING，那正是评审指出的洞"
+
+    def test_同一次决策的上游不受影响(self, wired):
+        wired[1] = up("market", task_id="BIGA-20260918-001")
+        wired[2] = up("emotion", stance="修复", task_id="BIGA-20260918-001")
+        v = build([1, 2], task_id="BIGA-20260918-001")
+        assert "risk.upstream.foreign_decision" not in [m.code for m in v.missing]
