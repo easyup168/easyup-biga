@@ -104,7 +104,7 @@ Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附
 | 06 | [建 Agent](docs/tutorial/06-agents.md) | 脚手架默认值多半不是你要的；角色契约写在 AGENTS.md |
 | 07 | [端到端](docs/tutorial/07-end-to-end.md) | 三层认证迷宫；怎么**证明** Specialist 真的被调用过 |
 | 08 | [回放](docs/tutorial/08-replay.md) | 冻结证据；在线与回放共用同一份组装代码 |
-| 09 | [隔离演练](docs/tutorial/09-isolation-drill.md) | `kill -9` 自己，逐项核对邻居毫发无伤 |
+| 09 | [隔离演练](docs/tutorial/09-isolation-drill.md) | `kill -9` 自己，逐项核对已有实例毫发无伤 |
 | 10 | [延迟与成本](docs/tutorial/10-latency-and-cost.md) | 216s→75s；延迟其实是正确性 bug 的症状 |
 
 配套抖音系列同步更新 · **关注 易涨EasyUp** 不迷路
@@ -126,7 +126,7 @@ Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附
 | `emotion-calc` Skill（真采 A 股情绪数据） | ✅ |
 | `emotion` Agent + Supervisor 委派配置 | ✅ |
 | 合成与回放（两条路径共用同一份组装代码） | ✅ |
-| 隔离演练（`kill -9` 自己，邻居六项未变） | ✅ |
+| 隔离演练（`kill -9` 自己，已有实例六项未变） | ✅ |
 | 124 条测试全绿 | ✅ |
 | 端到端 74.8s（预算 90s） | ✅ |
 
