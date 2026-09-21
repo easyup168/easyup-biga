@@ -8,7 +8,7 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/659%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/700%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v5%20%C2%B7%205%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-18%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
@@ -222,7 +222,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v5 —— 决策编号原子分配器 + 只追加保护 | ✅ |
-| 659 条测试 | ✅ |
+| 700 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
 | **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
@@ -230,6 +230,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | **出卡预算闸门** —— 最小间隔 / 当日上限 / 上一次还在跑 | ✅ |
 | 飞书里用自然语言要卡 | 🔶 会走错编排，**实测收口未做**（见待裁定）|
 | 两份外部对抗性评审共 29 条发现 | 🔶 15 模式级 / 7 **实例级（模式还在）** / 1 修不干净 |
+| 第三轮深度评审 6 条 —— **全是同一个形状**（守卫不会红，§9 L-13） | ✅ 每条都有探针红灯 |
 | 至少 1 次真实「否决」端到端落库 | ⬜ |
 | 真实缺失项跨天累积 ≥5 次 | 🔶 数够了，但全在同一天 |
 
@@ -296,10 +297,11 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 │   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
-├── tests/           659 条测试
+│                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
+├── tests/           700 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（18 章，与代码同步）
+│   └── tutorial/    开发教程（19 章，与代码同步）
 └── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 

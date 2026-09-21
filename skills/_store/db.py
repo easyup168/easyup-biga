@@ -417,18 +417,22 @@ def record_agent_run(
     error: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
-    """
-    ⚠️ **这不是 spawn 的证明**（外部评审 P2-3）。
+    """记一次 Agent 执行，返回 `run_id`。
 
+    🔴 **这不是 spawn 的证明**（外部评审 P2-3）
+    ------------------------------------------
     BigA 自己的代码就在写这张表 —— 人手工跑一遍 `synthesize.py`，
-    它照样多出几行。它能证明的只有「我们记下了一次执行」。
+    它照样多出几行。它能证明的只有「**我们记下了**一次执行」。
 
     要证明「运行时真的起过那个 Agent」，看**运行时自己的库**：
-    `subagent_runs` / `task_runs`，读取方是 `tools/verify/agent_trace.py`。
-记一次 Agent 执行，返回 `run_id`。
+    `subagent_runs` / `task_runs`。判据在 `tools/verify/spawn_check.py`
+    （两份独立记录都齐才算），排查用 `tools/verify/agent_trace.py`。
 
-    🔴 这张表是「Supervisor 确实调用了 Specialist」的唯一凭证。
-    Agent 在回答里声称自己调用过，不算数 —— LLM 完全可以把整段调用编出来。
+    ⚠️ 这段话曾经写的是相反的：「这张表是……的唯一凭证」。
+       P2-3 的修订把新结论插在了**旧结论上面**、没删旧的，
+       于是同一个 docstring 里两句话互相打脸 —— 谁先读到哪句就信哪句。
+       深度评审在三处找到这套旧口径。
+       **改口径要去删旧的那一句，不是在它上面再写一句。**
 
     ⚠️ 这里**不记 token 与成本**。那些数据的唯一真相源是 OpenClaw 运行时的
     trajectory，在这里存第二份必然滞后且会产生第二套口径。

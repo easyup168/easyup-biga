@@ -68,8 +68,13 @@ python3 skills/decision-card/scripts/amend_verdict.py --ref 17 \
 ```
 
 落库时会：
-1. 为每个 Verdict 在 `agent_runs` 记一行 —— **那是「确实调用过」的唯一凭证**
+1. 为每个 Verdict 在 `agent_runs` 记一行 —— 那是**执行账本**，不是调用证明
 2. 把整张 Card 冻结进 `decision_records.card_json`
+
+⚠️ 这里曾经写着「那是『确实调用过』的唯一凭证」。**不成立** ——
+写那一行的代码就是 `synthesize.py` 自己，人手工跑一遍它照样多出几行。
+真正的 spawn 证明在运行时自己的库里，判据是 `tools/verify/spawn_check.py`
+（`agent_runs` + 运行时 `subagent_runs` **两份独立记录都齐**才算）。
 
 判定原件本身在 `agent_verdicts`（schema v3）：skill 写、synthesize 读，
 只追加不修改，修订用 `amends` 指回原行。
