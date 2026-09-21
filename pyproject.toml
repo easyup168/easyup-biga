@@ -3,3 +3,7 @@
 pythonpath = ["skills", "."]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+# `--strict-markers` 在上面 ⇒ 标记必须先在这里注册，否则用了就报错。
+markers = [
+    "network: 这条测试真的需要出网（默认禁网，见 tests/conftest.py）",
+]

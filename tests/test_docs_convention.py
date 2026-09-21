@@ -284,7 +284,7 @@ _BARE_FILE_IN_DOC = re.compile(r"\b([\w-]+\.(?:py|sh))\b")
 
 @pytest.mark.parametrize("path", sorted((DOCS / "design").glob("*.md")))
 def test_设计文档点名的文件必须真实存在(path: pathlib.Path):
-    known = {p.name for p in repo_files(suffix="")}
+    known = {p.name for p in repo_files()}
     ghosts = []
     for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if any(w in line for w in _UNBUILT_MARKS):
