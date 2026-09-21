@@ -167,6 +167,7 @@ BigA 哪天不小心装错位置，生产侧当场报红。
     │        missing_ledger.py  缺失项台账（出口条件 4）
     │        audit_public.sh    公开内容审查（十项）
     │        probe.sh           在一次性库上跑手工探针
+    │        budget_report.py   当日出卡用量与闸门状态
     │        sync_test_count.sh 把文档里的测试条数同步成实测
     │        phase1_acceptance.py  Phase 1 验收（I-1 判据转调 isolation.py）
     │                ⚠️ placebo.py / reachability.py **设计中，从未提交过**
