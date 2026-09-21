@@ -27,6 +27,10 @@ sys.path.insert(0, str(_REPO / "skills" / "decision-card" / "scripts"))
 from _contract import now_cn  # noqa: E402
 from _store import StoreNotInitialised, db  # noqa: E402
 
+sys.path.insert(0, str(_HERE))
+
+from phase1_acceptance import orphan_spawns  # noqa: E402
+
 from budget import (  # noqa: E402
     DAILY_CAP,
     INFLIGHT_SEC,
@@ -61,6 +65,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  最近一次 {res[-1]['decision_id']} "
               f"{res[-1]['reserved_at'][11:19]} by={res[-1]['reserved_by']}")
     print(f"  阈值：最小间隔 {MIN_GAP_SEC}s · 在跑窗口 {INFLIGHT_SEC}s")
+
+    # 🔴 孤儿 spawn = 钱花了、结果进不了任何卡。
+    #    `spawn_check` 按决策号查，**查不到它们** —— 孤儿的特征
+    #    恰恰是没有号可查。两个检查分工不同，都得有。
+    orphans = orphan_spawns(day)
+    print()
+    if orphans is None:
+        print("🔶 孤儿 spawn 判不了 —— 读不到运行时库")
+    elif orphans:
+        print(f"🔴 孤儿 spawn {len(orphans)} 个 —— 跑了但进不了任何卡"
+              f"（约 ${len(orphans) * 0.10:.2f}~${len(orphans) * 0.15:.2f}）")
+        for when, agent, why in orphans[-6:]:
+            print(f"     {when}  {agent:11} {why}")
+        if len(orphans) > 6:
+            print(f"     …（只列最近 6 个，共 {len(orphans)} 个）")
+        print("     根因多半是 Stage 0 顺序反了：**先占号，再 spawn**。"
+              "见 architecture.md §5.3.2（L-11 身份晚于证据）")
+    else:
+        print("✅ 无孤儿 spawn —— 每次 spawn 都带着决策号")
 
     print()
     reasons = check_budget(day=day)
