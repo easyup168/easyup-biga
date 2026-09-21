@@ -101,7 +101,54 @@ class TestNoHardcodedSeq:
 
 
 class TestReservationIsAtomic:
-    """占号靠主键冲突仲裁，不靠「先查再插」。"""
+    """占号靠主键冲突仲裁，不靠「先查再插」。
+
+    🔴 外部评审 F17：这个类原来**名不副实** —— 文档字符串宣称的是并发属性，
+    而所有调用都是同进程同线程的顺序调用，**没有任何真正的竞争窗口**。
+    与本项目自己抓到过的「并发测试探针改错地方」是同一种形状。
+
+    评审两路各自用 multiprocessing 补了它没做的事（80 进程 ×2 轮 /
+    30 进程 ×1 轮），结论一致：编号全部唯一，**底层机制本身是对的**。
+    ⇒ 所以这里不是修 bug，是**让测试名副其实**：
+      把真并发这一条固化下来，否则将来有人把重试逻辑改坏
+      （比如误吞 `OperationalError` 而不只是 `IntegrityError`），
+      这个类仍然会一路绿灯。
+    """
+
+    def test_多进程同时占号不重号(self, tmp_path):
+        """真起 OS 进程，用 Barrier 卡在同一时刻一起冲。
+
+        ⚠️ 用 multiprocessing 不用 threading：GIL 会让线程版
+        「看起来并发、实际串行」，那正是这条测试要避免的假象。
+        """
+        import multiprocessing as mp
+
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        n = 16
+
+        def worker(barrier, q, path):
+            import sys
+            sys.path.insert(0, str(REPO / "skills"))
+            from _store import db as d
+            barrier.wait()
+            try:
+                q.put(d.reserve_decision_id(by="race", path=path))
+            except Exception as e:                      # noqa: BLE001
+                q.put(f"ERR {type(e).__name__}: {e}")
+
+        ctx = mp.get_context("fork")
+        barrier, q = ctx.Barrier(n), ctx.Queue()
+        procs = [ctx.Process(target=worker, args=(barrier, q, p)) for _ in range(n)]
+        for x in procs:
+            x.start()
+        for x in procs:
+            x.join(timeout=60)
+
+        got = [q.get(timeout=5) for _ in range(n)]
+        errs = [g for g in got if str(g).startswith("ERR")]
+        assert not errs, f"占号抛异常：{errs[:3]}"
+        assert len(set(got)) == n, f"{n} 个进程拿到 {len(set(got))} 个不同的号：{sorted(got)}"
 
     def test_连续占号不重复且从1开始(self, tmp_path):
         p = tmp_path / "t.db"

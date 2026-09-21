@@ -192,14 +192,37 @@ class TestContractsTeachTheSafePath:
     守卫写了没用，如果 `AGENTS.md` 还在示范贴 JSON —— agent 照着文档做。
     """
 
-    @pytest.mark.parametrize("path", [
-        REPO / "AGENTS.md",
-        REPO / "agents" / "emotion" / "AGENTS.md",
-        REPO / "agents" / "market" / "AGENTS.md",
-    ])
+    # 🔴 外部评审 F9：这份清单原来是**手写的三条**，而契约有六份。
+    #    自 sector/technical/news/risk 建立以来从未更新 ——
+    #    清单类守卫不会随组件数量增长而自动同步，这是本项目的头号形状。
+    #    ⇒ 改成扫目录：**新建一个 agent 就自动纳入**。
+    @pytest.mark.parametrize(
+        "path", [REPO / "AGENTS.md"] + sorted((REPO / "agents").glob("*/AGENTS.md")))
     def test_契约里不出现贴JSON的写法(self, path):
         text = path.read_text(encoding="utf-8")
         assert "--verdicts " not in text and "--verdicts\n" not in text, \
             f"{path.name} 仍在示范 --verdicts（贴 JSON）—— 应改用 --verdict-ids"
-        assert "verdict_ref" in text, \
-            f"{path.name} 没有告诉 agent 去哪里拿 verdict_ref"
+
+    @pytest.mark.parametrize(
+        "path", sorted((REPO / "agents").glob("*/AGENTS.md")))
+    def test_契约讲清楚了第一次去哪拿verdict_ref(self, path):
+        """🔴 判据不是「提到了这个词」，是「讲清楚了第一次去哪拿」。
+
+        F9 的要害在这里：`news/AGENTS.md` 里 "verdict_ref" 本来就出现了 3 次
+        （都在 `--ref <你的 verdict_ref>` 这类示例里），
+        **纯子串匹配会判它通过** —— 而它恰恰是唯一缺了那句话的。
+
+        真实后果有 trace 为证：两次真实调用里 news 都把 task_id 当成
+        `--ref` 传进去，报错后去读 `--help` 和源码，每次多花
+        2~3 次工具调用、约 20~30 秒 —— 与契约自己强调的
+        「不要为了确认参数去读源码」形成直接讽刺。
+
+        锚点选 `verdict_ref=NN` 这个**字面量**：它是 stderr 的真实输出格式，
+        不是散文措辞，改写同义词不会把它绕过去。
+        """
+        text = path.read_text(encoding="utf-8")
+        assert "verdict_ref=NN" in text, (
+            f"{path.name} 没告诉 agent **第一次**去哪拿 verdict_ref。\n"
+            "  只在 `--ref <你的 verdict_ref>` 里提到它是不够的 ——\n"
+            "  那假设读者已经知道它从哪来。照抄其余契约里那句：\n"
+            "  「stderr 最后一行是 `verdict_ref=NN`，记下这个数字。」")

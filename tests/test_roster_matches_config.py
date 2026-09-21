@@ -69,6 +69,32 @@ class TestRosterConsistency:
             "        Card 照常产出，只是少了一个领域。\n"
             "  怎么办：把它加进 ~/.openclaw-biga/openclaw.json 的该数组")
 
+    def test_两处名册必须一致(self):
+        """🔴 外部评审 F10：**姊妹配置已经出过事故，另一半至今没人管。**
+
+        上面那条守卫是为 `allowAgents` 漏了 news 那次事故专门写的。
+        但 `tools.agentToAgent.allow` 是**同一个形状**的第二处名册 ——
+        全仓没有任何测试碰过它（grep 不到一处引用），实测它确实少了 news。
+
+        > 清单类约定第一次踩坑后，团队本能地去补**那一个**，
+        > 而不去问「还有哪些地方是同样的结构」。—— 评审的原话。
+
+        ⚠️ 这类 json 配置**不受版本控制**，漂移天然不出现在 git diff 里
+        被 review 到 —— 所以只能靠测试对账。
+        """
+        cfg = self._cfg()
+        main = ((cfg.get("agents") or {}).get("entries") or {}).get("main", {})
+        allow_agents = set((main.get("subagents") or {}).get("allowAgents") or [])
+        a2a = set(((cfg.get("tools") or {}).get("agentToAgent") or {}).get("allow") or [])
+        if not allow_agents or not a2a:
+            pytest.skip("有一处没设白名单 = 不限制，无从对账")
+        missing = allow_agents - a2a
+        assert not missing, (
+            f"这些 agent 在 allowAgents 里，却不在 tools.agentToAgent.allow："
+            f"{sorted(missing)}\n"
+            "  两处名册各写一遍，改一处忘另一处 —— 与 2026-09-21 10:37 那次同型。\n"
+            "  怎么办：把它加进 ~/.openclaw-biga/openclaw.json 的该数组")
+
     def test_契约里的stage名单都建好了(self):
         """反方向：契约说有，实际没建。
 

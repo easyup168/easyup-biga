@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import pathlib
+import sys
 from datetime import timedelta
 
 import pytest
@@ -355,3 +356,42 @@ class TestAgentRunsIsLedgerNotProof:
         """过程文档写完即冻结 ⇒ 不改原文，只追加「⏩ 后续变动」。"""
         t = (REPO / "docs/tutorial/04-store-layer.md").read_text(encoding="utf-8")
         assert "⏩" in t and "subagent_runs" in t
+
+
+class TestF23MissingDatabase:
+    """库不存在是**全新环境的正常状态**，不该是一屏 traceback。
+
+    外部评审 F23。这条本身不严重（失败很响、退出码非零，没人会误读成成功），
+    但它落在「第一次 clone 下来跑巡检」这个位置上 ——
+    第一印象是一屏 `sqlite3.OperationalError`，既不说路径也不说该做什么。
+    """
+
+    def test_只读打开不存在的库给的是人话(self, tmp_path):
+        from _store import StoreNotInitialised
+        nope = tmp_path / "never" / "created.db"
+        with pytest.raises(StoreNotInitialised) as ei:
+            with connect(nope, readonly=True):
+                pass
+        msg = str(ei.value)
+        assert str(nope) in msg, "报错必须说出是哪个路径"
+        assert "biga-card" in msg, "🔴 报错要指路 —— 只说坏了等于没说"
+
+    def test_建好但零行不算未初始化(self, db):
+        """🔴 区分「文件不在」与「schema 建好但零行」——后者是正常状态，
+        把它也报成错，就会有人为了消警告去塞假数据。"""
+        with connect(db, readonly=True) as c:
+            assert c.execute("SELECT count(*) FROM decision_records").fetchone()[0] == 0
+
+    @pytest.mark.parametrize("tool", ["missing_ledger", "latency_report"])
+    def test_巡检工具不吐traceback(self, tmp_path, tool):
+        """判据是**有没有 traceback**，不是退出码 —— 退出码本来就非零。"""
+        import os
+        import subprocess
+
+        env = {**os.environ, "BIGA_DB_PATH": str(tmp_path / "nope.db")}
+        r = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "verify" / f"{tool}.py")],
+            capture_output=True, text=True, env=env, cwd=REPO)
+        assert "Traceback" not in r.stderr, r.stderr[-500:]
+        assert "判不了" in r.stderr
+        assert r.returncode == 2, f"判不了统一用退出码 2（与 isolation.py 一致）"

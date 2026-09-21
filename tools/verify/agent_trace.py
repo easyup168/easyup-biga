@@ -38,6 +38,7 @@ from collections import defaultdict
 _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
+from _store import StoreNotInitialised  # noqa: E402
 from _store.runtime import list_agents, read_tool_calls  # noqa: E402
 
 #: 这些形状一出现基本就是「在找东西」，值得直接标出来。
@@ -93,4 +94,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # 🔴 F23：库不存在是**全新环境的正常状态**，不该是一屏 traceback。
+    #    统一在入口转成人话 —— 每个工具各写一遍就又是一份散开的判据。
+    #    退出码 2 = 判不了，与 isolation.py 的三态口径一致。
+    try:
+        raise SystemExit(main())
+    except StoreNotInitialised as e:
+        print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
+        raise SystemExit(2) from None

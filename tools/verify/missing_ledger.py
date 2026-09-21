@@ -33,7 +33,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "skills"))
 
-from _store import db  # noqa: E402
+from _store import StoreNotInitialised, db  # noqa: E402
 
 #: 演练注入的标记。
 #:
@@ -144,4 +144,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # 🔴 F23：库不存在是**全新环境的正常状态**，不该是一屏 traceback。
+    #    统一在入口转成人话 —— 每个工具各写一遍就又是一份散开的判据。
+    #    退出码 2 = 判不了，与 isolation.py 的三态口径一致。
+    try:
+        raise SystemExit(main())
+    except StoreNotInitialised as e:
+        print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
+        raise SystemExit(2) from None

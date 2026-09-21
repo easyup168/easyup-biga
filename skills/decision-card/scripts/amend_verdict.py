@@ -68,8 +68,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.stance is not None:
+        # 🔴 外部评审 F8：这里原来抄了一遍契约层的逻辑，
+        #    连同那个盲区一起抄（`if vocab and ...` —— 没登记就放行）。
+        #    ⇒ 不再自己判，只负责把契约层的报错**翻译成命令行口吻**。
+        #      判据只留一处，这里只管好不好读。
         vocab = STANCE_VOCAB.get(original.agent)
-        if vocab and args.stance not in vocab:
+        if vocab is None:
+            print(f"{original.agent} 没有登记 stance 词表 —— "
+                  f"在 `_contract/verdict.py` 的 STANCE_VOCAB 里加一行。\n"
+                  f"已登记：{', '.join(sorted(STANCE_VOCAB))}", file=sys.stderr)
+            return 2
+        if args.stance not in vocab:
             print(f"stance={args.stance!r} 不在 {original.agent} 的词表里。可选："
                   f"{' / '.join(vocab)}\n"
                   f"（方向判断必须可聚合 —— 自由发挥的措辞做不了统计）", file=sys.stderr)

@@ -308,3 +308,44 @@ class TestCardBasics:
     def test_序列化往返(self):
         c = card()
         assert DecisionCard.from_dict(c.to_dict()).to_dict() == c.to_dict()
+
+
+class TestF8UnregisteredAgentStance:
+    """外部评审 F8：词表校验原来是「命中才查，命不中就放行」。
+
+        agent="market",     stance="超级看多"  → 正确拒绝
+        agent="Market",     stance="随便乱写"  → 通过（大小写 typo）
+        agent="discipline", stance="瞎编的"    → 通过（Phase 3 还没登记）
+
+    🔴 这是一颗定时炸弹，不是已经发生的事故 ——
+    6 个已登记 agent 的约束是真实生效的（评审也验证了这点）。
+    但 Phase 3 建 `discipline` 时忘加一行（纯手工步骤，没有清单强制），
+    它的 stance 从那天起完全不受约束，而 `AGENTS.md` 里
+    「契约层会直接拒绝表外词」这句话，读者会以为对全系统成立。
+
+    ⚠️ 原来唯一的交叉校验用 `parametrize("agent", sorted(STANCE_VOCAB))` ——
+    **天然只测「已经正确登记」的 agent**，覆盖不到「忘记登记」这个分支。
+    """
+
+    def test_未登记的agent直接拒绝(self):
+        with pytest.raises(ValueError, match="没有登记 stance 词表"):
+            verdict(agent="discipline", stance="瞎编的方向")
+
+    def test_大小写typo也算未登记(self):
+        """`Market` 不是 `market` —— 静默放行时这种错最难查：
+        agent 名在日志里长得几乎一样。"""
+        with pytest.raises(ValueError, match="没有登记 stance 词表"):
+            verdict(agent="Market", stance="随便乱写的词")
+
+    def test_已登记的照常工作(self):
+        v = verdict(agent="market", stance="分化")
+        assert v.stance == "分化"
+        with pytest.raises(ValueError, match="不在该 agent 的词表里"):
+            verdict(agent="market", stance="超级看多")
+
+    def test_报错要指出去哪加(self):
+        """🔴 报错要指路 —— 只说「不行」的守卫会被绕过，不会被修好。"""
+        try:
+            verdict(agent="discipline", stance="瞎编的方向")
+        except ValueError as e:
+            assert "STANCE_VOCAB" in str(e) and "已登记" in str(e)
