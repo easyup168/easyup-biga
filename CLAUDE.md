@@ -65,7 +65,7 @@ npm i --prefix ~/.openclaw-biga/runtime openclaw@latest
 
 | # | 不变式 | 验证方式 |
 |---|---|---|
-| **I-1** | BigA 的任何进程**不得以写模式**打开 `~/.openclaw/` 下的任何文件 | `tools/verify/isolation.py`（待建） |
+| **I-1** | BigA 的任何进程**不得以写模式**打开 `~/.openclaw/` 下的任何文件 | `tools/verify/isolation.py` ✅ |
 | **I-2** | BigA 崩溃 / 写坏自己的库 / 占死端口，另一套系统必须毫发无伤 | `kill -9` 演练后对方 gateway pid 不变 |
 | **I-3** | 契约（Evidence / AgentVerdict / DecisionCard）**只有一份实现** | AST 全仓扫描 |
 | **I-4** | 业务代码里不出现裸 `sqlite3.connect`，一律走 `skills/_store/db.py` | AST 扫描 |

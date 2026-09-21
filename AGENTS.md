@@ -115,11 +115,11 @@ mcp__openclaw__sessions_spawn
 
 ```
 （同一条消息里）
-  mcp__openclaw__sessions_spawn  agentId="market"     context="isolated"
-  mcp__openclaw__sessions_spawn  agentId="emotion"    context="isolated"
-  mcp__openclaw__sessions_spawn  agentId="sector"     context="isolated"
-  mcp__openclaw__sessions_spawn  agentId="technical"  context="isolated"
-  mcp__openclaw__sessions_spawn  agentId="news"       context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="market"     context="isolated"  collect=true
+  mcp__openclaw__sessions_spawn  agentId="emotion"    context="isolated"  collect=true
+  mcp__openclaw__sessions_spawn  agentId="sector"     context="isolated"  collect=true
+  mcp__openclaw__sessions_spawn  agentId="technical"  context="isolated"  collect=true
+  mcp__openclaw__sessions_spawn  agentId="news"       context="isolated"  collect=true
 ```
 
 🔴 **每条 spawn 的指令里都必须写上 Stage 0 那个编号**，照这个句式：
@@ -205,37 +205,65 @@ mcp__openclaw__sessions_spawn
 
 ### Stage 1.5 · 等 Specialist 返回
 
-spawn 是**异步**的。OpenClaw 的正常模式是：
+🔴 **只有一条路：`collect: true` + `agents_wait`。不要同时用 yield。**
 
 ```
-spawn → sessions_yield（交还控制权）→ Specialist 在后台跑
-      → 它返回时运行时把你唤醒 → 你接着合成 Card
+（Stage 1 同一条消息里，每个 spawn 都带 collect: true）
+  mcp__openclaw__sessions_spawn  agentId="market"  context="isolated"  collect=true
+  … 五个都这样
+
+（下一步，立刻）
+  mcp__openclaw__agents_wait  ids=[五个 spawn 返回的 runId]  timeoutSeconds=300
 ```
 
-所以 spawn 之后用 `sessions_yield` **是对的**，不是提前收工。
-实测：`agent:main:main` spawn 了 emotion 后 yield，自己那一轮标记 `succeeded`；
-emotion 跑了 80 秒；之后 main 被唤醒并产出了 Card，全程约 3 分钟。
+`agents_wait` 会**同步阻塞**到五个全部返回。它返回了，你就可以直接进 Stage 2。
 
-#### 🔴 但优先用同步等待
+#### 🔴 为什么必须带 `collect: true`
 
-```
-mcp__openclaw__agents_wait
-```
+不带的话 `agents_wait` **对每个 id 都返回 `not_found`，而且是瞬时返回** ——
+它只认 swarm collector 子会话（运行时源码里的判据是 `if (!entry?.collect)`）。
 
-两种都能出卡，但**延迟差很多**。实测一次完整链路：
+实测这条 bug 的代价（`BIGA-20260921-015`）：
 
 ```
-17:42:49  提问
-17:42:51 → 17:43:12   main 第 1 轮   21.1s（spawn + yield）
-17:42:59 → 17:43:46   emotion         47.8s
-17:43:46 → 17:45:47   ⚠️ 空档 121s    ← 异步唤醒 + 合成
-17:45:47  Card 落库
-                        总计 178s（预算 60s）
+10:45:37  agents_wait   → 全部 not_found，8.2s
+10:45:43  subagents     → 自己去查状态，6.2s
+10:45:50  sessions_yield→ 退回异步等待，7.4s
+          ─────────────────────────────
+          22 秒，全是协议开销，一点事没做
 ```
 
-**耗时最大的一块不是计算，是那 121 秒的唤醒空档。**
-用 `agents_wait` 同步等待可以省掉它 —— 你不交还控制权，
-Specialist 一返回你立刻接着做。
+这段时间里**没有任何东西报错** —— 卡照常产出，只是每次都白花 22 秒。
+
+⚠️ 之前的契约在这里给了**两条路**（「优先用 `agents_wait`」+「`sessions_yield`
+也是对的」）。给两条路的结果是你**两条都走**，还自己加了一次 `subagents` 查状态。
+
+> **写契约时，一个动作只给一条路。** 给「优先 A，B 也行」，
+> 得到的是 A 然后 B，而不是 A。
+
+#### ⚠️ `collect: true` 之后**不许再 yield**
+
+collect 模式**没有完成通知**（运行时明确写了 `no completion notification`）。
+你 yield 出去就再也不会被唤醒 —— 这次对话会**静默地永远停在那里**，
+既不出卡，也不报错。
+
+⇒ `collect: true` 与 `agents_wait` 是**一对**，不能只用其中一个。
+
+#### 不要用 `subagents` 查状态
+
+`agents_wait` 返回的 `completed` / `pending` / `errors` 已经包含全部信息。
+再查一次 `subagents list` 只是多一个模型往返（实测 6.2s）。
+
+#### 兜底：`agents_wait` 真的失败时
+
+如果它返回 `errors`（`not_found` / `not_owner`）而不是超时，说明 spawn 时
+**漏了 `collect: true`**。这时才退回异步路径：
+
+```
+sessions_yield → 运行时在 Specialist 返回时唤醒你 → 接着合成
+```
+
+⚠️ 这条路每次会多出一段唤醒空档，实测可达 121 秒。**它是兜底，不是备选。**
 
 #### 🔴 真正的硬约束：这次对话必须以一张 Card 收尾
 
@@ -243,7 +271,6 @@ Specialist 一返回你立刻接着做。
 > 没有第三种结束方式。
 
 注意这条约束的对象是**整个对话**，不是**你的某一轮**。
-你在 yield 之后那一轮确实结束了，这没问题；但被唤醒之后你必须把事情做完。
 
 ⚠️ 一个容易骗过自己的地方：`status=succeeded` 只表示**你这一轮**正常结束，
 **不表示任务完成了**。判据只有一个 —— `decision_records` 里有没有新增一行。
@@ -263,7 +290,8 @@ Stage 1 全部返回之后，**必须**再 spawn 一次 `risk`。它是本系统
 #### 🔴 传给它的是 Stage 1 的编号，不是新任务
 
 ```
-mcp__openclaw__sessions_spawn  agentId="risk"  context="isolated"
+mcp__openclaw__sessions_spawn  agentId="risk"  context="isolated"  collect=true
+（然后同样用 agents_wait 等它，不要 yield）
 ```
 
 指令里**必须**带上 Stage 1 各 Specialist 给你的那串 `verdict_ref`，照抄这段：
