@@ -1,5 +1,8 @@
 # Phase 2 设计 —— 补齐到 7 个 Agent
 
+> 📄 **阶段 · 进行中**（2.1 ✅ / 2.2 ✅ / 2.3 ⬜ / 2.4 ⬜）
+> **覆盖**：Phase 2 的范围、步骤、关键取舍、出口条件 ｜ **不覆盖**：结构细节（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）
+
 > Phase 2 的**设计 SSOT**。结构性问题（契约字段、表、失败模式清单）仍以
 > [`architecture.md`](architecture.md) 为准；本文只覆盖 Phase 2 这一段的范围、
 > 步骤与每一步的关键取舍。
@@ -14,7 +17,7 @@
 | [`../tutorial/`](../tutorial/README.md) | 施工过程：踩了什么坑、怎么发现的 | 当前设计是什么（会随时间失真） |
 | [`reference/`](reference/) | 外部评审等只读材料 | 任何本项目的裁定 |
 
-⚠️ 本文取代了原来的 `phase2-market.md` —— 那份只讲 2.1，
+⚠️ 本文取代了原来的 `phase2-market.md`（以及一度叫 `phase2.md` 的版本）—— 那份只讲 2.1，
 且在 2.1 做完之后就落后了（`agent_verdicts` / `stance` / `raw_hash` / `risk`
 一样都没有）。**按步骤切分设计文档，就会有 N 份各自过期的文档。**
 

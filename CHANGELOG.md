@@ -15,6 +15,47 @@
 
 ## [未发布]
 
+### 新增 · 文档规约（`docs/README.md`）+ 机器强制
+
+文档已经乱到需要规则了：两个同名的 `reference/` 目录、一个只放了一个文件的
+`prompt/`、以及 `phase2.md` 这种「什么的 phase 2」的名字。
+
+🔴 **按生命周期分类，不按主题分类。** 主题会重叠（market 的设计算 design 还是
+tutorial？），生命周期不会 —— 而真正出问题的恰恰是生命周期。
+
+| 目录 | 类别 | 生命周期 | 文件名 |
+|---|---|---|---|
+| `design/` | 常青 / 阶段 | 永远描述当前状态 / 完成后冻结 | `<主题>.md`、`phase-<N>-<主题>.md` |
+| `tutorial/` | 过程 | 写完即冻结 | `NN-<主题>.md` |
+| `guide/` | 操作 | 跑不通就是错的 | `<动作>.md` |
+| `external/` | 只读 | **永不修改** | `YYYY-MM-DD-<来源>-<主题>.md` |
+
+- 只有 `external/` 的文件名带日期：**我们自己的文档历史在 git 里**，
+  文件名带版本号等于邀请别人新建 `v2` 而把旧的留在原地
+- 每份文档开头必须写 **覆盖什么 / 不覆盖什么** ——
+  这次混乱的根因不是缺文档，是没人说清边界，于是内容往最近的那份里落
+
+### 新增 · `docs/design/phase-1-walking-skeleton.md`
+
+Phase 1 的设计原本是 `architecture.md` 的 §11 —— **一段历史躺在常青文档里**。
+后果实测过：那份文档顶部长期写着「设计中，未开工」，
+而那时 Phase 2 都做完两步了。**读者没有办法判断哪些还作数。**
+
+⇒ 抽成独立文档并标注「已完成并冻结」，原处留一行指针（编号不动，引用不断）。
+内容在原 §11 之上补了最终结果：九项验收、74.8s / $0.2179、
+三个「以慢表现的 bug」、以及 Phase 1 留给后面的四笔账。
+
+### 变更 · 文档重组
+
+- `docs/reference/` + `docs/design/reference/` → **`docs/external/`**（两个同名目录）
+- `docs/design/install-guide.md` → `docs/guide/install.md`（安装手册不是设计）
+- `docs/prompt/` → `docs/guide/`
+- `docs/design/phase2.md` → **`docs/design/phase-2-specialists.md`**
+  —— `phase2.md` 答不出「什么的 phase 2」
+- ✅ `tests/test_docs_convention.py`，**六条探针逐个验证过会红**：
+  按步骤切分阶段文档 / 带版本号 / phase 名没主题 / 外部材料无日期 /
+  重建歧义目录 / 没写「不覆盖」
+
 ### 实测 · Stage 2 端到端通过（`BIGA-20260921-004`）
 
 ```

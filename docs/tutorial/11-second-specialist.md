@@ -1,6 +1,10 @@
 # 第 11 章 · 第二个 Specialist：边界划在哪，以及怎么证明它们真的并行
 
-> 对应 Phase 2 的 2.1。设计见 [`docs/design/phase2.md`](../design/phase2.md) §3.1–3.3。
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
+> 对应 Phase 2 的 2.1。设计见 [`docs/design/phase-2-specialists.md`](../design/phase-2-specialists.md) §3.1–3.3。
 
 ---
 

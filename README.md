@@ -171,11 +171,13 @@ python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.jso
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/design/architecture.md`](docs/design/architecture.md) | 系统架构：Agent 拓扑、通信契约、数据架构、延迟预算、路线图 |
-| [`docs/design/phase2.md`](docs/design/phase2.md) | Phase 2 设计：范围、步骤、每步的关键取舍、出口条件 |
-| [`docs/design/install-guide.md`](docs/design/install-guide.md) | 环境安装：在已有 OpenClaw 实例的机器上并排装第二套隔离实例 |
-| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：10 章，真实建造过程 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本与变更历史（每条写「为什么」，不只是「做了什么」） |
+| [`docs/README.md`](docs/README.md) | **文档规约**：放哪、叫什么、谁该更新它（由测试强制） |
+| [`docs/design/architecture.md`](docs/design/architecture.md) | 架构 SSOT：Agent 拓扑、通信契约、数据架构、失败模式清单 |
+| [`docs/design/phase-1-walking-skeleton.md`](docs/design/phase-1-walking-skeleton.md) | Phase 1 设计与验收结果（已冻结） |
+| [`docs/design/phase-2-specialists.md`](docs/design/phase-2-specialists.md) | Phase 2 设计：范围、步骤、关键取舍、出口条件 |
+| [`docs/guide/install.md`](docs/guide/install.md) | 环境安装：在已有 OpenClaw 实例旁并排装第二套 |
+| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：13 章，真实建造过程 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 变更历史（每条写「为什么」，不只是「做了什么」） |
 
 ---
 

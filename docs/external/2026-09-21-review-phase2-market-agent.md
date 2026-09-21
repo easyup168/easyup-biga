@@ -1,5 +1,9 @@
 # EasyUp BigA Phase 2 与 Market Agent 技术设计
 
+> 📄 **只读** · 外部材料，**永不修改**
+> **覆盖**：Phase 2 / Market Agent 的外部设计评审（2026-09-21） ｜ **不覆盖**：采纳与否 —— 见 [`../design/phase2.md`](../design/phase2.md) §5 与教程第 12 章
+
+
 > Status: Draft  
 > Scope: Phase 2 / Market Data / Market Agent  
 > Project: `easyup168/easyup-biga`  

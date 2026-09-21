@@ -1,5 +1,9 @@
 # Phase 1 启动提示词
 
+> 📄 **操作** · 自包含，可直接粘贴
+> **覆盖**：Phase 1 的启动提示词 ｜ **不覆盖**：Phase 1 的实际结果（见 [`../tutorial/`](../tutorial/README.md)）
+
+
 > 用法：在 `~/.openclaw-biga/workspace/` 打开新会话，把下面「提示词正文」整段粘进去。
 > 要求：自包含 —— 不依赖任何先前会话的上下文；引用的文件全部存在。
 
@@ -15,7 +19,7 @@
 1. `CLAUDE.md` —— **三条红线 + 四条不变式 + 9 条已定裁定**。已定的事不要重新讨论
 2. `TODO.md` —— 当前进度与待办，Phase 1 的 8 条验收标准在里面
 3. `docs/design/architecture.md` —— 架构 SSOT。重点看 §三 Agent 拓扑、§四 通信契约、§九 失败模式清单、§十一 Phase 1
-4. `docs/reference/source-design-v1.md` —— 上游需求文档（只读，不改）
+4. `docs/external/2026-09-19-upstream-source-design-v1.md` —— 上游需求文档（只读，不改）
 5. `agents/README.md` —— roster 规划与 workspace 约定
 
 ### 第二步：开工前先跑环境自检

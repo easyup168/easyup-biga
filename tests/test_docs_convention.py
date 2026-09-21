@@ -1,0 +1,116 @@
+"""文档规约 —— 由机器强制，不靠人记得。
+
+规约本身在 `docs/README.md`。这里只负责让违反它的改动**红**。
+
+为什么需要它：本项目已经因为文档命名吃过两次亏 ——
+
+1. `phase2-market.md` 按**步骤**切分常青文档，2.1 做完它就过期了，
+   而名字看起来像「Phase 2 的设计文档」
+2. `architecture.md` 顶部长期写着「设计中，未开工」，
+   那时 Phase 2 都做完两步了 —— 因为一段**历史**躺在**常青**文档里
+
+两次的共同点：**没人说清每份文档的生命周期**，于是内容往最近的那份里落。
+"""
+
+from __future__ import annotations
+
+import pathlib
+import re
+from collections import Counter
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+DOCS = REPO / "docs"
+
+#: 五个类别标记，见 docs/README.md
+CATEGORIES = ("常青", "阶段", "过程", "操作", "只读")
+
+PATTERNS = {
+    "design": re.compile(r"^(phase-\d+-[a-z0-9]+(-[a-z0-9]+)*|[a-z0-9]+(-[a-z0-9]+)*)\.md$"),
+    "tutorial": re.compile(r"^(\d{2}-[a-z0-9]+(-[a-z0-9]+)*|README)\.md$"),
+    "guide": re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\.md$"),
+    "external": re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9]+(-[a-z0-9]+)*\.md$"),
+}
+
+
+def _md_files() -> list[pathlib.Path]:
+    return sorted(p for p in DOCS.rglob("*.md"))
+
+
+def _head(p: pathlib.Path) -> str:
+    """文档开头到第一条分隔线为止 —— 声明必须在这里面。"""
+    return p.read_text(encoding="utf-8").split("\n---", 1)[0]
+
+
+def test_扫到了文档():
+    """防空转：扫描器坏掉时会「零违规」通过，那是最糟的绿。"""
+    assert len(_md_files()) >= 15
+
+
+@pytest.mark.parametrize("path", _md_files(), ids=lambda p: str(p.relative_to(DOCS)))
+def test_文件名符合所在目录的规则(path: pathlib.Path):
+    top = path.relative_to(DOCS).parts[0]
+    if path.parent == DOCS:            # docs/README.md 本身
+        assert path.name == "README.md"
+        return
+    pat = PATTERNS.get(top)
+    assert pat is not None, f"docs/{top}/ 不在规约里 —— 先去 docs/README.md 定义它"
+    assert pat.match(path.name), \
+        f"docs/{top}/{path.name} 不符合命名规则 {pat.pattern}"
+
+
+@pytest.mark.parametrize("path", _md_files(), ids=lambda p: str(p.relative_to(DOCS)))
+def test_开头声明了类别与覆盖范围(path: pathlib.Path):
+    head = _head(path)
+    # 允许带后缀，例如 **阶段 · 已完成并冻结**
+    marker = re.compile(r"\*\*(" + "|".join(CATEGORIES) + r")[^*]*\*\*")
+    assert marker.search(head), \
+        f"{path.name} 开头没有类别标记（{' / '.join(CATEGORIES)}）"
+    assert "**覆盖**：" in head, f"{path.name} 没写覆盖什么"
+    assert "**不覆盖**：" in head, \
+        (f"{path.name} 没写**不覆盖**什么 —— 不写边界，内容就会往最近的那份文档里落")
+
+
+def test_常青文档不带日期或版本号():
+    """我们自己的文档，历史在 git 里。文件名带版本号等于邀请别人新建 v2。"""
+    for p in (DOCS / "design").glob("*.md"):
+        assert not re.search(r"-v\d|\d{4}-\d{2}-\d{2}", p.stem), \
+            f"{p.name} 带了版本号或日期 —— design/ 只描述当前状态"
+
+
+def test_阶段文档必须带主题():
+    """`phase2.md` 答不出「什么的 phase 2」。"""
+    for p in (DOCS / "design").glob("phase*.md"):
+        assert re.match(r"^phase-\d+-[a-z]", p.stem), \
+            f"{p.name} 应形如 phase-2-specialists.md —— 主题不能省"
+
+
+def test_一个阶段只有一份设计文档():
+    """🔴 按步骤切分常青文档，就会有 N 份各自过期的文档。"""
+    nums = Counter(m.group(1) for p in (DOCS / "design").glob("phase-*.md")
+                   if (m := re.match(r"^phase-(\d+)-", p.stem)))
+    dup = [n for n, c in nums.items() if c > 1]
+    assert not dup, \
+        f"Phase {dup} 有多份设计文档 —— 合成一份。按步骤切必然各自过期"
+
+
+def test_教程序号唯一且连续():
+    nums = sorted(int(p.stem[:2]) for p in (DOCS / "tutorial").glob("[0-9][0-9]-*.md"))
+    assert nums == list(range(1, len(nums) + 1)), f"教程序号不连续：{nums}"
+
+
+def test_外部材料带日期前缀():
+    """它是别人在某个时刻的想法的快照，日期是它的一部分。"""
+    for p in (DOCS / "external").glob("*.md"):
+        assert re.match(r"^\d{4}-\d{2}-\d{2}-", p.name), \
+            f"{p.name} 缺日期前缀"
+        assert "只读" in _head(p), f"{p.name} 必须标注只读"
+
+
+def test_没有歧义的目录名():
+    """曾经同时存在 docs/reference/ 与 docs/design/reference/。"""
+    names = [d.name for d in DOCS.rglob("*") if d.is_dir()]
+    assert len(names) == len(set(names)), f"存在同名目录：{names}"
+    assert "reference" not in names, \
+        "`reference` 说不出生命周期 —— 外部只读材料放 docs/external/"
