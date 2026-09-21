@@ -320,9 +320,9 @@ git -C $BIGA_REPO config core.hooksPath tools/git-hooks
 3. [ ] 至少 1 次真实 `BLOCK` 端到端落库，且 `replay --check` 能复现
 4. [ ] `missing[]` 在**真实**缺数据时非空 ≥5 次（不是注入故障）—— 见下方台账
 5. [ ] 延迟预算按实测**重新推导**并写回 `architecture.md` §10.1，**不照抄 105s**
-       🔴 **加 stance 之后 Stage 1 成了新瓶颈**（实测 30.0s → 82.0s，
-       Specialist 输出 tok 1200 → 3100，结构性而非缓存）。
-       候选：把契约里 stance 那节压成决策表减少推理；或 skill 给候选词由 Agent 确认
+       ✅ stance 引入的回退已解决：原因不是「推理变多」而是「找不到词表」——
+       Agent 花 62s / 12 次工具调用去 grep 源码（还跑了 find /）。
+       词表内联进契约后，工具调用 13→2，端到端 115.7s → **70.6s 达标**
        🔴 **2.1 的第一个数据点已经推翻了原假设**：加第二个 specialist 后
        端到端 74.8s → **159.1s（超 90s 预算 1.8×）**，而 Stage 1 只涨 15% ——
        **翻倍的是 Supervisor 合成轮**（30s → ≈111s，输出 tok 1668 → 9486）。
