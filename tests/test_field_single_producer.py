@@ -125,3 +125,39 @@ def test_涨跌家数归market():
     for field in ("advance_count", "decline_count", "flat_count"):
         assert p.get(field) == {"market-calc"}, \
             f"{field} 的生产方应当只有 market-calc，实际 {p.get(field)}"
+
+
+class TestDeclaredDuplicates:
+    """🔴 裁定 15 的受控例外：允许重复，**前提是有人核对**。
+
+    2.3 加 `technical` 时引入了一个漏网的重复：`market.sh_close` 与
+    `technical.close` 是同一个事实（上证收盘价），而单一生产方守卫
+    **比的是字段名**，所以完全没看见。
+
+    修法不是删掉其中一个 —— 两个 agent 从同一个源独立取值，
+    不一致正说明它们看到的不是同一份数据。⇒ 声明它，并要求 risk 核对。
+    """
+
+    def test_声明的重复必须有人核对(self):
+        from _contract import CROSS_CHECK_PAIRS
+        src = (REPO / "skills/risk-check/scripts/risk_check.py").read_text(encoding="utf-8")
+        assert "CROSS_CHECK_PAIRS" in src, \
+            "声明了重复事实却没人核对，就退化成裁定 15 要防的那种情况"
+        assert "cross_check_conflict" in src
+        assert CROSS_CHECK_PAIRS, "表为空说明这条机制没有被用上"
+
+    def test_声明里的字段确实都存在(self):
+        """防止表项写错字段名 —— 那样核对会永远静默跳过。"""
+        from _contract import CROSS_CHECK_PAIRS
+        prod = producers()
+        for a, fa, b, fb, _ in CROSS_CHECK_PAIRS:
+            assert fa in prod or fb in prod, f"{fa}/{fb} 都不存在，表项写错了"
+
+    def test_未声明的重复仍然要红(self):
+        """例外只对**声明过的**生效，不是把规则废掉。"""
+        from _contract import CROSS_CHECK_PAIRS
+        declared = {f for p in CROSS_CHECK_PAIRS for f in (p[1], p[3])}
+        for field, skills in producers().items():
+            if field in _PROVENANCE_FIELDS or field in declared:
+                continue
+            assert len(skills) == 1, f"{field} 有多个生产方且未声明"

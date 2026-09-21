@@ -40,6 +40,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    CROSS_CHECK_PAIRS,
     STAGE1_AGENTS,
     AgentVerdict,
     Evidence,
@@ -182,6 +183,28 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
                 break
     add("tripped_thresholds", tripped, "被触发的风险阈值")
 
+    # --- 被声明的重复事实：两个 agent 独立取的同一个值，必须相等 ---
+    # 🔴 这是裁定 15 的受控例外：允许重复，**前提是有人核对**。
+    #    不一致意味着两者看到的不是同一份数据 —— 那时它们的结论没有共同基准。
+    by_agent = {v.agent: v.result for v in upstream}
+    xconf: list[str] = []
+    for a, fa, b, fb, label in CROSS_CHECK_PAIRS:
+        va, vb = by_agent.get(a, {}).get(fa), by_agent.get(b, {}).get(fb)
+        if va is None or vb is None:
+            continue
+        try:
+            same = abs(float(va) - float(vb)) < 1e-6
+        except (TypeError, ValueError):
+            same = va == vb
+        if not same:
+            xconf.append(f"{label}: {a}.{fa}={va} vs {b}.{fb}={vb}")
+    add("cross_check_conflict", xconf, "跨源校验不一致之处")
+    if xconf:
+        missing.append(MissingItem(
+            "风险判断的事实基准 —— " + "；".join(xconf)
+            + " —— 两个 Agent 取的是同一个源，值却不同，说明它们看到的不是同一份数据",
+            "risk.upstream.cross_check_conflict"))
+
     # --- 上游 stance 互斥 ---
     stances = {v.agent: v.stance for v in upstream if v.stance}
     conflicts = [f"{a}={x} 与 {b}={y}"
@@ -216,7 +239,7 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
 
 
 #: 数据齐备时应当产出的字段数（同 market/emotion，故意不截断，由测试钉死）。
-_EXPECTED_FIELDS = 9
+_EXPECTED_FIELDS = 10
 
 
 def main(argv: list[str] | None = None) -> int:
