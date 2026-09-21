@@ -34,10 +34,12 @@ wrapper 强制 `--profile`、openclaw 装在 nvm 之外。
 演练的价值完全取决于基线记得够不够细。记了六项：
 
 ```bash
-echo "--- 18789 监听者 ---"; ss -lntp | grep 18789
+# OTHER_PORT / OTHER_STATE / OTHER_CONFIG = 同机已有实例的端口与文件
+#   （具体值属于本机情况，不写死在教程里）
+echo "--- 监听者 ---";        ss -lntp | grep "$OTHER_PORT"
 echo "--- 该进程启动时间 ---"; ps -o lstart= -p <pid>
-echo "--- state mtime ---";  stat -c '%y' ~/.openclaw/state/openclaw.sqlite
-echo "--- config mtime ---"; stat -c '%y' ~/.openclaw/openclaw.json
+echo "--- state mtime ---";  stat -c '%y' "$OTHER_STATE"
+echo "--- config mtime ---"; stat -c '%y' "$OTHER_CONFIG"
 echo "--- nvm default ---";  cat ~/.nvm/alias/default
 echo "--- nvm bin 里有 openclaw 的版本 ---"; ls ~/.nvm/versions/node/*/bin/openclaw
 ```
@@ -45,7 +47,7 @@ echo "--- nvm bin 里有 openclaw 的版本 ---"; ls ~/.nvm/versions/node/*/bin/
 结果：
 
 ```
-18789 监听 pid:   391
+已有实例监听 pid:  391
 启动时间:         Sat Sep 19 06:17:40 2026
 state mtime:      2026-09-19 15:47:43.855767307 +0800
 config mtime:     2026-08-16 18:59:15.046429632 +0800
@@ -157,7 +159,7 @@ sleep 6
   ✅ 19789 不再监听
 
 --- 已有实例六项 ---
-  18789 监听 pid:    391                              （基线 391）
+  已有实例监听 pid:   391                              （基线 391）
   该进程启动时间:     Sat Sep 19 06:17:40 2026         （基线一致）
   state mtime:       2026-09-19 15:47:43.855767307    （基线一致）
   config mtime:      2026-08-16 18:59:15.046429632    （基线一致）

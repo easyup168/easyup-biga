@@ -29,10 +29,14 @@ Phase 1 一直没撞上，纯粹因为那几天的实测都发生在**收盘后�
 
 from __future__ import annotations
 
+import pathlib
 import sys
 from datetime import date, datetime, time as dtime
 
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+# 原来这里写的是 `__import__("pathlib").Path(...)` —— 省了一行 import，
+# 但那个写法正是 F12 用来绕开 sqlite 扫描的同一种手法。
+# 业务代码里不该出现它，所以老老实实 import。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from _contract import CN_TZ  # noqa: E402
 
