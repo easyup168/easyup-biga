@@ -20,8 +20,9 @@
 2. `README.md` —— 项目概览与当前状态表
 3. `docs/design/architecture.md` —— **架构 SSOT**。任何结构性问题先查它
 4. `TODO.md` —— 当前进度与待办
-5. `CHANGELOG.md` —— 版本与变更历史
-5. `docs/reference/source-design-v1.md` —— 上游需求文档（只读，不改）
+7. `CHANGELOG.md` —— 版本与变更历史
+5. `docs/README.md` —— **文档规约**：新写文档前必读
+6. `docs/external/2026-09-19-upstream-source-design-v1.md` —— 上游需求文档（只读，不改）
 
 ---
 
@@ -149,6 +150,32 @@ Phase 3 之前必须换成 BigA 自己的凭据。触发条件任一成立即换
 1. 管理员批下了独立的 Anthropic API key
 2. *** 策略放开 `***`
 3. 出现第一次「因这条耦合导致的误判排查」
+
+---
+
+## 文档纪律
+
+新写任何文档之前先读 `docs/README.md`。规约由 `tests/test_docs_convention.py` 强制。
+
+一句话版本：**按生命周期分类，不按主题分类。**
+
+| 目录 | 类别 | 谁该更新它 |
+|---|---|---|
+| `docs/design/` | 常青 / 阶段 | 改代码的人 |
+| `docs/tutorial/` | 过程 | 写完即冻结 |
+| `docs/guide/` | 操作 | 跑不通就是错的 |
+| `docs/external/` | 只读 | **永不修改** |
+
+两条踩出来的硬规矩：
+
+1. **常青文档不许按阶段/步骤切分** —— `phase2-market.md` 写于 2.1 开工前，
+   做完就过期了，而名字看起来像「Phase 2 的设计文档」
+2. **阶段完成后要冻结并搬出常青文档** —— Phase 1 的设计原本是
+   `architecture.md` §11，导致那份文档顶部长期写着「设计中，未开工」，
+   而那时 Phase 2 都做完两步了
+
+每份文档开头必须写 **覆盖什么 / 不覆盖什么**。
+不写边界，内容就会往**最近的那份**里落 —— 这是本次混乱的根因。
 
 ---
 

@@ -287,7 +287,7 @@ git -C $BIGA_REPO config core.hooksPath tools/git-hooks
 
 ## Phase 2 · 补齐到 7 个 agent（当前阶段）
 
-> 🔴 **设计 SSOT 是 [`docs/design/phase2.md`](docs/design/phase2.md)。**
+> 🔴 **设计 SSOT 是 [`docs/design/phase-2-specialists.md`](docs/design/phase-2-specialists.md)。**
 > 本节只留勾选状态 —— 「为什么这么设计」写在那边，两处都写必然漂。
 
 > 🔴 **在独立分支 `phase2` 上开发**（裁定 14）—— `main` 保持 Phase 1 已验收的状态。

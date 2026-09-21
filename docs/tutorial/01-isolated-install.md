@@ -1,9 +1,13 @@
 # 第 01 章 · 隔离安装：在已有实例旁边装第二套 OpenClaw
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：在一台已经跑着 OpenClaw 的机器上，装出第二套完全独立的实例，
 > 且让第一套**毫无感知**。
 >
-> 命令级的完整步骤在 [`docs/design/install-guide.md`](../design/install-guide.md)。
+> 命令级的完整步骤在 [`docs/guide/install.md`](../guide/install.md)。
 > 本章讲的是**为什么** —— 两个陷阱，都属于「默认行为在共享资源上悄悄生效」。
 
 ---

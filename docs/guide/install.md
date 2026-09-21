@@ -1,5 +1,9 @@
 # EasyUp for BigA 2.0 — 环境安装指南
 
+> 📄 **操作** · 随环境更新；**跑不通就是错的**
+> **覆盖**：在已有 OpenClaw 实例旁并排装第二套 ｜ **不覆盖**：为什么这么设计（见 [`../design/architecture.md`](../design/architecture.md)）
+
+
 > 在一台**已经跑着另一套 OpenClaw 生产实例**的机器上，
 > 并排装第二套隔离的 OpenClaw，且保证生产零影响。
 >

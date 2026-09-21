@@ -1,8 +1,12 @@
 # EasyUp for BigA 2.0 — 系统架构设计
 
-> created: 2026-09-19 | author: 小易 | status: **设计中，未开工**（等小飞说「开始」）
-> 上游：`$HOME/references/EasyUp_for_BigA_2.0_...docx`（V1.0 参考文档）
-> 姊妹文档：`docs/design/easyup-biga-2.0-evaluation.md`（评估，结论被小飞覆盖，见 §0.2）
+> 📄 **常青** · 随代码同步
+> **覆盖**：Agent 拓扑、通信契约、数据架构、失败模式清单、延迟预算 ｜ **不覆盖**：阶段进度（见 [`phase-2-specialists.md`](phase-2-specialists.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）
+
+
+> 上游需求：[`../external/2026-09-19-upstream-source-design-v1.md`](../external/2026-09-19-upstream-source-design-v1.md)（只读）
+> ⚠️ 本文**不标 status/日期** —— 常青文档的状态就是「现在」，历史在 git 里。
+> （原来这里写着「设计中，未开工」，而那时 Phase 2 已经做完两步了）
 
 ---
 
@@ -608,61 +612,16 @@ Phase 2 结束时出一张「单次决策成本分解」，据此决定要不要
 
 ## 十一、Phase 1：最简功能验证
 
-> 小飞的原话：「先安装好新版 openclaw，实现最简单的功能验证」。
-> 本节把「最简单」定义清楚，避免范围漂移。
+> 📄 **已完成并冻结** —— 完整内容见
+> [`phase-1-walking-skeleton.md`](phase-1-walking-skeleton.md)。
+>
+> 这里只留指针。本文是**常青**文档（永远描述当前状态），
+> 而 Phase 1 的设计描述的是一个**已经结束的阶段** ——
+> 生命周期不同的东西放在一起，读者就无法判断哪些还作数。
 
-### 11.1 目标：一条最细的、端到端能走通的线
+结论：`main` + `emotion` 两个 agent，九项验收全过，端到端 74.8s / $0.2179。
 
-**只建 2 个 agent**（`main` + `emotion`），不是 8 个。
-
-理由：Phase 1 要验证的是**机制**（跨 agent spawn 能不能通、契约能不能落、能不能回放），
-不是**覆盖面**。机制通了，其余 6 个是复制。
-而且一上来建 8 个空 agent = 6 个零消费方组件，正是 L-1 要防的。
-
-选 `emotion` 做第一个 specialist：它最确定性（阈值+计数），最容易判断「答得对不对」。
-
-### 11.2 步骤
-
-| # | 动作 | 产物 / 验证 |
-|---|---|---|
-| 1 | 装 node **v24.21.0**（增量；不改 `default`、不卸 v24.18.0） | `nvm ls` 见到它；生产 gateway pid 不变 |
-| 2 | `npm i --prefix ~/.openclaw-biga/runtime openclaw@latest` —— 🔴 **不装进 nvm bin**（约束 D-1） | `runtime/node_modules/.bin/openclaw --version` ≥2026.9.5；且 `v24.21.0/bin/` 里**没有** openclaw |
-| 3 | 写 `~/.openclaw-biga/bin/biga` wrapper（强制 `--profile biga`）并加执行位 | `biga --version` 可用 |
-| 4 | 🔴 **生产侧**加一条守卫测试，断言其 PATH 解析 → `v24.18.0` | 绿（这是 D-1 的常驻守卫） |
-| 5 | `biga setup`：端口 **19789**，**跳过飞书** | `~/.openclaw-biga/openclaw.json` 生成 |
-| 6 | 在 `~/.openclaw-biga/workspace/` 建 git 仓库 + §2.4 骨架 + `.gitignore`（`data/`） | `git log` 有首个 commit |
-| 7 | 写 `skills/_contract/`（Evidence / AgentVerdict / DecisionCard） | `tests/test_contract_single_impl.py` 绿 |
-| 8 | 写 `skills/_store/db.py` + 三张表（`decision_records` / `agent_runs` / `raw_market_snapshot`） | `tests/test_no_raw_sqlite.py` 绿 |
-| 9 | 写 `skills/emotion-calc/` —— 真采一次 A 股情绪数据，输出 `AgentVerdict` | 命令行跑出带 `as_of` 的 JSON |
-| 10 | 建 agent `emotion`（`--workspace ~/.openclaw-biga/workspace/agents/emotion`）+ 写它的 AGENTS.md | `biga agents list` 见到它 |
-| 11 | 配 `main`(Supervisor)：AGENTS.md / SOUL.md / IDENTITY.md 落在**仓库根** + `allowAgents:["emotion"]` + `agentToAgent.allow` | |
-| 12 | 跑通：`biga agent --agent main -m "今天市场情绪怎么样？"` | 见 §11.3 |
-| 13 | 实现 `replay <decision_id>`（与在线路径共用同一份合成代码） | 同一 verdicts 重跑出一致结论 |
-| 14 | 隔离演练：`kill -9` BigA gateway 进程 | 生产 gateway pid 不变（不变式 I-2） |
-
-⚠️ 第 1 步只装 **node**；openclaw 在第 2 步用 `--prefix` 装到 profile 目录内。
-把这两步合成「在新 node 下 `npm i -g openclaw`」就会直接踩中 D-1。
-
-### 11.3 Phase 1 验收（全部满足才算过）
-
-1. Supervisor 收到问题后**确实 spawn 了 `emotion`**（`agent_runs` 有该行，不是自己编的）
-2. `emotion` 返回的是**合法 `AgentVerdict`**，含 ≥1 条带 `as_of` 的 `Evidence`
-3. 输出一张 **Decision Card**，含状态 + 证据 + 缺失项三段
-4. `decision_records` 落库 1 行，`biga replay` 能重跑出一致结论
-5. 故意把情绪数据源打断 → Card 显示 `UNKNOWN` + `missing` 非空，**不是 PASS**（L-2）
-6. 生产侧：gateway pid、openclaw 版本、`default` alias、PATH、18789 监听 —— 五项全部未变
-6b. 🔴 生产侧的 PATH 解析仍指向 **v24.18.0**（约束 D-1 未被破坏）
-7. 单次端到端 **< 90s**（热缓存，2 个 agent）—— 判据是 `latency_report.py` 的
-   **等卡墙钟**，不是 Card 上 Supervisor 自报的 `elapsed_ms`。
-   90s = Stage 0/1/3 预估上界之和（10+40+30 = 80s）+ 10s 盘中网络余量。
-   ⚠️ 八 Agent 的 105s 出自同一套「下界相加」的算术，且 Stage 3 在**只有一个**
-   specialist 时就已经压着 30s 上沿 —— 那个数要等 Phase 2 有数据了重新推，
-   **现在不改，也不要拿它当承诺**。
-
-### 11.4 Phase 1 明确不做
-
-装飞书 / 建任何 cron / 接任何下单路径 / 建其余 6 个 agent /
-PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI。
+Phase 2 及以后的设计见 [`phase-2-specialists.md`](phase-2-specialists.md)。
 
 ---
 

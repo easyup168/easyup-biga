@@ -1,5 +1,9 @@
 # 第 02 章 · Profile 初始化：为什么不走 onboarding 向导
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：生成 `openclaw.json`，把端口、模型、并发配好，且全程不接 IM 通道。
 >
 > **本章产出**：`~/.openclaw-biga/openclaw.json`（不进 git）+ 仓库根的四个 bootstrap 文件。

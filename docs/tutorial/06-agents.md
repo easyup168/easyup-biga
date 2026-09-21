@@ -1,5 +1,9 @@
 # 第 06 章 · 建 Agent：脚手架给你的默认值，多半不是你要的
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：建出 `emotion` Specialist，配好 Supervisor 的委派白名单。
 >
 > **本章产出**：`agents/emotion/AGENTS.md` + 仓库根的 `AGENTS.md` / `SOUL.md` /

@@ -1,5 +1,9 @@
 # 第 07 章 · 端到端：证明 Supervisor 真的调了 Specialist
 
+> 📄 **过程** · 写完即冻结（只追加「⏩ 后续变动」指针）
+> **覆盖**：这一段是怎么建起来的 ｜ **不覆盖**：当前设计（见 [`../design/`](../design/architecture.md)）
+
+
 > **本章目标**：`biga agent --agent main -m "今天市场情绪怎么样？"` 跑通，
 > 并**证明** emotion 确实被调用了 —— 不是 Supervisor 自己编的。
 >

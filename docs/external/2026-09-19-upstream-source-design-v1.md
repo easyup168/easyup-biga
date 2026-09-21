@@ -1,5 +1,9 @@
 # EasyUp for BigA 2.0 — 上游参考设计 V1.0
 
+> 📄 **只读** · 外部材料，**永不修改**
+> **覆盖**：上游需求文档 v1（2026-09-19 收到） ｜ **不覆盖**：本项目的任何裁定 —— 与它冲突之处见 [`../design/architecture.md`](../design/architecture.md) 的「刻意偏离」
+
+
 > 本文是本项目的**上游需求文档**，由 `EasyUp_for_BigA_2.0_OpenClaw_多Agent生产架构设计_V1.0.docx` 转换而来。
 > 原样保留，**不做修改** —— 实现与它的每一处偏离都在 `docs/design/architecture.md` 里显式标注并说明理由。
 
