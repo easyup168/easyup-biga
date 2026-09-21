@@ -298,3 +298,46 @@ def test_设计文档点名的文件必须真实存在(path: pathlib.Path):
         f"  要么建出来，要么在同一行标注 {_UNBUILT_MARKS[0]} —— \n"
         "  设计文档用陈述句提到一个文件，读者会认为这条风险已经有人管了。"
     )
+
+
+# ──────────────────────── 反向：建了东西却没写进设计文档
+#
+# 上面那条守的是「文档点名了不存在的文件」（F7）。它的**反面**同样会咬人，
+# 而且更安静：**东西建出来了，设计文档只字未提。**
+#
+# 🔴 实测：问「Phase 2 的功能都反映到设计里了吗」，机器扫了一遍，
+#    `sanity.py`、`spawn_check.py`、`server_as_of`、`StoreNotInitialised`
+#    **四样在任何设计文档里都找不到** —— 而它们全是当天刚建的。
+#
+# 两条守卫方向相反，缺一不可：
+#
+#   文档 → 代码   幽灵文件：说了有，其实没有
+#   代码 → 文档   孤儿组件：做了，但没人知道
+#
+# ⚠️ 只管**面向使用者的入口**（`tools/verify/` 下的工具、`skills/_*` 共享层），
+#    不管每一个业务脚本 —— 那会逼出一堆为了过测试而写的空话。
+
+#: 必须在 `docs/design/` 里被提到的东西。判据是「谁会去找它」：
+#: 巡检工具是人手工敲的命令，共享层是写新 skill 时要照着用的。
+def _entry_points() -> list[pathlib.Path]:
+    out = [p for p in (REPO / "tools" / "verify").iterdir()
+           if p.suffix in (".py", ".sh") and not p.name.startswith("_")]
+    out += [p for p in (REPO / "skills").glob("_*/*.py")
+            if p.name != "__init__.py"]
+    return sorted(out)
+
+
+def test_扫到了入口():
+    assert len(_entry_points()) >= 12, "一个都没扫到的话下面那条等于没测"
+
+
+@pytest.mark.parametrize("path", _entry_points(), ids=lambda p: p.name)
+def test_每个入口都在设计文档里被提过(path: pathlib.Path):
+    design = "\n".join(f.read_text(encoding="utf-8")
+                       for f in sorted((DOCS / "design").glob("*.md")))
+    assert path.name in design, (
+        f"{path.relative_to(REPO)} 建出来了，但 `docs/design/` 里一个字都没提。\n"
+        "  ⚠️ 这不是「补一行文件名」就完了 —— 要写清楚**它解决什么问题**，\n"
+        "     否则三个月后没人知道能不能删它。\n"
+        "  真的只是内部实现？改名加 `_` 前缀，它就不算入口了。"
+    )

@@ -8,9 +8,9 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/589%20TESTS-PASSING-2ea043)
-![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v4%20%C2%B7%205%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-17%20%E7%AB%A0-8957e5)
+![Tests](https://img.shields.io/badge/617%20TESTS-PASSING-2ea043)
+![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v5%20%C2%B7%205%20tables-555)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-18%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
 ![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
 
@@ -197,9 +197,11 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v5 —— 决策编号原子分配器 + 只追加保护 | ✅ |
-| 589 条测试 | ✅ |
+| 617 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
+| **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
+| 两份外部对抗性评审共 29 条发现 | 🔶 15 模式级 / 7 **实例级（模式还在）** / 1 修不干净 |
 | 至少 1 次真实「否决」端到端落库 | ⬜ |
 | 真实缺失项跨天累积 ≥5 次 | 🔶 数够了，但全在同一天 |
 
@@ -261,13 +263,15 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 ├── agents/          各 Agent 的 workspace（AGENTS.md = 角色契约唯一载体）
 ├── skills/
 │   ├── _contract/   Evidence / AgentVerdict / DecisionCard（唯一实现）
-│   └── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
+│   ├── _sources/    采集层：四个数据源 + 重试 + 交易日 + 量级围栏
+│   ├── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
+│   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
-├── tools/           cron 调度 + 验证工具
-├── tests/           589 条测试
+├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
+├── tests/           617 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（17 章，与代码同步）
+│   └── tutorial/    开发教程（18 章，与代码同步）
 └── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 
