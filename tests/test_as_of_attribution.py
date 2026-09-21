@@ -150,3 +150,76 @@ class TestMixedAsOfIsVisible:
         assert old.strftime("%m-%d %H:%M") in text
         assert now.strftime("%m-%d %H:%M") in text, \
             "两个 as_of 必须都出现在卡上 —— 否则读的人以为它们是同一时刻"
+
+
+# ══ 外部评审 P1-1：Decision Identity ═════════════════════════════
+#
+# 评审指出：`synthesize.py` 有「所有 verdict 的 task_id 必须一致」的检查，
+# 但**契约层没有** ⇒ 可以构造「卡 001 装着 999 的 verdict」并落库（实测通过）。
+#
+# 守卫在编排层就只守得住走编排层的那条路。
+#
+# ⚠️ 评审建议的验收是「Replay 也无法绕过」，但实测已落库 31 张卡里有 20 张
+#    的 verdict 写着别的号（Stage 0 占号是后来才加的）。一刀切会让它们永远读不出来。
+#    ⇒ 改成三段式：新卡拒绝 / 旧卡可读但显示 / **落库永远拒绝**。
+#    这与 stance 检查的取舍同源：能不能重建「当时看到的东西」优先于形式一致。
+
+
+class TestDecisionIdentity:
+    @staticmethod
+    def _v(agent: str, task_id: str):
+        t = now_cn()
+        return AgentVerdict(
+            agent=agent, task_id=task_id, status="completed", verdict="PASS",
+            stance="分化", result={"trade_date": "2026-09-18"},
+            evidence=[Evidence(field="trade_date", value="2026-09-18",
+                               source="probe", as_of=t, retrieved_at=t)])
+
+    def _card(self, did: str, tids: list[str], **kw):
+        return DecisionCard(
+            decision_id=did, status="WAIT", headline="h",
+            verdicts=[self._v(f"a{i}", t) for i, t in enumerate(tids)],
+            synthesis="s", model_ref="m", **kw)
+
+    def test_新造的卡装着别人的判定要被拒(self):
+        import pytest
+        with pytest.raises(ValueError, match="不属于它的判定"):
+            self._card("BIGA-20260921-001", ["BIGA-20260921-999"])
+
+    def test_多个外来判定也要被拒(self):
+        import pytest
+        with pytest.raises(ValueError, match="不属于它的判定"):
+            self._card("BIGA-20260921-001",
+                       ["BIGA-20260921-998", "BIGA-20260921-999"])
+
+    def test_一致的卡正常构造(self):
+        c = self._card("BIGA-20260921-001",
+                       ["BIGA-20260921-001", "BIGA-20260921-001"])
+        assert c.identity_warning == ""
+
+    def test_历史卡可读但卡面要显示(self):
+        """🔴 这条是与评审建议不同的地方，理由见本节开头。"""
+        c = self._card("BIGA-20260921-001", ["BIGA-20260921-999"],
+                       from_store=True)
+        assert c.identity_warning, "历史卡没有记下身份问题"
+        assert "提请注意" in c.render() and "无法核实" in c.render()
+
+    def test_from_dict_读历史卡不抛错(self):
+        # contract-exempt: 这里就是要模拟「从库里读回来的 JSON」
+        d = {"decision_id": "BIGA-20260921-001", "status": "WAIT",
+             "headline": "h", "synthesis": "s", "model_ref": "m",
+             "missing": [], "generated_at": "", "elapsed_ms": 0,
+             "verdicts": [self._v("market", "BIGA-20260921-999").to_dict()]}
+        c = DecisionCard.from_dict(d)
+        assert c.identity_warning
+
+    def test_历史卡不许再写回库(self, tmp_path):
+        """读可以宽，**写必须严** —— 否则「读一张旧卡再存回去」就洗白了它。"""
+        import pytest
+        from _store import db
+        p = tmp_path / "t.db"
+        db.init_schema(p)
+        c = self._card("BIGA-20260921-001", ["BIGA-20260921-999"],
+                       from_store=True)
+        with pytest.raises(ValueError, match="拒绝落库"):
+            db.save_card(c, path=p)

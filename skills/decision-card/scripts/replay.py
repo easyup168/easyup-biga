@@ -82,7 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         extra_missing=extra_missing,
     )
 
+    # 回放历史卡：Stage 0 统一占号之前的卡，判定编号与卡号不一致。
+    # 让契约层降级为提示而不是拒绝 —— 否则历史读不出来。详见 card_ops.synthesize。
     replayed = synthesize(
+        historical=True,
         decision_id=original.decision_id,
         verdicts=original.verdicts,      # 冻结的证据，不重新采集
         judgment=judgment,

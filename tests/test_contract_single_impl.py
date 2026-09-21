@@ -29,7 +29,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CONTRACT_DIR = REPO / "skills" / "_contract"
 
-EXCLUDE_DIRS = {".git", "__pycache__", "node_modules", "runtime", ".pytest_cache", "data"}
+from _scan import repo_files  # noqa: E402
 
 EXEMPT_MARKER = "contract-exempt:"
 
@@ -65,12 +65,8 @@ MIN_DICT_KEYS = 4
 
 
 def _py_files() -> list[pathlib.Path]:
-    out: list[pathlib.Path] = []
-    for p in REPO.rglob("*.py"):
-        if any(part in EXCLUDE_DIRS for part in p.relative_to(REPO).parts):
-            continue
-        out.append(p)
-    return sorted(out)
+    # 🔴 走 git 的口径，不走文件系统 —— 见 `tests/_scan.py` 的「worktree 副本」一节
+    return repo_files(".py")
 
 
 def _is_exempt(lines: list[str], lineno: int) -> bool:

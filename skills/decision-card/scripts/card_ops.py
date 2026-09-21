@@ -62,6 +62,7 @@ def synthesize(
     model_ref: str,
     elapsed_ms: int = 0,
     generated_at: str = "",
+    historical: bool = False,
 ) -> DecisionCard:
     """把 Verdict 组装成 Card。**纯函数，不碰 IO。**
 
@@ -70,6 +71,18 @@ def synthesize(
 
     缺失项的聚合规则：各 Verdict 的 `missing` 之并集 ∪ Supervisor 自己发现的。
     去重但**保持首次出现的顺序** —— 顺序稳定，回放的 diff 才是干净的。
+
+    Args:
+        historical: 🔴 **只有回放历史卡时才传 True。**
+
+            契约层要求「卡上的每条判定都属于这张卡」（外部评审 P1-1）。
+            但 Stage 0 统一占号是后加的，已落库 31 张里有 **20 张**
+            的判定写着别的号。回放这些卡时重新合成会撞上那条约束 ——
+            于是**历史再也读不出来**。
+
+            传 True 让契约层降级为「记下来并显示在卡面上」。
+            ⚠️ 它只影响**能不能构造**；`save_card()` 仍然无条件拒绝，
+            所以「读一张旧卡再存回去」洗不白它。
     """
     seen: set[str] = set()
     missing: list[MissingItem] = []
@@ -84,6 +97,7 @@ def synthesize(
 
     # 契约层会在这里拒绝：missing 非空却给 BUY、BLOCK 却给 BUY、缺失项没上浮……
     return DecisionCard(
+        from_store=historical,
         decision_id=decision_id,
         status=judgment.status,
         headline=judgment.headline,
