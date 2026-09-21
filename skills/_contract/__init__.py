@@ -14,6 +14,7 @@ from .missing import LEGACY_CODE, MissingItem
 from .verdict import (
     STANCE_VOCAB,
     TASK_ID_RE,
+    VETO_STANCE,
     AgentVerdict,
     VerdictLevel,
     VerdictStatus,
@@ -25,6 +26,7 @@ __all__ = [
     "LEGACY_CODE",
     "MissingItem",
     "STANCE_VOCAB",
+    "VETO_STANCE",
     "DECISION_ID_RE",
     "TASK_ID_RE",
     "AgentVerdict",

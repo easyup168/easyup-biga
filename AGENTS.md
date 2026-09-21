@@ -51,11 +51,12 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 |---|---|---|
 | `emotion` | A 股情绪周期位置 | 问到市场情绪 / 赚钱效应 / 涨停炸板 / 能不能追高 |
 | `market` | 市场状态：指数、成交额、量能、宽度 | 问到大盘 / 指数 / 成交量 / 市场强弱 / 今天行情怎么样 |
+| `risk` | **制衡层**：依据 Stage 1 的冻结证据判断这单能不能做 | **每次都要调**，见 Stage 2 |
 
-⚠️ **两者的边界**：涨停炸板连板 → `emotion`；指数成交额量能宽度 → `market`。
+⚠️ **边界**：涨停炸板连板 → `emotion`；指数成交额量能宽度 → `market`。
 涨跌家数（市场宽度）归 `market`，不要找 `emotion` 要。
 
-其余 5 个（`sector` / `news` / `technical` / `risk` / `discipline`）
+其余 4 个（`sector` / `news` / `technical` / `discipline`）
 **尚未建立**。被问到它们的领域时，如实说「该 Agent 尚未上线」，
 并把它写进 Card 的缺失项 —— **不要自己代答**。
 
@@ -208,8 +209,45 @@ Specialist 一返回你立刻接着做。
 
 ### Stage 2 · 制衡层
 
-Phase 1 无 `risk` / `discipline`，跳过。
-**但要在 Card 的缺失项里写明「未经风险审查」** —— 跳过了就要说跳过了。
+Stage 1 全部返回之后，**必须**再 spawn 一次 `risk`。它是本系统唯一有否决权的 Agent。
+
+#### 🔴 传给它的是 Stage 1 的编号，不是新任务
+
+```
+mcp__openclaw__sessions_spawn  agentId="risk"  context="isolated"
+```
+
+指令里**必须**带上 Stage 1 各 Specialist 给你的那串 `verdict_ref`，照抄这段：
+
+```
+请依据 Stage 1 的冻结证据做风险审查。
+Stage 1 的 verdict_ref：<逗号分隔的编号，例如 22,23>
+不要自己重新采集数据。
+```
+
+##### 为什么必须是「冻结证据」而不是让它自己看一遍
+
+制衡的意义在于审**别人据以下结论的那份证据**。risk 自己重采一遍，
+看到的就可能是另一个市场 —— 那时候它审的是自己的幻觉，不是这次决策的依据。
+而且回放时两边对不上，「当时为什么放行」就永远查不清了。
+
+⚠️ Stage 1 的结果**不许在这一步被修改**。你不能因为 risk 有意见就回头改
+Stage 1 的判定 —— 那些原件是只追加的，改不了，也不该想去改。
+
+#### 🔴 risk 说「否决」时你必须照办
+
+| risk 的 stance | 你的 Card 状态 |
+|---|---|
+| `放行` | 按 Stage 1 的证据正常判断 |
+| `警示` | 正常判断，但必须在 `--synthesis` 里说明它警示了什么 |
+| `否决` | **只能是 `AVOID` 或 `BLOCK`** |
+| `无法判定` | **不许 `BUY`**（它没看清，不等于没风险） |
+
+契约层会强制这几条：给 `BUY` 或 `WAIT` 会被直接拒绝，报错会告诉你原因。
+**不要试图绕过** —— 制衡层的否决权不可被合成阶段软化。
+
+⚠️ 特别地：`无法判定` **不是**放行。一个说不上话的风控，
+必须让人在卡上看出它说不上话。
 
 ### Stage 3 · 合成
 
@@ -233,7 +271,6 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
   --status WAIT \
   --headline "核心矛盾一句话" \
   --synthesis "两三句说明，数字必须来自上面的 evidence" \
-  --extra-missing supervisor.agent_offline "risk agent 尚未上线，本卡未经风险审查" \
   --extra-missing supervisor.agent_offline "discipline agent 尚未上线" \
   --model-ref anthropic/claude-sonnet-5
 ```
@@ -256,6 +293,12 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
 
 没有代码，缺失项就只能数次数，说不出是哪一类 —— 而「哪一类」正是
 将来判断「系统到底缺什么数据」时唯一有用的信息。
+
+#### 🔴 三个 Stage 的判定要一起交
+
+`--verdict-ids` 里要包含 **Stage 1 的全部 + Stage 2 的 risk**。
+漏掉 risk，那张卡上就看不到风险审查这一段 —— 而契约层拦不住这种「少交一个」，
+它只能检查交上来的那些。**这一条只有你自己守得住。**
 
 #### 🔴 Specialist 必须带 stance，否则出不了卡
 

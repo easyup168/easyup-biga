@@ -24,6 +24,7 @@ from .missing import MissingItem
 
 __all__ = [
     "STANCE_VOCAB",
+    "VETO_STANCE",
     "AgentVerdict",
     "VerdictStatus",
     "VerdictLevel",
@@ -32,7 +33,12 @@ __all__ = [
 ]
 
 VerdictStatus = Literal["completed", "partial", "failed"]
-VerdictLevel = Literal["PASS", "WARNING", "BLOCK", "UNKNOWN"]
+#: 🔴 只描述**数据完整度**，不含任何业务判断。
+#:
+#: 这里原本还有一个 `BLOCK`（制衡层的否决）。它被移到 `stance` 去了，理由是
+#: **一个字段装不下两件事**：risk 数据完整且要否决时，`verdict` 填 `BLOCK`
+#: 就再也说不出「它的数据是全的」—— 而「否决」与「凭什么否决」恰恰都需要知道。
+VerdictLevel = Literal["PASS", "WARNING", "UNKNOWN"]
 
 _STATUSES: frozenset[str] = frozenset(get_args(VerdictStatus))
 _LEVELS: frozenset[str] = frozenset(get_args(VerdictLevel))
@@ -49,9 +55,17 @@ TASK_ID_RE = re.compile(r"^BIGA-\d{8}-\d{3}$")
 #: ⚠️ 这张表与各 agent `AGENTS.md` 里的判断表是同一套口径，
 #:    由 `tests/test_stance_vocab.py` 钉死两边一致 —— 否则改了一边忘了另一边，
 #:    agent 会给出一个契约层拒绝的词，然后花几轮去猜。
+#: 🔴 制衡层的否决。它是一个**权限**，不是一句措辞 ——
+#:    `DecisionCard` 用它拦住 BUY，所以这个字面量只许有一处定义。
+#:    写死成常量而不是散在各处的字符串：改了词表却忘了改判据，
+#:    否决权会**静默失效**，而那是本项目最怕的 fail-open。
+VETO_STANCE = "否决"
+
 STANCE_VOCAB: dict[str, tuple[str, ...]] = {
     "market": ("放量上涨", "缩量上涨", "缩量调整", "放量下跌", "分化", "无法判定"),
     "emotion": ("冰点", "修复", "亢奋", "衰退", "恐慌", "无法判定"),
+    # 制衡层：它不描述市场，它描述「这单能不能做」
+    "risk": ("放行", "警示", VETO_STANCE, "无法判定"),
 }
 
 
