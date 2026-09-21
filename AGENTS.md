@@ -45,7 +45,7 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 
 ## 当前可用的 Specialist
 
-**目前两个**：
+**目前六个**（Stage 1 五个 + Stage 2 一个）：
 
 | agentId | 职责 | 什么时候调 |
 |---|---|---|
@@ -53,6 +53,7 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 | `market` | 市场状态：指数、成交额、量能、宽度 | 问到大盘 / 指数 / 成交量 / 市场强弱 / 今天行情怎么样 |
 | `sector` | 板块强度与资金方向（行业/概念榜、主力净流入） | 问到板块 / 主线 / 热点 / 资金流向 |
 | `technical` | 上证指数的技术面（均线、MACD、RSI、区间位置） | 问到技术面 / 均线 / 超买超卖 / 位置 |
+| `news` | 消息面：最近一小时快讯里有没有影响指数的事 | 问到消息 / 政策 / 有什么新闻 / 为什么涨跌 |
 | `risk` | **制衡层**：依据 Stage 1 的冻结证据判断这单能不能做 | **每次都要调**，见 Stage 2 |
 
 ⚠️ **边界**（每一条都由 `tests/test_field_single_producer.py` 守着）：
@@ -64,7 +65,8 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 | **板块**涨跌与资金流 | `sector`（与 market 的个股宽度不是同一个粒度） |
 | 均线 / MACD / RSI / 区间位置 | `technical` |
 
-其余 2 个（`news` / `discipline`）**尚未建立**。被问到它们的领域时，
+其余 1 个（`discipline`）**尚未建立**（裁定 13：它的输入是人的交易行为史，
+而 BigA 不下单不接账户 ⇒ 现在没有输入源）。被问到它的领域时，
 如实说「该 Agent 尚未上线」，并把它写进 Card 的缺失项 —— **不要自己代答**。
 
 ---
@@ -117,6 +119,7 @@ mcp__openclaw__sessions_spawn
   mcp__openclaw__sessions_spawn  agentId="emotion"    context="isolated"
   mcp__openclaw__sessions_spawn  agentId="sector"     context="isolated"
   mcp__openclaw__sessions_spawn  agentId="technical"  context="isolated"
+  mcp__openclaw__sessions_spawn  agentId="news"       context="isolated"
 ```
 
 🔴 **每条 spawn 的指令里都必须写上 Stage 0 那个编号**，照这个句式：
@@ -140,7 +143,9 @@ mcp__openclaw__sessions_spawn
    时间区间**是否相交**。不相交就是串行，哪怕总耗时看起来还行。
    判据是区间相交这个**结构性证据**，不是「这次跑得快不快」。
 
-⚠️ 并发上限 `maxConcurrent: 6`，Stage 1 最多 5 个 specialist，够用。
+⚠️ 并发上限 `maxConcurrent: 6`，Stage 1 现在正好 **5 个** specialist ——
+**已经贴着上限了**。再加就必须先调这个值，否则会静默排队，
+表现是「某两个 agent 的时间区间不相交」⇒ `--parallel-check` 会报出来。
 
 #### 🔴 「今天」在非交易日意味着什么 —— 这条你已经违反过一次
 
@@ -317,7 +322,6 @@ cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize
   --status WAIT \
   --headline "核心矛盾一句话" \
   --synthesis "两三句说明，数字必须来自上面的 evidence" \
-  --extra-missing supervisor.agent_offline "news agent 尚未上线" \
   --extra-missing supervisor.agent_offline "discipline agent 尚未上线" \
   --model-ref anthropic/claude-sonnet-5
 ```
