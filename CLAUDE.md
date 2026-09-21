@@ -240,6 +240,15 @@ git config core.hooksPath tools/git-hooks # 装 pre-push（克隆后每人执行
    判断逻辑散进 skill = 产生第二套口径。
 5. **raw 层永不改写** —— 采集原样落盘，状态变更一律追加而非 `UPDATE`，
    让「当时看到的」可重建。
+6. **时间一律北京时间（`Asia/Shanghai`）** —— 写库、上卡、打日志、写文档全部用它。
+   我们自己产生的时间走 `_contract.now_cn()`，不用 `datetime.now()`（跟系统时区走）。
+
+   ⚠️ **唯一的例外来自外部**：OpenClaw 运行时的 trajectory 里 `ts` 是 **UTC**。
+   转换**只在 `_store/runtime.py` 的读取边界做一次**，消费方拿到的已经是北京时间 ——
+   不要在各处自己 `.astimezone()`。
+
+   🔴 这类 bug 的形状是**差 8 小时但仍然是个合法时刻**，不报错。
+   实测踩过：同一件事在延迟报告里是 08:00、在临时脚本里是 00:00，白白对不上号。
 
 ### Agent
 
@@ -271,6 +280,21 @@ $BIGA chat                      # 本地 TUI（Phase 1 唯一交互入口，未�
 $BIGA gateway --port 19789      # 前台起 gateway
 $BIGA doctor                    # 健康检查
 ```
+
+### 诊断「为什么这么慢」
+
+```bash
+python3 tools/verify/agent_trace.py                      # 各 agent 最近几次会话的调用次数
+python3 tools/verify/agent_trace.py --agent market -n 1  # 展开最近一次的调用序列
+python3 tools/verify/latency_report.py --parallel-check  # 延迟/成本分解 + Stage 1 并行判据
+```
+
+🔴 **先看工具调用序列，再改提示词。** 本项目两次最有价值的诊断都来自这个动作：
+Supervisor 那 159 秒里有 47 秒零工具调用（在重打 JSON）；
+Specialist 加 stance 后慢一倍，是因为 62 秒都在 grep 源码找词表。
+两次的第一反应都是「提示词写得不好」，**两次都错**。
+
+> Agent 的「慢」，多数时候是它在**找东西**，不是在想事情。
 
 ### 隔离自检（改动环境后跑一次）
 
