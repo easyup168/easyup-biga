@@ -56,10 +56,20 @@ def make_verdict(**kw) -> AgentVerdict:
 
 
 def make_card(**kw) -> DecisionCard:
+    """默认造出**合法**的卡。
+
+    🔴 改 `decision_id` 时，verdict 的 `task_id` 必须跟着改 ——
+    否则造出来的就是「卡 A 装着 B 的判定」，而契约层现在会拒绝它
+    （外部评审 P1-1）。
+
+    在加那条约束之前，这个 helper 会默默造出非法卡，
+    于是两条测试一直在用不合法的样本跑 —— 它们通过，只是因为没人拦。
+    """
+    did = kw.get("decision_id", TID)
     # contract-exempt: 同上
     base = dict(
-        decision_id=TID, status="WAIT", headline="核心矛盾一句话",
-        verdicts=[make_verdict()], synthesis="",
+        decision_id=did, status="WAIT", headline="核心矛盾一句话",
+        verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
     )
     base.update(kw)

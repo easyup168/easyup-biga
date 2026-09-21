@@ -138,6 +138,21 @@ def save_card(
         raise TypeError(
             f"save_card 只接受 _contract.DecisionCard，收到 {type(card).__name__}"
         )
+    # 🔴 第三道：**落库永远拒绝身份不一致的卡。**
+    #
+    # 契约层对「新造的卡」是硬拒绝，但对 `from_dict()` 读回来的历史卡放行
+    # （否则 31 张里有 20 张再也读不出来）。那个放行口在这里必须堵上 ——
+    # 否则「读一张旧卡 → 原样存回去」就把非法状态重新写进了库。
+    #
+    # ⇒ 读可以宽，**写必须严**。
+    foreign = [(v.agent, v.task_id) for v in card.verdicts
+               if v.task_id != card.decision_id]
+    if foreign:
+        raise ValueError(
+            f"拒绝落库：Card {card.decision_id} 装着不属于它的判定 —— "
+            + "；".join(f"{a} 写着 {t}" for a, t in foreign) + "\n"
+            "  一张卡上的每一条判定都必须属于同一次决策。\n"
+            "  历史卡可以读（回放），但不能再写回库。")
     payload = json.dumps(card.to_dict(), ensure_ascii=False, sort_keys=True)
     try:
         return _insert_card(card, payload, replay_of, path)

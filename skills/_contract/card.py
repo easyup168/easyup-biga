@@ -77,6 +77,14 @@ class DecisionCard:
     missing: list[MissingItem] = dc_field(default_factory=list)
     generated_at: str = ""
     elapsed_ms: int = 0
+    #: 🔴 只有 `from_dict()` 会设成 True —— 表示「这是从库里读回来的历史记录」。
+    #:
+    #: 存在的理由见 `_check_identity()`：身份约束对**新造的卡**必须是硬拒绝，
+    #: 但对**已经落库的旧卡**只能是提示 —— 否则历史卡再也回放不了，
+    #: 而「能不能重建当时看到的东西」比形式一致更重要。
+    from_store: bool = False
+    #: 历史卡的身份问题记在这里，由 `render()` 显示。新卡永远为空（它直接被拒）。
+    identity_warning: str = ""
 
     def __post_init__(self) -> None:
         self.missing = [MissingItem.coerce(m) for m in self.missing]
@@ -116,6 +124,8 @@ class DecisionCard:
                 "缺失项必须逐条显示，汇总时丢弃等于静默 fail-open"
             )
 
+        self._check_identity()
+
         # --- 铁律 2 ---
         if self.missing and self.status == "BUY":
             raise ValueError(
@@ -140,6 +150,44 @@ class DecisionCard:
                 f"{blockers} 给出 stance={VETO_STANCE!r}，Card 状态却是 "
                 f"{self.status!r} —— 否决必须体现为 AVOID 或 BLOCK"
             )
+
+    def _check_identity(self) -> None:
+        """🔴 卡上的每一条判定，都必须属于这张卡。
+
+        外部评审 P1-1（2026-09-21）：`synthesize.py` 里已经有一道
+        「所有 verdict 的 task_id 必须一致」的检查，但**契约层没有**。
+        于是可以构造「卡 001 装着 999 的 verdict」并落库 —— 实测通过。
+
+        守卫在编排层就只守得住走编排层的那条路。回放、将来的 API、
+        测试辅助代码、手工构造 —— 每一条都能重新打开这个洞。
+
+        ⚠️ **新卡严格，旧卡可读。**
+        评审建议的验收是「Replay 也无法绕过」，但实测已落库 31 张卡里有
+        **20 张**的 verdict 写着别的号（Stage 0 占号是后来才加的）。
+        一刀切会让那 20 张永远读不出来。
+
+        这与 `synthesize.py` 里 stance 检查的取舍是同一条：
+        **能不能重建「当时看到的东西」优先于形式一致。**
+
+        ⇒ 三段式：
+          · 新造的卡        —— 直接拒绝
+          · 从库里读的旧卡   —— 可读，但把问题记下来并**显示在卡面上**
+          · 落库（`save_card`）—— 永远拒绝，见 `_store/db.py`
+        """
+        foreign = [(v.agent, v.task_id) for v in self.verdicts
+                   if v.task_id != self.decision_id]
+        if not foreign:
+            return
+        detail = "；".join(f"{a} 的判定写着 {t}" for a, t in foreign)
+        if not self.from_store:
+            raise ValueError(
+                f"Card {self.decision_id} 装着不属于它的判定：{detail}\n"
+                "  一张卡上的每一条判定都必须属于同一次决策，否则证据无处归属。\n"
+                "  怎么办：决策编号由 Stage 0 占下（new_decision.py），"
+                "沿 Stage 1/2/3 一路下传。")
+        self.identity_warning = (
+            f"本卡的判定编号与卡号不一致（{detail}）—— "
+            "它早于「Stage 0 统一占号」，证据归属无法核实")
 
     # --- 便捷查询 ---
 
@@ -204,6 +252,8 @@ class DecisionCard:
         #    warning 与 missing 的分工是「这个数能用但要注意」vs「这个数没有」。
         #    把前者藏起来，等于只保留了它的名字。
         warns = [(v.agent, w) for v in self.verdicts for w in v.warnings]
+        if self.identity_warning:
+            warns.insert(0, ("card", self.identity_warning))
         if warns:
             lines.append("")
             lines.append(f"⚠ 提请注意（{len(warns)}）")
@@ -258,4 +308,5 @@ class DecisionCard:
             missing=[MissingItem.coerce(m) for m in d.get("missing", [])],
             generated_at=d.get("generated_at", ""),
             elapsed_ms=d.get("elapsed_ms", 0),
+            from_store=True,
         )
