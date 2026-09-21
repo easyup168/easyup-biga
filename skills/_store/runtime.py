@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from _contract import CN_TZ
+
 __all__ = ["RuntimeProbe", "AgentTurn", "read_turns", "read_task_runs", "OPENCLAW_HOME"]
 
 OPENCLAW_HOME = pathlib.Path.home() / ".openclaw-biga"
@@ -95,10 +97,20 @@ def _agent_dbs() -> list[tuple[str, pathlib.Path]]:
 
 
 def _parse_ts(v: Any) -> datetime | None:
+    """把运行时的时间戳解析成**北京时间**。
+
+    🔴 OpenClaw 的 trajectory 里 `ts` 是 UTC（带 `Z`），而本项目对外一律北京时间。
+    转换放在**读取边界这一处**，不让每个消费方各自记得 `.astimezone(CN_TZ)` ——
+    那种「人人都要记得」的义务迟早会漏一个，而漏掉的表现是
+    **时间差了 8 小时却仍然是个合法时刻**，不报错。
+
+    实测踩过：手写的临时脚本直接打 `ts`，于是同一件事在延迟报告里是 08:00、
+    在脚本里是 00:00，白白花时间对不上号。
+    """
     if not isinstance(v, str):
         return None
     try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone(CN_TZ)
     except ValueError:
         return None
 
@@ -216,7 +228,8 @@ def read_task_runs(*, since: datetime | None = None) -> tuple[list[TaskRun], lis
 
         def ms(v: Any) -> datetime | None:
             try:
-                return datetime.fromtimestamp(int(v) / 1000).astimezone()
+                # 显式 CN_TZ，不用系统本地时区 —— 换台机器就会变
+                return datetime.fromtimestamp(int(v) / 1000, tz=CN_TZ)
             except (TypeError, ValueError):
                 return None
 

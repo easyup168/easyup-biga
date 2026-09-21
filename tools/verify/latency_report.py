@@ -42,6 +42,10 @@ from _contract import CN_TZ  # noqa: E402
 from _store import connect  # noqa: E402
 from _store.runtime import read_task_runs, read_turns  # noqa: E402
 
+# 🔴 `read_turns()` 返回的时间已经是北京时间（在 `_store.runtime` 的读取边界转好）。
+#    这里不再逐处 `.astimezone(CN_TZ)` —— 那种「人人都要记得」的义务迟早漏一个，
+#    而漏掉的表现是时间差 8 小时却仍是个合法时刻，不报错。
+
 # 90s 的推导见 architecture.md §10.1 —— 不是拍脑袋，也不是原来那个「下界相加」的 60s。
 DEFAULT_BUDGET_MS = 90_000
 
@@ -106,20 +110,20 @@ def _derive_start(end: datetime, turns, floor: datetime | None = None) -> dateti
     ordered = sorted(turns, key=lambda t: t.started_at)
     if floor is not None:
         # 上一张卡之前的轮次属于上一次决策，绝不并进来。
-        ordered = [t for t in ordered if t.started_at.astimezone(CN_TZ) > floor]
+        ordered = [t for t in ordered if t.started_at > floor]
     covering = [t for t in ordered
-                if t.started_at.astimezone(CN_TZ) <= end <= t.ended_at.astimezone(CN_TZ)]
+                if t.started_at <= end <= t.ended_at]
     if not covering:
-        covering = [t for t in ordered if t.ended_at.astimezone(CN_TZ) <= end]
+        covering = [t for t in ordered if t.ended_at <= end]
         if not covering:
             return None
         covering = covering[-1:]
-    cursor = covering[-1].started_at.astimezone(CN_TZ)
+    cursor = covering[-1].started_at
     changed = True
     while changed:
         changed = False
         for t in ordered:
-            ts, te = t.started_at.astimezone(CN_TZ), t.ended_at.astimezone(CN_TZ)
+            ts, te = t.started_at, t.ended_at
             if ts < cursor and (cursor - te).total_seconds() <= LEAD_GAP_S:
                 cursor, changed = ts, True
     return cursor
@@ -134,7 +138,7 @@ def _parallel_report(turns) -> bool | None:
     for t in turns:
         if t.agent_id == SUPERVISOR:
             continue
-        s0, e0 = t.started_at.astimezone(CN_TZ), t.ended_at.astimezone(CN_TZ)
+        s0, e0 = t.started_at, t.ended_at
         if t.agent_id in spans:
             a, b = spans[t.agent_id]
             spans[t.agent_id] = (min(a, s0), max(b, e0))
@@ -240,8 +244,8 @@ def main(argv: list[str] | None = None) -> int:
         #    所以那一轮的 ended_at 必然晚于 Card 的 generated_at。
         #    用结束时刻过滤会把最关键的合成轮整个漏掉。
         turns = [t for t in turns
-                 if t.ended_at.astimezone(CN_TZ) >= start
-                 and t.started_at.astimezone(CN_TZ) <= end]
+                 if t.ended_at >= start
+                 and t.started_at <= end]
         if not turns:
             print(f"{title} 内没有轮次。")
             return 1
@@ -261,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     print("─" * 88)
     cold = False
     for t in turns:
-        local = t.started_at.astimezone(CN_TZ)
+        local = t.started_at
         if t.cache_write > t.cache_read * 0.3:
             cold = True
         print(f"{local:%H:%M:%S}  {t.agent_id:<9}{t.duration_ms/1000:7.1f}s"
@@ -282,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                   if r.started_at and r.ended_at
                   and r.ended_at >= start and r.started_at <= end
                   and r.runtime in ("cli", "subagent")]
-        seen = {(t.agent_id, t.started_at.astimezone(CN_TZ).strftime("%H:%M:%S"))
+        seen = {(t.agent_id, t.started_at.strftime("%H:%M:%S"))
                 for t in turns}
         missing = [r for r in in_win
                    if (r.agent_id, r.started_at.strftime("%H:%M:%S")) not in seen]
@@ -343,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"卡后尾巴 {len(tail)} 轮 · {tms/1000:.1f}s · ${tcost:.4f}"
               f"（占决策总成本 {tcost/(cost+tcost):.0%}）")
         for t in tail:
-            print(f"      {t.started_at.astimezone(CN_TZ):%H:%M:%S} {t.agent_id:<9}"
+            print(f"      {t.started_at:%H:%M:%S} {t.agent_id:<9}"
                   f"{t.duration_ms/1000:6.1f}s  out={t.tokens_out:<5d} ${t.cost_usd:.4f}")
         print("      ⇒ 卡已落库，不计入等卡时间；但这是同一次决策真实花掉的钱。")
         print(f"{'决策总成本':>10} ${cost + tcost:.4f}")
