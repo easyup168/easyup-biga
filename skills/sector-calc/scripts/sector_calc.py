@@ -201,6 +201,31 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
             calc_version=CALC_VERSION, label=label,
             raw_hash=raw_hash_for(source)))
 
+
+    # 🔴 无日期端点的 as_of 不能沿用日线的收盘时刻。
+    #
+    #    实测（BIGA-20260921-017，周一 12:41 午休）：涨跌家数取回的是
+    #    **今天此刻**的 4385/1100/145，而卡面上写着 `as_of 09-18 15:00`
+    #    —— 周五收盘。一个今天的数，挂着上周五的时间戳。
+    #
+    #    代码其实知道（它发了一条 warning），但 warning 当时不上卡，
+    #    于是卡面看起来板上钉钉。
+    #
+    #    根子是 as_of 只算了一次就被所有证据共用。而这个端点连日期字段都没有
+    #    ⇒ 我们能诚实声明的只有「取回它的时刻」。
+    #
+    #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
+    #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
+    #    而它恰恰是最可能对不上的。
+    def add_live(field: str, value: Any, label: str, source: str) -> None:
+        """实时快照类证据：as_of = 取回时刻。"""
+        result[field] = value
+        evidence.append(Evidence(
+            field=field, source=source, value=value,
+            as_of=retrieved, retrieved_at=retrieved,
+            calc_version=CALC_VERSION, label=label,
+            raw_hash=raw_hash_for(source)))
+
     if c.daily is None:
         c.missing.append(MissingItem(
             "全部板块指标 —— 没有可信的交易日，无法确定这批数据描述的是哪一天",
@@ -225,25 +250,25 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
             src = f"em:clist/{kind}"
             ranked = sorted(r.boards, key=lambda b: b.pct, reverse=True)
             counts[tag] = len(ranked)
-            add(f"{tag}_top", [_brief(b) for b in ranked[:TOP_N]],
+            add_live(f"{tag}_top", [_brief(b) for b in ranked[:TOP_N]],
                 f"{label}涨幅前 {TOP_N}", src)
             up = sum(1 for b in ranked if b.pct > 0)
-            add(f"{tag}_advance_ratio", round(up / len(ranked), 4),
+            add_live(f"{tag}_advance_ratio", round(up / len(ranked), 4),
                 f"上涨{label}板块占比", f"derived:{src}")
             if tag == "industry":
-                add("industry_bottom", [_brief(b) for b in ranked[-BOTTOM_N:]],
+                add_live("industry_bottom", [_brief(b) for b in ranked[-BOTTOM_N:]],
                     f"{label}跌幅前 {BOTTOM_N}", src)
                 by_money = sorted(r.boards, key=lambda b: b.main_inflow, reverse=True)
-                add("main_inflow_top", [_brief(b) for b in by_money[:TOP_N]],
+                add_live("main_inflow_top", [_brief(b) for b in by_money[:TOP_N]],
                     "主力净流入前 5（行业）", src)
-                add("main_inflow_total_yi",
+                add_live("main_inflow_total_yi",
                     round(sum(b.main_inflow for b in r.boards) / _YI, 2),
                     "行业主力净流入合计(亿元)", f"derived:{src}")
             if any(b.leader is None for b in ranked[:TOP_N]):
                 c.warnings.append(f"{label}榜前 {TOP_N} 中有板块未返回领涨股")
 
         if counts:
-            add("board_counts", counts, "各榜板块数", "em:clist")
+            add_live("board_counts", counts, "各榜板块数", "em:clist")
         else:
             c.missing.append(MissingItem(
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))
