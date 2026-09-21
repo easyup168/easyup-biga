@@ -27,6 +27,7 @@ import pathlib
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+STORE_DIR = REPO / "skills" / "_store"
 CONTRACT_DIR = REPO / "skills" / "_contract"
 
 from _scan import repo_files  # noqa: E402
@@ -189,3 +190,50 @@ def test_契约可从包根导入(name):
     import _contract
 
     assert hasattr(_contract, name), f"_contract 未导出 {name}"
+
+
+# ───────────────────────────── 消费方必须走 from_dict（外部评审 F11）
+#
+# F11 的关键补充实验（评审做的）：把一条违反铁律的 verdict_json
+# 用绕过 `db.py` 的裸连接直接 INSERT 进 `agent_verdicts` —— 写入不报错；
+# 但用正规的 `load_verdict()` 读回来时**立刻**抛出引用具体铁律编号的
+# ValueError。`from_dict()` 在每次反序列化时都重跑一遍 `__post_init__`，
+# 构成运行时的第二道防线。
+#
+# ⇒ 所以静态扫描的盲区（逐键赋值、`type()` 动态建类）**不等于**
+#   坏数据会被正常读取路径无声接受。
+#
+# 🔴 **前提是所有消费方都老实走 `from_dict`。**
+#    评审检查过 `synthesize.py` 与 `card_ops.py`，两个都是干净的。
+#    但上这条守卫时又扫出一个它没查到的：`missing_ledger.py` 当时
+#    直接 `json.loads(card_json)`，绕开了那道防线。
+#
+# 「目前检查过的路径都是」这种前提，**得有机器守着才站得住**。
+
+_JSON_COLUMNS = ("card_json", "verdict_json")
+
+
+def test_契约对象只从_store取_不自己解JSON列():
+    bad = []
+    for path in repo_files(".py"):
+        if STORE_DIR in path.parents or path.parent.name == "tests":
+            continue
+        src = path.read_text(encoding="utf-8")
+        if not any(col in src for col in _JSON_COLUMNS):
+            continue
+        lines = src.splitlines()
+        for node in ast.walk(ast.parse(src, filename=str(path))):
+            # json.loads(row["card_json"]) 这种形状
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", "") in ("loads", "load")):
+                continue
+            seg = ast.get_source_segment(src, node) or ""
+            if any(col in seg for col in _JSON_COLUMNS) and \
+                    "contract-exempt" not in lines[node.lineno - 1]:
+                bad.append(f"{path.relative_to(REPO)}:{node.lineno}  {seg[:60]}")
+    assert not bad, (
+        "这些地方绕开了 `from_dict()` 的读取时校验：\n  " + "\n  ".join(bad) + "\n"
+        "  `from_dict()` 每次反序列化都重跑一遍铁律校验 ——\n"
+        "  那是静态扫描被绕过时唯一的后备防线，绕开它就什么都不剩了。\n"
+        "  改用 `_store` 的 `load_card()` / `load_verdict()`。"
+    )

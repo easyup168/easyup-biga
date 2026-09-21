@@ -70,13 +70,29 @@ def _weak(code: str) -> bool:
 
 
 def collect(path: pathlib.Path | str | None = None) -> list[dict]:
+    """🔴 走 `load_card()`，**不自己 `json.loads(card_json)`**。
+
+    外部评审 F11 的结论是：静态扫描能被绕过，但 `from_dict()` 在每次
+    反序列化时重跑一遍 `__post_init__`，构成运行时的第二道防线 ——
+    **前提是所有消费方都老实走 `from_dict`**。
+
+    ⚠️ 而这个文件当初正是那个反例：它直接 `json.loads(card_json)`，
+       绕开了那道防线。评审检查过 `synthesize.py` 和 `card_ops.py`
+       都是干净的，没查到这里。
+       ⇒ 「目前检查过的路径都是」这种前提，**得有机器守着才站得住**。
+    """
     with db.connect(path, readonly=True) as conn:
-        rows = conn.execute(
-            "SELECT decision_id, status, generated_at, card_json"
-            " FROM decision_records ORDER BY decision_id").fetchall()
+        ids = [r["decision_id"] for r in conn.execute(
+            "SELECT decision_id FROM decision_records ORDER BY decision_id")]
     out = []
-    for r in rows:
-        card = json.loads(r["card_json"])
+    for did in ids:
+        obj = db.load_card(did, path=path)
+        if obj is None:
+            continue
+        card = obj.to_dict()
+        r = {"decision_id": did,
+             "status": obj.status,
+             "generated_at": card.get("generated_at", "")}
         real, drill = [], []
         for m in card.get("missing", []):
             code = m.get("code", "legacy") if isinstance(m, dict) else "legacy"

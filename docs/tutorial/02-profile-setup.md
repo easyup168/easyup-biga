@@ -43,11 +43,12 @@ OpenClaw 提供了三种初始化方式：
 BIGA=~/.openclaw-biga/bin/biga
 
 # 施工前先记基线（第 01 章的 ③，每次改环境都要做）
-stat -c '%y' ~/.openclaw/state/openclaw.sqlite
+#   OTHER_STATE = 同机已有实例的状态库路径（本机情况，不写死在教程里）
+stat -c '%y' "$OTHER_STATE"
 
 $BIGA setup --baseline --workspace ~/.openclaw-biga/workspace
 
-stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须与上面相同
+stat -c '%y' "$OTHER_STATE"                        # 必须与上面相同
 ```
 
 输出：
@@ -136,7 +137,7 @@ cat > setup.patch.json5 <<'PATCH'
 {
   gateway: {
     mode: "local",
-    port: 19789,        // 与已有实例的 18789 间距 1000 ≥ 120（见第 01 章）
+    port: 19789,        // 与同机已有实例的 base 间距 1000 ≥ 120（见第 01 章）
     bind: "loopback",
   },
   agents: {
@@ -247,8 +248,8 @@ $BIGA agents list
 $BIGA config get channels
 # → Config path is valid but unset: channels.
 
-# ⑤ 端口：19789 归自己，18789 仍归已有实例且没被动过
-ss -lntp | grep -E '18789|19789'
+# ⑤ 端口：19789 归自己，已有实例的 base 仍归它且没被动过
+ss -lntp | grep -E "19789|$OTHER_PORT"
 ```
 
 第 ② 步是在防「死配置」：**不要相信命令返回 0 就等于配置生效了，读回来对一遍。**

@@ -107,3 +107,63 @@ def test_store层自身确实是唯一入口():
     """反向断言：`_store/` 里确实有 sqlite3，否则说明这条规则在守一个空壳。"""
     src = "\n".join(p.read_text(encoding="utf-8") for p in STORE_DIR.rglob("*.py"))
     assert "import sqlite3" in src, "_store/ 里没有 sqlite3 —— 这条规则守着一个不存在的入口"
+
+
+# ──────────────────────────── 间接 import 也要挡（外部评审 F12）
+#
+# 第二条检查的文档字符串**明确写着**「独立于上一条 —— 有人可能通过
+# importlib 或别名绕过 import 检查」，但它的判定逻辑仍然只认
+# `X.connect(...)` 里 X 是字面量 `ast.Name` 且 `id == "sqlite3"`。
+#
+# 评审实测：`__import__("sqlite3").connect(path)` 与
+# `importlib.import_module("sql" + "ite3")` + getattr 两条检查全部通过，
+# 而且**这不是文字游戏** —— 拿到的是一条真实、完整可读写的
+# `sqlite3.Connection`，能打开磁盘上任意 sqlite 文件。
+#
+# 🔴 与 F11 不同，这条**没有「读取时二次校验」那道后备**：
+#    一条绕开 `db.py` 的裸连接可以被拿去做任何读写，不经过任何契约层。
+#
+# ⚠️ 这里不打算追平「任意字符串拼接」—— 那是判定不了的。
+#    换一个可判定的判据：`importlib.import_module` / `__import__`
+#    在业务代码里**本来就不是一个自然会写出的模式**。
+#    ⇒ 默认禁止，真有需要就 `store-exempt:` 举手。
+#      这与词表、触发器、`server_as_of` 是同一条原则。
+
+_INDIRECT_IMPORT = {"__import__", "import_module"}
+
+
+def test_业务代码不许用间接import():
+    bad = []
+    for path in _py_files():
+        if STORE_DIR in path.parents or path.parent.name == "tests":
+            continue
+        src = path.read_text(encoding="utf-8")
+        lines = src.splitlines()
+        for node in ast.walk(ast.parse(src, filename=str(path))):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+            if name in _INDIRECT_IMPORT and not _is_exempt(lines, node.lineno):
+                bad.append(f"{path.relative_to(REPO)}:{node.lineno} {name}(…)")
+    assert not bad, (
+        "业务代码里出现了间接 import：\n  " + "\n  ".join(bad) + "\n"
+        "  它能绕开上面两条 AST 检查拿到一条真实可读写的 sqlite3 连接，\n"
+        "  而这条路**没有读取时的二次校验兜底**。\n"
+        "  真有需要就在该行标 `store-exempt: <理由>`。"
+    )
+
+
+def test_这条检查真的能抓到绕过写法(tmp_path):
+    """🔴 判据自检：造一个真的绕过样本，确认它会被逮住。
+
+    不自检的话，这条测试会因为「业务代码里本来就没有间接 import」
+    而永远绿 —— 那正是「通过是因为什么都没查」。
+    """
+    sample = tmp_path / "sneaky.py"
+    sample.write_text('c = __import__("sqlite3").connect("/tmp/x.db")\n', encoding="utf-8")
+    hits = [n for n in ast.walk(ast.parse(sample.read_text(encoding="utf-8")))
+            if isinstance(n, ast.Call)
+            and (n.func.id if isinstance(n.func, ast.Name)
+                 else getattr(n.func, "attr", "")) in _INDIRECT_IMPORT]
+    assert hits, "判据连最直白的绕过写法都抓不到"
