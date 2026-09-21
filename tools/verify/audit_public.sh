@@ -34,6 +34,7 @@ if [ "${1:-}" = "--worktree" ]; then
   # ':!tools/verify/audit_public.sh' —— 排除本脚本自己，否则它的正则字面量必然自匹配。
   DIFF=$(git ls-files -co --exclude-standard -- . ':!tools/verify/audit_public.sh' \
          | xargs -r -d'\n' grep -nHI '' 2>/dev/null | sed 's/^/+/')
+
   SCOPE="工作区（含未提交与未跟踪）"
 else
   REVS=("$@")
@@ -101,8 +102,40 @@ chk "环境/账号策略" '([p]olicy-limits|[s]etup-token|[E]nterprise|[企]业�
 #    与前九项一样用 [a]bc 写法，保证脚本自己不会匹配自己。
 chk "IM 应用凭据"   '([c]li_[a-z0-9]{16}|[F]EISHU_APP_(ID|SECRET)|[F]EISHU_(VERIFICATION_TOKEN|ENCRYPT_KEY)|[a]pp_?[sS]ecret["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{8,}|open\.[f]eishu\.cn/open-apis/bot/v2/hook/)'
 
+# audit-check: 运行时产物不进仓库
+#
+# 🔴 第 11 项加于 2026-09-21。它不是「内容检查」，是**范围检查** ——
+#    有些东西的问题不在于「这次的内容有没有问题」，
+#    而在于**它是自动长出来的，下次长成什么样你不知道**。
+#
+# 两类，都是实际在仓库里发现的：
+#
+#   1. 归档（zip/tar）—— 上面那十项用 `grep -I` 跳过二进制
+#      ⇒ 压缩包里的内容**一个字都扫不到**
+#   2. `memory/` —— OpenClaw 自己写的记忆/做梦产物，
+#      其中 `.dreams/session-corpus/*.txt` 是**会话逐字记录**
+#      ⇒ 今天内容无害，不代表明天无害（凭据讨论、环境细节都会进去）
+#
+# 一度想给归档做「展开后扫描」。放弃了，两个理由：
+#   ① 外部设计文档会**合法地**讨论 `FEISHU_APP_*` 这类变量名 ⇒ 6 处误报
+#   ② 全历史口径做不到 —— `git log -p` 对二进制只输出「Binary files differ」
+#
+# ⇒ 换成**不让它进来**。规则更窄，但**可判定且完整**；
+#   而「进了再扫」两头都不完整。
+STRAY=$(git ls-files -- '*.zip' '*.tar.gz' '*.tgz' '*.7z' '*.rar' 'memory/*' 2>/dev/null)
+if [ -n "$STRAY" ]; then
+  echo "⚠️  运行时产物不进仓库 —— $(printf '%s\n' "$STRAY" | grep -c .) 个"
+  printf '%s\n' "$STRAY" | head -6 | sed 's/^/     /'
+  echo "     归档：十项检查用 grep -I 跳过二进制，扫不到里面。"
+  echo "     memory/：OpenClaw 自动写的会话语料，内容不由你决定。"
+  echo "     ⇒ git rm --cached <路径>，并加进 .gitignore。原文留在本机。"
+  FAIL=1
+else
+  echo "✅ 运行时产物不进仓库"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
-  echo "══ 十项全绿 ══"
+  echo "══ 十一项全绿 ══"
   exit 0
 fi
 echo "══ 有命中，不要 push ══"
