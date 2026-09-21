@@ -38,21 +38,53 @@ openclaw <subcommand>                        # ❌ 会读写另一套实例的�
 `openclaw` CLI **会自动跑 doctor 迁移，不是只读操作**。少打一次 `--profile` 就会改到
 另一套系统的 state。wrapper 的存在就是为了消灭这个可能性 —— 本项目作者在调研阶段已实际踩过一次。
 
-### R-2 · openclaw 本体绝不能装进 nvm 的 bin 目录
+### R-2 · 不许占用共享命名空间里的默认名字
 
-本机另一套实例用「扫 nvm、挑**装了 openclaw 的最高版本**」的方式给它的几十个 systemd unit 注入 PATH。
-BigA 的 node（`v24.21.0`）比它的（`v24.18.0`）高 —— 一旦在 BigA 的 node 下跑
-`npm i -g openclaw`，那套系统的 cron 会**静默改用 BigA 的 binary**。
+**端口分开了、状态目录分开了，还有一类东西是共享的：名字。**
+两套实例装在同一个账号下，凡是「按约定取默认名」的地方都可能互相顶掉 ——
+而顶掉是**静默**的：文件被覆写，服务照常起来，只是指向了另一套。
 
-所以：**nvm 只提供 node 本体**，openclaw 装在 `~/.openclaw-biga/runtime/`。
+#### 已知的三处
 
-升级 openclaw 用：
+| # | 共享命名空间 | 撞车会怎样 | BigA 的做法 |
+|---|---|---|---|
+| 1 | **nvm 的 bin 目录** | 同机已有实例按「扫 nvm、挑**装了 openclaw 的最高版本**」给它的几十个 systemd unit 注入 PATH。BigA 的 node 版本更高 ⇒ 一旦 `npm i -g openclaw`，那套系统的定时任务会**静默改用 BigA 的 binary**，而那些命令不带 `--profile` | openclaw 装在 `~/.openclaw-biga/runtime/`，nvm 只提供 node |
+| 2 | **systemd 用户单元名** | 默认名是 `openclaw-gateway.service`，同机已有实例正用着它。装服务时若走到 override 分支，会**直接覆写正在跑的生产单元** | 靠 profile 后缀取 `openclaw-gateway-biga.service`，装前核对、装后比对生产单元的 sha256 |
+| 3 | 端口 / CDP 区间 | 见「路径与端口」一节 | 间距 1000 |
+
+#### 怎么升级 openclaw
+
 ```bash
 npm i --prefix ~/.openclaw-biga/runtime openclaw@latest
 ```
 ❌ 绝不用 `npm i -g openclaw`。
 
-守卫测试放在**另一套仓库**里（受害者是它）—— 断言它的 PATH 解析结果没有被改掉。
+#### 怎么装 / 重启 gateway 服务
+
+```bash
+~/.openclaw-biga/bin/biga gateway install   # 写 openclaw-gateway-biga.service
+~/.openclaw-biga/bin/biga gateway start
+journalctl --user -u openclaw-gateway-biga.service -f
+```
+
+🔴 **`OPENCLAW_SYSTEMD_UNIT` 这个环境变量会覆盖 profile 推导出来的名字。**
+它一旦从别处漏进 shell（比如复制了生产单元的 env），`gateway install`
+就会写到生产那个文件上。装之前确认它是空的。
+
+#### 判据
+
+```bash
+python3 tools/verify/isolation.py     # 「共享命名空间」是其中一项
+```
+
+⚠️ 第 1 处的守卫放在**另一套仓库**里（受害者是它）——
+断言它的 PATH 解析结果没有被改掉。
+第 2、3 处 BigA 自己能查，已进 `isolation.py`。
+
+> 🔴 **这条红线是「模式级」的，不是三条具体规则。**
+> 第 2 处是 2026-09-21 装服务时才发现的 —— 当时 R-2 只写了 nvm 一处，
+> 差点按「R-2 说的是 nvm，这里不是 nvm」放行。
+> **再发现第四处，补进上面那张表，别新开一条红线。**
 
 ### R-3 · `UNKNOWN` ≠ `PASS`
 
@@ -67,6 +99,7 @@ npm i --prefix ~/.openclaw-biga/runtime openclaw@latest
 |---|---|---|
 | **I-1** | BigA 的任何进程**不得以写模式**打开 `~/.openclaw/` 下的任何文件 | `tools/verify/isolation.py` ✅ |
 | **I-2** | BigA 崩溃 / 写坏自己的库 / 占死端口，另一套系统必须毫发无伤 | `kill -9` 演练后对方 gateway pid 不变 |
+| **I-5** | BigA **不占用共享命名空间里的默认名**（nvm bin / systemd 单元名 / 端口）| `tools/verify/isolation.py` 的「共享命名空间」一项（三态）|
 | **I-3** | 契约（Evidence / AgentVerdict / DecisionCard）**只有一份实现** | AST 全仓扫描 |
 | **I-4** | 业务代码里不出现裸 `sqlite3.connect`，一律走 `skills/_store/db.py` | AST 扫描 |
 
@@ -242,15 +275,17 @@ Phase 3 之前必须换成 BigA 自己的凭据。触发条件任一成立即换
 - 另一套实盘系统的**可识别细节**：内部模块名、文件路径、具体缺陷百分比、
   持续天数、绩效数字、账户信息
 
-🔴 **描述一条「不要写 X」的规则时，不要把 X 抄进去。** 已经犯过三次：
+🔴 **描述一条「不要写 X」的规则时，不要把 X 抄进去。** 已经犯过**四次**：
 
 | # | 在哪里 | 抄进去的是 |
 |---|---|---|
 | 1 | 记录「别泄露邮箱」的 CHANGELOG 条目 | 邮箱本身 |
 | 2 | 把审查脚本固化进 `TODO.md` | 脚本自己的正则（从此永远自匹配 3 处） |
 | 3 | 开发流程里「哪些邻居内容不适用」那张表 | 邻居的模块名（被 pre-push 拦下） |
+| 4 | 记录「审查脚本新增 IM 凭据检查」的 CHANGELOG 条目 | 那几个变量名本身（**被新加的那一项当场拦下**）|
 
-三次都是同一个形状：**举例子的时候用了真值。** 用「它引用的那些数据库与脚本名」
+四次都是同一个形状：**举例子的时候用了真值。**
+第 4 次尤其说明问题 —— 它发生在**写那条检查的同一次提交里**。 用「它引用的那些数据库与脚本名」
 这种指代就够了 —— 读者需要知道的是**类别**，不是**实例**。
 
 ⚠️ 邻居可识别细节容易漏，因为它**不是密钥**。
@@ -272,7 +307,7 @@ git config core.hooksPath tools/git-hooks # 装 pre-push（克隆后每人执行
 那句话隐含一个不再存在的窗口（先推上去、等转公开时再检查）。
 已公开的内容撤不回来 —— 删分支也可能留在 fork、缓存与镜像里。
 
-⚠️ 这八项检查**只有一份实现**（`tools/verify/audit_public.sh`）。
+⚠️ 这**十一项**检查**只有一份实现**（`tools/verify/audit_public.sh`）。
 本节曾另有一段「快速自查」用另一套正则，那就是 L-3 的第二套口径 ——
 **改了一份忘了另一份时，剩下那份仍然报绿。**
 
@@ -367,7 +402,7 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 |---|---|
 | Agent | **7 / 8**。`main` + Stage 1 五个（market/sector/technical/emotion/news）+ Stage 2 `risk`。<br>第 8 个 `discipline` **故意不建**（裁定 13：没有输入源） |
 | 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v5**，五张表，只追加由触发器强制（v4 时这句话是**假的** —— 分配器没有触发器，五取四） |
-| 测试 | 619 条 |
+| 测试 | 659 条 |
 | 端到端 | 盘中 172.6s / $1.20（预算 **180s**）；**盘后 198s / $1.37 —— 超预算**，因为收盘后一小时快讯量翻倍（184 vs ~70 条）|
 | 隔离 | `tools/verify/isolation.py` **三态**（`UNKNOWN` 不计入通过）；判据由 `tests/test_isolation.py` 钉住 |
 | 外部评审 | 两份，共 29 条，**全部处理完**（见 `TODO.md` 的合并台账）|

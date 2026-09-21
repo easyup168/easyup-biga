@@ -26,11 +26,14 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from _contract import CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 
 import isolation  # noqa: E402  —— I-1 的唯一判据，见下方 F19 的注释
 
@@ -114,6 +117,69 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
             conn.close()
         except Exception:
             pass
+
+
+def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
+    """当天**没有归属**的 specialist spawn → `[(时刻, agent, 原因), …]`。
+
+    🔴 它抓的是「钱花了，结果进不了任何卡」。
+
+    实测（2026-09-21 19:31:52，飞书触发那次）：
+
+        emotion     无决策号
+        technical   无决策号
+        market      无决策号
+        sector      BIGA-20260921-000   ← 临时号，`save_verdict` 会直接拒
+
+    四个 spawn 白跑，约 $0.4 / 2.5 分钟。根因是 Supervisor 在
+    **占号之前**就 spawn 了 Stage 1（L-11「身份晚于证据」）——
+    而 schema v4 那整套机制正是为了防它。
+
+    ⚠️ 与 `spawn_proof()` 的分工：那个按决策号查「这张卡的 agent 真跑了吗」，
+    **查不到孤儿** —— 孤儿的特征恰恰是没有号可查。两个都要有。
+
+    返回 `None` = 读不到运行时库（R-3：判不了，不是没问题）。
+    """
+    import re
+    import sqlite3  # store-exempt: 外部运行时状态库，只读
+
+    db = pathlib.Path(os.environ.get("BIGA_RUNTIME_DB")
+                      or pathlib.Path.home() / ".openclaw-biga/state/openclaw.sqlite")
+    if not db.exists():
+        return None
+    pat = re.compile(r"BIGA-\d{8}-(\d{3})")
+    lo = int(datetime.strptime(day, "%Y%m%d").replace(tzinfo=CN_TZ).timestamp() * 1000)
+    hi = lo + 86_400_000
+    out: list[tuple[str, str, str]] = []
+    try:
+        # store-exempt: 同上 —— 外部运行时状态库，只读
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT child_session_key, created_at, payload_json FROM subagent_runs"
+            " WHERE created_at >= ? AND created_at < ? ORDER BY created_at",
+            (lo, hi)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    known = set(STAGE1_AGENTS) | set(STAGE2_AGENTS)
+    for r in rows:
+        parts = (r["child_session_key"] or "").split(":")
+        agent = parts[1] if len(parts) > 1 else ""
+        if agent not in known:
+            continue                      # 不是 specialist，不在本检查范围
+        seqs = pat.findall(r["payload_json"] or "")
+        when = datetime.fromtimestamp(r["created_at"] / 1000, CN_TZ).strftime("%H:%M:%S")
+        if not seqs:
+            out.append((when, agent, "无决策号"))
+        elif all(s == "000" for s in seqs):
+            out.append((when, agent, "只带临时号 -000（落库会被拒）"))
+    return out
 
 
 @dataclass

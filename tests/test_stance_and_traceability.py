@@ -242,3 +242,77 @@ class TestMissingCodes:
                             synthesis="", model_ref="m")
         text = card.render()
         assert "成交额取不到" in text and "market.turnover.unavailable" in text
+
+
+class TestRestatedMissing:
+    """同一个生产方不许把同一句话说两遍 —— 裁定 15 + L-10。
+
+    实测来源：`BIGA-20260921-021`，**飞书触发的第一张卡**。
+
+        risk.upstream.coverage_incomplete  Stage 1 缺席：news，这些领域的风险本次没有被看过
+        risk.coverage.insufficient         Stage 1 缺席:news,这些领域的风险本次没有被看过
+
+    🔴 注意标点：全角 `：，` vs 半角 `:,`。**后者是 LLM 重打出来的** ——
+    这正是 L-10「不让 LLM 搬运结构化数据」要防的形态。
+
+    ⚠️ 判据是 **(命名空间, 归一化正文)**，不是光看正文。
+    第一版只看正文，当场把 `test_同文本不同代码不合并` 判红了 ——
+    那条测试钉的是一个**合法反例**：两个不同的源各自「数据源不可用」
+    是两件事，合并会让统计少一条。
+    """
+
+    @staticmethod
+    def _card(items, **kw):
+        v = _v("risk", verdict="UNKNOWN", status="partial", missing=items)
+        return DecisionCard(decision_id="BIGA-20260918-001", status="WAIT",
+                            headline="h", verdicts=[v], missing=list(items),
+                            synthesis="", model_ref="m", **kw)
+
+    A = ("Stage 1 缺席：news，这些领域的风险本次没有被看过",
+         "risk.upstream.coverage_incomplete")
+    B = ("Stage 1 缺席:news,这些领域的风险本次没有被看过",
+         "risk.coverage.insufficient")
+
+    def test_同一命名空间同一句话被拒(self):
+        with pytest.raises(ValueError, match="同一件事报了两遍"):
+            self._card([MissingItem(*self.A), MissingItem(*self.B)])
+
+    def test_报错要说清是哪两条(self):
+        """🔴 报错要指路 —— 「有重复」没用，要说出两个代码。"""
+        try:
+            self._card([MissingItem(*self.A), MissingItem(*self.B)])
+        except ValueError as e:
+            assert self.A[1] in str(e) and self.B[1] in str(e)
+
+    def test_不同agent同一句话是合法的(self):
+        """两个源各自不可用却报了同一句话 —— 那是两件事。"""
+        a = _v("market", verdict="WARNING", status="partial",
+               missing=[MissingItem("数据源不可用", "market.turnover.unavailable")])
+        b = _v("emotion", verdict="WARNING", status="partial",
+               missing=[MissingItem("数据源不可用", "emotion.pool.unavailable")],
+               evidence=[_ev(field="limit_up_count")], result={"limit_up_count": 1.0})
+        DecisionCard(decision_id="BIGA-20260918-001", status="WAIT", headline="h",
+                     verdicts=[a, b], synthesis="", model_ref="m",
+                     missing=[*a.missing, *b.missing])
+
+    def test_旧卡只警告不拒(self):
+        """「新卡严格，旧卡可读」—— 库里已经有这样的卡，回放不该崩。"""
+        items = [MissingItem(*self.A), MissingItem(*self.B)]
+        v = _v("risk", verdict="UNKNOWN", status="partial", missing=items)
+        # 目的正是绕过 __init__ 走反序列化路径，验「旧卡可读」
+        # contract-exempt: from_dict 的入参，不是第二套契约
+        raw = DecisionCard.from_dict({
+            "decision_id": "BIGA-20260918-001", "status": "WAIT", "headline": "h",
+            "verdicts": [v.to_dict()], "missing": [m.to_dict() for m in items],
+            "synthesis": "", "model_ref": "m", "elapsed_ms": 0})
+        assert raw.restate_warning, "旧卡应当带出提示，而不是静默"
+        assert "同一件事报了两遍" in raw.render()
+
+    def test_契约不再指示risk自己加这条(self):
+        """判据落在**契约文本**上 —— 根因在那里，不在代码里。"""
+        import re
+        text = (REPO / "agents" / "risk" / "AGENTS.md").read_text(encoding="utf-8")
+        cmds = re.findall(r"--add-missing\s+(\S+)", text)
+        assert not cmds, (
+            f"risk 契约仍在指示 agent 追加缺失项 {cmds} —— \n"
+            "  skill 已经报了覆盖不足，再加一条就是重述。")

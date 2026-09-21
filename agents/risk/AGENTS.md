@@ -133,15 +133,33 @@ python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref>
   --stance 警示
 ```
 
-要同时追加缺失项就合成一条，**不要调两次**：
+🔴 **覆盖不足时，不要自己再报一条缺失项。**
+
+skill 已经报了 `risk.upstream.coverage_incomplete`，里面写清楚了缺哪几个。
+你再加一条，卡上就是同一句话出现两遍 —— 而且**你重打的那遍标点会变**，
+事后没法按代码聚合。
+
+实测（`BIGA-20260921-021`）：
+
+```
+risk.upstream.coverage_incomplete   Stage 1 缺席：news，…
+risk.coverage.insufficient          Stage 1 缺席:news,…
+                                             ↑ 全角变半角，就是重打的痕迹
+```
+
+契约层现在会**直接拒绝**这种卡（同一命名空间、同一句话报两遍）。
+
+⇒ 覆盖不足时只改结论，不加缺失项：
 
 ```bash
 cd ~/.openclaw-biga/workspace && \
 python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
-  --add-missing risk.coverage.insufficient "<缺失项原文>" \
   --verdict UNKNOWN \
   --stance 无法判定
 ```
+
+⚠️ 真有 skill 没覆盖到的事（比如你从上游 stance 里看出的矛盾），
+才追加缺失项 —— 那是**你的判断**，不是复述。
 
 🔴 **不要为了确认参数去 `--help`、去 grep 源码、去 find。**
 实测有 Agent 为此花了 62 秒、12 次工具调用，还跑了被明令禁止的 `find /` ——

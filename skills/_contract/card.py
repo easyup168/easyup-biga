@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
-from .missing import MissingItem
+from .missing import LEGACY_CODE, MissingItem
 from .verdict import VETO_STANCE, AgentVerdict
 
 __all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
@@ -52,6 +52,16 @@ def _brief(value: Any) -> str:
     return t if len(t) <= _MAX_VALUE_WIDTH else t[:_MAX_VALUE_WIDTH - 1] + "…"
 
 
+#: 全角 → 半角，用于判断两条缺失项是不是同一句话。
+#: 🔴 LLM 重述时最先变的就是标点 —— 实测 `：，` 被打成 `:,`。
+_PUNCT = str.maketrans("：，。；、（）「」“”‘’！？　", ":,.;,()\"\"\"\"\'\'!? ")
+
+
+def _norm_text(text: str) -> str:
+    """归一化到「说的是不是同一句话」的粒度：标点折叠 + 去掉所有空白。"""
+    return "".join(str(text).translate(_PUNCT).split()).lower()
+
+
 @dataclass
 class DecisionCard:
     """Supervisor 合成的决策卡。
@@ -85,6 +95,8 @@ class DecisionCard:
     from_store: bool = False
     #: 历史卡的身份问题记在这里，由 `render()` 显示。新卡永远为空（它直接被拒）。
     identity_warning: str = ""
+    #: 旧卡里检出「同一件事报了两遍」时的提示（新卡直接拒）
+    restate_warning: str = ""
 
     def __post_init__(self) -> None:
         self.missing = [MissingItem.coerce(m) for m in self.missing]
@@ -114,6 +126,8 @@ class DecisionCard:
             from .evidence import now_cn
 
             self.generated_at = now_cn().isoformat()
+
+        self._check_restated_missing()
 
         # --- 缺失项必须完整上浮：漏报一条，Card 就在掩盖它自己不知道的事 ---
         upstream = {m for v in self.verdicts for m in v.missing}
@@ -150,6 +164,57 @@ class DecisionCard:
                 f"{blockers} 给出 stance={VETO_STANCE!r}，Card 状态却是 "
                 f"{self.status!r} —— 否决必须体现为 AVOID 或 BLOCK"
             )
+
+    def _check_restated_missing(self) -> None:
+        """同一件事不许在 `missing[]` 里出现两遍 —— 裁定 15 + L-10。
+
+        🔴 实测（`BIGA-20260921-021`，飞书触发的第一张卡）：
+
+            risk.upstream.coverage_incomplete  Stage 1 缺席：news，这些领域的风险本次没有被看过
+            risk.coverage.insufficient         Stage 1 缺席:news,这些领域的风险本次没有被看过
+
+        同一段话两个代码。**注意标点**：全角 `：，` vs 半角 `:,` ——
+        后者是 LLM 重打出来的，这正是 L-10 要防的「让 LLM 搬运结构化数据」。
+
+        为什么判据落在**正文**而不是代码前缀
+        ------------------------------------
+        六份 specialist 契约**全都**指示 agent 加自己命名空间下的缺失代码，
+        而那多数是合法的：skill 报「数据没取到」，agent 报「我据此判断不了」
+        —— 那是两件事（约定 S-2）。按命名空间判会把六条全误伤。
+
+        真正可判定的信号是**这两条说的是同一句话**。
+        ⇒ 归一化标点与空白后比较，重复即拒。
+
+        ⚠️ 旧卡只警告不拒（「新卡严格，旧卡可读」）——
+        库里已经有这样的卡，回放不该因此崩掉。
+        """
+        # 🔴 判据是 **(命名空间, 正文)**，不是光看正文。
+        #
+        #    因为「两个不同的源各自报『数据源不可用』」是**两件事** ——
+        #    合并会让统计少一条（`tests/test_stance_and_traceability.py`
+        #    里那条测试专门钉着这个反例，第一版判据当场把它判红了）。
+        #
+        #    真正的违例是**同一个生产方把同一句话说了两遍**。
+        seen: dict[tuple[str, str], MissingItem] = {}
+        dup: list[tuple[str, str, str]] = []
+        for m in self.missing:
+            ns = m.code.split(".")[0]
+            if ns in ("", LEGACY_CODE):        # 旧数据没有命名空间，不参与
+                continue
+            key = (ns, _norm_text(m))
+            if key in seen and seen[key].code != m.code:
+                dup.append((seen[key].code, m.code, str(m)[:40]))
+            seen.setdefault(key, m)
+        if not dup:
+            return
+        detail = "；".join(f"{a} 与 {b} 都在说「{t}…」" for a, b, t in dup)
+        msg = (f"Card {self.decision_id} 的缺失项里同一件事报了两遍：{detail}\n"
+               f"  同一个事实只能有一个生产方（裁定 15）。\n"
+               f"  多半是契约让 agent 重述了 skill 已经报出的缺失 —— "
+               f"而重述会把标点和措辞改掉，事后没法聚合。")
+        if not self.from_store:
+            raise ValueError(msg)
+        self.restate_warning = msg
 
     def _check_identity(self) -> None:
         """🔴 卡上的每一条判定，都必须属于这张卡。
@@ -252,8 +317,9 @@ class DecisionCard:
         #    warning 与 missing 的分工是「这个数能用但要注意」vs「这个数没有」。
         #    把前者藏起来，等于只保留了它的名字。
         warns = [(v.agent, w) for v in self.verdicts for w in v.warnings]
-        if self.identity_warning:
-            warns.insert(0, ("card", self.identity_warning))
+        for w in (self.identity_warning, self.restate_warning):
+            if w:
+                warns.insert(0, ("card", w))
         if warns:
             lines.append("")
             lines.append(f"⚠ 提请注意（{len(warns)}）")
