@@ -38,7 +38,7 @@ from datetime import datetime, timedelta
 _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
-from _contract import CN_TZ  # noqa: E402
+from _contract import CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 from _store import connect  # noqa: E402
 from _store.runtime import read_task_runs, read_turns  # noqa: E402
 
@@ -135,8 +135,15 @@ def _parallel_report(turns) -> bool | None:
     🔴 判据是区间相交，不是总耗时变短。
     """
     spans: dict[str, tuple[datetime, datetime]] = {}
+    stage2: dict[str, tuple[datetime, datetime]] = {}
     for t in turns:
         if t.agent_id == SUPERVISOR:
+            continue
+        if t.agent_id in STAGE2_AGENTS:
+            a, b = stage2.get(t.agent_id, (t.started_at, t.ended_at))
+            stage2[t.agent_id] = (min(a, t.started_at), max(b, t.ended_at))
+            continue
+        if t.agent_id not in STAGE1_AGENTS:
             continue
         s0, e0 = t.started_at, t.ended_at
         if t.agent_id in spans:
@@ -146,6 +153,20 @@ def _parallel_report(turns) -> bool | None:
             spans[t.agent_id] = (s0, e0)
 
     print("Stage 1 并行检查")
+    if stage2 and spans:
+        # 🔴 Stage 2 与 Stage 1 重叠 = 它读的是**还没冻结**的证据。
+        #    这不是性能问题，是正确性问题：制衡层审的必须是定稿，
+        #    否则「当时为什么放行」在回放里根本重建不出来。
+        s1_end = max(e for _, e in spans.values())
+        early = {a: s for a, (s, _) in stage2.items() if s < s1_end}
+        for a, s0 in early.items():
+            print(f"  🔴 {a}（Stage 2）在 {s0:%H:%M:%S} 就开始了，而 Stage 1 到 "
+                  f"{s1_end:%H:%M:%S} 才结束 —— 它读到的证据尚未冻结")
+        if not early:
+            for a, (s0, e0) in sorted(stage2.items(), key=lambda kv: kv[1][0]):
+                print(f"  {a:<11}{s0:%H:%M:%S} – {e0:%H:%M:%S}   "
+                      f"{(e0 - s0).total_seconds():5.1f}s   （Stage 2，应在 Stage 1 之后）")
+
     if len(spans) < 2:
         who = list(spans) or ["（无）"]
         print(f"  窗口内只有 {len(spans)} 个 specialist：{', '.join(who)}")

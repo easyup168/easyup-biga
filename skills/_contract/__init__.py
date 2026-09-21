@@ -12,6 +12,8 @@ from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, Evidence, now_cn
 from .missing import LEGACY_CODE, MissingItem
 from .verdict import (
+    STAGE1_AGENTS,
+    STAGE2_AGENTS,
     STANCE_VOCAB,
     TASK_ID_RE,
     VETO_STANCE,
@@ -25,6 +27,8 @@ __all__ = [
     "CN_TZ",
     "LEGACY_CODE",
     "MissingItem",
+    "STAGE1_AGENTS",
+    "STAGE2_AGENTS",
     "STANCE_VOCAB",
     "VETO_STANCE",
     "DECISION_ID_RE",
