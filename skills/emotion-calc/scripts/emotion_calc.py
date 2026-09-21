@@ -75,6 +75,7 @@ from _sources import (  # noqa: E402
     SourceError,
     as_of_for_trade_date,
     fetch_pool,
+    session_in_progress,
 )
 from _store import (  # noqa: E402
     init_schema,
@@ -252,6 +253,17 @@ def build_verdict(
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
         ))
+
+    if qdate and c.pools and all(r.total == 0 for r in c.pools.values()) \
+            and session_in_progress(qdate, retrieved_at=retrieved):
+        # 🔴 盘中/盘前三个池全为 0 —— 这是**还没形成**，不是「今天一个涨停都没有」。
+        #    当成事实上卡，读者看到的是「冰点」这种极端读数。
+        c.missing.append(MissingItem(
+            f"全部情绪指标 —— {qdate} 的股池此刻全部为 0，"
+            f"而这一天尚未收盘：数据**还没形成**，不是「涨停 0 家」",
+            "emotion.pool.not_yet_formed"))
+        c.pools.clear()
+        qdate = None
 
     if qdate:
         as_of, as_of_warning = as_of_for_trade_date(qdate, retrieved_at=retrieved)

@@ -36,7 +36,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 
 from _contract import CN_TZ  # noqa: E402
 
-__all__ = ["MARKET_CLOSE", "as_of_for_trade_date"]
+__all__ = ["MARKET_CLOSE", "as_of_for_trade_date", "session_in_progress"]
 
 #: A 股收盘时刻。收盘后，当日数据描述的是「全天结果」。
 MARKET_CLOSE = dtime(15, 0, 0)
@@ -87,3 +87,28 @@ def as_of_for_trade_date(
         f"{trade_date} 尚未收盘（现在 {retrieved_at:%H:%M}），"
         "这是**盘中快照**而不是全天结果"
     )
+
+
+def session_in_progress(trade_date: str, *, retrieved_at: datetime) -> bool:
+    """这批数据所属的交易时段**还在进行中**吗。
+
+    用途：区分「这个数真的是 0」与「这一天还没产生这个数」。
+
+    🔴 实测（2026-09-21 周一 09:05，开盘前）
+    ----------------------------------------
+    ============  ==========================  ====================
+    源            盘前返回                      如果当成事实
+    ============  ==========================  ====================
+    东财股池       `tc=0`，`qdate=今天`          「今日涨停 0 家」⇒ 冰点
+    东财涨跌家数    `0/0/0`                     「全市场无人交易」
+    东财板块榜      496 行全 `pct=0`             「所有板块都平盘」
+    新浪日线 / 腾讯  **保留上一交易日**            正确
+    ============  ==========================  ====================
+
+    三个实时源都会给出**看起来合法的 0**，而两个历史源保留旧值 ——
+    **同一时刻，不同端点对「新一天还没开始」的表现是相反的。**
+    所以不能靠「有没有数据」判断，每个源都要自己判断。
+    """
+    d = datetime.strptime(trade_date, "%Y%m%d").date()
+    now = retrieved_at.astimezone(CN_TZ)
+    return d == now.date() and now.time() < MARKET_CLOSE

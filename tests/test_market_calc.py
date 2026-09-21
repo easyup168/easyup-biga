@@ -229,11 +229,23 @@ class TestGuard5BreadthHasNoDate:
     def test_必须发警告说明as_of是推断的(self, wired):
         assert any("不返回交易日字段" in w for w in build().warnings)
 
-    def test_涨跌平合计为零时占比进missing(self, wired):
+    def test_涨跌平全为零是尚未形成不是事实(self, wired):
+        """🔴 三项全为 0 在任何真实交易时段都不可能。
+
+        实测周一 09:05 盘前：数据源已清零，而它会被贴上**日线的交易日**
+        （上一交易日）—— 于是 Card 上出现「9-18 上涨家数 0」，
+        而那天真实是 4277。比「算不出来」更糟：它是一个**有日期的错值**。
+        """
         wired["breadth"] = sources.BreadthResult(0, 0, 0, [], {"rc": 0})
         v = build()
-        assert "advance_ratio" not in v.result
-        assert any("分母为零" in m for m in v.missing)
+        for f in ("advance_count", "decline_count", "flat_count", "advance_ratio"):
+            assert f not in v.result, f"{f} 不该作为事实产出"
+        assert any(m.code == "market.breadth.not_yet_formed" for m in v.missing)
+
+    def test_没有恒假的分母分支(self):
+        """加了 not_yet_formed 守卫之后，「分母为零」那条路永远走不到 —— L-7。"""
+        src = (REPO / "skills/market-calc/scripts/market_calc.py").read_text(encoding="utf-8")
+        assert "breadth_ratio.zero_denominator" not in src
 
 
 class TestNoSilentDisappearance:
