@@ -301,3 +301,86 @@ class TestForeignDecisionUpstream:
         wired[2] = up("emotion", stance="修复", task_id="BIGA-20260918-001")
         v = build([1, 2], task_id="BIGA-20260918-001")
         assert "risk.upstream.foreign_decision" not in [m.code for m in v.missing]
+
+
+# ───────────────────────────── 阈值可达性巡检（外部评审 F7 的后半段）
+#
+# F7 有两半，第一半（设计文档点名了从未存在的 `reachability.py`）已经
+# 结构性修掉了。**但风险本体当时一条测试都没加** —— 而复查正确地指出：
+# 台账把整条 F7 标成「✅ 已修」，容易让人以为风险已经解除。
+#
+# 风险本体是 L-7「死配置」：`THRESHOLDS` 有 6 条，其中
+# `breadth_weak` / `streak_extreme` / `limit_down_many` **从未被任何测试
+# 触发过**。未来任何一次重构（给 `max_streak` 换单位、给 `advance_ratio`
+# 改字段名）如果让某条再也匹配不上，它会「照常参与计算，只是永远不生效」——
+# risk 从此对这类风险永久沉默，而 Card 会一直显得「风险已核查、无异常」。
+#
+# 🔴 判据 **parametrize 到 `THRESHOLDS` 本身**，不是手写六条：
+#    新加一条阈值自动被纳入，写死六条的话第七条又会是下一个 F7。
+
+#: 上游字段由谁产出 —— 用来验证阈值不是在等一个没人生产的字段。
+_FIELD_OWNER = {
+    "broken_rate": "emotion", "max_streak": "emotion",
+    "limit_down_count": "emotion",
+    "volume_ratio": "market", "advance_ratio": "market",
+}
+
+
+def _crossing_value(op: str, bound: float) -> float:
+    """造一个刚好越过这条线的值。"""
+    return bound + 1.0 if op == ">" else bound - 0.05
+
+
+class TestThresholdReachability:
+    @pytest.mark.parametrize("field,op,bound,code,why", rc.THRESHOLDS,
+                             ids=[t[3] for t in rc.THRESHOLDS])
+    def test_每条阈值都能被真的触发(self, wired, field, op, bound, code, why):
+        """🔴 「配了但从未命中」和「配对了但今天没触发」，日志长得一模一样。"""
+        owner = _FIELD_OWNER[field]
+        result = {"trade_date": "20260918", field: _crossing_value(op, bound)}
+        stance = {"market": "放量上涨", "emotion": "亢奋"}[owner]
+        wired[1] = up(agent=owner, result=result, stance=stance)
+        v = build([1])
+        assert code in v.result["tripped_thresholds"], (
+            f"{code} 配在 THRESHOLDS 里，但喂进越线的值也没触发 —— \n"
+            f"  字段 {field!r} 由 {owner} 产出，检查两边的字段名与单位是否还对得上。\n"
+            f"  L-7：死配置会照常参与计算，只是永远不生效。")
+
+    @pytest.mark.parametrize("field,op,bound,code,why", rc.THRESHOLDS,
+                             ids=[t[3] for t in rc.THRESHOLDS])
+    def test_没越线就不该触发(self, wired, field, op, bound, code, why):
+        """反方向 —— 否则上一条可以靠「永远触发」平凡通过。"""
+        owner = _FIELD_OWNER[field]
+        safe = bound - 0.01 if op == ">" else bound + 0.01
+        wired[1] = up(agent=owner, result={"trade_date": "20260918", field: safe},
+                      stance={"market": "放量上涨", "emotion": "亢奋"}[owner])
+        assert code not in build([1]).result["tripped_thresholds"]
+
+    def test_每条阈值的字段都有生产方(self):
+        """阈值在等一个没人产出的字段 = 它永远不会命中，而且不报错。"""
+        missing = [t[0] for t in rc.THRESHOLDS if t[0] not in _FIELD_OWNER]
+        assert not missing, (
+            f"这些阈值字段没登记生产方：{missing}\n"
+            "  先确认是谁产出它 —— 如果没人产出，这条阈值是死的。")
+
+    @pytest.mark.parametrize("field,owner", sorted(_FIELD_OWNER.items()))
+    def test_生产方真的在产出这个字段(self, field, owner):
+        """🔴 不信 `_FIELD_OWNER` 这张手写表，去上游源码里查字面量。
+
+        这条才是防重构的那一条：给字段改名之后，
+        阈值不会报错，只会**从此再也不命中**。
+        """
+        script = {"emotion": "emotion-calc/scripts/emotion_calc.py",
+                  "market": "market-calc/scripts/market_calc.py"}[owner]
+        src = (REPO / "skills" / script).read_text(encoding="utf-8")
+        names = {n.args[0].value
+                 for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.Call) and n.args
+                 and (getattr(n.func, "id", "") or getattr(n.func, "attr", ""))
+                 in ("add", "add_live")
+                 and isinstance(n.args[0], ast.Constant)
+                 and isinstance(n.args[0].value, str)}
+        assert field in names, (
+            f"{owner} 不再产出 {field!r}（现有字面量字段 {len(names)} 个）——\n"
+            f"  而 THRESHOLDS 仍在等它。这条阈值现在是死的，"
+            f"且不会有任何东西报错。")

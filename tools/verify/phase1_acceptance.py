@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -59,17 +60,40 @@ class Check:
 # ──────────────────────────────────────────────────────────── 需要跑过一次的项
 
 
-def _runtime_spawn_records() -> list[dict] | None:
-    """读 OpenClaw 运行时自己记的子会话表 —— **BigA 无法伪造的那一份证据**。
+def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
+    """读 OpenClaw 运行时自己记的子会话表，**只取属于这次决策的**。
 
     返回 None 表示读不到（状态库不存在 / 表结构变了），
     调用方必须据此报 PENDING 而不是 PASS。
+
+    🔴 为什么按决策号过滤（复查发现的洞）
+    ------------------------------------
+    第一版取「最近 50 条」然后只问「这个 agent 名字出现过吗」——
+    **完全没有跟决策号绑定**。实测复现：
+
+        伪造决策号 BIGA-20260921-901，用合法 API 写 6 行 agent_runs
+        → spawn 核验：6 个 agent 两份独立记录都齐   ✅ 通过
+
+    因为机器当天确实跑过别的真实决策，伪造的号**蹭上了别人的记录**。
+    而 `bin/biga-card` 正常使用本来就会反复运行 ⇒
+    这个条件在真实机器上**几乎总是成立**，不是刁钻场景。
+
+    ⚠️ 最讽刺的是：决策号**本来就明文写在 `payload_json` 里**（Supervisor
+    的 spawn 指令带着它），只是没被拿来做绑定。
+    ⇒ 这一版用它过滤，同时去掉 LIMIT —— 按号取就不该有条数上限，
+      否则一天跑得多了，早先的决策会悄悄查不到。
     """
     import sqlite3  # store-exempt: 读的是 OpenClaw 运行时状态库，不是 BigA 事实层；
                     # _store 的单一入口规则是为了「将来切 PG 只改一个文件」，
                     # 而这个库永远不会跟着 BigA 迁移。
 
-    db = pathlib.Path.home() / ".openclaw-biga/state/openclaw.sqlite"
+    # ⚠️ 环境变量只为**测试**存在。
+    #    没有它，唯一重要的那条测试（「别人的记录不算我的」）写不出来 ——
+    #    只能去 fake `_runtime_spawn_records` 本身，而那正好把
+    #    「按决策号过滤」这段逻辑**整个绕过去**，等于不测它。
+    #    第一版就是这么写的测试，所以复查发现的洞它一条都没拦住。
+    db = pathlib.Path(os.environ.get("BIGA_RUNTIME_DB")
+                      or pathlib.Path.home() / ".openclaw-biga/state/openclaw.sqlite")
     if not db.exists():
         return None
     try:
@@ -79,7 +103,8 @@ def _runtime_spawn_records() -> list[dict] | None:
         rows = conn.execute(
             "SELECT run_id, child_session_key, controller_session_key, "
             "       requester_session_key, created_at, payload_json "
-            "FROM subagent_runs ORDER BY created_at DESC LIMIT 50"
+            "FROM subagent_runs WHERE payload_json LIKE ? ORDER BY created_at DESC",
+            (f"%{decision_id}%",)
         ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.Error:
@@ -91,7 +116,16 @@ def _runtime_spawn_records() -> list[dict] | None:
             pass
 
 
-def spawn_proof(decision_id: str) -> dict[str, tuple[bool, bool]]:
+@dataclass
+class SpawnProof:
+    """spawn 核验的三态原料。`per_agent[agent] = (在 agent_runs 里, 被 spawn 过)`。"""
+
+    readable: bool
+    rows: int
+    per_agent: dict[str, tuple[bool, bool]]
+
+
+def spawn_proof(decision_id: str) -> SpawnProof:
     """`agent -> (在 agent_runs 里, 在运行时 subagent_runs 里)`。
 
     🔴 两份记录的性质完全不同，这正是本函数存在的全部理由：
@@ -108,16 +142,24 @@ def spawn_proof(decision_id: str) -> dict[str, tuple[bool, bool]]:
     也就是说 Phase 2 产出的每一张 Card，「Specialist 真的被调用过」
     这条最硬的约束**事实上没有任何机器在管**。
 
-    ⚠️ 返回 `{}` 表示读不到运行时状态库 ⇒ 调用方必须报 PENDING / UNKNOWN，
-       **不是 PASS**（红线 R-3）。
+    返回 `SpawnProof`。🔴 **`readable` 与「有没有记录」必须分开**：
+
+    ============================  ================================================
+    `readable=False`              读不到运行时库 ⇒ UNKNOWN（R-3：算不出来要说）
+    `readable=True, rows=0`       库能读、这个号一条记录都没有
+                                  —— 若 `agent_runs` 里却有行，那就是**伪造**
+    ============================  ================================================
+
+    第一版把这两种混为一谈，于是伪造被报成「判不了」——
+    而「判不了」是会被忽略的，「伪造」不会。
     """
     from _contract import STAGE1_AGENTS, STAGE2_AGENTS
     from _store import list_agent_runs
 
     ours = {r["agent"] for r in list_agent_runs(decision_id=decision_id)}
-    spawns = _runtime_spawn_records()
+    spawns = _runtime_spawn_records(decision_id)
     if spawns is None:
-        return {}
+        return SpawnProof(readable=False, rows=0, per_agent={})
 
     out = {}
     # 判据取自契约里的 stage 名单，**不是手写的一个名字** ——
@@ -125,12 +167,14 @@ def spawn_proof(decision_id: str) -> dict[str, tuple[bool, bool]]:
     for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
         if agent == "discipline":          # 裁定 13：故意不建
             continue
+        # 🔴 `child_session_key` 的形状是 `agent:<name>:subagent:<uuid>` ——
+        #    按**段**比，不按子串包含。子串会让 `news` 命中 `newsflash`
+        #    这类名字，而这类误判从来不会报错。
         spawned = any(
-            agent in (r.get("payload_json") or "")
-            or agent in (r.get("child_session_key") or "")
+            (r.get("child_session_key") or "").split(":")[1:2] == [agent]
             for r in spawns)
         out[agent] = (agent in ours, spawned)
-    return out
+    return SpawnProof(readable=True, rows=len(spawns), per_agent=out)
 
 
 def check_1_spawned(decision_id: str | None) -> Check:
@@ -140,13 +184,18 @@ def check_1_spawned(decision_id: str | None) -> Check:
         return c.pending("未提供 --decision-id") or c
 
     proof = spawn_proof(decision_id)
-    if not proof:
+    if not proof.readable:
         return c.pending(
             "读不到运行时的 subagent_runs，无法证明任何一个是 Supervisor spawn 的"
         ) or c
 
-    forged = [a for a, (ours, spawned) in proof.items() if ours and not spawned]
-    absent = [a for a, (ours, _) in proof.items() if not ours]
+    ours = [a for a, (o, _) in proof.per_agent.items() if o]
+    forged = [a for a, (o, sp) in proof.per_agent.items() if o and not sp]
+    absent = [a for a, (o, _) in proof.per_agent.items() if not o]
+    if proof.rows == 0 and ours:
+        return c.fail(
+            f"{decision_id} 在运行时 subagent_runs 里一条记录都没有，"
+            f"而 agent_runs 里有 {sorted(ours)} —— 这个号从未被 spawn 过") or c
     if forged:
         return c.fail(
             f"这些 agent 在 agent_runs 里有行，但运行时 subagent_runs 里没有："
@@ -154,7 +203,7 @@ def check_1_spawned(decision_id: str | None) -> Check:
             "**不是 Supervisor spawn 出来的**") or c
     if absent:
         return c.pending(f"本次决策没有这些 agent 的记录：{sorted(absent)}") or c
-    c.ok(f"{len(proof)} 个 agent 两份记录都齐：{sorted(proof)}")
+    c.ok(f"{len(proof.per_agent)} 个 agent 两份记录都齐：{sorted(proof.per_agent)}")
     return c
 
 

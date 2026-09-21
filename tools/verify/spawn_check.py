@@ -49,22 +49,43 @@ def main(argv: list[str] | None = None) -> int:
     decision_id = argv[0]
 
     proof = spawn_proof(decision_id)
-    if not proof:
+    if not proof.readable:
         print("🔶 spawn 核验判不了 —— 读不到运行时的 subagent_runs。", file=sys.stderr)
         print("   这**不算通过**：无法区分「真 spawn」与「手工跑脚本」。",
               file=sys.stderr)
         return 2
 
-    forged = sorted(a for a, (ours, sp) in proof.items() if ours and not sp)
-    absent = sorted(a for a, (ours, _) in proof.items() if not ours)
-    ok = sorted(a for a, (ours, sp) in proof.items() if ours and sp)
+    ours = sorted(a for a, (o, _) in proof.per_agent.items() if o)
+    forged = sorted(a for a, (o, sp) in proof.per_agent.items() if o and not sp)
+    absent = sorted(a for a, (o, _) in proof.per_agent.items() if not o)
+    ok = sorted(a for a, (o, sp) in proof.per_agent.items() if o and sp)
+
+    # 🔴 库能读、这个号一条运行时记录都没有，而 agent_runs 里却有行
+    #    ⇒ 那些行是凭空写进去的。这是**伪造**，不是「判不了」。
+    #
+    #    复查发现的洞就长这样：伪造一个决策号 + 用合法 API 写几行，
+    #    第一版判定「6 个 agent 两份独立记录都齐 ✅」——
+    #    因为它只问「这个 agent 名字在最近 50 条里出现过吗」，
+    #    而机器当天确实跑过别的真实决策，伪造的号**蹭上了别人的记录**。
+    #    ⚠️ `bin/biga-card` 正常使用就会反复运行 ⇒ 这个条件几乎总成立。
+    if proof.rows == 0 and ours:
+        print(f"🔴 spawn 核验失败：{decision_id} 在运行时 subagent_runs 里"
+              f"**一条记录都没有**，而 agent_runs 里有 {ours}。", file=sys.stderr)
+        print("   那些行是凭空写进去的，这个决策号从未被 spawn 过。", file=sys.stderr)
+        return 1
 
     if forged:
         print(f"🔴 spawn 核验失败：{forged} 在 agent_runs 里有行，"
-              f"但运行时 subagent_runs 里没有。", file=sys.stderr)
+              f"但本次决策的运行时记录里没有它们。", file=sys.stderr)
         print("   那些行是被**直接写入**的，不是 Supervisor spawn 出来的。",
               file=sys.stderr)
         return 1
+
+    if not ok:
+        print(f"🔶 spawn 核验判不了 —— {decision_id} 一个 agent 都没核到"
+              f"（运行时记录 {proof.rows} 条，agent_runs {len(ours)} 个）。",
+              file=sys.stderr)
+        return 2
 
     line = f"▸ spawn 核验：{len(ok)} 个 agent 两份独立记录都齐 {ok}"
     if absent:
