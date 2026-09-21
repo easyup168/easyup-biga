@@ -216,3 +216,125 @@ class TestParseFailureIsNotQuietNews:
                 SN.fetch_feed(pages=1)
         finally:
             SN.get_json = orig
+
+
+# ══ 外部评审 P1-3：连续事件流的时间语义 ═══════════════════════
+#
+# 原来把最新一条的日期喂给 `as_of_for_trade_date()` —— 那个函数是给**日线**
+# 用的：交易日过完了就返回当天 15:00。
+#
+# 7x24 没有「收盘」这个概念。于是收盘后：
+#
+#   最新一条 19:58，取回 20:00  ⇒  as_of=15:00  ⇒  staleness 5 小时
+#
+# 实际只有 2 分钟。这会污染 staleness_sec、risk 的 max_staleness_sec、
+# 新鲜度判断，以及日后所有数据质量统计。
+#
+# 🔴 它**盘中是对的** —— 这正是它躲过一整天实测的原因：
+#    当天所有测试都在 15:00 之前。⇒ 本类的用例全部钉在**收盘后**。
+
+CLOSED = datetime(2026, 9, 21, 20, 0, tzinfo=CN_TZ)      # 收盘后
+LATE = datetime(2026, 9, 21, 23, 50, tzinfo=CN_TZ)       # 深夜
+
+
+class TestContinuousStreamTemporalSemantics:
+    def test_收盘后as_of等于最新一条的时刻(self, monkeypatch):
+        newest = CLOSED - timedelta(minutes=2)
+        feed = _feed(newest, n=20, step_sec=30)
+        v = _build(monkeypatch, CLOSED, feed)
+        ev = {e.field: e for e in v.evidence}
+        assert ev["newest_at"].as_of == newest, (
+            f"as_of={ev['newest_at'].as_of} 应当等于最新一条的时刻 {newest}；"
+            "落到 15:00 就是把 2 分钟前的消息说成 5 小时前")
+
+    def test_收盘后不产生假陈旧度(self, monkeypatch):
+        newest = CLOSED - timedelta(minutes=2)
+        v = _build(monkeypatch, CLOSED, _feed(newest, n=20, step_sec=30))
+        ev = {e.field: e for e in v.evidence}
+        gap = (ev["newest_at"].retrieved_at - ev["newest_at"].as_of).total_seconds()
+        assert gap == 120, f"真实陈旧度 120s，算出来 {gap}s"
+        assert gap < 600, "这就是旧实现会给出的 5 小时"
+
+    def test_深夜同理(self, monkeypatch):
+        newest = LATE - timedelta(minutes=1)
+        v = _build(monkeypatch, LATE, _feed(newest, n=10, step_sec=30))
+        ev = {e.field: e for e in v.evidence}
+        assert ev["newest_at"].as_of == newest
+
+    def test_盘中也仍然正确(self, monkeypatch):
+        """修之前盘中碰巧是对的 —— 修之后不能把它改坏。"""
+        newest = MON_OPEN - timedelta(seconds=90)
+        v = _build(monkeypatch, MON_OPEN, _feed(newest, n=20, step_sec=30))
+        ev = {e.field: e for e in v.evidence}
+        assert ev["newest_at"].as_of == newest
+
+    def test_不再依赖日线口径的换算(self):
+        """判据是**有没有被调用 / 被 import**，不是「源码里出不出现」。
+
+        🔴 第一版写的是 `"as_of_for_trade_date" not in src` —— 当场红了，
+        因为**解释「为什么不能用它」的注释里必然要提到它的名字**。
+        （这是本项目第 6 次撞上「描述规则时把 X 抄进去」那个形状，
+        只不过这次反过来：判据把合法的解释也禁掉了。）
+
+        ⇒ 用 AST。散文可以提它，代码不能用它。
+        """
+        import ast
+        tree = ast.parse((REPO / "skills/news-scan/scripts/news_scan.py")
+                         .read_text(encoding="utf-8"))
+        imported = {a.name for n in ast.walk(tree)
+                    if isinstance(n, ast.ImportFrom) for a in n.names}
+        called = {n.func.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        bad = {"as_of_for_trade_date"} & (imported | called)
+        assert not bad, (
+            f"news 仍在用日线的 as_of 换算：{bad} —— "
+            "7x24 是连续事件流，没有「收盘」这个概念")
+
+
+# ══ 共享采集层：被截断的响应不该炸掉 skill ═══════════════════
+#
+# 实测（2026-09-21 15:14，跑 FIX-04 的验证时撞上的）：
+# 新浪 7x24 返回了被截断的 chunked 响应，`news_scan.py` **直接崩溃**，
+# 吐出一个裸 traceback。
+#
+# 根因：`http.client.IncompleteRead` 继承自 `HTTPException` + `ValueError`，
+# **不继承 `OSError`** —— 而重试层的 except 只写了
+# `(URLError, TimeoutError, OSError)`。
+#
+# 按本项目的口径，它应该变成一条 `missing`，让卡照常出、只是标着「不知道」。
+#
+# ⚠️ 重试只此一处 ⇒ 这条影响**全部六个 skill**。
+
+
+class TestTruncatedResponseBecomesSourceError:
+    def test_IncompleteRead_不是OSError(self):
+        """先钉死前提 —— 否则下次有人会以为 OSError 够用。"""
+        import http.client
+        assert not issubclass(http.client.IncompleteRead, OSError)
+
+    def test_被截断的响应变成SourceError(self, monkeypatch):
+        import http.client
+        import _sources.http as H
+        from _sources.http import SourceError
+
+        def boom(*a, **k):
+            raise http.client.IncompleteRead(b"half")
+
+        monkeypatch.setattr(H.urllib.request, "urlopen", boom)
+        monkeypatch.setattr(H, "BACKOFF_SEC", (0, 0, 0))
+        with pytest.raises(SourceError, match="次尝试全部失败"):
+            H.get_text("https://x/y", referer="https://x")
+
+    def test_skill层把它变成缺失项而不是崩溃(self, monkeypatch):
+        import http.client
+        from _sources.http import SourceError
+
+        def boom(**_):
+            raise SourceError("7x24: 3 次尝试全部失败，最后一次 IncompleteRead")
+
+        monkeypatch.setattr(NS, "now_cn", lambda: MON_OPEN)
+        monkeypatch.setattr(NS, "fetch_feed", boom)
+        v = NS.build_verdict(break_source=set(), store=False,
+                             task_id=new_task_id(1))
+        assert v.verdict == "UNKNOWN"
+        assert "news.feed.unavailable" in [m.code for m in v.missing]

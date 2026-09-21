@@ -111,6 +111,31 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             continue
         upstream.append(v)
 
+    # 🔴 Stage 边界的身份守卫（外部评审 P1-2）。
+    #
+    # risk 原本只检查覆盖率、交易日、陈旧度、阈值、stance 冲突、跨源校验 ——
+    # **唯独没有检查上游判定属不属于这次决策**。
+    #
+    # 于是可以出现：五个 Specialist 全在、trade_date 一致、coverage_ratio=1.0，
+    # 而它们分别来自三个不同的决策。risk 会在这个错误组合上做出判断。
+    #
+    # ⚠️ 合成阶段那道闸门拦得住最终的卡，但拦不住这件事：
+    #    **错误的 risk 判定已经生成、而且可能已经落库。**
+    #    制衡层在污染的输入上得出的结论，事后拒绝那张卡也撤销不了。
+    #
+    # 处理方式沿用本项目的一贯口径：不崩溃、不静默，
+    # **报成缺失并把结论压到 UNKNOWN** —— 出一张标着「不知道」的卡，
+    # 比不出卡强得多，也比出一张看起来正常的卡强得多。
+    foreign = sorted({v.task_id for v in upstream} - {task_id})
+    if foreign:
+        names = "、".join(
+            f"{v.agent}({v.task_id})" for v in upstream if v.task_id != task_id)
+        missing.append(MissingItem(
+            f"风险判断的证据归属 —— 本次决策是 {task_id}，但上游判定来自 "
+            f"{foreign}：{names}。不同决策的证据不能合在一起审 —— "
+            "它们采自不同时刻，甚至可能是不同的市场状态",
+            "risk.upstream.foreign_decision"))
+
     result: dict[str, Any] = {}
     evidence: list[Evidence] = []
 
@@ -224,7 +249,13 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             "risk.upstream.stance_absent"))
 
     core = {"coverage_ratio", "tripped_thresholds", "trade_date_consistent"}
-    if not missing:
+    if foreign:
+        # 🔴 证据归属不成立时，**其余指标全部失去意义**。
+        #    coverage_ratio=1.0 在这里不是「五个都到齐了」，
+        #    而是「五个坑里各插了一面旗，但不是同一片地」。
+        #    ⇒ 直接压到 UNKNOWN，不让它沿 WARNING 这条路给出任何倾向。
+        status, level = "partial", "UNKNOWN"
+    elif not missing:
         status, level = "completed", "PASS"
     elif core <= set(result):
         status, level = "partial", "WARNING"

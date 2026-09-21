@@ -241,7 +241,18 @@ def reserve_decision_id(
     「先查空位再插入」中间有窗口 —— 两次同时起的运行会拿到同一个号，
     然后它们的证据合进同一张卡，事后**没有任何字段能把它们分开**。
     这不是假想：2026-09-21 盘中的两次端到端就是这么混的。
+
+    🔴 会自己建 schema。
+    外部评审 P2-2：`new_decision.py` 在**全新的库**上直接抛
+    `sqlite3.OperationalError: unable to open database file` ——
+    因为算下一个序号走的是 readonly 连接，而文件还不存在。
+
+    Stage 0 是整条链路的**第一步**，它必须能在空环境里独立跑起来 ——
+    否则「自包含的入口」这个说法不成立。
+    ⇒ 建 schema 放在这里而不是 CLI 里：任何调用方都受益，
+    而放在 CLI 就只有那一个入口受益。
     """
+    init_schema(path)
     for _ in range(1000):
         cand = new_task_id(_next_free_seq(day or now_cn().strftime("%Y%m%d"), path),
                            day=day)
@@ -382,7 +393,15 @@ def record_agent_run(
     error: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
-    """记一次 Agent 执行，返回 `run_id`。
+    """
+    ⚠️ **这不是 spawn 的证明**（外部评审 P2-3）。
+
+    BigA 自己的代码就在写这张表 —— 人手工跑一遍 `synthesize.py`，
+    它照样多出几行。它能证明的只有「我们记下了一次执行」。
+
+    要证明「运行时真的起过那个 Agent」，看**运行时自己的库**：
+    `subagent_runs` / `task_runs`，读取方是 `tools/verify/agent_trace.py`。
+记一次 Agent 执行，返回 `run_id`。
 
     🔴 这张表是「Supervisor 确实调用了 Specialist」的唯一凭证。
     Agent 在回答里声称自己调用过，不算数 —— LLM 完全可以把整段调用编出来。
