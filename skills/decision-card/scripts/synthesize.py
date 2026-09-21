@@ -172,7 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if not args.no_store:
-        # 先记每个 Specialist 的执行账本 —— 它是「确实调用过」的唯一凭证。
+        # 先记每个 Specialist 的执行账本。
+        # ⚠️ 只是账本，**不是**调用证明 —— 写它的就是这一行代码本身，
+        #    所以它不能证明任何关于自己的事（原注释写的是「唯一凭证」，不成立）。
+        #    spawn 证明的判据在 tools/verify/spawn_check.py。
         for v in verdicts:
             record_verdict_run(v, decision_id=decision_id,
                                started_at=card.generated_at,

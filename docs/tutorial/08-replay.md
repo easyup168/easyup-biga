@@ -277,6 +277,17 @@ summary = "; ".join(f"{k}={v.result[k]}" for k in sorted(v.result)[:3]) or "—"
 顺带，落库时还会为每个 Verdict 在 `agent_runs` 记一行。
 那张表是「Supervisor 确实调用过 Specialist」的唯一凭证（第 04 章）。
 
+> ⏩ **后续变动（2026-09-21，外部评审 P2-3）：上面这句话不成立。**
+>
+> `agent_runs` 是**执行账本**，不是调用证明 —— 写它的是 `synthesize.py` 自己。
+> 第 04 章那一节已加修正块，这里当时**漏了**：同一条旧口径散在三处代码 +
+> 两章教程里，改了两处、剩下的继续报着旧结论。
+>
+> 🔴 教训不是「再改仔细一点」，而是**口径没有单一实现就必然发散**。
+> ⇒ 现在由 `tests/test_spawn_proof.py::test_旧口径不许再出现在活文档里` 守着。
+>
+> 真正的判据：`tools/verify/spawn_check.py`（两份独立记录都齐才算）。
+
 ---
 
 ## 8. 验证
