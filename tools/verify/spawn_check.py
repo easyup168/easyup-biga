@@ -40,12 +40,16 @@ sys.path.insert(0, str(_HERE.parent.parent / "skills"))
 
 from phase1_acceptance import spawn_proof  # noqa: E402
 
+# 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _verdict as _v  # noqa: E402
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
         print("用法: spawn_check.py <决策号>", file=sys.stderr)
-        return 2
+        return _v.UNKNOWN
     decision_id = argv[0]
 
     proof = spawn_proof(decision_id)
@@ -53,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         print("🔶 spawn 核验判不了 —— 读不到运行时的 subagent_runs。", file=sys.stderr)
         print("   这**不算通过**：无法区分「真 spawn」与「手工跑脚本」。",
               file=sys.stderr)
-        return 2
+        return _v.UNKNOWN
 
     ours = sorted(a for a, (o, _) in proof.per_agent.items() if o)
     forged = sorted(a for a, (o, sp) in proof.per_agent.items() if o and not sp)
@@ -72,26 +76,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"🔴 spawn 核验失败：{decision_id} 在运行时 subagent_runs 里"
               f"**一条记录都没有**，而 agent_runs 里有 {ours}。", file=sys.stderr)
         print("   那些行是凭空写进去的，这个决策号从未被 spawn 过。", file=sys.stderr)
-        return 1
+        return _v.FAIL
 
     if forged:
         print(f"🔴 spawn 核验失败：{forged} 在 agent_runs 里有行，"
               f"但本次决策的运行时记录里没有它们。", file=sys.stderr)
         print("   那些行是被**直接写入**的，不是 Supervisor spawn 出来的。",
               file=sys.stderr)
-        return 1
+        return _v.FAIL
 
     if not ok:
         print(f"🔶 spawn 核验判不了 —— {decision_id} 一个 agent 都没核到"
               f"（运行时记录 {proof.rows} 条，agent_runs {len(ours)} 个）。",
               file=sys.stderr)
-        return 2
+        return _v.UNKNOWN
 
     line = f"▸ spawn 核验：{len(ok)} 个 agent 两份独立记录都齐 {ok}"
     if absent:
         line += f"；本次缺席 {absent}"
     print(line)
-    return 0
+    return _v.PASS
 
 
 if __name__ == "__main__":

@@ -41,6 +41,10 @@ sys.path.insert(0, str(_REPO / "skills"))
 from _store import StoreNotInitialised  # noqa: E402
 from _store.runtime import list_agents, read_tool_calls  # noqa: E402
 
+# 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _verdict as _v  # noqa: E402
+
 #: 这些形状一出现基本就是「在找东西」，值得直接标出来。
 SMELLS = (
     ("find /", "🔴 扫全文件系统 —— 契约明令禁止，且必然很慢"),
@@ -60,8 +64,9 @@ def main(argv: list[str] | None = None) -> int:
 
     agents = [args.agent] if args.agent else list_agents()
     if not agents:
-        print("没有找到任何 agent 库。")
-        return 1
+        # 🔴 判不了，不是不通过。一个 agent 库都没有 ⇒ 还没跑过任何会话。
+        print("🔶 判不了 —— 没有找到任何 agent 库（还没跑过会话？）。")
+        return _v.UNKNOWN
 
     for agent in agents:
         calls, why = read_tool_calls(agent)
@@ -90,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
                 if c.command and c.args_len > 120:
                     print(f"                 {c.command[:110]}")
             print()
-    return 0
+    return _v.PASS
 
 
 if __name__ == "__main__":
@@ -101,4 +106,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except StoreNotInitialised as e:
         print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit(_v.UNKNOWN) from None

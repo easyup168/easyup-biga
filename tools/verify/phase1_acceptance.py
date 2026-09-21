@@ -37,6 +37,10 @@ from _contract import CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 
 import isolation  # noqa: E402  —— I-1 的唯一判据，见下方 F19 的注释
 
+# 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _verdict as _v  # noqa: E402
+
 Verdict = Literal["PASS", "FAIL", "PENDING"]
 
 _MARK = {"PASS": "✅", "FAIL": "❌", "PENDING": "⏳"}
@@ -552,11 +556,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.save_baseline:
         if not args.baseline:
             print("--save-baseline 需要同时给 --baseline <路径>", file=sys.stderr)
-            return 1
+            # 用法错误。不是「判不了」—— 参数怎么给由调用方决定，能立刻改对。
+            return _v.FAIL
         args.baseline.write_text(
             json.dumps(neighbour_state(), ensure_ascii=False, indent=2))
         print(f"邻居基线已写入 {args.baseline}")
-        return 0
+        return _v.PASS
 
     baseline = None
     if args.baseline and args.baseline.exists():
@@ -597,7 +602,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("\n✅ Phase 1 八条全部通过。")
 
-    return 0 if tally == {"PASS": len(checks), "FAIL": 0, "PENDING": 0} else 1
+    # 🔴 三态。上面那句注释（「PENDING 不算 PASS，这是第一条红线」）
+    #    原来配的是 `return 0 if … else 1` —— **PENDING 和 FAIL 退成同一个码**。
+    #    渲染层分得清、退出码分不清，等于没分（外部深度评审同形状第 4 处）。
+    if tally["FAIL"]:
+        return _v.FAIL
+    if tally["PENDING"]:
+        return _v.UNKNOWN
+    return _v.PASS
 
 
 if __name__ == "__main__":
