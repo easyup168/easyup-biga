@@ -143,6 +143,16 @@ class TestF6ZeroSwallow:
             sector_calc, "fetch_boards",
             lambda kind: BoardResult(kind=kind, total=20, raw={"pages": []},
                                      boards=boards))
+        # 🔴 第二个桩是评审抓出来的：`build_verdict` 并发跑三个 job，
+        #    只桩掉板块榜，`collect_date` 那一路**照样真的去连新浪**。
+        #    于是这条「离线单测」在有网时绿、断网时红。
+        #    ⇒ 判据现在由 `tests/conftest.py` 的禁网围栏执行，不再靠记性。
+        #
+        # ⚠️ 复用 `test_sector_calc.daily()` 而不是再造一个日线桩 ——
+        #    同一个假数据两份实现，就是 architecture.md §9 L-3 的形状。
+        from test_sector_calc import daily
+        monkeypatch.setattr(sector_calc, "fetch_index_daily",
+                            lambda symbol, **kw: daily())
         c = sector_calc.build_verdict(break_source=set(), store=False,
                                       task_id="BIGA-20260921-001")
         codes = [m.code for m in c.missing]
