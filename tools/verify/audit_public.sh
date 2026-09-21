@@ -49,9 +49,20 @@ fi
 echo "扫描范围：$SCOPE"
 
 
+# 🔴 为什么模式里到处是 [x] 这样的单字符类
+#
+#    `[a]bcd` 与 `abcd` 在正则里完全等价，但**前者让本脚本
+#    自身不再字面包含那个词**。好处有三个，都是实际踩出来的：
+#
+#    1. `git filter-repo --replace-text` 清理历史时，会把本脚本的正则
+#       一起替换成 `***` —— 脚本静默失效，而且看起来一切正常
+#    2. 任何人 grep 仓库找这些词，不会被本脚本干扰
+#    3. 下面那个 `grep -v '^+chk "'` 的自排除不再是唯一防线
+#
+#    这就是 `ps aux | grep [b]ash` 那个老把戏，用在同一个问题上。
+#
 FAIL=0
-# 🔴 grep -v '^+chk "' 是必需的：本脚本的正则字面量自己也在被扫描的内容里，
-#    不排除就会永远自匹配 —— 与上面那条同源：永远报警 = 被当成噪音。
+# grep -v '^+chk "' 仍然保留：模式之外的说明文字也可能撞上关键词。
 chk() { c=$(printf '%s' "$DIFF" | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
         [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
 
@@ -59,20 +70,20 @@ chk "凭据/私钥"      '(sk-ant|oat[0-9]{2}_|ghp_|github_pat_|tvly-|BEGIN [A-Z
 chk "Gateway token" '(bootstrapToken=|gateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
 chk "家目录路径"     '/home/[a-z][a-z0-9_-]*'
 chk "个人邮箱"       '[a-zA-Z0-9._%-]+@(gmail|qq|163|126|outlook|hotmail|foxmail|sina)\.'
-chk "邻居可识别细节" '(EASYUP|\bQMT\b|market\.db|nodeenv|find_node_bin|[0-9]+ 个 systemd|***)'
+chk "邻居可识别细节" '([E]ASYUP|\b[Q]MT\b|[m]arket\.db|[n]odeenv|[f]ind_node_bin|[0-9]+ 个 systemd|[a]nthropic:openclaw)'
 chk "IP 地址"        '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
-chk "旧用户名"       '\b***\b'
+chk "旧用户名"       '\b[r]engydl\b'
 chk "密码赋值"       '(password|passwd|secret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
 # 🔴 第 9 项加于 2026-09-21。触发它的不是某次事故，是一次人工 review ——
 #    作者读教程第 7 章时指出：「如何接通 claude」属于个人/组织的特殊情况。
 #
 #    前八项一项都没抓到它，因为它既不是密钥，也不是路径，也不是邻居的模块名。
-#    它是**这台机器与这个账号的认证安排**：***、账号层级、
-#    哪条命令被禁、凭据从哪来。
+#    它是**这台机器与这个账号的认证安排** —— 限制来自哪、
+#    账号处于什么层级、凭据从哪来。
 #
 #    ⚠️ 这类内容的危险在于它读起来像「踩坑记录」，所以会被顺手写进教程 ——
 #    而教程恰恰是最鼓励写细节的地方。
-chk "环境/账号策略" '(***|***|***|***|***|***|***|***|***|***)'
+chk "环境/账号策略" '([p]olicy-limits|[s]etup-token|[E]nterprise|[企]业策略|[组]织策略|[账]号级策略|[策]略禁止|[策]略收紧|[s]tatic token|[s]hared-from-neighbour)'
 
 if [ "$FAIL" -eq 0 ]; then
   echo "══ 九项全绿 ══"
