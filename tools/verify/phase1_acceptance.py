@@ -29,6 +29,9 @@ from typing import Literal
 
 _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import isolation  # noqa: E402  —— I-1 的唯一判据，见下方 F19 的注释
 
 Verdict = Literal["PASS", "FAIL", "PENDING"]
 
@@ -316,44 +319,22 @@ def neighbour_state() -> dict:
     }
 
 
-def biga_fds_into_neighbour() -> tuple[int, list[str]]:
-    """🔴 不变式 I-1 的**直接**证据：有没有 BigA 进程打开了邻居目录下的文件。
-
-    比 mtime 强得多 —— mtime 只能说「这个文件被改过」，
-    而 fd 列表直接回答「是谁打开的、以什么模式」。
-    mtime 会因为邻居自己的活动而变化，fd 不会。
-
-    返回 (检查到的 BigA 进程数, 违规描述列表)。
-    """
-    import os
-
-    hits: list[str] = []
-    pids: list[str] = []
-    for d in pathlib.Path("/proc").iterdir():
-        if not d.name.isdigit():
-            continue
-        try:
-            cmd = (d / "cmdline").read_bytes().decode("utf-8", "replace")
-        except OSError:
-            continue
-        if "openclaw-biga" not in cmd:
-            continue
-        pids.append(d.name)
-        fd_dir = d / "fd"
-        try:
-            entries = list(fd_dir.iterdir())
-        except OSError:
-            continue
-        for fd in entries:
-            try:
-                target = os.readlink(fd)
-            except OSError:
-                continue
-            # 只认邻居的 state 根，不误伤 ~/.openclaw-biga
-            if "/.openclaw/" in target:
-                hits.append(f"pid {d.name} fd {fd.name} → {target}")
-    return len(pids), hits
-
+# 🔴 I-1 的判据**不在这个文件里** —— 外部评审 F19。
+#
+# 这里原本有一份独立实现（`biga_fds_into_neighbour()`，判据是 cmdline 含
+# "openclaw-biga"）。同一分钟内与 `isolation.py` 的判据现场对照：
+#
+#     isolation.py 口径        14 个进程 / 412 个 fd
+#     这个文件的口径            4 个进程
+#
+# 两边都报 0 命中、都是 ✅，但**检查对象的集合完全不同**。
+# 如果 I-1 真的被违反、而违反它的进程只满足其中一种判据，
+# 两份实现会给出相反的结论，使用者根本不知道该信哪一份。
+#
+# 这正是 `architecture.md` §9 L-3 点名的失败模式（同一判据多份实现，
+# 错法全是静默的）—— 而它发生在这个项目最看重的那条不变式自己的验证代码里。
+#
+# ⇒ 删掉这一份，统一走 `isolation.py`。**判据只留一处。**
 
 def check_6_neighbour(baseline: dict | None) -> Check:
     c = Check("6", "邻居 gateway pid / 启动时间 / 监听 / config / nvm default 未变")
@@ -380,15 +361,19 @@ def check_6_neighbour(baseline: dict | None) -> Check:
 
 
 def check_6b_no_write_handles() -> Check:
-    """不变式 I-1：BigA 的任何进程不得以写模式打开邻居目录下的文件。"""
-    c = Check("6b", "没有任何 BigA 进程打开邻居目录下的文件（不变式 I-1）")
-    n_procs, hits = biga_fds_into_neighbour()
-    if hits:
-        c.fail(f"🔴 发现 {len(hits)} 个句柄指向邻居目录: " + "; ".join(hits[:3]))
-    elif n_procs == 0:
-        c.pending("当前没有 BigA 进程在跑 —— 这条要在 gateway 运行时查才有意义")
+    """不变式 I-1 —— **判据由 `isolation.py` 提供，这里只做三态转译。**"""
+    c = Check("6b", "没有任何 BigA 进程以写模式打开邻居目录下的文件（不变式 I-1）")
+    res = isolation.Result()
+    isolation.check_i1(res)
+    verdict, name, detail = res.rows[0]
+    if verdict == isolation.FAIL:
+        c.fail(f"🔴 {name}\n{detail}")
+    elif verdict == isolation.UNKNOWN:
+        # 三态在这里能原样传下去 —— 旧脚本本来就有 PENDING，
+        # 反倒是 isolation.py 一度把它丢了（F18）。
+        c.pending(f"{name}\n{detail}")
     else:
-        c.ok(f"检查了 {n_procs} 个 BigA 进程，无一持有邻居目录下的句柄")
+        c.ok(name)
     return c
 
 
