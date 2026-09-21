@@ -20,6 +20,8 @@ from collections import Counter
 
 import pytest
 
+from _scan import repo_files
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DOCS = REPO / "docs"
 
@@ -209,4 +211,52 @@ def test_文档里的测试条数与实测一致(request):
         f"  改掉这些数字；如果某处是历史快照（某次验收当时的数），\n"
         f"  在同一行加注释标记「{_FROZEN_MARK}」把它排除掉。\n"
         "  教程 / CHANGELOG / external 不在校验范围内。"
+    )
+
+
+# ───────────────────────────────────────────────── 设计文档不许点名不存在的文件
+#
+# 外部评审 F7：`architecture.md` §2.4 的目录树把 `placebo.py` / `reachability.py`
+# 与真实文件并排列出，§9 的 L-4 / L-7 用**与真实机制相同的陈述句式**点名它们
+# 为「新系统的防护机制」。而 `git log --all -- '**/placebo.py'` 是空的 ——
+# 不是曾经有过又删了，是从来没有过一次提交。
+#
+# 🔴 为什么这不是「纯文档问题」：
+# 读者（包括三个月后的作者）据此认为这条风险已经有人管了，于是不再去建。
+# **一个不存在的守卫，比公开承认没有守卫更危险** —— 后者至少不会让人放心。
+#
+# 上这条检查时，除了评审报告点名的 2 个，又扫出 4 个，其中两个同样是
+# 「由 `tests/xxx.py` 钉住」这种句式，而那两个测试文件都不存在。
+# ⇒ 评审找到的是**样本**，不是全集。这正是「手工维护的名单」形状的另一面：
+#    人去找的时候，也只找得到想到过的那几个。
+
+#: 未建的东西照样可以在设计文档里讨论 —— 但必须在同一行标出来。
+_UNBUILT_MARKS = ("未建", "设计中", "从未存在", "从未提交")
+
+_PATH_IN_DOC = re.compile(
+    r"`([a-zA-Z_][\w./-]*/[\w./-]+\.(?:py|sh|md|ya?ml|json|db|sqlite))`")
+
+#: 🔴 光查反引号路径**等于没查** —— 探针当场证明了这一点：
+#: F7 报的那两个幽灵就写在目录树里，是**裸文件名**，一个反引号都没有。
+#: 差一点就上线一条「通过是因为它什么都没查」的守卫，正是本项目最常栽的形状。
+#: ⇒ 第二条路按 basename 比对 `git ls-files`：树形图里重建完整路径不现实，
+#:    而「仓库里根本没有叫这个名字的文件」已经足够定性。
+_BARE_FILE_IN_DOC = re.compile(r"\b([\w-]+\.(?:py|sh))\b")
+
+
+@pytest.mark.parametrize("path", sorted((DOCS / "design").glob("*.md")))
+def test_设计文档点名的文件必须真实存在(path: pathlib.Path):
+    known = {p.name for p in repo_files(suffix="")}
+    ghosts = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if any(w in line for w in _UNBUILT_MARKS):
+            continue
+        ghosts += [(lineno, rel) for rel in _PATH_IN_DOC.findall(line)
+                   if not (REPO / rel).exists()]
+        ghosts += [(lineno, n) for n in sorted(set(_BARE_FILE_IN_DOC.findall(line)))
+                   if n not in known]
+    assert not ghosts, (
+        f"{path.name} 点名了不存在的文件：{ghosts}\n"
+        f"  要么建出来，要么在同一行标注 {_UNBUILT_MARKS[0]} —— \n"
+        "  设计文档用陈述句提到一个文件，读者会认为这条风险已经有人管了。"
     )
