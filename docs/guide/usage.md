@@ -326,8 +326,20 @@ rm .biga-card-stop                                          # 解除
 0  卡出了，spawn 核验通过
 1  等超时，这一轮没出卡
 2  用法错误 / 起不来（取不到编排提示词等）
-3  **被拦下了**：总闸 / 单实例锁 / 预算闸门。⇒ 这次没花钱
+3  **被拦下了**：总闸 / 单实例锁 / 预算闸门 / ownership。⇒ 这次没花钱
 4  卡出了，但 spawn 核验没通过 —— 卡照常打印，命令算失败
+5  **INTERACTION_UNAVAILABLE**：卡在非交互 `ask_user` 上，已收掉该会话
+```
+
+`5` 的意思是 Supervisor 问了一个问题，而这条路上**没有人能回答**
+（运行时报 `recovery=none`，它自己不会救）。看门狗 30s 内认出来并收掉。
+
+⚠️ **不要直接重跑** —— 同一个请求很可能再次 `ask_user`，那是成本循环。
+先看它为什么要问：
+
+```bash
+python3 tools/verify/agent_trace.py --agent main -n 1
+journalctl --user -u openclaw-gateway-biga.service --since -10min | grep stalled
 ```
 
 🔴 `3` 和 `4` 的区别是**钱花了没有**。`3` 是在花钱之前拦住的，
