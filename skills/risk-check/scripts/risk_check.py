@@ -40,6 +40,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    ADHOC_TASK_SEQ,
     CROSS_CHECK_PAIRS,
     STAGE1_AGENTS,
     AgentVerdict,
@@ -266,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
         init_schema()
 
     v = build_verdict(verdict_ids=ids, store=store,
-                      task_id=args.task_id or new_task_id(1))
+                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
     ref = save_verdict(v) if store else None
 
     print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))

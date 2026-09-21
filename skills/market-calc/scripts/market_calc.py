@@ -64,6 +64,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    ADHOC_TASK_SEQ,
     AgentVerdict,
     Evidence,
     MissingItem,
@@ -450,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         init_schema()
 
     v = build_verdict(date=args.date, break_source=set(args.break_source),
-                      store=store, task_id=args.task_id or new_task_id(1))
+                      store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
     # 🔴 判定原件直接落库，返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：
     #    15 条 evidence 的 retrieved_at 转述后一条不剩。

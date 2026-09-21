@@ -100,6 +100,25 @@ def main(argv: list[str] | None = None) -> int:
         print("没有任何 Verdict —— 不出卡。", file=sys.stderr)
         return 1
 
+    # --- 🔴 先查身份，再查完整性 ---
+    #
+    # 2026-09-21 盘中，两次端到端相隔两分钟。每个 specialist 的 verdict 都写着
+    # 同一个 task_id（当时全是硬编码的 -001），于是**两次运行的证据合成了一张卡**，
+    # 而卡上没有任何字段能暴露这件事 —— 五个 agent 齐全、时间戳都在几十秒内。
+    #
+    # 顺序不是随意的：证据来自两次运行时，先抱怨「缺 stance」会把人引向
+    # 错误的修复 —— 补完 stance，真正的问题还在，而且更难看见了。
+    # **身份比完整性更根本。**
+    tids = {v.task_id for v in verdicts}
+    if len(tids) > 1:
+        print(
+            f"这些 verdict 来自不止一次决策：{sorted(tids)}\n"
+            f"  合成会把不同时刻采到的证据混进同一张卡，而卡上看不出来。\n"
+            f"  怎么办：只传属于本次的 verdict_id；\n"
+            f"          本次的号由 Stage 0 的 new_decision.py 占下并 --task-id 下发。",
+            file=sys.stderr)
+        return 1
+
     # 🔴 每个给得出判断的 Specialist 都必须提交 stance。
     #    放在这里而不是契约层，是因为契约层会在 `from_dict` 时也生效 ——
     #    那会让 Phase 1/2 早期落库的卡（没有 stance）再也回放不了。
@@ -119,6 +138,15 @@ def main(argv: list[str] | None = None) -> int:
     # 🔴 不要硬编码序号。原来写的是 new_task_id(1)，当天第二次决策必撞主键，
     #    Supervisor 只好每次自己查库推序号 —— 一轮多花一百多秒。
     decision_id = args.decision_id or next_decision_id()
+    stray = {v.task_id for v in verdicts} - {decision_id}
+    if args.decision_id and stray:
+        print(
+            f"verdict 的 task_id {sorted(stray)} 与 --decision-id {decision_id} 不符。\n"
+            f"  说明这批证据不是为这次决策采的。\n"
+            f"  怎么办：核对 Stage 0 占的号有没有原样传给每个 specialist。",
+            file=sys.stderr)
+        return 1
+
     card = synthesize(
         decision_id=decision_id,
         verdicts=verdicts,

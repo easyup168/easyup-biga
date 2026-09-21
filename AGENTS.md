@@ -71,6 +71,31 @@ Card 上的每一个数字都必须来自某个 Specialist 的 `Evidence`。
 
 ## 工作流程
 
+### Stage 0 · 先占一个决策编号
+
+🔴 **在 spawn 任何 Specialist 之前**，跑这一条：
+
+```bash
+cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/new_decision.py
+```
+
+它会打印一个编号，例如 `BIGA-20260921-007`。**记住它**，
+下面每一步都要原样带上。
+
+#### 为什么不能等到合成时再分配
+
+编号原来确实是合成时才分配的。2026-09-21 盘中，两次端到端相隔两分钟：
+
+* 五个 Specialist 的判定原件**全部**写着同一个 task_id
+* 合成出来的卡却是另一个号
+* 两次运行的证据混进了同一张卡，而卡上**看不出来** ——
+  agent 齐全、时间戳都在几十秒内，一切正常
+
+> **一个决策必须在收集证据之前就有身份，否则证据无处归属。**
+
+现在合成脚本会拒绝把不同编号的判定原件合成一张卡，
+所以号传错了会当场报错，而不是悄悄出一张混血的卡。
+
 ### Stage 1 · 调 Specialist
 
 🔴 **必须用 OpenClaw 的跨 agent spawn 工具，工具真名是：**
@@ -93,6 +118,16 @@ mcp__openclaw__sessions_spawn
   mcp__openclaw__sessions_spawn  agentId="sector"     context="isolated"
   mcp__openclaw__sessions_spawn  agentId="technical"  context="isolated"
 ```
+
+🔴 **每条 spawn 的指令里都必须写上 Stage 0 那个编号**，照这个句式：
+
+```
+本次决策编号 BIGA-20260921-007。
+跑你的 skill 时必须加 --task-id BIGA-20260921-007。
+```
+
+不带这句，Specialist 的 skill 会用临时号（`-000`）而**落库直接报错** ——
+这是有意的：它宁可当场失败，也不产生一条无法归属的判定原件。
 
 **分两轮发就是串行。** 而串行的表现是 ——
 
@@ -230,6 +265,7 @@ mcp__openclaw__sessions_spawn  agentId="risk"  context="isolated"
 
 ```
 请依据 Stage 1 的冻结证据做风险审查。
+本次决策编号 <Stage 0 那个号>，跑 skill 时必须加 --task-id <同一个号>。
 Stage 1 的 verdict_ref：<逗号分隔的编号，例如 22,23>
 不要自己重新采集数据。
 ```
@@ -274,8 +310,9 @@ Stage 1 的判定 —— 那些原件是只追加的，改不了，也不该想�
 编号。你要做的就是把这些编号交给合成脚本。
 
 ```bash
-# decision_id 不用管，脚本会自动分配当天下一个未占用的序号
+# 🔴 --decision-id 用 Stage 0 占下的那个号，不要另起一个
 cd ~/.openclaw-biga/workspace && python3 skills/decision-card/scripts/synthesize.py \
+  --decision-id BIGA-20260921-007 \
   --verdict-ids 17,18 \
   --status WAIT \
   --headline "核心矛盾一句话" \

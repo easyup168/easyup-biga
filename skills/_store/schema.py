@@ -182,11 +182,46 @@ CREATE INDEX IF NOT EXISTS ix_verdict_chain ON agent_verdicts(amends);
 """ + _append_only("agent_verdicts", "判定原件改了，就没法证明 Card 上的数字来自采集而非复述")
 
 
+_V4 = """
+-- ───────────────────────────────────────────────────────────────
+-- v4：decision_ids —— 决策编号的**分配器**
+--
+-- 🔴 它解决的是一次实测事故：**两次运行的证据被合成进了同一张卡。**
+--
+-- 2026-09-21 09:37 与 09:39 各起了一次盘中端到端。结果：
+--
+--   · 每个 specialist 的 verdict 都写着 task_id = BIGA-20260921-001
+--   · 而合成出来的卡是 BIGA-20260921-006
+--   · 两次运行的 verdict 混在一起，**没有任何字段能把它们分开**
+--
+-- 两层原因：
+--
+-- 1. 五个 specialist 都写着 `new_task_id(1)` —— 序号硬编码。
+--    这个 bug 在 synthesize.py 上修过一次，**兄弟模块一个没查**。
+-- 2. 更根本的：编号原本在**合成时**才分配，而那时证据早就采完了。
+--    一个决策在收集证据之前就该有身份，否则证据无处归属。
+--
+-- ⇒ 编号改为 Stage 0 分配，并且**原子占号**：
+--    主键冲突是唯一可靠的并发仲裁，靠「先查再插」必然有竞态窗口。
+--
+-- 为什么不直接用 decision_records 的 decision_id 占位：
+-- 那张表是追加式的、且要求一张完整的卡。占号发生在有卡之前。
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS decision_ids (
+    decision_id TEXT PRIMARY KEY,
+    reserved_at TEXT NOT NULL,
+    -- 谁占的号。排查「这个号哪来的」时唯一有用的线索。
+    reserved_by TEXT
+);
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
     (2, _V2),
     (3, _V3),
+    (4, _V4),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

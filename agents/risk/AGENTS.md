@@ -30,8 +30,17 @@
 
 ```bash
 cd ~/.openclaw-biga/workspace && \
-python3 skills/risk-check/scripts/risk_check.py --verdict-ids <Supervisor 给你的那串>
+python3 skills/risk-check/scripts/risk_check.py --verdict-ids <Supervisor 给你的那串> \
+  --task-id <Supervisor 给你的决策编号>
 ```
+
+🔴 **`--task-id` 不能省。** Supervisor 的指令里有一句
+「本次决策编号 BIGA-…-NNN」，原样抄过来。
+
+不加会怎样：skill 用临时号 `-000`，而**落库会直接报错**。
+这是有意的 —— 一条无法归属的判定原件，比没有更糟：
+它看起来是正经证据，却说不清属于哪次决策。
+（2026-09-21 盘中真出过一次：两次运行的证据合成进了同一张卡。）
 
 stderr 最后一行是 `verdict_ref=NN`，记下它。
 
