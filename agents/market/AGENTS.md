@@ -142,16 +142,7 @@ cd ~/.openclaw-biga/workspace && python3 skills/market-calc/scripts/market_calc.
 > 落到 Card 上，`retrieved_at` 变成了「敲命令的时刻」而不是采集时刻，
 > 与真实采集差 106 秒。**事实可追溯这条地基，就是在这一步塌的。**
 
-正确做法是追加一行修订（原件不动）：
-
-```bash
-cd ~/.openclaw-biga/workspace && \
-python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
-  --add-missing market.trend.no_history "<缺失项原文>" \
-  --verdict WARNING
-```
-
-它会在 stderr 打出**新的** `verdict_ref=NN`，交给 Supervisor 的是这个新编号。
+正确做法是**追加一行修订**（原件不动）—— 命令见下一节，和 `--stance` 合成一条一起跑。
 
 ⚠️ `--add-missing` 要两个参数：**机器可读代码** + **人话**。
 代码形如 `<域>.<对象>.<原因>`（上面那个是现成的，直接抄）——
@@ -166,32 +157,52 @@ python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref>
 
 `status` 由脚本自动置为 `partial` —— 那是机械记账，不是判断，不用你管。
 
-#### 🔴 最后一步：提交你的方向判断（`stance`）
+#### 🔴 最后一步：提交 `stance`（方向判断）
 
-跑完 skill、处理完缺失项之后，**还要把你的判断作为结构化字段提交**：
+`verdict` 说的是**数据全不全**，`stance` 说的是**你的判断是什么**。两者不能互相替代 ——
+`verdict=PASS` 只表示数据完整，不表示「看好」。
+
+而且方向判断只写在自然语言里就**没法被统计**：将来要检验
+「BigA 说强的时候后面几天到底怎么样」，那一列根本不存在。每跑一次丢一次。
+
+##### 词表（**就在这里，不要去别处找**）
+
+| 用这个词 | 什么时候 |
+|---|---|
+| `放量上涨` | 指数涨 + 量能比 >1.1 + 上涨占比 >60% |
+| `缩量上涨` | 指数涨 + 量能比 <0.9 —— 持续性存疑 |
+| `缩量调整` | 指数跌 + 量能比 <0.9 |
+| `放量下跌` | 指数跌 + 量能比 >1.1 —— 出货或恐慌 |
+| `分化` | 两市方向不一致，或指数涨而上涨占比 <40% |
+| `无法判定` | 核心三项有缺（此时 `--verdict` 必须是 `UNKNOWN`） |
+
+⚠️ 只能用上表里的词，不要自己发挥措辞。今天写「偏强」、明天写「震荡偏强」，
+三个月后它就是一列自由文本，做不了任何统计 —— 契约层会直接拒绝表外的词。
+
+##### 照抄这条命令
 
 ```bash
 cd ~/.openclaw-biga/workspace && \
 python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
-  --stance <下表里的一个词>
+  --stance 缩量上涨
 ```
 
-同样会打出**新的** `verdict_ref=NN`，交给 Supervisor 的是最新那个。
+要同时追加缺失项就合成一条，**不要调两次**：
 
-> 如果你上一步已经因为追加缺失项调过 `amend_verdict`，
-> **把 `--stance` 一起加在那一条命令里就行**，不用调两次。
+```bash
+cd ~/.openclaw-biga/workspace && \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+  --add-missing market.trend.no_history "<缺失项原文>" \
+  --verdict WARNING \
+  --stance 缩量上涨
+```
 
-##### 为什么必须结构化，写在话里不算
+它会打出**新的** `verdict_ref=NN`，交给 Supervisor 的是最新那个。
 
-`verdict` 回答的是「数据全不全」，`stance` 回答的是「市场偏哪边」——
-**两个不同的问题**。`verdict=PASS` 不等于「看好」，它只表示数据完整。
-
-而且方向判断只写在自然语言里，就**没法被统计**：
-将来要检验「BigA 说强的时候后面几天到底怎么样」，
-翻历史记录会发现那一列根本不存在 —— 每跑一次丢一次。
-
-⚠️ 词必须取自词表，不要自己发挥措辞。今天写「偏强」、明天写「震荡偏强」，
-三个月后它就是一列自由文本，做不了任何统计。
+🔴 **不要为了确认参数去 `--help`、去 grep 源码、去 find。**
+实测有一次为此花了 62 秒、12 次工具调用，还跑了被明令禁止的 `find /` ——
+而运行时会把那些命令的输出吞掉（显示 `[Malformed diagnostic JSON redacted]`），
+**你搜不到东西，只会越搜越远**。上面这两条命令是完整的，照抄即可。
 
 ---
 
