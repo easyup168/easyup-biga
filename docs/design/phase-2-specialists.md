@@ -1,6 +1,6 @@
 # Phase 2 设计 —— 补齐到 7 个 Agent
 
-> 📄 **阶段 · 进行中**（2.1 ✅ / 2.2 ✅ / 2.3 ⬜ / 2.4 ⬜）
+> 📄 **阶段 · 进行中**（2.1 ✅ / 2.2 ✅ / 2.3 ✅ / 2.4 ⬜）
 > **覆盖**：Phase 2 的范围、步骤、关键取舍、出口条件 ｜ **不覆盖**：结构细节（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）
 
 > Phase 2 的**设计 SSOT**。结构性问题（契约字段、表、失败模式清单）仍以
@@ -30,8 +30,8 @@ Phase 2 补齐到 **7 个 Agent**（`main` + 6 个 Specialist）：
 ```
 main ──┬── market      ✅ 2.1
        ├── emotion     ✅ Phase 1
-       ├── sector      ⬜ 2.3
-       ├── technical   ⬜ 2.3
+       ├── sector      ✅ 2.3
+       ├── technical   ✅ 2.3
        ├── news        ⬜ 2.4
        └── risk        ✅ 2.2（Stage 2 制衡层）
 ```
@@ -66,7 +66,7 @@ main ──┬── market      ✅ 2.1
 |---|---|---|---|
 | 2.1 | `market` skill + agent | Stage 1 **第一次真并行** | ✅ |
 | 2.2 | `risk` + Stage 2 | **冻结证据传递 + 否决权** | ✅ |
-| 2.3 | `sector` / `technical` | 无 —— 到这一步才是真正的「复制」 | ⬜ |
+| 2.3 | `sector` / `technical` | 无 —— 到这一步才是真正的「复制」 | ✅ |
 | 2.4 | `news` | 时间戳 / 来源 / 新鲜度核验 | ⬜ |
 
 排序依据是**新机制优先、复制其次**。
