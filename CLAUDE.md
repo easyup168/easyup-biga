@@ -363,11 +363,18 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 
 ## 当前状态
 
-**Phase 1 · 环境已就绪，业务代码尚未开始。**
+**Phase 1 已验收（在 `main`）。Phase 2 在 `phase2` 分支，出口条件 6/8。**
 
-已完成：隔离安装（node v24.21.0 + openclaw 2026.9.5）、`biga` wrapper、
-workspace 骨架、git、设计与安装文档。
+| | 状态 |
+|---|---|
+| Agent | **7 / 8**。`main` + Stage 1 五个（market/sector/technical/emotion/news）+ Stage 2 `risk`。<br>第 8 个 `discipline` **故意不建**（裁定 13：没有输入源） |
+| 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v4**，五张表，只追加由触发器强制 |
+| 测试 | 417 条 |
+| 端到端 | 盘中六 Agent 172.6s（预算 **180s**，已按四次实测重推）、$1.20/次 |
+| 隔离 | `tools/verify/isolation.py` 四项全绿 |
 
-未开始：`biga setup`（profile 初始化）、契约层、数据层、任何 agent。
+🔴 **还差两条出口条件，而它们卡在同一个根上**：盘中 `emotion`/`news` 报「今天」、
+日线类报「上一交易日」⇒ `risk` 每次「无法判定」⇒ 攒不到真实否决，
+缺失项也总是同样几条。详见 `docs/design/phase-2-specialists.md` §3.11 与 §4。
 
-详见 `TODO.md`。
+详见 `TODO.md` 与 `docs/design/phase-2-specialists.md`。

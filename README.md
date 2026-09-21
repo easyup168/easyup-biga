@@ -6,12 +6,12 @@
 
 ### 基于 OpenClaw 的 Multi-Agent A 股短线决策辅助系统
 
-![Phase](https://img.shields.io/badge/PHASE-1%20walking%20skeleton-555)
-![Agents](https://img.shields.io/badge/AGENTS-2%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/124%20TESTS-PASSING-2ea043)
-![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%203%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-10%20%E7%AB%A0-8957e5)
-![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-74.8s%20%C2%B7%20%E9%A2%84%E7%AE%97%2090s-2ea043)
+![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
+![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
+![Tests](https://img.shields.io/badge/417%20TESTS-PASSING-2ea043)
+![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v4%20%C2%B7%205%20tables-555)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-17%20%E7%AB%A0-8957e5)
+![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-172.6s%20%C2%B7%20%E9%A2%84%E7%AE%97%20180s-2ea043)
 ![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
 
 ***发现共识，锁定核心，让每一笔交易都有逻辑***
@@ -136,15 +136,51 @@ Phase 1 的验收标准由机器逐条核对，`PENDING` 不计为通过：
 python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.json --live
 ```
 
+---
+
+## Phase 2 · Specialists（进行中，在 `phase2` 分支）
+
+| 项 | 状态 |
+|---|---|
+| Agent **7 / 8** —— Stage 1 五个 + Stage 2 `risk` + Supervisor | ✅ |
+| 第 8 个 `discipline` —— **故意不建**（没有输入源，见裁定 13） | — |
+| Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
+| Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
+| schema v4 —— 决策编号原子分配器 | ✅ |
+| 417 条测试 | ✅ |
+| 成本分解 $1.20/次（`main` 占 37%） | ✅ |
+| 隔离自检 `tools/verify/isolation.py` 四项全绿 | ✅ |
+| 至少 1 次真实「否决」端到端落库 | ⬜ |
+| 真实缺失项跨天累积 ≥5 次 | 🔶 数够了，但全在同一天 |
+
+🔴 **最后两条卡在同一个架构问题上**：盘中 `emotion`/`news` 报「今天」、
+日线类报「上一交易日」，`risk` 正确地拒绝合并审 ⇒ 每次「无法判定」。
+这是**对的行为**，但它意味着盘中出不了有把握的卡。
+详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11。
+
 ### 关于「徽章全绿」的说明
 
-这里必须说清楚，否则就是粉饰。
+这里必须说清楚，否则就是粉饰。**端到端徽章绿过两次，两次都改过预算。**
 
-端到端徽章从橙变绿，是因为**把预算从 60s 改成了 90s**。60s 从来不是合理的预算——
-它是四个阶段预估**下界**之和，等于要求所有阶段同时命中最优。
-实测每个阶段都落在自己的预估区间内，超的是那个不合理的加法，不是系统本身。
+**第一次 60s → 90s。** 60s 从来不是合理的预算 —— 它是四个阶段预估**下界**之和，
+等于要求所有阶段同时命中最优。实测每个阶段都落在自己的区间内，
+超的是那个加法，不是系统本身。
 
-完整推导见[第 10 章 · 延迟与成本](docs/tutorial/10-latency-and-cost.md)。
+**第二次 90s → 180s。** 这次更需要说清楚，因为**数字变差了**：
+Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大多因数据未形成早退。
+盘中六 Agent 实测 172.6s。
+
+改预算的三个必答问题（缺一条就是作弊）：
+
+1. **旧数字错在哪** —— 在一个 agent 都没有时把四个区间相加得到的，是愿望不是预测
+2. **新数字怎么来的** —— 四次盘中实测，每项取最好值仍需 158s，180s 留 14% 余量
+3. **什么时候它该红** —— 优化后三次都在 158–173s；超 180s 说明有组成异常了
+
+而且要指出**哪部分不在我们控制内**：Stage 1 的最慢项是第三方接口延迟，
+实测并发度调到 4 会触发渐进限流（7.2 → 25.2 → 60.1s）。
+
+完整推导见[第 10 章](docs/tutorial/10-latency-and-cost.md)与
+[第 17 章](docs/tutorial/17-closing-phase-2.md)。
 
 ---
 
