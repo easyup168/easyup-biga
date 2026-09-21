@@ -44,6 +44,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any
@@ -225,6 +226,18 @@ _BOARD_PAGE = 100
 #: 分页上限。496/100 ≈ 5 页，给到 12 页足够且不会失控。
 _BOARD_MAX_PAGES = 12
 
+#: 翻页并发度。**实测调出来的，不是拍的。**
+#:
+#: | 并发 | 连跑三次（sector_calc 整脚本） | 判断 |
+#: |---|---|---|
+#: | 1（原实现） | 67.9s | 串行等待占 58.8s |
+#: | 4 | 7.2s → 25.2s → **60.1s** | 🔴 单调上升 ⇒ 渐进限流 |
+#: | **2** | 23.3s → 9.1s → 23.5s | ✅ 不再爬升，均值 ~19s |
+#:
+#: 单调上升不是网络抖动 —— 抖动会双向。打得越猛越慢，说明对方在限速。
+#: 这是别人的公开接口：目标是折叠掉串行等待，不是把它打满。
+_BOARD_FETCH_WORKERS = 2
+
 
 @dataclass(frozen=True)
 class Board:
@@ -286,10 +299,8 @@ def fetch_boards(kind: str) -> BoardResult:
     if kind not in BOARD_KINDS:
         raise ValueError(f"未知的板块榜 {kind!r}，可选 {sorted(BOARD_KINDS)}")
 
-    rows: list[dict[str, Any]] = []
-    total = 0
-    pages: list[dict[str, Any]] = []
-    for pn in range(1, _BOARD_MAX_PAGES + 1):
+    def _one_page(pn: int) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+        """取第 pn 页。返回 (原始报文, 行, total)。"""
         qs = urllib.parse.urlencode({
             "pn": pn, "pz": _BOARD_PAGE, "po": 1, "fltt": 2, "fid": "f3",
             "fs": BOARD_KINDS[kind],
@@ -308,16 +319,41 @@ def fetch_boards(kind: str) -> BoardResult:
                 f"boards/{kind} 第 {pn} 页: 全部备选主机失败 —— " + " | ".join(errors))
         if payload.get("rc") != 0:
             raise SourceError(f"boards/{kind} 第 {pn} 页: 接口返回 rc={payload.get('rc')}")
-
         data = payload.get("data") or {}
         diff = data.get("diff")
         # ⚠️ 形状陷阱见 docstring：这里是 dict，ulist 那边是 list
         page = list(diff.values()) if isinstance(diff, dict) else (diff or [])
-        total = int(data.get("total") or total)
-        pages.append(payload)
-        rows.extend(page)
-        if not page or len(rows) >= total:
-            break
+        return payload, page, int(data.get("total") or 0)
+
+    # 🔴 第 1 页要单独取 —— 它告诉我们一共有多少行，也就是要翻几页。
+    #    在那之前无法并发：不知道页数就只能一页一页试。
+    first_payload, first_rows, total = _one_page(1)
+    pages: list[dict[str, Any]] = [first_payload]
+    rows: list[dict[str, Any]] = list(first_rows)
+
+    # 🔴 其余页并发取。
+    #
+    # 为什么值得做：实测盘中 industry+concept 一共 11 次请求、**58.8 秒纯网络等待**
+    # （concept 那 6 次就占 42.5s）。串行翻页让 sector 成为 Stage 1 最慢的那个，
+    # 而 Stage 1 的耗时是 max() —— 一个慢 agent 就决定整个阶段。
+    #
+    # 并发度见 `_BOARD_FETCH_WORKERS` —— 那里记着为什么是 2 而不是 4。
+    # 一句话：过了某个点，**并发反而是成本**（对方会限速）。
+    if first_rows and total > len(rows):
+        need = min(_BOARD_MAX_PAGES,
+                   -(-total // _BOARD_PAGE))          # 向上取整
+        rest = range(2, need + 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_BOARD_FETCH_WORKERS) as pool:
+            # 🔴 按页号收集再排序，不用 as_completed 的到达顺序 ——
+            #    否则同样的输入会因为网络抖动产生不同的 raw，回放就对不上。
+            got = dict(zip(rest, pool.map(_one_page, rest)))
+        for pn in rest:
+            payload, page, t = got[pn]
+            pages.append(payload)
+            rows.extend(page)
+            total = t or total
+            if not page:
+                break
 
     if not rows:
         raise SourceError(f"boards/{kind}: 一行都没取到")

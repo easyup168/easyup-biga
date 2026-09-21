@@ -178,3 +178,91 @@ class TestR3Paths:
         for b in ({"industry"}, {"concept"}, {"date"}):
             v = build(break_source=b)
             assert not (v.verdict == "PASS" and v.missing)
+
+
+class TestBoardPaginationIsConcurrent:
+    """并发翻页 —— 折叠掉串行等待，但不能因此变得不确定。
+
+    为什么改：实测盘中 industry+concept 一共 11 次请求、**58.8 秒纯网络等待**
+    （concept 那 6 次就占 42.5s）。串行翻页让 sector 成为 Stage 1 最慢的那个，
+    而 Stage 1 的耗时是 `max()` —— 一个慢 agent 决定整个阶段。
+    改完 67.9s → 20.7s。
+
+    并发带来两个新风险，本类各钉一条。
+    """
+
+    @staticmethod
+    def _fake(total: int, per: int = 100, delay=None):
+        """造一个分页接口。`delay` 让后面的页先回来，专门制造乱序。"""
+        import time
+
+        def get_json(url, **kw):
+            import urllib.parse as up
+            q = up.parse_qs(up.urlparse(url).query)
+            pn = int(q["pn"][0])
+            if delay:
+                time.sleep(delay(pn))
+            lo = (pn - 1) * per
+            rows = {str(i): {"f12": f"BK{lo+i:04d}", "f14": f"板块{lo+i}",
+                             "f3": 1.0, "f62": 0.0, "f104": 1, "f105": 0,
+                             "f204": "X"}
+                    for i in range(min(per, max(0, total - lo)))}
+            return {"rc": 0, "data": {"total": total, "diff": rows}}
+        return get_json
+
+    def test_乱序返回也要按页号拼(self, monkeypatch):
+        """🔴 用 as_completed 的到达顺序拼页，同样的输入会产生不同的 raw。
+
+        那样回放就对不上 —— 而回放 diff 里的每一处差异都应该是真实差异。
+
+        ⚠️ 顺序保证在 **`for pn in rest` 那一行**，不在字典怎么造。
+        验证这条测试有效的探针是把它换成 `as_completed` 的到达顺序：
+
+            futs = {pool.submit(_one_page, pn): pn for pn in rest}
+            got = [(futs[f], f.result()) for f in as_completed(futs)]
+
+        （第一次写探针时改的是字典构造，测试没红 ——
+          说明当时那条测试并没有在测它声称的东西。）
+        """
+        import _sources.eastmoney as em
+        # 第 2 页故意最慢，保证它不是第一个回来的
+        monkeypatch.setattr(em, "get_json",
+                            self._fake(350, delay=lambda pn: 0.15 if pn == 2 else 0.0))
+        r = em.fetch_boards("industry")
+        assert len(r.boards) == 350
+        names = [row["f14"] for row in r.raw["pages"][1]["data"]["diff"].values()]
+        assert names[0] == "板块100", f"第 2 页没排在第 2 位：{names[0]}"
+        # 全量顺序也要是页内顺序拼接
+        got = [b.code for b in sorted(r.boards, key=lambda b: b.code)]
+        assert got == sorted(f"BK{i:04d}" for i in range(350))
+
+    def test_分页取不全仍然报错(self, monkeypatch):
+        """并发不能把「少了一页」变成静默少几行 —— 那会让涨跌分布算错。"""
+        import _sources.eastmoney as em
+        from _sources.http import SourceError
+
+        base = self._fake(350)
+
+        def holey(url, **kw):
+            import urllib.parse as up
+            pn = int(up.parse_qs(up.urlparse(url).query)["pn"][0])
+            if pn == 3:                      # 第 3 页返回空
+                return {"rc": 0, "data": {"total": 350, "diff": {}}}
+            return base(url, **kw)
+
+        monkeypatch.setattr(em, "get_json", holey)
+        with pytest.raises(SourceError, match="分页没取全"):
+            em.fetch_boards("industry")
+
+    def test_单页就够时不发多余请求(self, monkeypatch):
+        import _sources.eastmoney as em
+        n = []
+        base = self._fake(42)
+
+        def counting(url, **kw):
+            n.append(url)
+            return base(url, **kw)
+
+        monkeypatch.setattr(em, "get_json", counting)
+        assert len(em.fetch_boards("industry").boards) == 42
+        assert len(n) == 1, f"只有 42 行却发了 {len(n)} 次请求"
