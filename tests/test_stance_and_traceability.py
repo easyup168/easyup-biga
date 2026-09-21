@@ -21,6 +21,7 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "skills"))
+sys.path.insert(0, str(REPO / "tests"))
 
 from _contract import (  # noqa: E402
     CN_TZ,
@@ -31,6 +32,7 @@ from _contract import (  # noqa: E402
     Evidence,
     MissingItem,
 )
+from _consistency import assert_matches_source, built_agents  # noqa: E402
 
 
 def _ev(field="sh_close", source="sina:kline/sh000001", raw_hash="abc123"):
@@ -85,6 +87,26 @@ class TestStanceVocabMatchesContracts:
     改了一边忘了另一边，agent 会给出一个契约层拒绝的词，
     然后花几轮去猜为什么被拒。
     """
+
+    def test_STANCE_VOCAB覆盖全部已建好的agent(self):
+        """🔴 外部评审 F8 的结构性半部分。
+
+        `verdict.py` 的构造函数已经修好了运行时行为——`STANCE_VOCAB.get(agent)`
+        命不中就直接拒绝，不再静默退化成「1~16 字任意词都收」。但复查指出：
+        那只堵住了"用到才崩"，没有一条测试在**忘记登记**这件事发生的那一刻
+        （建 agent 的那次 commit）就报红——要等到真正调用才会崩，CI 阶段
+        发现不了。
+
+        下面这一条以下两个测试（`sorted(STANCE_VOCAB)` 做 parametrize 源）
+        天生只能测"已经登记"的 agent，结构上不可能覆盖"忘记登记"这个分支——
+        这条单独存在，权威源换成 `built_agents()`（与 STANCE_VOCAB 无关的
+        独立事实：`agents/` 目录下有没有这个 agent）。
+        """
+        assert_matches_source(
+            set(STANCE_VOCAB), built_agents(),
+            what="STANCE_VOCAB 的 key 集合 vs 已建好的 agent",
+            fix_hint="新建一个 agent 时，在 `_contract/verdict.py` 的 "
+                      "STANCE_VOCAB 里登记它的词表")
 
     @pytest.mark.parametrize("agent", sorted(STANCE_VOCAB))
     def test_每个词都出现在该agent的契约里(self, agent):
