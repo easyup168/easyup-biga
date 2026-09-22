@@ -716,6 +716,24 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `run()` 只调一次 freeze ⇒ **一个 run 只冻一次**（正是评审复核要的 per-run 语义）。
         一个 decision 被重试 ⇒ 两个 run ⇒ 两次 freeze ⇒ 各自一份新数据（retry 本就该拿新数据），
         各 run 用自己 `run_events.detail` 里记的 evidence_set_id。coordinator 无须按 run_id 收参。
+- [x] 修复 · `agent_runs` 记账在批 C-II 之后没人写，`spawn_check.py` 永远判不了
+      2026-09-22 对 C-II/D-II 做真实 live 验证时发现：真实出卡（`BIGA-20260922-001`，
+      8 步细粒度链、7 个真实 spawn 含 synthesizer，`agent_trace.py` 独立确认；
+      market/technical 的 raw_hash 真的相同，D-II 的共享快照生产里成立）之后，
+      `bin/biga-card` 却 exit 4——`spawn_check.py` 报「判不了」。根因：写 `agent_runs`
+      唯一的调用方是旧 standalone `synthesize.py`（main 提示词驱动时期），批 C-II 把
+      合成挪进 `card_ops.persist()` 时没有把这一步搬过来。不是安全洞（没把失败判成
+      成功），但每次真实出卡都印一条误导性的红字，且验证闸门名存实亡。
+      ⚠️ 这条本该被 `test_store.py::test_我们自己的代码就在写它` 的 AST 扫描挡住，
+      但那条扫描只查「repo 里有没有调用点」，`synthesize.py` 作为测试夹具仍满足它——
+      判据是「文字存不存在」不是「生产入口会不会走到」，本仓库自己在别处反复强调
+      的原则这次没做到（这条本身不算错：那条测试的目的是证明 agent_runs 可被业务
+      代码自产而不可信，不是验证生产入口真的在写，两件事不该混）。
+      修法：`card_ops.persist()` 在线路径补 `record_verdict_run()` 循环，回放路径
+      显式跳过。两条新回归测试独立复现过两个方向的红（去掉记账→在线测试
+      `[] == [...]`；回放也记账→回放测试 `12 == 6`）。1003→1005 条。
+      本次修复在这个会话里直接做的，没有走单独的开工/评审两会话流程——
+      范围小、根因链条已经查实，但没有另一个独立视角复核过，如实记在这里。
 - [ ] 批 E · Facts / Assessment 拆分
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库

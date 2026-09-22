@@ -28,7 +28,7 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _store import connect, init_schema, load_online_card  # noqa: E402
+from _store import connect, init_schema, list_agent_runs, load_online_card  # noqa: E402
 
 
 def _load(name: str):
@@ -236,6 +236,39 @@ class TestReplay:
 
     def test_不存在的decision_id(self, db, capsys):
         assert replay.main(["BIGA-20260101-999", "--check"]) == 1
+
+
+class TestPersistWritesAgentRunsLedger:
+    """🔴 回归：批 C-II 把合成挪进 `card_ops.persist()` 之后，没有一并搬「记账本」
+    这一步（旧路径靠 standalone `synthesize.py` 记，新路径不再跑那个脚本）——
+    `agent_runs` 从此再没被在线路径写过，`tools/verify/spawn_check.py` 因此永远
+    「判不了」（它要拿这张表的行去跟运行时 `subagent_runs` 交叉核对）。
+    2026-09-22 第一次真实 live 验证时才暴露：不是 fail-open（没把失败判成成功），
+    是把成功判成了失败，且每次真实出卡都会印一条误导性的红字。
+
+    这条测试钉住修法：在线 `persist()` 必须记账本；回放 `persist()` 不许——
+    回放没有重新执行任何 agent，给它记一遍「执行」是假账。
+    """
+
+    def test_在线路径记账_每个verdict一行(self, db):
+        c = card_ops.synthesize(decision_id=DID, verdicts=full_roster(),
+                                judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        card_ops.persist(c)
+        rows = list_agent_runs(decision_id=DID, path=db)
+        assert sorted(r["agent"] for r in rows) == sorted(STANCE_VOCAB), (
+            "在线 persist() 必须给每个 verdict 记一行 agent_runs，"
+            "否则 spawn_check.py 永远判不了")
+
+    def test_回放路径不记账(self, db):
+        c = card_ops.synthesize(decision_id=DID, verdicts=full_roster(),
+                                judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        rid = card_ops.persist(c)
+        before = len(list_agent_runs(decision_id=DID, path=db, limit=1000))
+        card_ops.persist(c, replay_of=rid)
+        after = len(list_agent_runs(decision_id=DID, path=db, limit=1000))
+        assert after == before, (
+            "回放不该重复记账——它没有重新执行任何 agent，"
+            "记一遍「执行」是假账，会让 agent_runs 的行数与真实 spawn 次数脱节")
 
 
 class TestSharedCode:
