@@ -607,11 +607,11 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 - [x] 批 A-I · 写边界重校验 + 严格 JSON（A3 / A4）—— ✅ 评审复核通过（`33fc55a`）
       评审四条：F-1/F-1b（审查判据两次方向反了）· F-2（档位改由调用参数推导）·
       F-3（`content_sha256` 锚存量文本）已修；F-4（`readback_check` 无自动调用方）带进 A-II
-- [x] 批 A-II · 值对象与不变量（A1 / A2 / A5 / A6 / A7 / A8 + F-4）—— 评审三条已修，待复核
-      F-5（阻塞，`MissingItem.code` 冻结后仍可写）· F-6（中等，Card roster
+- [x] 批 A-II · 值对象与不变量（A1 / A2 / A5 / A6 / A7 / A8 + F-4）—— ✅ 评审复核通过（`884f0fb`）
+      三轮评审：F-5（阻塞，`MissingItem.code` 冻结后仍可写）· F-6（中等，Card roster
       「缺席该不该硬拒」与设计表格不一致，裁决为折中方案）· F-8（第二轮复核，
-      「非空即放行」太松，收紧为「missing 条数 ≥ 缺席数」）均已修完；837 条测试全绿；
-      schema 落到 v6（`ux_verdict_amends_linear`）
+      「非空即放行」太松，收紧为「missing 条数 ≥ 缺席数」）均已修完并独立复现过；
+      837 条测试全绿；schema 落到 v6（`ux_verdict_amends_linear`）
 - [ ] 批 B · 运行身份 + 状态机（schema v7 —— 批 A-II 的 A8 先占了 v6）
 - [ ] 批 C · Runtime Adapter + DecisionOrchestrator ★（spike 已通过，可开工）
       ⚠️ 开工第一件事：补验 spike 未覆盖的三项（五个并行 fan-out / grant 长跑稳定性 /
