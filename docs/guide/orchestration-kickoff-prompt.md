@@ -832,11 +832,150 @@ P5  故意让 `evidence_set_id` 传一个不存在的号给某个 skill，断言
 
 ---
 
-## 批 E–H · 现在不写分发提示词
+## 批 E-I · Facts / Assessment 拆分 —— 契约基础设施 + 一个试点 Specialist
+
+⚠️ **批 D-II 合并之后才开这一批。** D-II 已于 `e81f94b` 合并并通过评审复核
+（另有 `e8518ed` 修 `agent_runs` 回归、`71789b5` 记 C-II 收尾——三个都要在这
+之前）。
+
+🔴 **设计文档自己说这是七批里最贵的一批**（六个 skill 的输出结构、契约层、
+存储层、回放、以及大量测试都会被触及）。分发时收紧成两层：**E-I 只建基础
+设施 + 迁一个试点 Specialist**（建议 `emotion`——Phase 1 第一个建成的
+skill，形状最简单、不参与 `risk_check.py` 的 `CROSS_CHECK_PAIRS`，出问题
+影响面最小）；**E-II 起才迁剩下五个**，且要等 E-I 落地的真实类型形状之后
+才写（同 D 的道理——现在写只会是一份很快过期的清单）。
+⚠️ 这是分发口径，不是设计变更——设计文档仍是 SSOT。
+
+```text
+做设计文档 §6 批 E 的第一段：定义 `FactBundle` / `AgentAssessment` /
+`AgentOutcome` 三个新契约类型 + `LegacyAdapter`，并在一个试点 Specialist
+上证明「旧 `AgentVerdict`、新三型并存」这件事真的成立。先读 §9「兼容策略」
+全文——里面「每次只迁一个边界」与「读路径宽、写路径严」两条硬约束，这一批
+从第一行代码就要遵守，不是做完了再补。
+
+## 要解决的问题（已有真实事故，不是假想）
+
+`AgentVerdict` 现在把两件产生方不同、时机不同的东西焊在一个 frozen
+dataclass 里：
+  · **事实**（skill 算出来的，如 `result`/`evidence`/`data_completeness`/
+    `missing`）——skill 跑完那一刻就有，是**机械记账**；
+  · **判断**（Agent 给的，`stance`）——skill 跑完之后，Agent 才补得上。
+
+`skills/_contract/verdict.py` 那句话点破了这条断层（读它的 docstring，
+不要跳过）：`status=PASS` 且 `stance=看空` 时,"没发现问题"与"看多"分不开。
+
+`amend_verdict.py`（skill 先落 verdict、Agent 再补 stance 的补丁路径）本身
+就是这条断层已经在咬人的证据——它不是一个方便功能，是"没有它，Agent 没有
+任何办法只加一个判断而不重新克隆一整份事实"这件事的补救：
+
+  · **实测事故（`BIGA-20260920-002`）**：补丁路径建成之前，唯一办法是让
+    Agent 把整份 JSON 重新吐一遍——15 条 Evidence 的 `retrieved_at` 全部
+    转述丢失（L-10）。
+  · **F8（外部评审）**：`amend_verdict.py` 曾经把契约层的 stance 校验逻辑
+    抄了一遍，连带抄走了同一个 fail-open 盲区（`agent="Market"`
+    大小写打错也能通过）——L-3 的形状，判据只该有一处。
+  · **F9（外部评审）+ 实测**：Agent 曾经把 `task_id` 当 `--ref` 传错，
+    报错后现读源码重试；加 `stance` 那次 Stage 1 延迟直接翻倍
+    （71s→133s），62 秒都花在"找 amend 命令怎么用"上——这些成本都是
+    "判断必须靠第二条命令后补"这件事本身产生的，不是 Agent 笨。
+
+## 顺带解决批 D-II 留的一笔账
+
+批 D-II 的 `CROSS_CHECK_PAIRS` 改成了比 `Evidence.raw_hash`，但自己承认有
+盲区：如果一个 Specialist 悄悄退回独立抓取、又刚好抓到与冻结数据逐字节
+相同的结果，`raw_hash` 会碰巧相同，检查漏报（D-II 评审复核认为这个漏报本身
+无害，但"是否真的走了共享机制"这件事结构上验证不了）。真正的修法是给
+`Evidence` 加一个字段直接声明"我用的是哪个冻结集"——`deterministic-
+orchestration.md` 第 372 行明确写着这是批 E 的契约改动。这一批做。
+
+## 做什么
+
+1. **`skills/_contract/` 新增类型**（具体放几个文件、字段怎么分，你定；
+   下面是必须满足的约束，不是逐字段的规格）：
+   - `FactBundle`：只装 skill 能独立算出来的东西——`result` / `evidence` /
+     `data_completeness` / `missing` / `status` / `elapsed_ms` 这一类。
+     **不装 `stance`。**
+   - `AgentAssessment`：Agent 的判断——`stance`，以及需要指回它评估的是
+     哪一份 `FactBundle`（用 id 引用，不要把事实抄进来——抄进来就是回到
+     L-10 的形状）。
+   - `AgentOutcome`：`risk_check.py` / `card_ops.py` 这类下游消费方实际
+     要读的组合视图（`FactBundle` + `AgentAssessment` 拼起来）。
+   - 铁律不能因为拆了就松：`missing` 非空 ⇒ 不能是 PASS/completed；
+     `UNKNOWN` ⇒ `stance` 必须是"无法判定"——这些跨 `FactBundle`/
+     `AgentAssessment` 的约束现在归谁校验、在哪一步校验，你要给出明确答案，
+     不能"以后再说"。
+2. **`Evidence` 加 `evidence_set_id: str | None = None`**（可选字段，参照
+   `raw_hash` 的先例）。`market_calc.py`/`sector_calc.py`/`technical_calc.py`
+   读冻结快照时顺手填上（它们已经拿着 `evidence_set_id` 参数，这不是新增
+   调用链，是给已有调用点多填一个字段）。
+3. **`risk_check.py` 的 `CROSS_CHECK_PAIRS` 补一层判据**：两条 Evidence 都有
+   `evidence_set_id` 时，直接比它（结构验证，不是内容碰巧相同）；没有时退回
+   现有的 `raw_hash` 比较（老 Specialist 还没填这个字段，不能因此让检查失效）。
+4. **`LegacyAdapter`**：`旧 AgentVerdict → LegacyAdapter → FactBundle +
+   AgentAssessment (+ AgentOutcome)`。🔴 读路径宽、写路径严（§9 的硬约束，
+   不是这一批自己发明的）：能把历史上任何一条已落库的 `AgentVerdict`
+   还原成新三型，但**新的落库只允许写新形状**——不然旧格式永远不会自然
+   清零，变成第二套要跟着演进的口径（L-3）。
+5. **存储层**：`agent_verdicts` 表怎么装新形状（新增列、版本标记，还是新表）
+   你定，但必须满足：只追加语义不能丢；`amend_verdict.py` 的线性修订约束
+   （`ux_verdict_amends_linear`）在过渡期对**还没迁移的** Specialist 必须
+   继续有效——它们还在用旧路径，不能因为这一批就先坏掉。
+6. **迁一个试点 Specialist**（建议 `emotion`，理由见上）：改它的 skill 脚本，
+   让它产出新三型而不是旧的 `AgentVerdict`；其余五个（market/sector/
+   technical/news/risk）**一个字都不改**，继续走 `amend_verdict.py` 老路径。
+7. **端到端验证新旧并存**：在一次（可以是离线模拟的）Card 合成里，一部分
+   Specialist 给新形状、一部分给旧形状，`card_ops`/`risk_check` 都能正确
+   处理，不因为"看到了不认识的类型"而出错或者悄悄漏掉某个 Specialist。
+
+## 不要做
+
+- 不要迁 market/sector/technical/news/risk 这五个——那是 E-II 起的事，
+  且要等这一批落地的真实类型形状之后才好写它们的分发提示词
+- 不要退役 `amend_verdict.py`——设计文档写得很清楚，退役的前提是**全部**
+  Specialist 迁完，现在只迁了一个
+- 不要因为"新形状更干净"就顺手改 `synthesizer` 判官的接口或
+  `orchestrator.py` 的编排逻辑——它们消费的是 `card_ops.load_verdicts_and_refs()`
+  返回的东西，这一批要做到的是让那个返回值不管来源是新是旧都长一样，
+  不是去改调用它的地方
+- 不要把 `evidence_set_id` 做成必填——第 2 条已经说了理由，还没接冻结快照
+  的 Specialist（news/emotion 目前不读日线）没有这个值可填
+
+## 必须做的探针（G-1）
+
+P1  用一条真实的历史 `emotion` verdict（老 `AgentVerdict` 形状），走
+    `LegacyAdapter`，断言还原出的 `FactBundle`+`AgentAssessment` 与原始
+    facts/stance 逐字段一致——不是"能跑不报错"，是内容对得上
+P2  尝试用新落库路径写一条旧形状（或反过来，缺了必需字段的新形状），断言
+    被拒——证明"写路径严"是真的严，不是文档说说
+P3  🔴 新旧并存探针：造一个场景，Card 合成时 5 个 Specialist 给旧
+    `AgentVerdict`、1 个（试点）给新三型，断言 Card 正确聚合了全部 6 个
+    的 missing/evidence，没有静默丢掉试点那一个（这条最容易在"看着能跑"
+    但其实丢了数据的方式上出问题）
+P4  CROSS_CHECK_PAIRS 的新判据：造两条都有 `evidence_set_id` 但故意不同
+    的 Evidence，断言报冲突；再造一条有 `evidence_set_id`、一条没有
+    （模拟老 Specialist），断言退回 `raw_hash` 比较、不因为字段缺失就
+    跳过检查
+P5  跨类型的铁律探针：造一个 `FactBundle.missing` 非空但对应
+    `AgentAssessment` 却给出 PASS 效果的组合，断言在你选定的那一层被拒——
+    先证明这条检查确实存在并且真的会红，再说它挂在哪
+P6  回归：对**还没迁移**的某个 Specialist（比如 `market`），走一遍
+    `amend_verdict.py` 补 stance 的旧路径，断言它跟这一批之前完全一样
+    地工作——这一批不能让老路径先坏
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 E-II–H · 现在不写分发提示词
 
 | 批 | 为什么现在不写 |
 |---|---|
-| E–G | 依赖 D-II 的实际落地形状（尚不具备） |
+| E-II | 迁剩下五个 Specialist + 退役 `amend_verdict.py`；依赖 E-I 落地的真实类型形状（尚不具备） |
+| F–G | 依赖 E 系列完整落地（尚不具备） |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
 🔴 **现在把它们写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
