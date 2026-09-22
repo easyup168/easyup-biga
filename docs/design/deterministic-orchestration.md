@@ -459,8 +459,13 @@ Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet �
 > + 存储（schema v8 `kind` 列，新旧同住 `agent_verdicts`）+ `Evidence.evidence_set_id`
 > （顺带还了 D-II 的账）+ risk CROSS_CHECK 升级 + **试点 `emotion`** 已迁到新三型。
 > 其余五个 skill（market/sector/technical/news/risk）**未迁**，仍产 `AgentVerdict`。
-> 落地细节冻结在教程第 27 章；当前状态见 `architecture.md` §4.1.2。**E-II 起迁剩下五个**
-> —— 要等 E-I 落地的真实类型形状之后才写分发提示词（同 D 的道理）。
+> 落地细节冻结在教程第 27 章；当前状态见 `architecture.md` §4.1.2。
+> ⬜ **批 E-II（分发提示词已就绪）**：迁 market/sector/technical/news 四个。
+> ⬜ **批 E-III（未写分发提示词）**：迁 `risk` + 退役 `amend_verdict.py`——
+> `risk` 单独一批的理由是它同样带 `stance`（`VETO_STANCE`，制衡层最安全关键的判断），
+> 且它消费其余五个的产出，等那五个形状稳定、评审复核过之后再动最后一个更安全；
+> 退役 `amend_verdict.py` 的前提是**全部六个**都迁完，天然只能跟最后一个绑在一起，
+> 不是这一批顺手加的范围。
 
 ```
 旧 AgentVerdict  →  LegacyAdapter  →  FactBundle + AgentAssessment + AgentOutcome
@@ -472,7 +477,23 @@ Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet �
 
 ⚠️ 这是七批里最贵的一批：六个 skill 的输出结构、契约层、存储层、回放、
 以及大量测试都会被触及。**不与批 C 并行做。** ⇒ 分发时拆成 E-I（基础设施 + 一个试点）
-/ E-II（其余五个），同 A/C/D 的拆分理由。
+/ E-II（market/sector/technical/news）/ E-III（`risk` + 退役 amend_verdict.py），
+同 A/C/D 的拆分理由，比原计划多拆一层——理由见上面 risk 那条。
+
+#### E-I 交下来的两个设计问题，E-II 分发时已裁定（2026-09-23）
+
+**①「Agent 追加的限制」缺失项归哪**：老 `amend_verdict.py --add-missing` 反复出现
+的真实用例只有一种形状——"这次只抓到单日快照，无法判断趋势/周期"。这不是判断，
+是 skill 自己在抓取那一刻就知道的事实（抓到几天数据是抓取的直接输出）。
+⇒ **裁定：改成 skill 自己在 `build_fact_bundle` 里检测（阈值判断：实际抓到的
+bars 数 < 判断趋势/周期所需的最小值），写进 `FactBundle.missing`，不给
+`AgentAssessment` 加字段。** 如果 E-II 实际迁移时找到一条历史实例不符合这个
+形状（需要 Agent 主观判断，不是 skill 能查的阈值），停下来回评审，不强行套用。
+
+**② 消费方要不要改成直接读 `AgentOutcome`**：**裁定：不改。** `card_ops`/
+`risk_check`/`DecisionCard` 现在靠 `load_verdict` 的兼容垫零改动消费新旧两种形状，
+且已被 E-I 的 P3 探针证明过新旧并存不丢数据。没有消费方需要"事实与判断分开看"
+这件事本身——提前把这层也收敛掉是 L-1（没有消费方的结构）。
 
 ### 批 F · Risk 拆两层
 
