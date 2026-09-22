@@ -70,6 +70,7 @@ A 股短线**决策辅助**系统。
 | 25 | [冻结一次、多处读：SnapshotCoordinator 的地基](25-snapshot-coordinator.md) | 确定性编排批 D-I：把抓取与读取拆开；为不写第二套解析而拆 `fetch`/`parse`（L-3）；manifest 要能反查不是好看；只建地基不改 Specialist（显式登记的施工空档）；分发提示词里一个过期的数字被实测抓出（120 不是 25） | ✅ |
 | 26 | [让 Specialist 改口读冻结快照](26-specialists-read-frozen.md) | 确定性编排批 D-II：切三个 skill 的实际行为；`--evidence-set-id` 为何可选、坏号为何 fail-closed；`raw_hash` 取冻结集那份不对切片重算；恒真检查**改判据**而不是删；两个 fail-closed 点互相兜底、探针从没预期处报红 | ✅ |
 | 27 | [把事实和判断拆开](27-facts-and-assessment.md) | 确定性编排批 E-I：`amend_verdict.py` 的存在就是那条断层的证据；三个新类型一条边界一个；跨型铁律归谁校验；事实层铁律共用一份防 L-3；`load_verdict` 多态让消费方零改动；读宽写严让旧格式自然清零；只迁 emotion 一个试点；顺带还 D-II 的 `evidence_set_id` 账 | ✅ |
+| 28 | [Orchestrator 健壮性四处收尾](28-orchestrator-robustness.md) | 确定性编排批 C-III：外部复审四条独立小修复；本项目**第一次两批并行**（为什么开 worktree 而不是动对方的未提交草稿）；只追加表里的假「已落库」记录删不掉；`cancel()` 三批以来第一个真调用方；探针要因**对的原因**红 | ✅ |
 
 ---
 

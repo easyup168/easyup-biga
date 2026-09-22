@@ -174,6 +174,37 @@ class TestVerifyVerdictRefs:
         problems = verify_verdict_refs(_card(refs=[ref]), path=db)
         assert len(problems) == 1 and "找不到" in problems[0]
 
+    def test_agent对不上时报红(self, db):
+        """C3-3：`verdict_id` 是**跨 agent 的全局自增**，不按 agent 分号段。
+        一条 ref 声称是 market 的原件、`verdict_id`/`content_sha256` 却全指向
+        news 那一行时，「能找到 + hash 对」两条都成立 —— 只有核对
+        `ref.agent == 存量.agent` 才能拦下这种张冠李戴（设计文档 §2 追加 5 §8-16）。
+        """
+        vid_market = save_verdict(_verdict(agent="market"), path=db)
+        vid_news = save_verdict(_verdict(agent="news"), path=db)
+        news_sha = load_verdict_meta(vid_news, path=db)["content_sha256"]
+
+        # 前置断言：这两条确实是不同行、不同 agent（否则伪造无从谈起）。
+        assert vid_market != vid_news
+        assert load_verdict_meta(vid_market, path=db)["agent"] == "market"
+        assert load_verdict_meta(vid_news, path=db)["agent"] == "news"
+
+        # 🔴 前置断言：一条「agent 也说 news」的 ref（id/sha 全指向同一行）核对通过 ——
+        #    证明 forged 唯一的破绽就是 agent，只有 agent 核对能抓到它，
+        #    存在性与 hash 两道检查都不会触发（A-II 探针纪律：先确认命中的是目标条件）。
+        consistent = VerdictRef(agent="news", verdict_id=vid_news,
+                                content_sha256=news_sha,
+                                contract_version=CONTRACT_VERSION)
+        assert verify_verdict_refs(_card(refs=[consistent]), path=db) == []
+
+        # 伪造：声称 market，实际 verdict_id + sha 全对得上 news 那一行。
+        forged = VerdictRef(agent="market", verdict_id=vid_news,
+                            content_sha256=news_sha,
+                            contract_version=CONTRACT_VERSION)
+        problems = verify_verdict_refs(_card(refs=[forged]), path=db)
+        assert len(problems) == 1
+        assert "market" in problems[0] and "news" in problems[0]
+
 
 class TestSynthesizeBuildsRefs:
     """`synthesize.py --verdict-ids` 是唯一能造出 VerdictRef 的路径。"""
