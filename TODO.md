@@ -636,8 +636,8 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       无 N=2 专属 bug——残留风险收窄为「运行时在这些场景下是否真的保持同位
       对应」，线下无法验证，已作为条件性探针 P5 带进批 C-II（只在 Orchestrator
       真的调用 cancel() 时才适用，否则要求原样记进已知问题，见分发提示词）
-- [ ] 批 C-II · DecisionOrchestrator + 生产入口切换 ★ —— **实现完成，待独立评审 + P1/P2 live**
-      这次升级第一次改动生产入口（`bin/biga-card`）。已落地（离线全绿，948 条）：
+- [x] 批 C-II · DecisionOrchestrator + 生产入口切换 ★ —— ✅ 评审复核通过（`d35d286`）
+      这次升级第一次改动生产入口（`bin/biga-card`）。已落地（离线全绿，956 条）：
       · `DecisionOrchestrator`（`skills/decision-card/scripts/orchestrator.py`）程序
         驱动 8 步细粒度状态链（RECEIVED→…→COMPLETED），占号在 `open_run` 之前
         （`decision_id` 从头非空）；Stage 1 五路 fan-out 共用一个 groupId、Stage 2
@@ -664,6 +664,10 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
           +wait，wrapper 一死就 kill 编排子进程。孤儿化事故根因是外层 timeout 杀 shell
           后孙进程孤立（不是 `$1.2` bug），需代码兜底不是「以后小心」。探针见红：
           `_reap_orch` 改空操作→真杀 wrapper 后子进程存活→红。
+      评审复核：两条红灯都独立复现过（不是抄交接里的输出）。阻塞 2 的信号传播多验了
+      一步——第一次用 `pgrep -a sleep` 粗筛，被环境里一个不相关的 `sleep` 进程误导
+      成「孙进程还活着」；换成精确 pid 追踪后确认三层信号传导正常，是探针写糙了，
+      不是修法有问题。生产库里 11 条孤儿 verdict 独立查库核对过，数量与 task_id 一致。
       P1（真跑端到端走 8 步链）/ P2 的 live 面（把 L-14 提示词贴给真 main 会话）需
       **重启网关加载 synthesizer 后 live 跑** —— 见下方待办，未做完不算收口。
 - [ ] 批 C-II 收尾 · P1/P2 live 补验（需 $1.2 授权 + 新会话）
