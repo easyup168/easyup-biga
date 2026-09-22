@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""快讯扫描 → AgentVerdict。`news` Agent 的唯一算子。
+"""快讯扫描 → FactBundle。`news` Agent 的唯一算子。
+
+🔴 批 E-II：从产合体 `AgentVerdict` 迁到产 `FactBundle`（只事实、无 stance），形状与
+E-I 迁 emotion 完全一致。news 的 stance（利好/利空/平静…）由 News Agent 事后
+`amend_verdict.py --stance` 追加一个 `AgentAssessment`（不重打事实与原文）。
+消费方零改动（`load_verdict` 多态）。
 
 🔴 这是第一个「skill 算不出结论」的 Specialist
 ================================================
@@ -55,8 +60,8 @@ sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
-    AgentVerdict,
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
@@ -69,8 +74,8 @@ from _sources.sina_news import STALE_SEC, fetch_feed  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
     payload_sha256,
+    save_fact_bundle,
     save_raw_snapshot,
-    save_verdict,
 )
 
 AGENT = "news"
@@ -108,10 +113,10 @@ FETCH_PAGES = 3
 _EXPECTED_FIELDS = 11
 
 
-def build_verdict(
+def build_fact_bundle(
     *, break_source: set[str], store: bool, task_id: str,
     window_min: int = WINDOW_MIN, max_items: int = MAX_ITEMS,
-) -> AgentVerdict:
+) -> FactBundle:
     t_start = time.monotonic()
     result: dict[str, Any] = {}
     evidence: list[Evidence] = []
@@ -273,7 +278,8 @@ def build_verdict(
     else:
         status, level = "partial", "UNKNOWN"
 
-    return AgentVerdict(
+    # 🔴 批 E-II：产 FactBundle（只事实、无 stance）；stance 由 News Agent 事后追加。
+    return FactBundle(
         task_id=task_id, agent=AGENT, status=status, verdict=level,
         result=result,
         data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
@@ -282,7 +288,7 @@ def build_verdict(
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="快讯扫描 → AgentVerdict JSON")
+    ap = argparse.ArgumentParser(description="快讯扫描 → FactBundle JSON（批 E-II）")
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练：人为中断 (feed)")
     ap.add_argument("--window-min", type=int, default=WINDOW_MIN)
@@ -295,28 +301,29 @@ def main(argv: list[str] | None = None) -> int:
     store = not args.no_store
     if store:
         init_schema()
-    v = build_verdict(break_source=set(args.break_source), store=store,
-                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
-                      window_min=args.window_min, max_items=args.max_items)
-    ref = save_verdict(v) if store else None
+    fb = build_fact_bundle(break_source=set(args.break_source), store=store,
+                           task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                           window_min=args.window_min, max_items=args.max_items)
+    # 🔴 批 E-II：事实原件（FactBundle，不含 stance）直接落库；stance 由 agent 事后追加。
+    ref = save_fact_bundle(fb) if store else None
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref else "  (未落库)"), file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             val = e.value
             if e.field == "items":
                 val = f"{len(val)} 条（最新：{val[0]['text'][:36]}…）" if val else "无"
             print(f"  {e.display_label:<20} = {val}", file=sys.stderr)
-        for w in v.warnings:
+        for w in fb.warnings:
             print(f"  ⚠ {w}", file=sys.stderr)
-        for m in v.missing:
+        for m in fb.missing:
             print(f"  ⚠ 缺失 [{m.code}] {m}", file=sys.stderr)
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":

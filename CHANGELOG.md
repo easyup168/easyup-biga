@@ -15,6 +15,78 @@
 
 ## [未发布]
 
+### 🔴 变更 · 批 E-II：把 market/sector/technical/news 四个 skill 迁到 FactBundle
+
+设计文档 §6 批 E 的第二段。**实现完成、离线全绿（1039→1062 条），六道探针（P1–P6）
+外加四道红灯演练全见过红并已还原，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。
+
+**为什么**：E-I 只迁了 `emotion`（不读冻结快照、不进 `CROSS_CHECK` 的那个），把新三型
+的形状定了下来。这一批第一次让**读冻结快照**（market/sector/technical）与**参与
+`CROSS_CHECK`**（market/technical）的 Specialist 走新形状 —— 这两件事 E-I 都没真正测过。
+`risk` 仍留在 E-III（它带 `VETO_STANCE`，还消费其余五个的产出，等它们形状稳定再动最安全；
+退役 `amend_verdict.py` 的前提是**全部六个**都迁完，天然跟最后一个绑在一起）。
+
+**做了什么**：
+
+- **四个 skill 机械迁移**（形状与 E-I 迁 emotion 完全一致）：各自的 `build_verdict`→
+  `build_fact_bundle`（返回 `FactBundle`）、`save_verdict`→`save_fact_bundle`。
+  market/sector/technical **读冻结快照、填 `evidence_set_id`** 那部分逻辑一字未改 ——
+  这一批只改「产出的是哪个类型」。消费方（card_ops/risk_check/DecisionCard）**零改动**，
+  继续吃 `load_verdict` 的 `to_agent_verdict()` 兼容垫（②的裁定：不改成直接读
+  `AgentOutcome`，那没有消费方、提前做是 L-1）。
+- **①「Agent 追加的限制」缺失项归哪 —— 查了真实数据库，不照抄设计文档的例子**：
+  `data/biga.db` 里四个 skill 历史上靠 `--add-missing` 补的限制（去掉 `stance=` 类）只有
+  三个形状，**全部已经由 skill 自己检测**：market 涨跌家数 0/0/0 → `market.breadth.not_yet_formed`、
+  市场宽度源不可用 → `market.breadth.unavailable`、sector 盘前板块榜无数据 →
+  `sector.board.pre_session`（同名同码）。technical/news 的历史 `--add-missing` **一条都没有**
+  （全是 `stance=`）。⇒ ①的裁定对这四个 skill **不新增任何检测代码**，genuine 数据缺口
+  skill 早就在自己的 `missing[]` 里报了。
+- **唯一的例外 `market.trend.no_history`：裁定为「范围外」，skill 不产它**。
+  🔴 **它不是数据缺口** —— 实测 5 次「市场趋势——只有单日快照，无指数历史序列」修订，
+  原件**每一次都带着 `volume_ratio`**（≥21 根、整段 20 日序列），3 次还是 15/15 满字段的
+  PASS。也就是说 market 一直有整段序列，这句话从来不是「抓少了」，而是 agent 在说
+  「我看不出**趋势方向**」——那是**判断**（铁律 4），与 sector 早就裁定为范围外的
+  「板块连涨几天」（`sector_calc.py` 顶部注释）是同一条线：`missing[]` 是给「本该有却这次
+  没有」的，范围外的东西每次都在，混进去只会把真正的缺失淹没。⇒ 归 agent 回答的自然
+  语言「需要注意」，不进 `missing`、不加 `AgentAssessment` 字段、skill 源码里连 `trend`
+  这个词都不出现。（这一条命中了 E-I 交下来的 ⚠️ escape hatch；开工会话据实测证据停下来
+  确认过设计，未强行套用。）
+- **第五交付物：修 `agents/market/AGENTS.md` 模板**（本批**唯一**触碰 AGENTS.md，经设计
+  owner 明确授权）。老模板**强制** agent「想说趋势就必须往 `missing` 加 `market.trend.no_history`
+  + `--verdict WARNING`」——这本身是**旧契约漏的一个洞**：agent 拿 `--verdict` 把 skill
+  算的、可回放的完整度**事后降级**，把一个**判断上的保留**伪装成**数据缺失**。批 E 拆事实/
+  判断正是要焊死这条缝。迁移后 fact 行会**直接拒绝** `--add-missing`（`_assess_fact` 报错），
+  🔴 **不修模板的代价不是文档陈旧，是 market agent 下一次真实出卡就撞拒绝、然后像 F9 那样
+  抖动**（62s／12 次工具调用去找正确命令）。⇒ 删掉 `--add-missing … --verdict WARNING`
+  组合命令，趋势 caveat 改走 agent 已有的「需要注意」自由文本字段。
+  ⚠️ sector/technical/news 的 AGENTS.md 里还留着**可选**的 `--add-missing X.partial` 示例
+  （对应 genuine 数据缺口，skill 已自检、agent 正常只需 `--stance` 转述，不会撞上）——
+  破坏概率低，未在本批修，已记进 `TODO.md` 作为后续文档收敛。
+- **`amend_verdict.py`**：`_assess_fact` 对 fact 行拒绝 `--add-missing/--add-warning` 这条
+  **硬约束不变**，只把提示语从「留给批 E-II」改成终态口径（缺口归 skill 自己的 `missing[]`、
+  范围外 caveat 归「需要注意」，这一行只收 `--stance`）。`kind=='fact'` 路由是 E-I 就铺好的
+  通用路，四个新 agent 直接复用，未加新代码。
+
+**探针记录（G-1：每道守卫先弄坏、见红、还原）**：
+
+- **P1**（四个 skill 产合法 FactBundle、落库 `kind='fact'`）：另有一条主动红灯 ——
+  把 skill 产出退回合体 `AgentVerdict`，`save_fact_bundle` 当场 `TypeError: 只接受…FactBundle`
+  （写路径严，E-I 判据）。
+- **P2**（CROSS_CHECK 穿透新形状）🔴：**弄坏** market 的 `_es_id_for` 恒返回 `None`（断掉
+  es-id 流），跑「不同 evidence_set_id 应报冲突」→ **报红 `assert []`**（因两次冻结同一份
+  数据 raw_hash 相同、只有 es-id 判据能抓到，退回 raw_hash 兜底就漏报了）→ 还原。证明 P2
+  真的锚在 evidence_set_id 穿过新 FactBundle 形状这条链上，不是凑巧绿。
+- **P3**（①裁定：skill 自检缺口、market-trend 不产）🔴：**弄坏** —— 往 market 注入一条
+  `market.trend.no_history` → 「范围外不产」断言**报红 `assert not True`** → 还原。
+- **P5**（amend 路由四个 agent）🔴：**弄坏** `_assess_fact` 的 `--add-missing` 拒绝分支
+  （改成永不触发）→ 四个 agent 的「fact 行加 --add-missing 被拒」**全部报红**（rc 变 0）→ 还原。
+- **P6**（第五交付物验收）🔴：**弄坏** —— 往 market AGENTS.md 塞回一段带 `--add-missing`
+  的 bash 命令块 → 「模板命令块里没有 --add-missing」**报红** → 还原。P6 同时正向验证：
+  模板现在教的那条 `--stance` 命令对一条真实 market fact 行确实 rc=0、判断落上去、事实没被重打。
+- **P4**（回归：五新一旧六个 agent card_ops 聚合不丢）：market/sector/technical/news/emotion
+  走新三型 + risk 走老合体，`load_verdicts_and_refs` 聚合六个、stance 全压回、market 自检的
+  一条 missing 也没丢。
+
 ### 🔴 新增 · 批 E-I：把事实和判断拆开（契约基础设施 + 一个试点）
 
 设计文档 §6 批 E 的第一段。**实现完成、离线全绿，六道探针（P1–P6）全见过红并已还原，

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""market-calc —— A 股市场状态事实计算，输出一份合法的 AgentVerdict。
+"""market-calc —— A 股市场状态事实计算，输出一份合法的 FactBundle。
+
+🔴 批 E-II：这个 skill 从产合体 `AgentVerdict` 迁到产 `FactBundle`（只事实、无 stance），
+形状与 E-I 迁 emotion 完全一致。stance 由 Market Agent 事后用 `amend_verdict.py --stance`
+追加一个 `AgentAssessment`（**不重打这份事实**）。消费方（card_ops/risk_check）零改动 ——
+`_store.load_verdict` 对新旧两种落库形状都返回一个 AgentVerdict。
 
 分工（architecture.md §6 硬约束 S-1 / S-2）
 --------------------------------------------
@@ -65,8 +70,8 @@ sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
-    AgentVerdict,
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
@@ -85,8 +90,8 @@ from _sources import (  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
     payload_sha256,
+    save_fact_bundle,
     save_raw_snapshot,
-    save_verdict,
 )
 from _snapshot import SnapshotCoordinator  # noqa: E402
 
@@ -276,14 +281,14 @@ def _ma_volume(daily: IndexDaily) -> float | None:
     return sum(b.volume for b in window) / len(window)
 
 
-def build_verdict(
+def build_fact_bundle(
     *,
     date: str | None,
     break_source: set[str],
     store: bool,
     task_id: str,
     evidence_set_id: str | None = None,
-) -> AgentVerdict:
+) -> FactBundle:
     t_start = time.monotonic()
     c = Collector(date, break_source, store, evidence_set_id)
 
@@ -501,7 +506,9 @@ def build_verdict(
     else:
         status, level = "partial", "UNKNOWN"
 
-    return AgentVerdict(
+    # 🔴 批 E-II：产 FactBundle（只事实、无 stance）。stance 由 Market Agent 事后
+    #    `amend_verdict.py --stance` 追加一个 AgentAssessment，不重打这份事实。
+    return FactBundle(
         task_id=task_id,
         agent=AGENT,
         status=status,
@@ -516,7 +523,7 @@ def build_verdict(
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="A 股市场状态事实计算 → AgentVerdict JSON")
+    ap = argparse.ArgumentParser(description="A 股市场状态事实计算 → FactBundle JSON（批 E-II）")
     ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
     ap.add_argument("--evidence-set-id", default=None,
@@ -531,38 +538,38 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
 
-    v = build_verdict(date=args.date, break_source=set(args.break_source),
-                      store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
-                      evidence_set_id=args.evidence_set_id)
-    # 🔴 判定原件直接落库，返回一个 id 供 agent 引用。
+    fb = build_fact_bundle(date=args.date, break_source=set(args.break_source),
+                           store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                           evidence_set_id=args.evidence_set_id)
+    # 🔴 事实原件直接落库（批 E-II：FactBundle，不含 stance），返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：
-    #    15 条 evidence 的 retrieved_at 转述后一条不剩。
-    #    让数据不经过 LLM，是唯一可靠的修法。
-    ref = save_verdict(v) if store else None
+    #    15 条 evidence 的 retrieved_at 转述后一条不剩。让数据不经过 LLM 是唯一可靠的修法。
+    #    stance 由 Market Agent 事后 `amend_verdict.py --ref <这个号> --stance <词>` 追加。
+    ref = save_fact_bundle(fb) if store else None
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
 
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref is not None else "  (未落库)"),
               file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             print(f"  {e.display_label:<22} = {e.value}"
                   f"   as_of {e.as_of:%Y-%m-%d %H:%M}", file=sys.stderr)
-        if v.warnings:
+        if fb.warnings:
             print("  警告:", file=sys.stderr)
-            for w in v.warnings:
+            for w in fb.warnings:
                 print(f"    · {w}", file=sys.stderr)
-        if v.missing:
-            print(f"  ⚠ 缺失项（{len(v.missing)}）:", file=sys.stderr)
-            for m in v.missing:
+        if fb.missing:
+            print(f"  ⚠ 缺失项（{len(fb.missing)}）:", file=sys.stderr)
+            for m in fb.missing:
                 print(f"    · {m}", file=sys.stderr)
 
     # 退出码：0=完整，2=有缺失但核心可用，3=核心缺失
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":

@@ -153,7 +153,7 @@ class TestF6ZeroSwallow:
         from test_sector_calc import daily
         monkeypatch.setattr(sector_calc, "fetch_index_daily",
                             lambda symbol, **kw: daily())
-        c = sector_calc.build_verdict(break_source=set(), store=False,
+        c = sector_calc.build_fact_bundle(break_source=set(), store=False,
                                       task_id="BIGA-20260921-001")
         codes = [m.code for m in c.missing]
         assert code in codes, codes

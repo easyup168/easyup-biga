@@ -85,11 +85,11 @@ class TestSameFrozenSet:
         断了不影响「日线证据是否同源」这条判据。
         """
         esid, _db, H = frozen
-        mv = market.build_verdict(date=None, break_source={"tencent", "breadth"},
+        mv = market.build_fact_bundle(date=None, break_source={"tencent", "breadth"},
                                   store=False, task_id=TID, evidence_set_id=esid)
-        sv = sector.build_verdict(break_source={"industry", "concept"},
+        sv = sector.build_fact_bundle(break_source={"industry", "concept"},
                                   store=False, task_id=TID, evidence_set_id=esid)
-        tv = technical.build_verdict(break_source=set(), store=False,
+        tv = technical.build_fact_bundle(break_source=set(), store=False,
                                      task_id=TID, evidence_set_id=esid)
         assert _rh(mv, "sh_close") == H
         assert _rh(tv, "close") == H
@@ -98,11 +98,11 @@ class TestSameFrozenSet:
     def test_三者报告同一个交易日(self, frozen):
         """同一份冻结数据 ⇒ 交易日必然一致（这正是共享要保证的）。"""
         esid, _db, _H = frozen
-        mv = market.build_verdict(date=None, break_source={"tencent", "breadth"},
+        mv = market.build_fact_bundle(date=None, break_source={"tencent", "breadth"},
                                   store=False, task_id=TID, evidence_set_id=esid)
-        sv = sector.build_verdict(break_source={"industry", "concept"},
+        sv = sector.build_fact_bundle(break_source={"industry", "concept"},
                                   store=False, task_id=TID, evidence_set_id=esid)
-        tv = technical.build_verdict(break_source=set(), store=False,
+        tv = technical.build_fact_bundle(break_source=set(), store=False,
                                      task_id=TID, evidence_set_id=esid)
         assert mv.result["trade_date"] == sv.result["trade_date"] == tv.result["trade_date"]
 
@@ -111,9 +111,9 @@ class TestSameFrozenSet:
         freeze 已经落了 2 行，读只是读。"""
         esid, db, _H = frozen
         before = _count_raw(db)
-        market.build_verdict(date=None, break_source={"tencent", "breadth"},
+        market.build_fact_bundle(date=None, break_source={"tencent", "breadth"},
                              store=True, task_id=TID, evidence_set_id=esid)
-        technical.build_verdict(break_source=set(), store=True,
+        technical.build_fact_bundle(break_source=set(), store=True,
                                 task_id=TID, evidence_set_id=esid)
         assert _count_raw(db) == before, "读冻结不该新增 raw 行"
 
@@ -206,7 +206,7 @@ class TestDebugPathAndFailClosed:
             return _fake_daily(symbol, bars=bars)
 
         monkeypatch.setattr(technical, "fetch_index_daily", fake_fetch)
-        v = technical.build_verdict(break_source=set(), store=False,
+        v = technical.build_fact_bundle(break_source=set(), store=False,
                                     task_id=TID, evidence_set_id=None)
         assert calls["n"] == 1, "不给 esid 就该自己抓"
         assert v.result.get("close")
@@ -224,7 +224,7 @@ class TestDebugPathAndFailClosed:
 
         monkeypatch.setattr(technical, "fetch_index_daily", fake_fetch)
         with pytest.raises(SnapshotReadError):
-            technical.build_verdict(break_source=set(), store=False,
+            technical.build_fact_bundle(break_source=set(), store=False,
                                     task_id=TID, evidence_set_id="es-从来没冻过")
         assert calls["n"] == 0, "坏 esid 时绝不能退回独立抓取"
 
@@ -238,7 +238,7 @@ class TestDebugPathAndFailClosed:
 
         monkeypatch.setattr(market, "fetch_index_daily", fake_fetch)
         with pytest.raises(SnapshotReadError):
-            market.build_verdict(date=None, break_source={"tencent", "breadth"},
+            market.build_fact_bundle(date=None, break_source={"tencent", "breadth"},
                                  store=False, task_id=TID, evidence_set_id="es-无")
         assert calls["n"] == 0
 

@@ -58,7 +58,8 @@ def build(**kw):
     kw.setdefault("break_source", set())
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return tc.build_verdict(**kw)
+    # 批 E-II：technical 迁到产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return tc.build_fact_bundle(**kw)
 
 
 class TestIndicators:

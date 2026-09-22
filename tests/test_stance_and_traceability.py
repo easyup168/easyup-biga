@@ -183,7 +183,7 @@ class TestSkillsEmitTraceableEvidence:
                             lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
         monkeypatch.setattr(mc, "save_raw_snapshot", lambda **kw: 1)
 
-        v = mc.build_verdict(date=None, break_source=set(), store=True,
+        v = mc.build_fact_bundle(date=None, break_source=set(), store=True,
                              task_id="BIGA-20260918-001")
         bad = [e.field for e in v.evidence
                if "/" in e.source and not e.source.startswith("derived:")
