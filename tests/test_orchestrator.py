@@ -33,7 +33,10 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _runtime import SpawnHandle, SpawnResult, SpawnStatus  # noqa: E402
+from _snapshot import SnapshotCoordinator  # noqa: E402
+from _sources import parse_index_daily  # noqa: E402
 from _store import (  # noqa: E402
+    connect,
     init_schema,
     load_online_card,
     run_events,
@@ -95,6 +98,15 @@ class FakeAdapter:
         return out
 
 
+def _fake_daily(symbol, *, bars):
+    """离线桩日线 —— 冻结用（批 D-II：orchestrator 现在会真的调 freeze）。"""
+    from datetime import date, timedelta
+    rows = [{"day": (date(2026, 3, 2) + timedelta(days=i)).strftime("%Y-%m-%d"),
+             "open": 3000.0 + i, "high": 3010.0 + i, "low": 2990.0 + i,
+             "close": 3000.0 + i, "volume": 10_000_000 + i} for i in range(bars)]
+    return parse_index_daily(symbol, rows)
+
+
 def _make_orch(db, **fake_kw):
     fake = FakeAdapter(db, **fake_kw)
 
@@ -104,7 +116,9 @@ def _make_orch(db, **fake_kw):
         attach.last_ttl = ttl_ms
         yield fake
 
-    orch = DecisionOrchestrator(attach=attach, deadline_sec=780)
+    # 注入装了假 fetcher 的 coordinator —— freeze 因此不出网（禁网围栏兜底）。
+    snapshot = SnapshotCoordinator(fetcher=_fake_daily, path=db)
+    orch = DecisionOrchestrator(attach=attach, snapshot=snapshot, deadline_sec=780)
     return orch, fake, attach
 
 
@@ -224,6 +238,53 @@ class TestPartialAndFailure:
         orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, absent=list(ROSTER))
         ctx = new_run_context(origin="cli", non_interactive=True)
         with pytest.raises(OrchestratorError, match="零证据"):
+            orch.run(ctx)
+        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
+
+
+class TestSnapshotFreeze:
+    """批 D-II：orchestrator 在 Stage 1 之前冻结一次，SNAPSHOT_FROZEN 转移接了真东西。"""
+
+    def test_SNAPSHOT_FROZEN带evidence_set_id(self, db):
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        orch.run(ctx)
+        sf = [e for e in run_events(ctx.run_id, path=db)
+              if e["to_state"] == RunState.SNAPSHOT_FROZEN][0]
+        esid = sf["detail"]["evidence_set_id"]
+        assert esid.startswith("es-")
+        assert sf["detail"]["bars"] == 120  # 取最大消费者 technical 的根数，不是 25
+
+    def test_一次决策只冻2行raw_登记1个evidence_set(self, db):
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        orch.run(ctx)
+        with connect(db, readonly=True) as c:
+            n_raw = c.execute("SELECT COUNT(*) FROM raw_market_snapshot").fetchone()[0]
+            n_es = c.execute("SELECT COUNT(*) FROM evidence_sets").fetchone()[0]
+        assert n_raw == 2, "两个指数代码 ⇒ 冻结只落 2 行 raw"
+        assert n_es == 1
+
+    def test_specialist_task_只给日线三个agent带esid(self, db):
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        for a in ("market", "sector", "technical"):
+            assert "--evidence-set-id" in orch._specialist_task(a, "BIGA-20260101-001", "es-x")
+        for a in ("emotion", "news"):
+            assert "--evidence-set-id" not in orch._specialist_task(a, "BIGA-20260101-001", "es-x")
+
+    def test_freeze失败则整体FAILED(self, db):
+        """freeze 抓不到 ⇒ 异常上抛 ⇒ FAILED（fail-closed，不退回各自抓一份）。"""
+        def _boom(symbol, *, bars):
+            raise RuntimeError("数据源挂了")
+        boom_coord = orch_mod.SnapshotCoordinator(fetcher=_boom, path=db)
+        fake = FakeAdapter(db, judgment=_GOOD_JUDGMENT)
+
+        @contextlib.contextmanager
+        def attach(session_key, *, ttl_ms, **_):
+            yield fake
+        orch = DecisionOrchestrator(attach=attach, snapshot=boom_coord, deadline_sec=780)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        with pytest.raises(OrchestratorError):
             orch.run(ctx)
         assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
 

@@ -208,12 +208,36 @@ class SnapshotCoordinator:
         「有个字段存在」就算数。冻结方（本类）定义 manifest 形状，所以这条反查
         放在这里；存储层（`_store.load_evidence_set`）对 manifest 结构不做假设。
         """
+        symbols = self._manifest_symbols(evidence_set_id)
+        return [int(e["snapshot_id"]) for e in symbols.values()]
+
+    def frozen_content_sha256(self, evidence_set_id: str, symbol: str) -> str:
+        """这个 evidence set 里 `symbol` 那份**整份** raw 的 `content_sha256`。
+
+        🔴 批 D-II 要用它给 `Evidence.raw_hash` 赋值：改口读冻结快照的 Specialist，
+        `raw_hash` 应指向**冻结集登记的**这份哈希（整份 raw 的指纹），**不能**对自己
+        读到的那一截（`read_index_daily` 切出来的 N 根）重新 `payload_sha256`——
+        不同消费者读不同根数（sector 2 / market 25 / technical 120），对切片重算会得到
+        三个不同的哈希，而它们本该指向同一份冻结数据。用这一份，三者天然相等
+        （探针 P4），risk 的 CROSS_CHECK 才能靠「raw_hash 是否相同」判断两个 Specialist
+        是不是真的共享了同一份数据。
+
+        这是**新增的只读访问器**，不改 `read_index_daily` 的签名（D-I 已评审通过）——
+        读端要的这份哈希，D-I 的读接口没有暴露，属于分发提示词说的「签名接不上」。
+        """
+        symbols = self._manifest_symbols(evidence_set_id)
+        entry = symbols.get(symbol)
+        if entry is None:
+            raise SnapshotReadError(
+                f"{symbol} 不在 evidence set {evidence_set_id} 里。这次冻的是：{sorted(symbols)}。")
+        return str(entry["content_sha256"])
+
+    def _manifest_symbols(self, evidence_set_id: str) -> dict[str, Any]:
         es = load_evidence_set(evidence_set_id, path=self._path)
         if es is None:
             raise SnapshotReadError(
                 f"evidence_set_id={evidence_set_id!r} 不存在 —— 无法反查它冻了哪些 raw。")
-        symbols = es["manifest"].get("symbols", {})
-        return [int(e["snapshot_id"]) for e in symbols.values()]
+        return es["manifest"].get("symbols", {})
 
     # ── 内部 ────────────────────────────────────────────────────────────────
 

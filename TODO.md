@@ -693,7 +693,22 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         per-run 约束的手段都没有，留给 D-II 按 run_id 认。顺带发现分发提示词把
         technical 的 `bars` 写错成 25（实测 120）——已在 `orchestration-kickoff-prompt.md`
         改正。
-  - [ ] 批 D-II · Specialist 改口读冻结快照（切 market/sector/technical 的实际调用点，改现有 skill 行为，高风险）—— 分发提示词已就绪，可开工
+  - [ ] 批 D-II · Specialist 改口读冻结快照 —— **实现完成、离线全绿（1003）、四道探针见过红，待独立评审**（不自宣通过）
+        `orchestrator.py` Stage 1 前冻结一次（sh/sz@**120**，取消费者里最大的 technical），
+        evidence_set_id 进转移 detail + `RunContext`（第一次真填这个字段）；只给日线三个
+        agent 的任务文本加 `--evidence-set-id`。market/sector/technical 各加可选
+        `--evidence-set-id`：给了读冻结（不联网、不重复落盘、`raw_hash` 取冻结集登记的
+        `content_sha256`），没给自己抓（调试路径保留），给坏号 fail-closed（`SnapshotReadError`
+        上抛，绝不静默退回抓取）。`risk_check.py` 的 `CROSS_CHECK_PAIRS` 判据从「比值」改成
+        「比 `raw_hash`」（共享后比值恒真 L-7；比 raw_hash 才是「谁没读冻结」的探照灯）。
+        新增只读访问器 `SnapshotCoordinator.frozen_content_sha256`（不改 `read_index_daily` 签名）。
+        探针见红并还原：P5（冻结分支改成退回 fetch→`calls==1`≠0）/ P4（sector 对 2 根重算 hash→
+        与冻结集 H 不符）/ P2（CROSS_CHECK 退回比值→值相等漏掉 hash 不一致，双红）/
+        freeze 跳过→`test_一次决策只冻2行raw` 报 `0≠2`。详见 CHANGELOG。
+        🔴 **D-I 自报的「freeze 跨 decision_id 不幂等」在这一批自然消解**：orchestrator 每次
+        `run()` 只调一次 freeze ⇒ **一个 run 只冻一次**（正是评审复核要的 per-run 语义）。
+        一个 decision 被重试 ⇒ 两个 run ⇒ 两次 freeze ⇒ 各自一份新数据（retry 本就该拿新数据），
+        各 run 用自己 `run_events.detail` 里记的 evidence_set_id。coordinator 无须按 run_id 收参。
 - [ ] 批 E · Facts / Assessment 拆分
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
@@ -721,32 +736,29 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 orchestrator 的超时诊断路径（超时时判一下是不是 `ask_user` 死锁、记进 detail/missing），
 给它一个真实消费方。这条同 P5 一样，是「这一批用不到但不让它悄悄消失」。
 
-### 🔶 批 D-I 施工空档 + 批 D-II 输入（评审时一并看）
+### ✅ 批 D-I 施工空档 + 批 D-II 输入 —— 均由 D-II 消费（保留作台账）
 
-**施工空档：`freeze_index_daily` 现在没有编排层调用方。** D-I 只建这层并用探针证明
-它工作，Specialist 一个没改（那是 D-II）。所以现在没有任何调度命令会跑 `freeze` ——
-它的读取方是 `read_index_daily` + 探针。这是分批施工里一段**显式登记**的中间态
-（同批 B「只建 `evidence_sets` 表、无生产方」），不是零消费方死配置（L-1）。误删这层
-不会有测试变红，但会变成「谁建的、干嘛的」都答不上来的孤儿 —— 记在这里免得下次疑惑。
+D-I 留的三条都在 D-II 落实了，记在这里免得以后翻出来以为还悬着：
+- **施工空档（freeze 没有调用方）** ✅ 消费：`orchestrator.py` 每次 `run()` 冻结一次。
+- **输入 1（bars 取 120 不是 25）** ✅ 采纳：`SNAPSHOT_BARS = 120`（分发提示词那个 25 是错的）。
+- **输入 2（raw_hash 指向冻结集那份，不对切片重算）** ✅ 采纳：读冻结走
+  `frozen_content_sha256`；`CROSS_CHECK_PAIRS` 也随之从「比值」改成「比 raw_hash」（不再恒真）。
 
-**D-II 输入 1 · 冻结的 `bars` 要取所有消费者里最大的那个 —— 是 120，不是 25。**
-分发提示词把 technical 的调用写成 `bars=BAR_COUNT # 默认 25`，但实测
-`technical_calc.py::BAR_COUNT = 120`（market 才是 25，sector 是 2）。谁把这层接进
-编排器，`freeze_index_daily(..., bars=?)` 就得取 **120**，否则 technical 读 120 会撞
-`read_index_daily` 的 fail-closed（「只冻了 25 根，读不出 120 根」）。这不是设计变更，
-是分发提示词里一个过期的数字，D-I 的读端已经按「越界即报错」处理，接线时照 120 传即可。
+### 🔶 批 D-II 残留（评审时一并看）
 
-**D-II 输入 2 · `raw_hash` 语义要在 D-II 一并想清楚。** 今天 technical 用
-`payload_sha256(daily.raw)` 给 `Evidence.raw_hash`（整份 raw 的指纹）。改读冻结快照后，
-若消费者对**切片后**的 raw 重新取 sha，会与冻结集登记的**整份** raw 的 sha 对不上
-（切片 ≠ 整份），而且不报错。⇒ D-II 让 Specialist 改口时，`raw_hash` 应指向冻结集
-（`evidence_sets` 里那份 `content_sha256` / `snapshot_id`），不是各自对自己看到的那截
-重算。D-I 已经把整份 raw 的 `content_sha256` 记进 manifest，就是给这一步用的。
+**`decision_runs.evidence_set_id` 这一列填不进去，是设计使然不是漏。** schema v7 注释写
+「批 D 填」，但 `decision_runs` 只追加、它那一行在 `open_run`（RECEIVED）时就写了，而 freeze
+在 SNAPSHOT_FROZEN（晚于 open_run）才发生 ⇒ 事后 UPDATE 违反只追加，提前 freeze 到预检前
+更糟。⇒ evidence_set_id 的持久记录落在 `run_events`（SNAPSHOT_FROZEN 那次转移的 detail）
++ `evidence_sets` 表；`RunContext` 内存里也更新。这一列保持 NULL。谁将来要「按 run 查它
+用了哪个冻结集」，读 run_events.detail，别指望 decision_runs 那一列。
 
-**CROSS_CHECK_PAIRS 现在仍有意义，别在 D-I 删。** 设计文档 §6 说 `market.sh_close ↔
-technical.close` 会在 Specialist **真的**共享快照后变成恒真 —— 那是 D-II 之后的事。
-D-I 的 Specialist 还各自抓取，这条交叉校验现在仍能抓到两市日线对不上，删早了是自己
-造一个假阴性窗口（L-7 的反面）。D-I 没碰它。
+**`SNAPSHOT_INDEX_AGENTS` 是一份会漂的清单。** `orchestrator.py` 里写死
+`{market, sector, technical}`——决定给谁的任务文本加 `--evidence-set-id`。它必须与「哪几个
+skill 真接了这个参数」一致，没有权威源可派生。加了新日线消费者忘了改它 ⇒ 各自抓、不共享。
+靠探针 P1 兜底（三条日线证据反查同一冻结集，漏了就 raw_hash 对不上报红），但那是运行期
+才发现。将来 breadth/pool 也迁冻结（批 D 后两段）时，一并想清楚这份清单要不要变成
+可派生的（比如各 skill 自报「我读哪些冻结源」）。
 
 ### ⚠️ `.biga-card-stop` 的解除条件看起来已经满足，但没解除
 

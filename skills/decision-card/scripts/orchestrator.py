@@ -45,6 +45,7 @@ from _contract import (  # noqa: E402
     new_run_context,
 )
 from _runtime import OpenClawRuntimeAdapter, SpawnStatus  # noqa: E402
+from _snapshot import SnapshotCoordinator  # noqa: E402
 from _store import (  # noqa: E402
     latest_verdict_ids,
     open_run,
@@ -56,6 +57,21 @@ import entry_guard  # noqa: E402
 
 #: Stage 2 的制衡层。这一批只有 risk（discipline 按裁定 13 不建）。
 RISK_AGENT = "risk"
+
+#: 🔴 冻结数据切片（批 D-II）。Stage 1 之前冻结这两个指数的日线一次，
+#: market/sector/technical 都从这一份读，不各自联网。
+SNAPSHOT_SYMBOLS = ("sh000001", "sz399106")
+
+#: 冻结的根数 —— 取**所有消费者里最大的那个**。今天是 technical 的 120
+#: （`technical_calc.py::BAR_COUNT`），不是 market 的 25。取小了 technical 读 120
+#: 会撞 read 端的 fail-closed（见 `_snapshot` 教程第 25/26 章、`TODO.md` 批 D-II 输入）。
+SNAPSHOT_BARS = 120
+
+#: 会读冻结日线的 Specialist —— 只有这三个消费 `fetch_index_daily`。
+#: 只给它们的任务文本加 `--evidence-set-id`；emotion/news 的 skill 没有这个参数。
+#: 谁给某个 skill 接了 `--evidence-set-id`，谁把它加进这里 —— 漂了探针 P1 会抓到
+#: （三条 Evidence 反查不到同一个冻结集）。
+SNAPSHOT_INDEX_AGENTS = frozenset({"market", "sector", "technical"})
 
 #: 判官的结构化输出契约 —— 靠 `outputSchema` 拿到干净的 {status, headline, synthesis}，
 #: 不去解析它的自然语言回复（那是 F3/L-13 的形状）。
@@ -87,6 +103,7 @@ class DecisionOrchestrator:
         self,
         *,
         attach=None,
+        snapshot: SnapshotCoordinator | None = None,
         model_ref: str = "anthropic/claude-sonnet-5",
         deadline_sec: int | None = None,
         stage1_sec: int | None = None,
@@ -95,6 +112,9 @@ class DecisionOrchestrator:
     ):
         # attach 是依赖注入点：默认真实 adapter，测试传假的。
         self._attach = attach or OpenClawRuntimeAdapter.attach
+        # snapshot 同理：默认真实 coordinator（真联网抓一次并冻结），测试传一个
+        # 装了假 fetcher 的，freeze 就不出网。
+        self._snapshot = snapshot or SnapshotCoordinator()
         self._model_ref = model_ref
         self.deadline_sec = deadline_sec or int(os.environ.get("BIGA_CARD_DEADLINE_SEC", "780"))
         self.stage1_sec = stage1_sec or int(os.environ.get("BIGA_ORCH_STAGE1_SEC", "300"))
@@ -116,15 +136,26 @@ class DecisionOrchestrator:
             state = self._to(ctx.run_id, state, RunState.PREFLIGHTED)
             ttl_ms = (self.deadline_sec + 60) * 1000
             with self._attach(f"agent:main:orchestrator-{ctx.run_id}", ttl_ms=ttl_ms) as ad:
-                # 批 D 之前，快照冻结还没有真东西；转移合法，detail 不谎称「已冻结」。
+                # 🔴 批 D-II：冻结一次，Stage 1 之前完成。market/sector/technical 都
+                #    从这一份读（各带 --evidence-set-id），不再各自联网抓日线 ——
+                #    「所有 Specialist 看同一份数据」从「机制可行」变成「这次真的如此」。
+                #    freeze 失败（抓不到）⇒ 异常上抛 ⇒ 整体 FAILED（fail-closed：宁可
+                #    不出卡，也不退回各自抓一份、悄悄丢掉共享保证）。
+                esid = self._snapshot.freeze_index_daily(
+                    did, SNAPSHOT_SYMBOLS, bars=SNAPSHOT_BARS)
+                # evidence_set_id 从批 B 起就在 RunContext 里、一直是 None ——
+                # 这一批第一次真的填它（in-memory；decision_runs 是只追加、RECEIVED
+                # 时已写入 None，所以持久记录落在这次转移的 detail + evidence_sets 表）。
+                ctx = dataclasses.replace(ctx, evidence_set_id=esid)
                 state = self._to(ctx.run_id, state, RunState.SNAPSHOT_FROZEN,
-                                 detail={"note": "SnapshotCoordinator 未建（批 D）；"
-                                                 "Specialist 仍各自联网取数"})
+                                 detail={"evidence_set_id": esid,
+                                         "symbols": list(SNAPSHOT_SYMBOLS),
+                                         "bars": SNAPSHOT_BARS})
 
                 # ── Stage 1：并行 fan-out ──
                 state = self._to(ctx.run_id, state, RunState.STAGE1_RUNNING)
                 gid = f"g-{ctx.run_id[:8]}-s1"
-                handles = [ad.start(a, did, self._specialist_task(a, did),
+                handles = [ad.start(a, did, self._specialist_task(a, did, esid),
                                     group_id=gid, run_timeout_sec=run_timeout)
                            for a in STAGE1_AGENTS]
                 r1 = ad.wait(handles, self.stage1_sec)
@@ -207,14 +238,23 @@ class DecisionOrchestrator:
             pass
 
     # ── 任务文本（给 Specialist / risk / 判官的指令）──────────────────────
-    def _specialist_task(self, agent: str, did: str) -> str:
+    def _specialist_task(self, agent: str, did: str, evidence_set_id: str) -> str:
         # 🔴 绝不在指令里出现日期（ORCHESTRATION.md 反复踩过）——走宽松模式，
         #    取数据源最近一个交易日，并让它写出是哪天。
-        return (
+        base = (
             f"本次决策编号 {did}。请给出当前市场状态/情绪的事实与判断。\n"
             f"不要指定日期，走宽松模式，取数据源给出的最近一个交易日，"
             f"并在回答里明确写出那是哪一天。\n"
             f"跑你的 skill 时必须加 --task-id {did}。")
+        # 🔴 读冻结日线的三个 Specialist 必须再带 --evidence-set-id —— 与 --task-id
+        #    同一种机制（提示词说要做什么，跑完靠代码/探针核实真做了）。emotion/news
+        #    的 skill 没有这个参数，不加（加了它们也不认）。
+        if agent in SNAPSHOT_INDEX_AGENTS:
+            base += (
+                f"\n本次决策的指数日线已冻结（evidence_set_id={evidence_set_id}）。"
+                f"跑 skill 时必须再加 --evidence-set-id {evidence_set_id} —— "
+                f"读这份冻结快照，不要自己联网抓日线，这样所有 Specialist 看的是同一份。")
+        return base
 
     def _risk_task(self, did: str, s1_ids: list[int]) -> str:
         ids = ",".join(str(i) for i in s1_ids)
