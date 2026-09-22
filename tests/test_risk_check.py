@@ -39,7 +39,7 @@ def up(agent="market", result=None, stance="放量上涨", missing=None,
           for k in result for v in [result[k]]]
     # contract-exempt: 拼的是构造 AgentVerdict 的 kwargs，不是第二套契约
     return AgentVerdict(task_id=task_id, agent=agent, status=status,
-                        verdict=verdict, result=result, confidence=1.0,
+                        verdict=verdict, result=result, data_completeness=1.0,
                         evidence=ev, warnings=[], missing=list(missing or []),
                         elapsed_ms=1, stance=stance)
 
@@ -109,7 +109,7 @@ class TestCoverage:
     def test_一个都拿不到时是failed(self, wired):
         v = build([999])
         assert (v.status, v.verdict) == ("failed", "UNKNOWN")
-        assert v.result == {} and v.evidence == []
+        assert v.result == {} and v.evidence == ()
 
 
 class TestThresholds:
@@ -183,7 +183,7 @@ class TestFreshness:
 
 
 class TestContractShape:
-    def test_字段数与confidence分母一致(self, wired):
+    def test_字段数与data_completeness分母一致(self, wired):
         wired[1] = up("market")
         wired[2] = up("emotion", stance="修复")
         wired[3] = up("sector", stance=None, verdict="UNKNOWN", status="partial",
@@ -194,7 +194,7 @@ class TestContractShape:
                       missing=["x"])
         v = build([1, 2, 3, 4, 5])
         assert len(v.result) == rc._EXPECTED_FIELDS
-        assert v.confidence == 1.0
+        assert v.data_completeness == 1.0
 
     def test_否决这个词与契约层同源(self):
         text = (REPO / "agents" / "risk" / "AGENTS.md").read_text(encoding="utf-8")
@@ -306,7 +306,7 @@ class TestForeignDecisionUpstream:
 
             verdict: UNKNOWN
             result:  coverage_ratio=1.0, trade_date_consistent=True, …
-            confidence: 0.9
+            data_completeness: 0.9
 
         每个数字都是**把两次决策的证据混在一起**算出来的，而它们和正常
         判定逐字段同形。任何不去读 `verdict` 的消费方都会照常用它们。
@@ -330,10 +330,10 @@ class TestForeignDecisionUpstream:
             "  这些数是把两次决策的证据混起来算的，和正常判定逐字段同形。")
 
     def test_归属不成立时置信度是零(self, wired):
-        """`confidence` 原来由 `len(result)/_EXPECTED_FIELDS` 算 ——
+        """`data_completeness` 原来由 `len(result)/_EXPECTED_FIELDS` 算 ——
         字段算得越多越「自信」，而这里字段越多恰恰意味着污染越深。"""
         ids = self._full(wired, "BIGA-20260918-999")
-        assert build(ids, task_id="BIGA-20260918-001").confidence == 0.0
+        assert build(ids, task_id="BIGA-20260918-001").data_completeness == 0.0
 
     def test_归属不成立时不许发出阈值告警(self, wired):
         """`volume_ratio=3.0` 来自**别的决策**。

@@ -265,6 +265,27 @@ _V5 = """
 """ + _append_only("decision_ids", "号发出去就不能收回，否则两次运行会共用一个身份")
 
 
+_V6 = """
+-- ───────────────────────────────────────────────────────────────
+-- v6：修订链只能线性，不许分叉（设计文档 §6 A8）
+--
+-- 🔴 它解决的是一个实测能构造出来的洞：`agent_verdicts.amends` 原来只是
+-- 一个普通索引（`ix_verdict_chain`），同一个 verdict_id 可以被**两条不同
+-- 的修订**同时指向——一条原件分叉出两条历史，读者不知道该信哪条「当前」。
+--
+-- 「先查这个 verdict_id 有没有被修订过，没有才写」中间有窗口——
+-- 和 v4/v5 的 decision_ids 是同一类竞态，唯一可靠的仲裁是数据库自己的
+-- 唯一约束，不是应用层的「先查再插」。
+--
+-- ⇒ 补一条局部唯一索引：非 NULL 的 amends 值不许重复。
+--    应用层（`_store.db.save_verdict`）额外校验 `new.task_id == old.task_id`
+--    且 `new.agent == old.agent`——那两条数据库管不了，只能代码管。
+-- ───────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS ux_verdict_amends_linear
+    ON agent_verdicts(amends) WHERE amends IS NOT NULL;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -272,6 +293,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (3, _V3),
     (4, _V4),
     (5, _V5),
+    (6, _V6),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

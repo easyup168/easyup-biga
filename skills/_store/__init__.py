@@ -11,7 +11,8 @@ from .db import (
     db_path,
     init_schema,
     list_agent_runs,
-    load_card,
+    load_card_by_record_id,
+    load_online_card,
     load_raw_snapshot,
     load_verdict,
     load_verdict_meta,
@@ -24,6 +25,7 @@ from .db import (
     save_card,
     save_raw_snapshot,
     save_verdict,
+    verify_verdict_refs,
 )
 from .schema import SCHEMA_VERSION
 
@@ -36,7 +38,8 @@ __all__ = [
     "db_path",
     "init_schema",
     "list_agent_runs",
-    "load_card",
+    "load_card_by_record_id",
+    "load_online_card",
     "load_raw_snapshot",
     "load_verdict",
     "load_verdict_meta",
@@ -49,4 +52,5 @@ __all__ = [
     "save_card",
     "save_verdict",
     "save_raw_snapshot",
+    "verify_verdict_refs",
 ]

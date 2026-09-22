@@ -85,9 +85,9 @@ class TestHappyPath:
         v = build()
         assert (v.status, v.verdict) == ("completed", "PASS")
 
-    def test_字段数与confidence分母一致(self, wired):
+    def test_字段数与data_completeness分母一致(self, wired):
         v = build()
-        assert len(v.result) == sc._EXPECTED_FIELDS and v.confidence == 1.0
+        assert len(v.result) == sc._EXPECTED_FIELDS and v.data_completeness == 1.0
 
     def test_榜单按涨跌幅降序(self, wired):
         top = build().result["industry_top"]

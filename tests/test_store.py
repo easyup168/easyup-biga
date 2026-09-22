@@ -16,14 +16,22 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
+from _contract import (
+    STANCE_VOCAB,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    new_task_id,
+    now_cn,
+)
 from _store import (
     SCHEMA_VERSION,
     AppendOnlyViolation,
     connect,
     init_schema,
     list_agent_runs,
-    load_card,
+    load_card_by_record_id,
+    load_online_card,
     load_raw_snapshot,
     load_verdicts,
     next_decision_id,
@@ -50,7 +58,7 @@ def make_verdict(**kw) -> AgentVerdict:
     # contract-exempt: 构造真 dataclass 的 kwargs
     base = dict(
         task_id=TID, agent="emotion", status="completed", verdict="PASS",
-        result={"limit_up": 42}, confidence=0.8,
+        result={"limit_up": 42}, data_completeness=0.8,
         evidence=[Evidence(field="limit_up", source="biga.db:raw_market_snapshot",
                            value=42, as_of=t - timedelta(seconds=300),
                            retrieved_at=t, label="涨停家数")],
@@ -71,11 +79,15 @@ def make_card(**kw) -> DecisionCard:
     于是两条测试一直在用不合法的样本跑 —— 它们通过，只是因为没人拦。
     """
     did = kw.get("decision_id", TID)
+    # 🔴 只给 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按计数
+    #    比较（missing 条数须不少于缺席 agent 数），5 条占位才够
+    #    （本文件不测 roster）。
     # contract-exempt: 同上
     base = dict(
         decision_id=did, status="WAIT", headline="核心矛盾一句话",
         verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
+        missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
     )
     base.update(kw)
     return DecisionCard(**base)
@@ -179,12 +191,16 @@ class TestDecisionRecords:
     def test_存取往返(self, db):
         card = make_card()
         save_card(card, path=db)
-        got = load_card(card.decision_id, path=db)
+        got = load_online_card(card.decision_id, path=db)
         assert got is not None
         assert got.to_dict() == card.to_dict()
 
     def test_派生列由卡对象生成(self, db):
-        card = make_card(status="AVOID", headline="高位风险")
+        # 满 roster + missing=[]：要验证 missing_count 的派生值真的是 0，
+        # 不能靠「占位 missing」绕过——那样 missing_count 就不是 0 了。
+        full_roster = [make_verdict(agent=a, task_id=TID) for a in sorted(STANCE_VOCAB)]
+        card = make_card(status="AVOID", headline="高位风险",
+                         verdicts=full_roster, missing=[])
         save_card(card, path=db)
         with connect(db, readonly=True) as c:
             row = c.execute("SELECT status, headline, missing_count "
@@ -210,8 +226,8 @@ class TestDecisionRecords:
         save_card(replay, replay_of=rid, path=db)
 
         # 在线那条仍然是原始结论
-        assert load_card(TID, path=db).status == "WAIT"
-        assert load_card(TID, record_id=rid, path=db).model_ref == "anthropic/claude-sonnet-5"
+        assert load_online_card(TID, path=db).status == "WAIT"
+        assert load_card_by_record_id(rid, path=db).model_ref == "anthropic/claude-sonnet-5"
         with connect(db, readonly=True) as c:
             assert c.execute("SELECT COUNT(*) FROM decision_records").fetchone()[0] == 2
 
@@ -222,7 +238,7 @@ class TestDecisionRecords:
         assert vs[0].evidence[0].as_of.tzinfo is not None
 
     def test_不存在返回None(self, db):
-        assert load_card("BIGA-20260101-999", path=db) is None
+        assert load_online_card("BIGA-20260101-999", path=db) is None
 
 
 class TestDecisionIdAllocation:

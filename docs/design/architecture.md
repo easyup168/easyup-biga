@@ -599,11 +599,12 @@ r.server_as_of or now_cn()      # 调用方统一这么写，不必逐处判断
 一次网络抖动直接冒成未捕获异常，六个 skill 全中。
 ⇒ 这一层漏一个异常类型，影响面是全系统。
 
-### 6.3 三个契约/存储侧的支撑模块
+### 6.3 契约/存储侧的支撑模块
 
 | 模块 | 为什么单独存在 |
 |---|---|
 | `skills/_contract/missing.py` | `MissingItem` 带**机器可读代码**（`market.turnover.date_mismatch`）—— 缺失项要能统计「哪个源最常缺」，自由文本做不到 |
+| `skills/_contract/verdict_ref.py` | 确定性编排升级批 A-II（A6）新增。`VerdictRef(agent, verdict_id, content_sha256, contract_version)`——Card 记下自己用的每条判定原件指向 `agent_verdicts` 哪一行、当时长什么样，`_store.verify_verdict_refs()` 据此核对「现在还认不认」。核对必须比对**存量 `content_sha256` 列**，不能把 `AgentVerdict` 对象重新序列化再算一遍——`_canonical_dumps` 的格式不是冻结的（A-I 就改过一次分隔符），走后者会让序列化格式一变，之前落库的原件集体核对不上且不报错 |
 | `skills/_store/schema.py` | 按版本号递增的迁移列表。**已发布的条目不许改动** —— 跑过 v4 的库不会重放它，所以补触发器只能开 v5 |
 | `skills/_store/runtime.py` | 读 OpenClaw 运行时自己的 trajectory。🔴 **UTC → 北京时间的转换只在这里做一次**，消费方拿到的已经是北京时间 —— 这类 bug 的形状是「差 8 小时但仍是个合法时刻」，不报错 |
 

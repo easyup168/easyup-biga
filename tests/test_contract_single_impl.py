@@ -35,7 +35,9 @@ from _scan import repo_files  # noqa: E402
 EXEMPT_MARKER = "contract-exempt:"
 
 #: A —— 契约类名，全仓只许 `_contract/` 定义
-CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard"}
+#: 🔴 A-II 补上 `MissingItem`（早就是契约对象，之前漏登记）与 `VerdictRef`
+#:    （A6 新增）—— 都在这里，不新开一份判据。
+CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard", "MissingItem", "VerdictRef"}
 
 #: B —— 近名类：名字里带这些词根的类定义，都算另起炉灶
 NAME_ROOTS = ("Evidence", "Verdict", "DecisionCard")
@@ -48,7 +50,7 @@ TEST_CLASS_PREFIX = "Test"
 DICT_SHAPES: dict[str, tuple[set[str], set[str]]] = {
     "AgentVerdict": (
         {"task_id", "agent", "status", "verdict", "result",
-         "confidence", "evidence", "warnings", "missing", "elapsed_ms"},
+         "data_completeness", "evidence", "warnings", "missing", "elapsed_ms"},
         {"task_id", "verdict", "elapsed_ms", "missing"},
     ),
     "Evidence": (
@@ -235,5 +237,6 @@ def test_契约对象只从_store取_不自己解JSON列():
         "这些地方绕开了 `from_dict()` 的读取时校验：\n  " + "\n  ".join(bad) + "\n"
         "  `from_dict()` 每次反序列化都重跑一遍铁律校验 ——\n"
         "  那是静态扫描被绕过时唯一的后备防线，绕开它就什么都不剩了。\n"
-        "  改用 `_store` 的 `load_card()` / `load_verdict()`。"
+        "  改用 `_store` 的 `load_online_card()` / `load_card_by_record_id()` / "
+        "`load_verdict()`。"
     )

@@ -16,7 +16,8 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
 from .missing import LEGACY_CODE, MissingItem
-from .verdict import VETO_STANCE, AgentVerdict
+from .verdict import STANCE_VOCAB, VETO_STANCE, AgentVerdict
+from .verdict_ref import VerdictRef
 
 __all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
 
@@ -62,7 +63,7 @@ def _norm_text(text: str) -> str:
     return "".join(str(text).translate(_PUNCT).split()).lower()
 
 
-@dataclass
+@dataclass(frozen=True)
 class DecisionCard:
     """Supervisor 合成的决策卡。
 
@@ -81,10 +82,10 @@ class DecisionCard:
     decision_id: str
     status: CardStatus
     headline: str
-    verdicts: list[AgentVerdict]
+    verdicts: tuple[AgentVerdict, ...]
     synthesis: str
     model_ref: str
-    missing: list[MissingItem] = dc_field(default_factory=list)
+    missing: tuple[MissingItem, ...] = dc_field(default_factory=tuple)
     generated_at: str = ""
     elapsed_ms: int = 0
     #: 🔴 只有 `from_dict()` 会设成 True —— 表示「这是从库里读回来的历史记录」。
@@ -97,9 +98,23 @@ class DecisionCard:
     identity_warning: str = ""
     #: 旧卡里检出「同一件事报了两遍」时的提示（新卡直接拒）
     restate_warning: str = ""
+    #: 旧卡里检出「同一个 agent 出现了不止一条判定」时的提示（新卡直接拒）
+    roster_warning: str = ""
+    #: 🔴 A6：这张卡用的每条判定原件，指向 `agent_verdicts` 的哪一行 + 当时的哈希。
+    #: 历史卡没有这份数据（`from_dict` 缺省成空 tuple）——它是可追加的证据，
+    #: 不是必需品；核对逻辑见 `_store.verify_verdict_refs()`。
+    input_verdict_refs: tuple[VerdictRef, ...] = dc_field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        self.missing = [MissingItem.coerce(m) for m in self.missing]
+        # 🔴 A2：frozen 之后不能再 `self.x = ...`，改用 object.__setattr__。
+        #    verdicts/missing 一并转成 tuple —— 光 frozen 挡得住重新赋值
+        #    `card.missing = [...]`，挡不住原地 `card.missing.append(...)`
+        #    （tests/test_write_boundary.py 的 P2 探针就是这么绕过旧校验的）。
+        object.__setattr__(self, "verdicts", tuple(self.verdicts))
+        object.__setattr__(
+            self, "missing", tuple(MissingItem.coerce(m) for m in self.missing))
+        object.__setattr__(
+            self, "input_verdict_refs", tuple(self.input_verdict_refs))
 
         if not DECISION_ID_RE.match(self.decision_id):
             raise ValueError(
@@ -117,6 +132,12 @@ class DecisionCard:
                     f"verdicts 必须全部是 _contract.AgentVerdict，收到 {type(v).__name__} —— "
                     "不许自建第二套 Verdict 结构（铁律 4）"
                 )
+        for r in self.input_verdict_refs:
+            if not isinstance(r, VerdictRef):
+                raise TypeError(
+                    f"input_verdict_refs 必须全部是 _contract.VerdictRef，"
+                    f"收到 {type(r).__name__}（铁律 4）"
+                )
         if not self.headline.strip():
             raise ValueError("headline 不能为空 —— Card 必须给出一句话的核心矛盾")
         if not self.model_ref.strip():
@@ -125,7 +146,7 @@ class DecisionCard:
         if not self.generated_at:
             from .evidence import now_cn
 
-            self.generated_at = now_cn().isoformat()
+            object.__setattr__(self, "generated_at", now_cn().isoformat())
 
         self._check_restated_missing()
 
@@ -139,6 +160,7 @@ class DecisionCard:
             )
 
         self._check_identity()
+        self._check_roster()
 
         # --- 铁律 2 ---
         if self.missing and self.status == "BUY":
@@ -214,7 +236,7 @@ class DecisionCard:
                f"而重述会把标点和措辞改掉，事后没法聚合。")
         if not self.from_store:
             raise ValueError(msg)
-        self.restate_warning = msg
+        object.__setattr__(self, "restate_warning", msg)
 
     def _check_identity(self) -> None:
         """🔴 卡上的每一条判定，都必须属于这张卡。
@@ -250,9 +272,75 @@ class DecisionCard:
                 "  一张卡上的每一条判定都必须属于同一次决策，否则证据无处归属。\n"
                 "  怎么办：决策编号由 Stage 0 占下（new_decision.py），"
                 "沿 Stage 1/2/3 一路下传。")
-        self.identity_warning = (
+        object.__setattr__(self, "identity_warning", (
             f"本卡的判定编号与卡号不一致（{detail}）—— "
-            "它早于「Stage 0 统一占号」，证据归属无法核实")
+            "它早于「Stage 0 统一占号」，证据归属无法核实"))
+
+    def _check_roster(self) -> None:
+        """🔴 设计文档 §6 A5：拒绝同一个 agent 出现不止一条判定；
+        roster 不全且没有任何缺失项解释，同样拒绝。
+
+        **重复**没有对应的合法场景：`verdicts=[market的判定, market的判定]`
+        能直接构造（评审 §8 实测），没有任何字段说得清「该信哪一条」。
+
+        **缺席**不一样——它在 Phase 1/2 是**已知且合法**的常态（single-agent
+        walking skeleton；agent 掉线时 Supervisor 用 `supervisor.agent_offline`
+        / `agent_no_response` 显式登记，见 `ORCHESTRATION.md`）。第一版做法是
+        「缺席永不硬拒，只由 `absent_agents` 报告事实」——评审 F-6 指出这与
+        设计表格「缺席也报红」的字面探针不一致，往上交后裁定为折中方案：
+
+            roster 不全 且 self.missing 完全为空 ⇒ 拒绝
+            roster 不全 但 self.missing 非空 ⇒ 放行
+
+        F-6 落地后的第二轮独立复核（F-8）指出这条判据本身还留了一个口子：
+        「非空」只要求**至少一条**解释，不管缺席了几个 agent——5 个 agent
+        静默缺席，只要随便挂一条跟它们毫无关系的 `missing`（比如
+        `market.turnover.stale`），一样能通过。真正需要收紧的不是"要不要
+        精确对应"（按文本猜哪条 missing 对应哪个缺席 agent 仍然是 L-13
+        要防的「按字符串形状分类」，这一半判断不动），而是有一个**不需要
+        比较任何文本、只需要计数**就能拿到的信号：
+
+            roster 不全 且 len(self.missing) < len(self.absent_agents) ⇒ 拒绝
+            roster 不全 且 len(self.missing) >= len(self.absent_agents) ⇒ 放行
+
+        为什么是"计数"而不是"精确对应"：`missing` 项的 code 前缀是发起方的
+        命名空间（`supervisor.*`/`market.*`……），不是缺席 agent 的名字——
+        用文本去猜"这条 missing 说的是不是那个缺席的 agent"，是本仓库
+        反复踩过的「按字符串形状分类」陷阱（L-13）。计数不比较任何文本，
+        只问"缺席几个、解释了几条"，对按 `ORCHESTRATION.md` 约定正确操作
+        的路径（每个掉线 agent 各自登记一条）恒真，只在**漏报**时命中。
+        解释得准不准，仍然留给人看卡面上的 `absent_agents` 那一行
+        （已接进 `render()`）与各条 missing 自己判断——这条不变。
+
+        🔴 在批 C 的 `DecisionOrchestrator` 把"要不要登记缺席"从 Supervisor
+        LLM 的提示词自觉行为改成程序强制之前，"缺席登记"这件事今天完全
+        依赖 LLM 老实执行 `ORCHESTRATION.md` 里的约定——这条计数判据是那个
+        假设成立之前的一道结构性兜底，不是替代它。
+
+        两条判据的宽严不能因为都叫「roster 问题」就合并成一套。
+
+        ⚠️ 新卡严格，旧卡可读 —— 与 `_check_identity` / `_check_restated_missing`
+        同一套三段式：能不能重建「当时看到的东西」优先于形式一致。
+        """
+        agents = [v.agent for v in self.verdicts]
+        dupes = sorted({a for a in agents if agents.count(a) > 1})
+        problems = []
+        if dupes:
+            problems.append(
+                f"这些 agent 出现了不止一条判定：{dupes} —— "
+                "一次决策里每个 agent 只能给一条判定，多出来的那条不知道该信哪个。")
+        if self.absent_agents and len(self.missing) < len(self.absent_agents):
+            problems.append(
+                f"缺席 {list(self.absent_agents)}（{len(self.absent_agents)} 个），"
+                f"但 missing 只有 {len(self.missing)} 条 —— "
+                "缺席必须每个都显式登记（如 supervisor.agent_offline / "
+                "agent_no_response），不许用一条解释掩盖多个缺席。")
+        if not problems:
+            return
+        msg = f"Card {self.decision_id} 的 roster 有问题：" + "；".join(problems)
+        if not self.from_store:
+            raise ValueError(msg)
+        object.__setattr__(self, "roster_warning", msg)
 
     # --- 便捷查询 ---
 
@@ -261,6 +349,25 @@ class DecisionCard:
             if v.agent == agent:
                 return v
         return None
+
+    @property
+    def absent_agents(self) -> tuple[str, ...]:
+        """已建成的 roster（`STANCE_VOCAB` 的 key 集合）里，这张卡没有判定的那些 agent。
+
+        `STANCE_VOCAB` 的 key 集合与 `agents/` 目录下已建好的 agent
+        由 `tests/test_stance_and_traceability.py::TestStanceVocabMatchesContracts`
+        钉死一致（复用它而不是另开一份 roster 常量，是 dev-workflow 第五问
+        要防的「同一份清单多处手抄」）。
+
+        🔴 评审 F-6/F-8 之后：非空**不代表**允许构造——`_check_roster()`
+        按计数比较 `self.missing` 的条数与这里返回的缺席数，条数不够
+        才拒绝（新卡）/ 警告（旧卡）。这里只算「谁缺席、缺几个」，不
+        判断「缺席有没有被解释」，也**不**去猜「哪一条 missing 对应
+        哪个缺席的 agent」——那需要按自由文本匹配 agent 名，是本仓库
+        反复踩过的「按字符串形状分类」陷阱（L-13）。判据只比数量，
+        不比内容。
+        """
+        return tuple(sorted(set(STANCE_VOCAB) - {v.agent for v in self.verdicts}))
 
     @property
     def is_complete(self) -> bool:
@@ -292,6 +399,13 @@ class DecisionCard:
             #    只显示前者，读者会把「PASS」误读成「看好」。
             lines.append(
                 f"{v.agent:<12} {v.verdict:<8} {(v.stance or '—'):<6} {summary}")
+        # 🔴 评审 F-6：absent_agents 曾经是零消费方——算出来了，但 render()
+        #    不读它，missing_ledger.py / risk_check.py / bin/biga-card 也不读，
+        #    于是「roster 是否齐全」这份事实实际上无处可查。
+        #    缺席该不该硬拒是另一个尚待裁定的问题（见 TODO.md），
+        #    但无论那条怎么定，"缺席是不是事实"不该只存在于一个没人读的属性里。
+        if self.absent_agents:
+            lines.append(f"已建成 roster 缺席：{', '.join(self.absent_agents)}")
         lines.append("")
         lines.append(f"状态：{self.status}")
         lines.append("")
@@ -317,7 +431,7 @@ class DecisionCard:
         #    warning 与 missing 的分工是「这个数能用但要注意」vs「这个数没有」。
         #    把前者藏起来，等于只保留了它的名字。
         warns = [(v.agent, w) for v in self.verdicts for w in v.warnings]
-        for w in (self.identity_warning, self.restate_warning):
+        for w in (self.identity_warning, self.restate_warning, self.roster_warning):
             if w:
                 warns.insert(0, ("card", w))
         if warns:
@@ -360,15 +474,22 @@ class DecisionCard:
             "model_ref": self.model_ref,
             "generated_at": self.generated_at,
             "elapsed_ms": self.elapsed_ms,
+            "input_verdict_refs": [r.to_dict() for r in self.input_verdict_refs],
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], *, from_store: bool = True) -> "DecisionCard":
         """反序列化。默认 `from_store=True`（库里读回来的历史卡，三段式从宽）。
 
-        ⚠️ `_store.save_card()` 的写边界重校验会传 `from_store=card.from_store`——
-        不能让这里悄悄把新卡也变成「历史卡」对待，否则身份/重述这两条检查
-        会被写路径的重建步骤自己降级成警告，判据就落空了。
+        ⚠️ 曾经这里写的是「`_store.save_card()` 会传 `from_store=card.from_store`」——
+        **不成立**，那正是追加 4（A-I 评审复核）揪出的洞：`card.from_store` 是对象
+        自己的属性，合法构造后 `card.from_store = True` 不会报错，会把这一层
+        「新卡严格」悄悄绕开。`save_card()` 现在从**调用参数**
+        `replay_of is not None` 推导档位，不看 `card.from_store`——
+        `card_ops.persist()` 是唯一调用点，在线路径永远不传、
+        `replay.py --store` 永远传原始 `record_id`，这个决定不受 card 对象
+        本身状态影响。A2 把 `DecisionCard` 冻结之后，`card.from_store = True`
+        本身也会直接 `FrozenInstanceError`——这里只是把文字改回和代码一致。
         """
         return cls(
             decision_id=d["decision_id"],
@@ -381,4 +502,7 @@ class DecisionCard:
             generated_at=d.get("generated_at", ""),
             elapsed_ms=d.get("elapsed_ms", 0),
             from_store=from_store,
+            # 历史卡没有这个字段 —— 缺省成空 tuple，不是缺失的证据引用。
+            input_verdict_refs=[VerdictRef.from_dict(x)
+                                 for x in d.get("input_verdict_refs", [])],
         )

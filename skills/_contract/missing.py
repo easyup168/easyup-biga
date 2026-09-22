@@ -18,6 +18,35 @@
 做成 `str` 子类，字符串值就是给人看的那句话，代码挂在 `.code` 上：
 旧代码一行不用改，新代码能拿到分类。
 
+🔴 「显示」与「身份」是两件事（批 A-II · A1）
+--------------------------------------------
+`__str__`（继承自 `str`，值是 `detail`）负责**显示**；`__eq__`/`__hash__`
+负责**身份**，而这两者不能共用同一个信号。
+
+实测（`replay.py` 反推 `extra_missing`）：两条 verdict 各自报「数据源不可用」，
+一条 code 是 `market.turnover.unavailable`，另一条是 `supervisor.agent_no_response`
+—— 文本相同，说的不是同一件事。旧实现把 `__eq__`/`__hash__` 留给 `str` 默认
+（按文本比较），于是 `{m for v in verdicts for m in v.missing}` 这类去重
+会把它们**塌成一条**，回放据此反推出的 `extra_missing` 少了一条 ——
+「回放悄悄让卡变好看」，这正是本项目最怕的静默失真。
+
+⇒ `__eq__`/`__hash__` 改成只看 `.code`：两个 `MissingItem` 是否算「同一条」，
+只问它们的机器可读代码，不问措辞。**且只在两边都是 `MissingItem` 时才生效**
+（`__eq__` 对非 `MissingItem` 一律返回 `False`，不回退到 `str` 的内容比较）——
+否则 `hash()` 与 `==` 会不一致（同一个哈希桶里，`==` 却按不同信号判断），
+这本身就是另一种静默 bug。
+
+⚠️ 这意味着 `MissingItem("x") == "x"`（对纯字符串）不再成立。
+仓库里靠这个成立的地方只有 5 处（都在测试里，都是拿 `.missing` 与一份
+纯文本列表比较），已经改成显式取 `.detail` 再比较 —— 这是 A1 要求的
+「找出所有把 MissingItem 当字符串用的地方，逐个改掉」，而不是给身份判据
+开一个不一致的后门。
+
+`sorted(missing)` / `"某某" in m` / `f"{m}"` 这三类不受影响：
+它们分别走 `str` 继承来的 `__lt__`（显示序，不代表身份）、
+`__contains__`（子串匹配，不经过 `__eq__`）、`__str__`/`__format__`
+（走 `detail`），没有一处依赖 `__eq__`/`__hash__`。
+
 🔴 旧数据怎么办
 ---------------
 Phase 1/2 早期落库的卡里，`missing` 是裸字符串。回放必须还能读它们 ——
@@ -39,6 +68,7 @@ Phase 1/2 早期落库的卡里，`missing` 是裸字符串。回放必须还能
 from __future__ import annotations
 
 import re
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 __all__ = ["MissingItem", "LEGACY_CODE", "CODE_RE"]
@@ -67,6 +97,25 @@ class MissingItem(str):
         object.__setattr__(obj, "code", code)
         return obj
 
+    # --- 冻结：A2 把 AgentVerdict/DecisionCard/Evidence 都做成
+    # `@dataclass(frozen=True)`，但 MissingItem 是手写的 str 子类，不是
+    # dataclass——`__slots__` 只声明了存储位置，从不阻止赋值。评审 F-5 抓到：
+    # `m.code = "换一个"` 在 A2 之后照样成功，而 `.code` 正是 A1 刚建立的
+    # 身份信号（`__eq__`/`__hash__` 都只看它）。`TestVerdictFrozen` 测的是
+    # "容器不能原地追加"，从没测过"容器里的元素本身不能被改"——
+    # 同一个 L-13 形状，这次的载体是元素而不是容器。
+    #
+    # ⇒ 覆写 `__setattr__`/`__delattr__`，统一抛
+    # `dataclasses.FrozenInstanceError`——与另外三个契约对象被篡改时
+    # 抛出的异常类型一致，不需要调用方分两套写法处理。
+    # `__new__` 里的 `object.__setattr__` 直接调用基类实现，不经过这里，
+    # 构造阶段不受影响。
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise FrozenInstanceError(f"MissingItem 是不可变值对象，不能给 {name!r} 赋值")
+
+    def __delattr__(self, name: str) -> None:
+        raise FrozenInstanceError(f"MissingItem 是不可变值对象，不能删除 {name!r}")
+
     @property
     def detail(self) -> str:
         return str(self)
@@ -74,6 +123,21 @@ class MissingItem(str):
     @property
     def is_legacy(self) -> bool:
         return self.code == LEGACY_CODE
+
+    # --- 身份：只看 code，不看措辞（A1） ---
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, MissingItem):
+            return self.code == other.code
+        # 🔴 不回退到 str 的内容比较：那会让 `==` 与 `__hash__` 依据不同信号，
+        #    hash 相同的两个对象却可能因为对比对象类型不同而判定不一致。
+        return False
+
+    def __ne__(self, other: Any) -> bool:
+        return not self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash(("_contract.MissingItem", self.code))
 
     def to_dict(self) -> dict[str, str]:
         return {"code": self.code, "detail": str(self)}

@@ -118,17 +118,17 @@ class TestHappyPath:
     def test_完整时是PASS(self, wired):
         v = build()
         assert (v.status, v.verdict) == ("completed", "PASS")
-        assert v.missing == []
+        assert v.missing == ()
 
-    def test_字段数与confidence分母一致(self, wired):
+    def test_字段数与data_completeness分母一致(self, wired):
         """🔴 钉死 `_EXPECTED_FIELDS`。
 
-        加了字段却忘了改这个常数，`confidence` 会 >1 而被契约层当场拒绝 ——
+        加了字段却忘了改这个常数，`data_completeness` 会 >1 而被契约层当场拒绝 ——
         那是在生产里炸。这条测试把它挪到 CI 里炸。
         """
         v = build()
         assert len(v.result) == mc._EXPECTED_FIELDS
-        assert v.confidence == 1.0
+        assert v.data_completeness == 1.0
 
     def test_三个源的值都落到了正确的字段(self, wired):
         r = build().result

@@ -341,7 +341,7 @@ def build_verdict(
         status=status,
         verdict=level,
         result=result,
-        confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence,
         warnings=c.warnings,
         missing=c.missing,

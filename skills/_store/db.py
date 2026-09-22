@@ -38,7 +38,8 @@ __all__ = [
     "db_path",
     "init_schema",
     "save_card",
-    "load_card",
+    "load_online_card",
+    "load_card_by_record_id",
     "load_verdicts",
     "next_decision_id",
     "reserve_decision_id",
@@ -323,24 +324,40 @@ def reserve_decision_id(
     raise RuntimeError("当天 1000 个决策编号全被占用 —— 这不正常，先查 decision_ids 表")
 
 
-def load_card(
+def load_online_card(
     decision_id: str,
     *,
-    record_id: int | None = None,
     path: pathlib.Path | str | None = None,
 ) -> DecisionCard | None:
-    """取回一张冻结的 Card。缺省取该 decision_id 的**在线**那条（非回放）。"""
+    """取回某个 decision_id 的**在线**记录（非回放）。找不到返回 None。
+
+    🔴 设计文档 §6 A8：这里原本是一个 `load_card(decision_id, *, record_id=None)`，
+    两个 id 都收，`record_id` 给了就按它查、`decision_id` 参数被静默忽略 ——
+    `load_card("乱写的号", record_id=真实id)` 会正常返回，调用方以为自己按
+    decision_id 校验过了，其实那个校验从未发生。
+    ⇒ 拆成两个 API：这一个只认 `decision_id`（在线记录），
+    `load_card_by_record_id()` 只认 `record_id`。不再有「两个 id 都能传，
+    其中一个被悄悄忽略」这条路。
+    """
     with connect(path, readonly=True) as conn:
-        if record_id is not None:
-            row = conn.execute(
-                "SELECT card_json FROM decision_records WHERE record_id=?", (record_id,)
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT card_json FROM decision_records "
-                "WHERE decision_id=? AND replay_of IS NULL",
-                (decision_id,),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT card_json FROM decision_records "
+            "WHERE decision_id=? AND replay_of IS NULL",
+            (decision_id,),
+        ).fetchone()
+    return DecisionCard.from_dict(json.loads(row["card_json"])) if row else None
+
+
+def load_card_by_record_id(
+    record_id: int,
+    *,
+    path: pathlib.Path | str | None = None,
+) -> DecisionCard | None:
+    """按 `record_id` 精确取回一行 —— 在线记录或某一次回放都能取，不猜测哪个是「当前」。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT card_json FROM decision_records WHERE record_id=?", (int(record_id),)
+        ).fetchone()
     return DecisionCard.from_dict(json.loads(row["card_json"])) if row else None
 
 
@@ -348,7 +365,7 @@ def load_verdicts(
     decision_id: str, *, path: pathlib.Path | str | None = None
 ) -> list[AgentVerdict]:
     """取回某次决策的冻结证据 —— 回放的输入。"""
-    card = load_card(decision_id, path=path)
+    card = load_online_card(decision_id, path=path)
     return list(card.verdicts) if card else []
 
 
@@ -374,6 +391,10 @@ def save_verdict(
     Args:
         amends: 本行修订的是哪一行。Specialist 追加缺失项时用 ——
             **写新行，不覆盖原行**（与 `decision_records.replay_of` 同一套做法）。
+            🔴 设计文档 §6 A8：修订不许跨 agent、跨决策，且只能线性
+            （一条原件最多被修订一次，不许分叉）——前者代码校验，
+            后者由 schema v6 的 `ux_verdict_amends_linear` 唯一索引兜底
+            （应用层「先查再插」有竞态窗口，唯一约束没有）。
         amend_reason: 为什么修订。没有它，修订链读起来只是「有两行」。
     """
     if not isinstance(v, AgentVerdict):
@@ -382,6 +403,18 @@ def save_verdict(
     if amends is not None and amend_reason is None:
         # 修订不写理由，三个月后没人知道这一行为什么存在。
         raise ValueError("amends 非空时必须给 amend_reason —— 修订要写为什么")
+    if amends is not None:
+        original_meta = load_verdict_meta(amends, path=path)
+        if original_meta is None:
+            raise ValueError(
+                f"amends={amends} 在 agent_verdicts 里不存在 —— "
+                "修订必须指向一条真实落库的原件。")
+        if original_meta["task_id"] != v.task_id or original_meta["agent"] != v.agent:
+            raise ValueError(
+                f"修订必须同一次决策、同一个 agent：原件 #{amends} 是 "
+                f"{original_meta['agent']}/{original_meta['task_id']}，"
+                f"这次却是 {v.agent}/{v.task_id} —— "
+                "修订不能跨 agent 或跨决策，那样读者会以为是同一条判定的两个版本。")
     # 🔴 临时号不得入账。守卫放在这里而不是五个 specialist 里 ——
     #    调用点会越来越多，而这里是**唯一**的写入口（铁律 2）。
     if is_adhoc_task_id(v.task_id):
@@ -409,17 +442,28 @@ def save_verdict(
     #    「重新序列化对象再比对」而不是「直接比对存量 `verdict_json` 文本
     #    的哈希」，这一批之前落库的行会集体核对不上——而且是静默的。
     #    `tests/test_write_boundary.py` 钉了这一点，别让它变红。
-    with connect(path) as conn:
-        cur = conn.execute(
-            """INSERT INTO agent_verdicts
-               (task_id, agent, amends, amend_reason,
-                verdict_json, content_sha256, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
-            (v.task_id, v.agent, amends, amend_reason, blob,
-             hashlib.sha256(blob.encode("utf-8")).hexdigest(),
-             now_cn().isoformat()),
-        )
-        return int(cur.lastrowid)
+    try:
+        with connect(path) as conn:
+            cur = conn.execute(
+                """INSERT INTO agent_verdicts
+                   (task_id, agent, amends, amend_reason,
+                    verdict_json, content_sha256, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (v.task_id, v.agent, amends, amend_reason, blob,
+                 hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+                 now_cn().isoformat()),
+            )
+            return int(cur.lastrowid)
+    except sqlite3.IntegrityError as e:
+        if "ux_verdict_amends_linear" not in str(e) and "agent_verdicts.amends" not in str(e):
+            raise
+        # 报错要能自解释：这是 schema v6 的唯一索引在拦，不是随便一个约束炸了。
+        raise ValueError(
+            f"verdict_id={amends} 已经被修订过一次了 —— 修订链只能线性，不许分叉。\n"
+            f"  如果这是有意的第二次修订：先看已有的那条修订说了什么"
+            f"（load_verdict_meta 或 --ref 查一下它的 amends 链），"
+            f"在它的基础上再修一次，不要指回同一条原件。"
+        ) from e
 
 
 def load_verdict(
@@ -445,6 +489,39 @@ def load_verdict_meta(
             (int(verdict_id),),
         ).fetchone()
     return dict(row) if row else None
+
+
+def verify_verdict_refs(
+    card: DecisionCard, *, path: pathlib.Path | str | None = None
+) -> list[str]:
+    """核对 `card.input_verdict_refs` 是否仍与 `agent_verdicts` 现状一致。
+
+    返回问题列表，**空列表 = 全部一致**（含「这张卡没有任何 ref 可核」——
+    历史卡没有这份数据，不算不一致，见 `DecisionCard.input_verdict_refs`）。
+
+    🔴 设计文档 §6 A6 + 追加 4（约束 A6）：核对必须走
+    `hashlib.sha256(存量 verdict_json 文本)`，不能走「把 AgentVerdict
+    对象重新序列化再比对」——`agent_verdicts.content_sha256` 这一列
+    本来就是**当时写入那段文本**的哈希（`save_verdict` 里现算的），
+    这里只是原样取回来比对，不重新计算，所以天然不会踩中
+    `tests/test_write_boundary.py::TestVerdictContentShaIsHashOfStoredText`
+    钉住的那个坑。
+    """
+    problems: list[str] = []
+    for ref in card.input_verdict_refs:
+        meta = load_verdict_meta(ref.verdict_id, path=path)
+        if meta is None:
+            problems.append(
+                f"[{ref.agent}] verdict_id={ref.verdict_id} 在 agent_verdicts "
+                f"里已经找不到了 —— 这张卡引用的原件消失了")
+            continue
+        if meta["content_sha256"] != ref.content_sha256:
+            problems.append(
+                f"[{ref.agent}] verdict_id={ref.verdict_id} 的哈希对不上："
+                f"卡上记的是 {ref.content_sha256[:12]}…，"
+                f"agent_verdicts 里现在是 {meta['content_sha256'][:12]}… —— "
+                f"这条原件在合成之后被改变过")
+    return problems
 
 
 # ───────────────────────────────────────────────────────────────── agent_runs

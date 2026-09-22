@@ -84,7 +84,7 @@ class TestHappyPath:
     def test_完整时是PASS(self, wired):
         v = build()
         assert (v.status, v.verdict) == ("completed", "PASS")
-        assert v.missing == []
+        assert v.missing == ()
 
     def test_核心字段与派生值(self, wired):
         r = build().result
@@ -105,15 +105,15 @@ class TestHappyPath:
         for field in ("advance_count", "decline_count", "flat_count"):
             assert field not in src, f"{field} 又出现在 emotion-calc 里了"
 
-    def test_字段数与confidence分母一致(self, wired):
-        """数据齐备时 confidence 必须正好 1.0。
+    def test_字段数与data_completeness分母一致(self, wired):
+        """数据齐备时 data_completeness 必须正好 1.0。
 
         移出涨跌家数之前这里的分母是 15、实际只有 13 个字段 ——
         **数据完整时也只读到 0.87，「完整」这件事永远表达不出来**。
         """
         v = build()
         assert len(v.result) == ec._EXPECTED_FIELDS
-        assert v.confidence == 1.0
+        assert v.data_completeness == 1.0
 
     def test_每个result字段都有证据(self, wired):
         """契约铁律 3 —— 由 AgentVerdict 构造时强制，这里再从外部确认一次。"""
@@ -172,7 +172,7 @@ class TestMissingPaths:
     def test_全断时result为空且missing非空(self, wired):
         v = build(break_source={"limit_up", "broken_board", "limit_down"})
         assert v.result == {}
-        assert v.evidence == []
+        assert v.evidence == ()
         assert len(v.missing) >= 4
 
     def test_三档verdict都可达(self, wired):
@@ -199,7 +199,7 @@ class TestDateDiscipline:
     def test_宽松模式下日期不符只是警告(self, wired):
         v = build(date=None)
         assert v.verdict == "PASS"
-        assert v.missing == []
+        assert v.missing == ()
 
     def test_各池报告日期不一致时拒绝汇总(self, wired):
         """不同来源说的不是同一天，就不能当作同一天的事实汇总。"""

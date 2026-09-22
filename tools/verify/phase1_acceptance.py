@@ -298,9 +298,9 @@ def check_3_card_sections(decision_id: str | None) -> Check:
     c = Check("3", "Decision Card 含 状态 / 证据 / 缺失项 三段")
     if not decision_id:
         return c.pending("未提供 --decision-id") or c
-    from _store import load_card
+    from _store import load_online_card
 
-    card = load_card(decision_id)
+    card = load_online_card(decision_id)
     if card is None:
         return c.fail(f"decision_records 里没有 {decision_id}") or c
     text = card.render()
@@ -374,10 +374,10 @@ def check_8_latency(decision_id: str | None, budget_ms: int = 90_000) -> Check:
         return c.pending("未提供 --decision-id") or c
     from datetime import datetime, timedelta
 
-    from _store import load_card
+    from _store import load_online_card
     from _store.runtime import read_turns
 
-    card = load_card(decision_id)
+    card = load_online_card(decision_id)
     if card is None:
         return c.fail("Card 不存在") or c
     if card.elapsed_ms <= 0:
