@@ -59,8 +59,9 @@ def _build(monkeypatch, now: datetime, feed: NewsFeed, **kw):
     #    假时钟只假一半，比不假更难查。
     monkeypatch.setattr(evidence_mod, "now_cn", lambda: now)
     monkeypatch.setattr(NS, "fetch_feed", lambda **_: feed)
-    return NS.build_verdict(break_source=set(), store=False,
-                            task_id=new_task_id(1), **kw)
+    # 批 E-II：news 迁到产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return NS.build_fact_bundle(break_source=set(), store=False,
+                                task_id=new_task_id(1), **kw)
 
 
 MON_OPEN = datetime(2026, 9, 21, 10, 30, tzinfo=CN_TZ)      # 周一盘中
@@ -341,7 +342,7 @@ class TestTruncatedResponseBecomesSourceError:
 
         monkeypatch.setattr(NS, "now_cn", lambda: MON_OPEN)
         monkeypatch.setattr(NS, "fetch_feed", boom)
-        v = NS.build_verdict(break_source=set(), store=False,
-                             task_id=new_task_id(1))
+        v = NS.build_fact_bundle(break_source=set(), store=False,
+                                 task_id=new_task_id(1))
         assert v.verdict == "UNKNOWN"
         assert "news.feed.unavailable" in [m.code for m in v.missing]

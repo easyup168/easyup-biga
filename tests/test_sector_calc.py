@@ -77,7 +77,8 @@ def build(**kw):
     kw.setdefault("break_source", set())
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return sc.build_verdict(**kw)
+    # 批 E-II：sector 迁到产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return sc.build_fact_bundle(**kw)
 
 
 class TestHappyPath:

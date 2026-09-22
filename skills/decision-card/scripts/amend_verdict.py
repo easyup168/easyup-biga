@@ -61,10 +61,14 @@ def _assess_fact(args, meta: dict) -> int:
     """
     if args.add_missing or args.add_warning:
         print(
-            f"verdict_id={args.ref} 是一条 FactBundle（新形状）。E-I 只支持给它加 "
-            "--stance（一个判断）。\n"
-            "  追加缺失项 / warning 属于「修订事实」，新形状里还没有落点 —— 留给批 E-II。\n"
-            "  （若这条限制本该由 skill 自己产出，改 skill，不要在这里补）", file=sys.stderr)
+            f"verdict_id={args.ref} 是一条 FactBundle（事实行），不接受 "
+            "--add-missing / --add-warning。\n"
+            "  批 E 把事实与判断拆开之后，「事后修订事实」这条路对 fact 行是关闭的 ——\n"
+            "  它当年就是 fail-open 的入口（agent 拿 --verdict 把 skill 算的完整度事后降级）：\n"
+            "  · 真正的数据缺口：skill 跑的时候就知道抓到了什么，已经写进它自己的 missing[]；\n"
+            "  · 范围外的判断边界（例如「只有单日快照，无法判断趋势」）：那是 agent 的\n"
+            "    自然语言 caveat，写进回答的「需要注意」，不是数据缺失项。\n"
+            "  这一行只接受 --stance（追加一个判断）。", file=sys.stderr)
         return 2
     if args.stance is None:
         print("给 FactBundle 追加判断必须带 --stance —— 它就是这一步唯一要加的东西。",

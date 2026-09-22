@@ -71,6 +71,7 @@ A 股短线**决策辅助**系统。
 | 26 | [让 Specialist 改口读冻结快照](26-specialists-read-frozen.md) | 确定性编排批 D-II：切三个 skill 的实际行为；`--evidence-set-id` 为何可选、坏号为何 fail-closed；`raw_hash` 取冻结集那份不对切片重算；恒真检查**改判据**而不是删；两个 fail-closed 点互相兜底、探针从没预期处报红 | ✅ |
 | 27 | [把事实和判断拆开](27-facts-and-assessment.md) | 确定性编排批 E-I：`amend_verdict.py` 的存在就是那条断层的证据；三个新类型一条边界一个；跨型铁律归谁校验；事实层铁律共用一份防 L-3；`load_verdict` 多态让消费方零改动；读宽写严让旧格式自然清零；只迁 emotion 一个试点；顺带还 D-II 的 `evidence_set_id` 账 | ✅ |
 | 28 | [Orchestrator 健壮性四处收尾](28-orchestrator-robustness.md) | 确定性编排批 C-III：外部复审四条独立小修复；本项目**第一次两批并行**（为什么开 worktree 而不是动对方的未提交草稿）；只追加表里的假「已落库」记录删不掉；`cancel()` 三批以来第一个真调用方；探针要因**对的原因**红 | ✅ |
+| 29 | [把其余四个 Specialist 迁到 FactBundle](29-migrate-four-to-factbundle.md) | 确定性编排批 E-II：一次「机械迁移」真正难的那一小块 —— ①「Agent 补的限制归哪」要**查真实数据库**不照抄例子；判断「缺口 vs 判断边界」看数据在不在；`market.trend.no_history` 实测有整段序列 ⇒ 范围外（同 sector 持续性）；修 Agent 模板反成核心交付物（旧 `--add-missing … --verdict` 是覆盖 skill 完整度的洞，不改就是 F9 抖动） | ✅ |
 
 ---
 

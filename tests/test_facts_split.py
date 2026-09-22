@@ -339,4 +339,6 @@ class TestLegacyAmendUnchanged:
         rc = amend.main(["--ref", str(fid), "--add-missing", "emotion.x.y", "限制",
                          "--verdict", "WARNING"])
         assert rc == 2
-        assert "E-II" in capsys.readouterr().err  # 明确指路，不是静默
+        # 明确指路，不是静默：告诉调用方 fact 行只收 --stance，缺口归 skill、caveat 归「需要注意」
+        err = capsys.readouterr().err
+        assert "--stance" in err and "需要注意" in err
