@@ -286,6 +286,83 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_verdict_amends_linear
 """
 
 
+_V7 = """
+-- ───────────────────────────────────────────────────────────────
+-- v7：运行身份 + 显式状态机（设计文档 §4 / §5）
+--
+-- 🔴 它解决的是「decision_id 一个身份被迫承担五件事」，实测踩过三次：
+--   · 飞书事件重投 = 重跑一次决策（没有 trigger_id 做幂等键）
+--   · 硬超时重试的两次尝试挤在同一个 decision_id 上，事后分不开
+--   · 「所有 Specialist 看同一份数据」无法验证（没有 evidence_set_id）
+--
+-- 三张表：
+--   decision_runs   —— 一次执行尝试的**不可变身份头**
+--   run_events      —— 状态转移日志（事件溯源）。当前状态 = 最新一行的 to_state
+--   evidence_sets   —— 冻结数据切片登记（批 D 的 SnapshotCoordinator 填，批 B 只建表）
+--
+-- 🔴 状态**不在 decision_runs 上原地 UPDATE** —— 那张表是只追加的。
+--    当前状态由 run_events 的最新一行给出；transition() 靠
+--    UNIQUE(run_id, seq) 做 compare-and-set：并发两次同转移都算 seq=N+1，
+--    唯一约束只让一个落地。这与 decision_ids 用主键冲突仲裁占号是同一招 ——
+--    「先查再写」永远有竞态窗口，唯一约束没有。
+--
+-- 🔴 建表时**就**带只追加触发器 —— v4 建 decision_ids 时漏过一次（F1），
+--    代价是整套决策身份机制建在可撤销的地基上。
+--    tests/test_store.py::test_每张表都有只追加触发器 兜底：新表默认受保护。
+--
+-- 建表顺序：evidence_sets 先建，decision_runs FK 指向它，run_events FK 指向
+-- decision_runs —— 被引用的表先出现，避免前向引用。
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS evidence_sets (
+    evidence_set_id TEXT PRIMARY KEY,
+    decision_id     TEXT,
+    frozen_at       TEXT NOT NULL,
+    -- 冻结了哪些 raw snapshot（sha 列表等）。批 D 定它的结构，批 B 只建表。
+    manifest_json   TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_evsets_decision ON evidence_sets(decision_id);
+
+CREATE TABLE IF NOT EXISTS decision_runs (
+    run_id          TEXT PRIMARY KEY,
+    -- 属于哪个决策。🔴 可空：legacy 路径（bin/biga-card）在 RECEIVED 时还
+    --   不知道号 —— LLM 的 Stage 0 才占号，事后把发现的号记进 run_events.detail。
+    --   批 C 的 Orchestrator 在开 run 之前占号，那时它非空。
+    decision_id     TEXT,
+    -- 一次外部请求的幂等键（飞书 event id / CLI 每次一个 / cron）。
+    trigger_id      TEXT    NOT NULL,
+    -- 被冻结的数据切片（批 D 填；批 B 恒 NULL）。
+    evidence_set_id TEXT    REFERENCES evidence_sets(evidence_set_id),
+    origin          TEXT    NOT NULL,
+    non_interactive INTEGER NOT NULL,
+    created_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_runs_decision2 ON decision_runs(decision_id);
+CREATE INDEX IF NOT EXISTS ix_runs_trigger   ON decision_runs(trigger_id);
+
+CREATE TABLE IF NOT EXISTS run_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     TEXT    NOT NULL REFERENCES decision_runs(run_id),
+    -- 每个 run 内单调递增，从 1（进入 RECEIVED）开始。
+    seq        INTEGER NOT NULL,
+    -- 从哪个状态来。NULL = 初始事件（进入 RECEIVED 之前没有状态）。
+    from_state TEXT,
+    to_state   TEXT    NOT NULL,
+    at         TEXT    NOT NULL,
+    -- 转移的附加信息（JSON）：如 legacy 路径发现的 decision_id、失败原因。
+    detail     TEXT,
+    -- 🔴 CAS 的并发仲裁：同一个 run 的同一个 seq 只能有一行。
+    UNIQUE(run_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS ix_events_run ON run_events(run_id, seq);
+""" + _append_only("decision_runs", "运行身份的头发出去就不能改，否则两次尝试会串味") \
+    + _append_only("run_events", "转移日志改了，就没法复述这次运行走过的路（也就没法做 CAS）") \
+    + _append_only("evidence_sets", "冻结切片一旦改写，「所有 Specialist 看同一份数据」就成了空话")
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -294,6 +371,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (4, _V4),
     (5, _V5),
     (6, _V6),
+    (7, _V7),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

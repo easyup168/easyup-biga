@@ -11,6 +11,18 @@
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, Evidence, now_cn
 from .missing import LEGACY_CODE, MissingItem
+from .run import (
+    INITIAL_STATE,
+    LEGAL_TRANSITIONS,
+    RUN_ORIGINS,
+    RUN_STATES,
+    TERMINAL_STATES,
+    RunContext,
+    RunState,
+    new_run_context,
+    new_run_id,
+    new_trigger_id,
+)
 from .verdict_ref import CONTRACT_VERSION, VerdictRef
 from .verdict import (
     ADHOC_TASK_SEQ,
@@ -33,6 +45,16 @@ __all__ = [
     "LEGACY_CODE",
     "MissingItem",
     "VerdictRef",
+    "INITIAL_STATE",
+    "LEGAL_TRANSITIONS",
+    "RUN_ORIGINS",
+    "RUN_STATES",
+    "TERMINAL_STATES",
+    "RunContext",
+    "RunState",
+    "new_run_context",
+    "new_run_id",
+    "new_trigger_id",
     "ADHOC_TASK_SEQ",
     "CROSS_CHECK_PAIRS",
     "STAGE1_AGENTS",

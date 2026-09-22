@@ -612,10 +612,21 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       「缺席该不该硬拒」与设计表格不一致，裁决为折中方案）· F-8（第二轮复核，
       「非空即放行」太松，收紧为「missing 条数 ≥ 缺席数」）均已修完并独立复现过；
       837 条测试全绿；schema 落到 v6（`ux_verdict_amends_linear`）
-- [ ] 批 B · 运行身份 + 状态机（schema v7 —— 批 A-II 的 A8 先占了 v6）
+- [x] 批 B · 运行身份 + 状态机（schema v7）—— ✅ 待评审
+      `RunContext` 进契约层（第六个契约类型）；schema v7 建 `decision_runs` /
+      `run_events` / `evidence_sets`，三张表**建表即带只追加触发器**（不重蹈 F1）；
+      `transition()` 用 `UNIQUE(run_id, seq)` 做 CAS（状态事件溯源，不在只追加表上
+      原地 UPDATE）；13 个状态照设计文档 §5，一个不多；`biga-card --status <run_id>`
+      能说「死在哪一步」；`bin/biga-card` best-effort 记 run（不改行为）。
+      四道探针全见过红（P1 并发仲裁 / P2 只追加触发器 / P3 拆 CAS→P1 红 /
+      P4 无消费方状态被抓）。899 条测试全绿（837 → 899）。
 - [ ] 批 C · Runtime Adapter + DecisionOrchestrator ★（spike 已通过，可开工）
       ⚠️ 开工第一件事：补验 spike 未覆盖的三项（五个并行 fan-out / grant 长跑稳定性 /
       spawn 失败的结构化错误面）—— 见设计文档 §7 末尾
+      🔴 批 B 欠的一笔：`LEGAL_TRANSITIONS` 里 `PREFLIGHTED → CARD_PERSISTED` 是
+      legacy 粗边（`bin/biga-card` 观测不到中间五个编排态才用它）。Orchestrator
+      上线、`bin/biga-card` 收缩成薄 CLI 之后，这条边的唯一使用者消失 —— **删掉它**，
+      否则它变成一条恒不被走的死边（L-7）。
 - [ ] 批 D · SnapshotCoordinator
 - [ ] 批 E · Facts / Assessment 拆分
 - [ ] 批 F · RiskPolicy 前移

@@ -27,6 +27,16 @@ from .db import (
     save_verdict,
     verify_verdict_refs,
 )
+from .runs import (
+    IllegalTransition,
+    UnknownRun,
+    current_state,
+    open_run,
+    run_events,
+    run_header,
+    run_journey,
+    transition,
+)
 from .schema import SCHEMA_VERSION
 
 __all__ = [
@@ -53,4 +63,12 @@ __all__ = [
     "save_verdict",
     "save_raw_snapshot",
     "verify_verdict_refs",
+    "IllegalTransition",
+    "UnknownRun",
+    "current_state",
+    "open_run",
+    "run_events",
+    "run_header",
+    "run_journey",
+    "transition",
 ]

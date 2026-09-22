@@ -18,6 +18,7 @@
 #   bin/biga-card --list [n]      列出最近 n 张（默认 10）
 #   bin/biga-card --check <决策号> 用冻结证据重跑，断言**组装结果**逐字段相同
 #                                （验的是管线无损，不是「结论能被独立复算」——见 F14）
+#   bin/biga-card --status <run_id> 说出某次运行「死在哪一步」（批 B 状态机）
 #
 # ⚠️ 出一张新卡实测需要 **3 分钟左右**、约 $1.2。不是瞬时操作。
 
@@ -40,6 +41,27 @@ BIGA_STOP_FILE="${BIGA_STOP_FILE:-$ROOT/.biga-card-stop}"
 #    测试当场把真实出卡流程跑了起来 —— **一个坏掉时会花钱的测试**。
 BIGA="${BIGA:-$HOME/.openclaw-biga/bin/biga}"
 PY=python3
+RL="$PY skills/decision-card/scripts/run_ledger.py"
+
+# ══ 批 B · 运行状态机记账（best-effort）══════════════════════════════
+#
+# 这次运行走到哪一步，写进 decision_runs / run_events，供 `--status` 复述。
+# 🔴 **全部 best-effort：记账失败绝不改变出卡的行为**（退出码 / 流程 / 成本）。
+#    批 B 的硬约束是「新旧并存，不改行为」—— 老路径照跑，只是顺带记一笔。
+#    真正由状态机驱动流程是批 C。
+#
+# ⚠️ legacy 路径的粒度是粗的：Specialist 编排整个交给一个被 spawn 的 LLM，
+#    那段对本脚本不透明，所以只记 RECEIVED→PREFLIGHTED→CARD_PERSISTED→COMPLETED
+#    这几个能诚实观测到的点，不伪造中间五个编排态（那是批 C 的 Orchestrator 的活）。
+RUN_ID=""
+_move() {  # $1=expect $2=to [$3=detail-json]；从不影响出卡流程
+  [ -n "$RUN_ID" ] || return 0
+  if [ -n "${3:-}" ]; then
+    $RL move "$RUN_ID" --expect "$1" --to "$2" --detail "$3" >/dev/null 2>&1 || true
+  else
+    $RL move "$RUN_ID" --expect "$1" --to "$2" >/dev/null 2>&1 || true
+  fi
+}
 
 _sql() { $PY - "$@" <<'EOF'
 import sys, pathlib
@@ -59,6 +81,11 @@ case "${1:-}" in
   --check)
     [ -n "${2:-}" ] || { echo "用法: biga-card --check <决策号>" >&2; exit 2; }
     exec $PY skills/decision-card/scripts/replay.py "$2" --check
+    ;;
+  --status)
+    # 批 B：说出某次运行「死在哪一步」。不花钱，事故排查要用（与 --show/--list 同类）。
+    [ -n "${2:-}" ] || { echo "用法: biga-card --status <run_id>" >&2; exit 2; }
+    exec $RL status "$2"
     ;;
   --list)
     n=${2:-10}
@@ -91,6 +118,11 @@ if [ -e "$BIGA_STOP_FILE" ]; then
   echo "   看已有的卡不受影响：bin/biga-card --list / --show <决策号>" >&2
   exit 3
 fi
+
+# 🔴 批 B：过了总闸就算「接下了这次请求」⇒ 开一个 run（RECEIVED）。
+#    放在闸后：被总闸拦下的请求是被 admission 拒在门外，不算 received。
+#    best-effort（见顶部 _move 注释）—— open 失败就整段记账静默跳过，出卡照跑。
+RUN_ID=$($RL open --origin cli 2>/dev/null || true)
 
 # 🔴 Ownership 守卫 —— 顶层入口只能由人 / CLI / cron 启动
 # ------------------------------------------------------------------
@@ -133,6 +165,7 @@ EOF
     echo "   如果你收到了「请出一张决策卡，严格按以下步骤」那段消息：" >&2
     echo "   **你就是执行者**，照那段步骤做，不要调这条命令。" >&2
     echo "   见 AGENTS.md「绝对不要运行」一节。" >&2
+    _move RECEIVED CANCELLED '{"blocked_by":"ownership"}'
     exit 3
   fi
 fi
@@ -167,6 +200,7 @@ if [ "${BIGA_CARD_NOLOCK:-0}" != "1" ]; then
     echo "   锁文件：$ROOT/.biga-card.lock" >&2
     echo "   如果你是 agent：**不要调这条命令**，见 AGENTS.md「绝对不要运行」一节。" >&2
     echo "   看在跑的那次：bin/biga-card --list 3" >&2
+    _move RECEIVED CANCELLED '{"blocked_by":"single_instance_lock"}'
     exit 3
   fi
 fi
@@ -203,6 +237,7 @@ EOF
     echo >&2
     echo "   ⓘ 这次拦下的代价是 \$0 —— 闸门在 agent 调用**之前**。" >&2
     echo "     确实要跑：BIGA_CARD_FORCE=1 bin/biga-card" >&2
+    _move RECEIVED CANCELLED '{"blocked_by":"budget"}'
     exit 3
   fi
 fi
@@ -210,6 +245,7 @@ fi
 BEFORE=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
 SESS="card-$(date +%H%M%S)"
 echo "▸ 会话 $SESS   起 $(date +%T)"
+[ -n "$RUN_ID" ] && echo "  run $RUN_ID   （查进度：bin/biga-card --status $RUN_ID）"
 echo "  （实测 3 分钟左右、约 \$1.2；期间可以做别的事）"
 
 # 🔴 提示词**不写在这里** —— 从 ORCHESTRATION.md 的标记块里抽。
@@ -251,6 +287,9 @@ AGENT_TIMEOUT=$(( CARD_DEADLINE_SEC - CARD_SETTLE_SEC ))
 SETTLE_TRIES=$(( CARD_SETTLE_SEC / 5 ))
 echo "  （总预算 ${CARD_DEADLINE_SEC}s：agent ${AGENT_TIMEOUT}s + 结算 ${CARD_SETTLE_SEC}s）"
 
+# 🔴 批 B：五道守卫全过、即将第一次花钱 ⇒ PREFLIGHTED。
+_move RECEIVED PREFLIGHTED
+
 "$BIGA" agent --agent main --session-key "agent:main:$SESS" \
   --timeout "$AGENT_TIMEOUT" -m "$PROMPT" >/dev/null 2>&1
 
@@ -260,6 +299,9 @@ for _ in $(seq "$SETTLE_TRIES"); do
   NOW=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
   if [ "$NOW" != "$BEFORE" ]; then
     echo "→ $NOW  $(date +%T)"
+    # 🔴 批 B：卡落库了 = 观测到 CARD_PERSISTED。legacy 路径这里第一次知道
+    #    决策号（LLM 的 Stage 0 占的），记进 detail —— run 头那侧占号时它还不存在。
+    _move PREFLIGHTED CARD_PERSISTED "{\"decision_id\":\"$NOW\"}"
     echo
     $PY skills/decision-card/scripts/replay.py "$NOW"
     echo
@@ -322,6 +364,7 @@ for _ in $(seq "$SETTLE_TRIES"); do
       # ⚠️ 仍然把卡渲染出来了（上面已经渲染）——
       #    出卡这件事已经发生、钱已经花了，藏起来没有意义。
       #    要变的是**这条命令的成败**，而不是要不要给人看。
+      _move CARD_PERSISTED FAILED "{\"reason\":\"spawn_check\",\"rc\":$SPAWN_RC}"
       exit 4
     fi
     if [ "$READBACK_RC" -ne 0 ]; then
@@ -330,8 +373,12 @@ for _ in $(seq "$SETTLE_TRIES"); do
       echo "   这次的卡（$NOW）本身没事：spawn 核验已经通过。" >&2
       echo "   库里存在**更早**落的、读不回来的行（写边界建成之前的产物）。" >&2
       echo "   细节：python3 tools/verify/readback_check.py" >&2
+      # 🔴 这次运行本身成功了（卡没问题、spawn 已核验）——毒行是历史遗留。
+      #    所以 run 的终态是 COMPLETED，不是 FAILED；rc=6 说的是别的行。
+      _move CARD_PERSISTED COMPLETED "{\"note\":\"readback_flag_on_history\",\"rc\":$READBACK_RC}"
       exit 6
     fi
+    _move CARD_PERSISTED COMPLETED
     exit 0
   fi
   # 🔴 看门狗 —— 非交互 `ask_user` 死锁（外部评审 ASK-04）
@@ -363,6 +410,7 @@ EOF
         timeout 60 "$BIGA" sessions delete --agent main --yes "agent:main:$SESS" \
           >/dev/null 2>&1 && echo "   已收掉该会话。" >&2
       fi
+      _move PREFLIGHTED INPUT_REQUIRED '{"tool":"ask_user","recovery":"none"}'
       exit 5
     fi
   fi
@@ -395,4 +443,7 @@ if [ "${BIGA_CARD_KEEP_STALLED:-0}" != "1" ]; then
     && echo "   已收掉。" >&2 \
     || echo "   ⚠️ 收不掉。手工：$BIGA sessions list --agent main --active 60" >&2
 fi
+# 🔴 批 B：预算耗尽仍无卡 —— 这次运行超时。若中途已 CARD_PERSISTED（卡晚到但
+#    poll 已越过），PREFLIGHTED→TIMEOUT 会 best-effort 失败并静默跳过，不影响退出。
+_move PREFLIGHTED TIMEOUT
 exit 1

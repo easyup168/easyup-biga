@@ -15,6 +15,74 @@
 
 ## [未发布]
 
+### 🔴 新增 · 批 B：运行身份 + 状态机（schema v7）
+
+设计文档 §4「身份模型」与 §5「显式状态机」。899 条测试全绿（837 → 899，+62）。
+
+**为什么**：此前只有 `decision_id` 一个身份，它被迫同时承担五件事，实测踩过三次——
+飞书事件重投没有幂等键（重投 = 重跑一次决策）、硬超时重试的两次尝试挤在同一个
+`decision_id` 上事后分不开、「所有 Specialist 看的是同一份数据」这句话没有
+`evidence_set_id` 根本无法验证。⇒ 把身份拆开：`trigger_id`（一次外部请求）/
+`decision_id`（一次业务决策）/ `run_id`（一次执行尝试）/ `evidence_set_id`（一片冻结数据）。
+
+**做了什么**：
+
+- `skills/_contract/run.py`：`RunContext` 值对象（第六个契约类型，已登记进
+  `test_contract_single_impl.py` 的 `CONTRACT_NAMES`）+ 13 个状态 `RunState` +
+  合法转移图 `LEGAL_TRANSITIONS`。状态清单从类属性**派生**，不手抄第二份。
+- schema **v7**：`decision_runs`（运行身份头）/ `run_events`（状态转移日志）/
+  `evidence_sets`（冻结切片登记，批 D 起有生产方）。三张表**建表时就带只追加触发器**
+  —— v4 建 `decision_ids` 时漏过一次（F1），这次不重蹈。
+- `skills/_store/runs.py`：`open_run()` / `transition(run_id, expected, next)` / `run_journey()`。
+- `skills/decision-card/scripts/run_ledger.py`：bash↔状态机的桥，兼 `--status` 渲染，
+  持有 `STATE_MEANING`（消费方知识）。
+- `bin/biga-card`：新增 `--status <run_id>`；老路径出卡时**best-effort** 记 run 记录。
+
+**为什么状态是事件溯源、而不是 `decision_runs` 上一个 `state` 列**：`decision_runs`
+是只追加的（触发器强制），原地 `UPDATE state` 直接被拒。当前状态由 `run_events`
+最新一行给出；`transition()` 靠 `UNIQUE(run_id, seq)` 做 compare-and-set——读到最新
+`seq`、断言当前状态 == expected、`INSERT seq+1`，并发两次同转移都写 `seq+1`，唯一约束
+只让一个落地。这与 `decision_ids` 用主键冲突占号是**同一招**：唯一约束是唯一可靠的
+并发仲裁，「先查再写」永远有竞态窗口。
+
+**为什么 13 个状态而不是评审的 15 个**：去掉 `IDENTITY_RESERVED`（与 `PREFLIGHTED`
+是同一瞬间）和 `SNAPSHOT_COLLECTING`（并入 `PREFLIGHTED→SNAPSHOT_FROZEN` 的转移，
+中间态无人读）——本系统里没有代码能进入、也没有消费方会读它们，凭空多一个状态就是
+一条 L-1 死配置。`NOTIFICATION_PENDING` 推到批 G（outbox 存在之前它没有消费方）。
+每个状态都要能指出「谁写它」（能从 `RECEIVED` 经合法转移到达）与「谁读它」
+（`--status` 说得清），两条都有结构性测试钉死。
+
+**为什么 `decision_runs.decision_id` 可空**：legacy 路径（`bin/biga-card`）在 RECEIVED
+时**还不知道决策号**——它由被 spawn 的 LLM 的 Stage 0 占，`bin/biga-card` 是靠 poll
+`MAX(decision_id)` 发现的。批 B 的硬约束是「不改行为 / 不改占号逻辑」，所以不能让
+`bin/biga-card` 提前占号。⇒ run 头开在占号之前、`decision_id` 留空，发现号后记进
+`CARD_PERSISTED` 事件的 `detail`。批 C 的 Orchestrator 在开 run 之前占号，那时它非空。
+
+**为什么 run 记录是 best-effort**：批 B「新旧并存，不改行为」是硬约束——记账失败
+绝不能改变出卡的退出码/流程/成本。所以 `bin/biga-card` 里所有 `_move` 调用吞掉自身
+错误。代价是记账静默失效时无人察觉，但那是可接受的：run 记录是**可观测数据**不是
+安全守卫，且它的正确性由测试（直接驱动 `run_ledger`/`_store.runs`）保证，不靠 live 路径。
+legacy 路径粒度是粗的（`RECEIVED→PREFLIGHTED→CARD_PERSISTED→COMPLETED`，跳过五个
+编排内部态）——那五个态由批 C 的 Orchestrator 产生，`bin/biga-card` 观测不到，
+**不伪造**（`LEGAL_TRANSITIONS` 里 `PREFLIGHTED→CARD_PERSISTED` 是一条显式登记的
+legacy 粗边，批 C 收缩 `bin/biga-card` 时删除）。
+
+**探针（G-1，每道新守卫都见过红）**：
+
+- **P1 并发同转移只有一个成功**（`test_并发同转移只有一个成功`）：8 线程同时对同一 run
+  做 `RECEIVED→PREFLIGHTED`，断言恰好 1 个成功、7 个 `IllegalTransition`。常绿。
+- **P3 拆掉 CAS 仲裁 → P1 变红**：把 `transition()` 里 `except IntegrityError` 从
+  `raise IllegalTransition` 改成 `pass`（吞掉 UNIQUE 冲突 = 退化成无条件写）。
+  P1 报红：`应恰好一个成功，实际 8`。已还原。
+- **P2 只追加触发器**（`test_UPDATE_decision_runs被拒` / `test_DELETE_run_events被拒`）：
+  从 schema v7 删掉 `_append_only("run_events", ...)`，建新库。两条报红（UPDATE/DELETE
+  成功），且 F1 兜底 `test_每张表都有只追加触发器` 也报红：`这些表可被改写：['run_events']`。
+  已还原。
+- **P4 无消费方的状态被抓到**（`test_每个状态都有消费方`）：给 `RunState` 加一个
+  `PROBE_ORPHAN`（不进 `STATE_MEANING`、无入边）。三条同时报红——消费方检查
+  `这些状态没有读取方（STATE_MEANING 缺）：['PROBE_ORPHAN']`、可达性检查
+  `从 RECEIVED 走不到（没人能写它）`、以及「恰好 13 个」的钉子。已还原。
+
 ### 🔴 新增 · 批 A-II：契约值对象与不变量（A1/A2/A5/A6/A7/A8 + F-4）
 
 设计文档 §6 批 A 的后半段。A-I 已经把**写边界**堵上（写入前重新构造一遍），
