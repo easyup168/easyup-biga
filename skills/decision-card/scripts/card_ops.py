@@ -39,6 +39,7 @@ from _store import (  # noqa: E402
     load_online_card,
     load_verdict,
     load_verdict_meta,
+    record_verdict_run,
     save_card,
 )
 
@@ -152,7 +153,26 @@ def synthesize(
 
 
 def persist(card: DecisionCard, *, replay_of: int | None = None) -> int:
-    """落库，返回 `record_id`。在线路径 `replay_of=None`，回放路径填原始 record_id。"""
+    """落库，返回 `record_id`。在线路径 `replay_of=None`，回放路径填原始 record_id。
+
+    🔴 只在在线路径记账本（`agent_runs`，`record_verdict_run`）——回放不重新
+    执行任何 agent，给回放记一遍「执行」是假账。这与 `synthesize()` 保持纯函数
+    是同一个理由的另一半：`persist()` 才是 IO 边界，账本这类「这次真的跑过」
+    的记录只能长在这里，不能长在纯函数里。
+
+    ⚠️ 这是批 C-II 的一处回归修复：旧的 standalone `synthesize.py`（编排从
+    main 的提示词驱动时期）在落库前调过这个账本；批 C-II 把合成逻辑挪进这个
+    模块的 `synthesize()`/`persist()`，但当时没有把这一步一并搬过来——`agent_runs`
+    从那天起再没被写过，`tools/verify/spawn_check.py` 因此永远「判不了」（它需要
+    这张表有行才能跟运行时的 `subagent_runs` 交叉核对）。2026-09-22 第一次真实
+    live 验证时才暴露（不是安全洞：把成功误判成失败，不是把失败误判成成功）。
+    """
+    if replay_of is None:
+        for v in card.verdicts:
+            record_verdict_run(v, decision_id=card.decision_id,
+                               started_at=card.generated_at,
+                               finished_at=card.generated_at,
+                               model=card.model_ref)
     return save_card(card, replay_of=replay_of)
 
 
