@@ -761,7 +761,28 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       `[] == [...]`；回放也记账→回放测试 `12 == 6`）。1003→1005 条。
       本次修复在这个会话里直接做的，没有走单独的开工/评审两会话流程——
       范围小、根因链条已经查实，但没有另一个独立视角复核过，如实记在这里。
-- [ ] 批 E · Facts / Assessment 拆分
+- [ ] 批 E · Facts / Assessment 拆分 —— **拆成 E-I / E-II 起**（同 A、C、D 的理由）
+  - [ ] 批 E-I · 契约基础设施 + 一个试点 Specialist —— 分发提示词已就绪，开工中
+        建 `FactBundle`/`AgentAssessment`/`AgentOutcome` + `LegacyAdapter`，
+        `Evidence` 加 `evidence_set_id`，试点迁 `emotion`；市场/板块/技术/
+        新闻/风险五个暂不动，`amend_verdict.py` 暂不退役。见分发提示词。
+  - [ ] 批 E-II 起 · 迁剩下五个 Specialist + 退役 amend_verdict.py（等 E-I
+        落地的真实类型形状之后再写分发提示词）
+- [ ] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— 分发提示词已就绪，
+      不依赖 D/E，可与 E-I 并行开工
+      来源：2026-09-22 外部架构复审，复核记在设计文档 §2 追加 5。四件独立
+      小修复：① `CARD_PERSISTED` 转移挪到 `persist()` 成功之后（现在顺序
+      反了，`persist()` 抛错会留一条假的"已落库"记录）；② Stage 1 部分
+      启动失败时取消已启动的 handle（给 `cancel()` 第一个真实调用方,
+      顺带补上「批 C-II 残留风险」里记的 N=5/drain 验证缺口）；③
+      `verify_verdict_refs()` 补 `agent` 字段核对（`verdict_id` 是跨
+      agent 全局自增，理论上能伪造一条指错行的 VerdictRef）；④
+      Orchestrator 感知总 deadline，各阶段按剩余时间收窄预算（现在三段
+      预算互不感知,加总可能超过 `deadline_sec`，只靠外层 bash timeout 硬顶）。
+      评审里"run_id 未贯穿 Verdict/EvidenceSet/Card"那条断言是真的，但据此
+      构造的"重试跨 run 串读"场景目前打不中（`decision_id` 现在恒为新铸，
+      没有重试路径）——按追加 5.1，这是排期约束不是紧急修复，留给"任何引入
+      同 decision_id 重试"的批次开工前处理，现在提前建就是 L-1。
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
