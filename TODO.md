@@ -771,11 +771,15 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `Evidence` 加 `evidence_set_id`（还 D-II 的账，CROSS_CHECK 升级为优先
         比它）；试点迁 `emotion`（`build_fact_bundle`）。市场/板块/技术/新闻/
         风险五个未动，`amend_verdict.py` 未退役。教程 ch 27。
-  - [~] 批 E-II · 迁 market/sector/technical/news 四个 —— **实现完成、离线全绿
-        （1039→1062），六道探针（P1–P6）+ 四道红灯演练全见过红并已还原，
-        `biga-card --check` 回放一致、`audit --worktree` 十一项全绿，待独立评审**
-        （不自宣通过）。四个 skill `build_verdict→build_fact_bundle`、产 `FactBundle`；
+  - [x] 批 E-II · 迁 market/sector/technical/news 四个 —— **评审复核通过、已合并
+        （`359b97c`）**。四个 skill `build_verdict→build_fact_bundle`、产 `FactBundle`；
         消费方零改动。教程 ch 29。
+        评审复核：独立查库验证了 `market.trend.no_history` 的历史修订（4 条，
+        2 条原件确认是 PASS/completed 且 `volume_ratio` 均完整，与报告结论一致）；
+        亲手 sabotage 了「skill 源码不该出现 trend 概念」这条守卫；核对 sector/
+        technical/news 的历史 amend 记录，确认下面「后续文档收敛」那条的风险
+        评估准确（technical 19 条修订从未用过 `--add-missing`，sector/news 用的
+        都是 skill 自己的码，模板占位码从未被字面照抄过）。
         **①的裁定落地查了真实数据库**（不照抄例子）：四个 skill 历史 `--add-missing`
         限制全部已由 skill 自检（`market.breadth.*`、`sector.board.pre_session`），
         ①不新增检测代码。唯一例外 `market.trend.no_history` 命中 escape hatch ——
@@ -790,12 +794,16 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         **可选**的 `--add-missing X.partial` 示例命令。它们对应 genuine 数据缺口、skill
         已自检，agent 正常只需 `--stance` 转述、不会撞上，破坏概率远低于 market；但示例
         本身迁移后同样会被 fact 行拒 ⇒ 建议随 E-III 或一次文档 pass 一并清掉。
-  - [ ] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py`（等 E-II 评审通过、
-        四个新形状稳定之后再写分发提示词）
+  - [ ] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py` —— 分发提示词已就绪
         `risk` 单独一批：它也有 `stance`（`VETO_STANCE` = 制衡层最安全关键的
         判断），且消费其余五个的产出，等它们形状稳定更安全；退役
         `amend_verdict.py` 的前提是全部六个都迁完，天然只能跟最后一个绑一起。
-- [ ] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— **实现完成（分支 `c-iii`，
+        🔴 分发提示词把「VETO 穿透」列为核心交付物（不是顺带）：要求探针验到
+        `AgentAssessment(stance=否决)` 真能传导到 `DecisionCard` 实际拦截
+        BUY 的那一层，不能只验到 FactBundle 迁移成功就停。`save_verdict()`
+        明确不删——七个测试文件还靠它构造老形状数据，证明 `LegacyAdapter`
+        读路径宽。
+- [x] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— **实现完成（分支 `c-iii`，
       基于 `2e5e8ea`）：离线全绿 1005→1016、四道探针 P1–P4 全见过红并已还原、
       `biga-card --check` 回放一致、`audit --worktree` 十一项全绿；评审复核通过，
       已合并。** 在独立 git worktree 上做，因为批 E-I 的未提交 WIP 同时在主工作区
