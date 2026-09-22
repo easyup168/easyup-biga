@@ -225,7 +225,7 @@ specialist 是有界工人，窄 cwd 反而是对的。
 
 | agentId | 角色 | 模型 | `subagents.allowAgents` | 职责一句话 |
 |---|---|---|---|---|
-| **`main`** | **BigA Supervisor** | Opus | 其余 7 个全部 | 人的唯一接触点；拆任务、收证据、查完整性、组织制衡、出 Card |
+| **`main`** | **BigA Supervisor** | Opus | 其余 7 个全部 | 人的唯一接触点；对话式答疑与解释。⚠️ **出 Card 批 C-II 起不再由它驱动** —— 那是程序（`orchestrator.py`），它够不到 |
 | `market` | Market Agent | Sonnet | `[]` | 市场现在是什么状态（指数/成交额/涨跌结构/宽度/量能）。**不选股** |
 | `sector` | Sector Agent | Sonnet | `[]` | 资金与共识方向（行业/概念强度、核心股、持续性、扩散） |
 | `news` | News Agent | Sonnet | `[]` | 政策/产业/公告/海外；**重点是时间戳、来源、新鲜度核验** |
@@ -238,6 +238,13 @@ specialist 是有界工人，窄 cwd 反而是对的。
 "specialists return artifacts and evidence to the coordinator **without delegating further**"，
 也对应参考文档 §6「星型协作，而不是 Agent 之间任意互聊」。
 这同时是成本护栏：防止 specialist 递归 spawn 炸开。
+
+**➕ `synthesizer`（编排支撑，不计入业务 8 个）**：批 C-II 新建的**综合判官**，
+`allowAgents=[]` 叶子，模型 Sonnet。它只产出整张卡的 `status`/`headline`/`synthesis`，
+不采数据、不产 `AgentVerdict`、不搬运证据。综合判断从 `main` 手里移到它这里，正是因为
+它在能力上就 spawn 不了任何东西 —— `main` 若兼任判官会把 L-14 的攻击面又带回来。
+`tests/_consistency.py` 把它登记为 `SUPPORT_AGENTS`，`built_specialists()` 不含它，
+roster 一致性检查要求配置里有它。
 
 **模型分层理由**：`emotion` / `discipline` 的判断高度规则化（阈值+计数），Haiku 够用；
 `market` / `sector` / `news` / `technical` / `risk` 需要跨源推理，用 Sonnet；
@@ -291,33 +298,42 @@ Supervisor 做最终合成与矛盾裁定，用 Opus。
 ⚠️ `delegationMode: "prefer"` **只是 prompt 引导，不是调度器**。
 真正保证 Supervisor 一定去调 specialist 的，是它 AGENTS.md 里的硬性流程约定 + §12 的验收。
 
-### 3.3 调用链（参考文档 §12，加上并行化）
+### 3.3 调用链（参考文档 §12 + 并行化 + 批 C-II 程序驱动）
+
+🔴 **批 C-II 之后 `main` 不在这条链上。** 编排是一段程序
+（`skills/decision-card/scripts/orchestrator.py` 的 `DecisionOrchestrator`），
+由**人 / cron** 经 `bin/biga-card` 触发。`main` 是个 agent，够不到这个 Python 对象 ——
+不是「守卫拦住它」，是根本没有一条工具调用能到达（L-14 那条边界从提示词约定变成程序结构）。
 
 ```
-人 ──► main (Supervisor)
+人 / cron ──► bin/biga-card ──► DecisionOrchestrator（Python，orchestrator.py）
          │
-         │ Stage 1：并行 spawn 5 个（maxConcurrent ≥ 5）
+         │ Stage 0：reserve_decision_id（占号在 open_run 之前，decision_id 从头非空）
+         │ Stage 1：并行 spawn 5 个（**共用一个 groupId**，maxConcurrent ≥ 5）
          ├──► market ──┐
          ├──► sector ──┤
          ├──► news   ──┼──► AgentVerdict × 5（含 evidence）
          ├──► technical┤
          └──► emotion ─┘
          │
-         │ Stage 2：并行 spawn 2 个「制衡层」，输入 = Stage 1 的冻结证据
-         ├──► risk      ──┐
-         └──► discipline ─┴──► AgentVerdict × 2（BLOCK / WARNING / PASS）
+         │ Stage 2：spawn 制衡层 risk，输入 = Stage 1 的冻结证据（verdict_ref）
+         └──► risk ──► AgentVerdict（否决 / 警示 / 放行 / 无法判定）
          │
-         │ Stage 3：Supervisor 合成
+         │ Stage 3：spawn synthesizer 判官（allowAgents=[] 叶子，无 spawn 能力），
+         │          拿结构化 status/headline/synthesis；**证据由程序从冻结 verdict 组装**
          ▼
    BigA Decision Card  ──► decision_records 落库（可回放）
          ▼
    Human-in-the-loop
 ```
 
-⚠️ **Stage 2 两个并行是对文档 §12 的一处偏离**：文档画的是 `Risk → Discipline` 串行。
-但两者输入不相交（risk 看市场与个股、discipline 看人的行为史），
-且文档 §5 自己就把它们并列为「制衡层」。并行省 10-15s。
-**若将来发现 discipline 需要读 risk 的结论，立刻改回串行** —— 由 §12 的验收项守着。
+⚠️ **综合判断为什么是 synthesizer 而不是 `main`**：判官若复用 `main`，它带着 `main`
+的全套 spawn 能力，一个提示词注入就能让它再拉起一轮编排（L-14）；`allowAgents=[]` 的
+叶子 agent 从能力上就做不到。判官只出判断，不采数据、不搬运证据。
+
+⚠️ **`discipline` 按裁定 13 不建**（没有输入源），所以 Stage 2 目前只有 risk。参考文档
+§12 画的是 `Risk → Discipline` 串行；将来 discipline 上线时，若它不需要读 risk 的结论
+就可并行（两者输入不相交），需要则串行 —— 由 §12 的验收项守着。批 F 可能前移 risk 的调用时机。
 
 #### 3.3.1 运行时适配层 `skills/_runtime/`（确定性编排批 C-I 加的）
 
@@ -340,9 +356,11 @@ spike（设计文档 §7）证明了 Python 能不经 LLM 轮次驱动它：`big
   测掉（五路并行相交 / grant 撑过 780s / 失败结构化），运行时升级后可重跑复验。
   🔴 它驱动真实的 `OpenClawRuntimeAdapter`（不另写一套 MCP 调用），且**会花钱**。
 
-🔴 **批 C-I 不接生产入口**：`bin/biga-card` 一个字都不改。把 Adapter 接进
-`DecisionOrchestrator`、让程序而非 LLM 驱动 Stage 0→3，是批 C-II。这一批只是
-把地基验实、把入口建好。
+**批 C-II 已把 Adapter 接进 `DecisionOrchestrator`**：`orchestrator.py` 用它驱动
+Stage 0→3（占号 / 五路 fan-out / risk / 判官 / 合成落库），走 8 步细粒度状态链
+（批 B 的 `LEGAL_TRANSITIONS`）。`bin/biga-card` 收缩成薄 CLI：五道守卫 → 调
+orchestrator → `spawn_check` + `readback_check` → 退出码，不再 spawn `main`、不再抽提示词。
+usage 落 `run_events.detail`（唯一真相源是运行时 trajectory，不在 `agent_runs` 建第二套）。
 
 ---
 
@@ -589,10 +607,13 @@ L-1 死配置），`NOTIFICATION_PENDING` 推到批 G（outbox 存在之前它�
 每个状态都要能指出「谁写它」（能从 `RECEIVED` 经合法转移到达）与「谁读它」
 （`--status` 说得清），两条都有结构性测试钉死。
 
-🔴 **批 B 只是「新旧并存」**：`bin/biga-card` 仍走老路径（spawn `main`，LLM 内部
-编排），只是**顺带**把能诚实观测到的状态（`RECEIVED` → `PREFLIGHTED` →
-`CARD_PERSISTED` → `COMPLETED`，及各失败终态）best-effort 地记进 run 表 ——
-记账失败绝不改变出卡行为。真正由程序驱动流程是批 C 的 Orchestrator。
+🔴 **批 B 建的状态机，批 C-II 已真正启用**：`DecisionOrchestrator`
+（`orchestrator.py`）自己 `open_run` 并驱动全部 8 步转移（`RECEIVED` → `PREFLIGHTED`
+→ `SNAPSHOT_FROZEN` → `STAGE1_RUNNING` → `STAGE1_COMPLETED` → `RISK_RUNNING` →
+`SYNTHESIZING` → `CARD_PERSISTED` → `COMPLETED`），走**细粒度链**而不是批 B 那条
+legacy 粗边（`PREFLIGHTED → CARD_PERSISTED` 已随 C-II 删除，L-7）。批 B 当时是过渡态
+「新旧并存」：`bin/biga-card` 还走老路径（spawn `main`、LLM 内部编排）、只 best-effort
+记账；C-II 把老路径整段换成程序驱动，记账变成流程本身而不再是旁挂。
 
 ---
 

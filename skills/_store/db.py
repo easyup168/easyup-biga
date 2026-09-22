@@ -41,6 +41,7 @@ __all__ = [
     "load_online_card",
     "load_card_by_record_id",
     "load_verdicts",
+    "latest_verdict_ids",
     "next_decision_id",
     "reserve_decision_id",
     "record_agent_run",
@@ -464,6 +465,28 @@ def save_verdict(
             f"（load_verdict_meta 或 --ref 查一下它的 amends 链），"
             f"在它的基础上再修一次，不要指回同一条原件。"
         ) from e
+
+
+def latest_verdict_ids(
+    task_id: str, *, path: pathlib.Path | str | None = None
+) -> dict[str, int]:
+    """每个 agent 在这次决策下**最新**那条判定原件的 id（agent → verdict_id）。
+
+    🔴 DecisionOrchestrator 靠它拿 verdict_id，而不是去解析 Specialist 回复文本里的
+    `verdict_ref=NN`——那种解析是 F3/L-13 的形状（把判据落在 LLM 复述的文本上）。
+    这里直接按 `(task_id, agent)` 查库，是结构化、确定性的。
+
+    「最新」= amend 链的 tip。amendment 的 verdict_id 一定比它改的原件大
+    （autoincrement，后写），且 schema v6 保证修订线性、同 agent 同 task ——
+    所以 `MAX(verdict_id) GROUP BY agent` 就是每个 agent 的当前判定。
+    """
+    with connect(path, readonly=True) as conn:
+        rows = conn.execute(
+            "SELECT agent, MAX(verdict_id) AS vid FROM agent_verdicts "
+            "WHERE task_id=? GROUP BY agent",
+            (task_id,),
+        ).fetchall()
+    return {r["agent"]: int(r["vid"]) for r in rows}
 
 
 def load_verdict(

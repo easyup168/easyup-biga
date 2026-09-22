@@ -170,17 +170,57 @@ class TestWiredIntoRealPath:
             "  一个不会被跑到的检查，和没有这个检查是一回事。")
 
     @staticmethod
+    def _orch_path(work) -> pathlib.Path:
+        return work / "skills" / "decision-card" / "scripts" / "orchestrator.py"
+
+    @staticmethod
+    def _orch_stub(work, db, did: str) -> str:
+        """orchestrator.py 的桩内容：落一张真卡 + 渲染到 stdout + 退出 0。
+
+        🔴 批 C-II 之后，出卡的**付费动作**是 `orchestrator.py`（经 Adapter → 真
+           spawn），不再是 `$BIGA agent`。而 Adapter 用的是 `DEFAULT_BIGA`（写死的
+           真实路径），**根本不读 `BIGA` 环境变量** —— 所以桩必须落在 orchestrator.py
+           上，桩 `BIGA` 已经拦不住花钱了。这一处正是收缩把「付费调用」挪了地方、
+           而守卫还盯着老地方（L-13）会咬人的位置。
+        """
+        return (
+            "import sys\n"
+            f"sys.path.insert(0, {str(work / 'skills')!r})\n"
+            "from _contract import AgentVerdict, DecisionCard, Evidence, now_cn\n"
+            "from _store import init_schema, save_card\n"
+            "t = now_cn()\n"
+            f"TID = {did!r}\n"
+            f"init_schema({str(db)!r})\n"
+            "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
+            "                 verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
+            "                 stance='分化', elapsed_ms=1,\n"
+            "                 evidence=[Evidence(field='x', source='s', value=1,\n"
+            "                                    as_of=t, retrieved_at=t)])\n"
+            # 🔴 只落 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按计数
+            #    比较（missing 条数 >= 缺席 agent 数），给 5 条占位 missing 才够，
+            #    免得抢在这批探针要验证的事情前面报错。
+            "card = DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
+            "                    verdicts=[v], synthesis='', model_ref='m',\n"
+            "                    missing=['占位1 —— 本文件不测 roster',\n"
+            "                             '占位2', '占位3', '占位4', '占位5'])\n"
+            f"save_card(card, path={str(db)!r})\n"
+            "print('run stub-run   （查进度：bin/biga-card --status stub-run）',"
+            " file=sys.stderr)\n"
+            "print(card.render())\n"
+        )
+
+    @staticmethod
     def _seeded_repo(tmp_path, did: str, spawn_stub: str, readback_stub: str | None = None):
         """造一个能走完出卡路径的沙盒。**不联网、不花钱。**
 
-        三个桩（`readback_stub` 缺省时不桩 —— 让真的 `readback_check.py`
-        跑在刚种下的干净库上，它本该报 0 条毒行，用于验证 F-4 的接入
-        不影响「一切正常」时的行为）：
-          · `BIGA` → 直接往库里落一张真卡（替掉 agent 调用）
+        桩（`readback_stub` 缺省时不桩 —— 让真的 `readback_check.py` 跑在刚种下的
+        干净库上，它本该报 0 条毒行，用于验证 F-4 的接入不影响「一切正常」时的行为）：
+          · `orchestrator.py` → 直接往库里落一张真卡并渲染（替掉真 spawn，见 `_orch_stub`）
           · `spawn_check.py` → 由调用方决定退出码
           · `readback_check.py` → 同上（F-4：设计文档 §6，A-I 评审欠的账）
         """
         import shutil
+        import subprocess
         work = tmp_path / "repo"
         shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
             # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
@@ -189,33 +229,24 @@ class TestWiredIntoRealPath:
             ".biga-card-stop", ".biga-card.lock",
             ".git", "__pycache__", "data", ".pytest_cache", ".claude", "memory"))
         db = tmp_path / "t.db"
+        # 预建空 schema，让 bin/biga-card 读 BEFORE（readonly）时库已存在、返回空。
+        subprocess.run(
+            [sys.executable, "-c",
+             f"import sys; sys.path.insert(0, {str(work / 'skills')!r}); "
+             f"from _store import init_schema; init_schema({str(db)!r})"],
+            check=True, capture_output=True)
 
-        seed = tmp_path / "seed.py"
-        seed.write_text(
-            "import sys\n"
-            f"sys.path.insert(0, {str(work / 'skills')!r})\n"
-            "from _contract import AgentVerdict, DecisionCard, Evidence, now_cn\n"
-            "from _store import init_schema, save_card\n"
-            "t = now_cn()\n"
-            f"TID = {did!r}\n"
-            "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
-            "                 verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
-            "                 stance='分化', elapsed_ms=1,\n"
-            "                 evidence=[Evidence(field='x', source='s', value=1,\n"
-            "                                    as_of=t, retrieved_at=t)])\n"
-            f"init_schema({str(db)!r})\n"
-            # 🔴 只桩了 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据
-            #    按计数比较（missing 条数 >= 缺席 agent 数），给 5 条占位
-            #    missing 才够，免得抢在这批探针要验证的事情前面报错。
-            "save_card(DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
-            "                       verdicts=[v], synthesis='', model_ref='m',\n"
-            "                       missing=['占位1 —— 本文件不测 roster',\n"
-            "                                '占位2', '占位3', '占位4', '占位5']),\n"
-            f"          path={str(db)!r})\n", encoding="utf-8")
+        # 🔴 桩掉 orchestrator.py —— 这才是收缩之后的付费调用。
+        TestWiredIntoRealPath._orch_path(work).write_text(
+            TestWiredIntoRealPath._orch_stub(work, db, did), encoding="utf-8")
 
+        # BIGA 桩留成一个「响亮的空操作」：Adapter 走 DEFAULT_BIGA 不经这里，
+        # 万一有别的路径去调 $BIGA，这里会在 stderr 留痕而不是真起会话。
         stub = tmp_path / "fake-biga"
-        stub.write_text(f"#!/usr/bin/env bash\n{sys.executable} {seed}\n",
-                        encoding="utf-8")
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo '🔴 stub BIGA 被调用 —— C-II 后 orchestrator 用 DEFAULT_BIGA，"
+            "不该经过这里' >&2\nexit 0\n", encoding="utf-8")
         stub.chmod(0o755)
         (work / "tools" / "verify" / "spawn_check.py").write_text(
             spawn_stub, encoding="utf-8")
@@ -228,6 +259,12 @@ class TestWiredIntoRealPath:
     def _run(work, db, stub):
         import os
         import subprocess
+        # 🔴 自证不花钱：收缩后付费点是 orchestrator.py（Adapter 走 DEFAULT_BIGA，
+        #    不读 BIGA 环境变量）。只在它已被桩掉的沙盒里跑 —— 桩没落上就当场炸，
+        #    而不是让一次真跑去触发真 spawn。fail-closed 在**使用点**，不靠元测试兜。
+        orch_src = TestWiredIntoRealPath._orch_path(work).read_text(encoding="utf-8")
+        assert "OpenClawRuntimeAdapter" not in orch_src, (
+            "sandbox 里的 orchestrator.py 不是桩 —— 这次 _run 会触发真 spawn（真花钱）")
         return subprocess.run(
             ["bash", str(work / "bin" / "biga-card")],
             capture_output=True, text=True, cwd=work, timeout=120,
@@ -416,9 +453,10 @@ class TestNoCardRecursion:
             td = pathlib.Path(td)
             work, db, stub = TestWiredIntoRealPath._seeded_repo(
                 td, "BIGA-20260921-701", "print('桩：全齐')\n")
-            # 桩掉 agent：慢一点，好让第二次撞上锁
-            stub.write_text("#!/usr/bin/env bash\nsleep 8\n", encoding="utf-8")
-            stub.chmod(0o755)
+            # 🔴 持锁的是 orchestrator 那一段（flock 在调它之前拿到）——要让第二次
+            #    撞上锁，就得让**它**慢一点，桩 BIGA 已经不在出卡路径上了。
+            TestWiredIntoRealPath._orch_path(work).write_text(
+                "import time; time.sleep(8)\n", encoding="utf-8")
             env = {**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db),
                    "BIGA_CARD_FORCE": "1"}
             first = subprocess.Popen(["bash", str(work / "bin" / "biga-card")],
@@ -461,6 +499,70 @@ class TestNoCardRecursion:
             assert r2.returncode == 0, (
                 "总闸把 --list 也拦了 —— 事故当中最需要的就是看现状。\n"
                 f"  {r2.stderr[-200:]}")
+
+    def test_wrapper被杀会收掉编排子进程(self):
+        """🔴 评审阻塞项 2：wrapper（`bin/biga-card`）死了，它起的编排子进程不许孤立
+        继续跑完 spawn 真花钱。
+
+        事故根因**不是** `$1.2` 那个 bash bug —— 那行在文本顺序上排在编排调用之前，
+        真在那崩溃根本到不了 spawn。真正的根因：一个外层短 timeout 杀掉了上层 shell，
+        而 `timeout 840 orchestrator.py` 孙进程被孤立后跑完了整轮 spawn。修法是
+        `bin/biga-card` 的 trap（Code Guard），不是「以后别手工乱跑」（意图）。
+
+        判据是**真的杀 wrapper、看子进程还在不在**，不是「源码里有没有 trap」。
+        """
+        import os
+        import signal
+        import subprocess
+        import tempfile
+
+        def _alive(pid: int) -> bool:
+            try:
+                os.kill(pid, 0)
+                return True
+            except (ProcessLookupError, PermissionError):
+                return False
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            work, db, stub = TestWiredIntoRealPath._seeded_repo(
+                td, "BIGA-20260921-802", "print('桩：全齐')\n")
+            pidfile = td / "orch.pid"
+            # 编排桩：记下自己的 pid，长睡 —— 模拟 wrapper 被杀时它还在跑（不 spawn、不花钱）
+            TestWiredIntoRealPath._orch_path(work).write_text(
+                "import os, pathlib, time\n"
+                f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+                "time.sleep(120)\n", encoding="utf-8")
+            env = {**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db),
+                   "BIGA_CARD_FORCE": "1"}
+            proc = subprocess.Popen(
+                ["bash", str(work / "bin" / "biga-card")], cwd=work, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            orch_pid = None
+            try:
+                deadline = time.time() + 20
+                while not pidfile.exists() and time.time() < deadline:
+                    time.sleep(0.2)
+                assert pidfile.exists(), "编排子进程没起来，测试前提不成立"
+                orch_pid = int(pidfile.read_text())
+                assert _alive(orch_pid), "编排子进程此刻应当在跑"
+                # 杀掉 wrapper —— 模拟外层 timeout / 工具超时把上层 shell 收了
+                proc.terminate()
+                proc.wait(timeout=15)
+                gone = time.time() + 6
+                while _alive(orch_pid) and time.time() < gone:
+                    time.sleep(0.2)
+                assert not _alive(orch_pid), (
+                    f"wrapper 被杀后编排子进程 {orch_pid} 还活着 —— 孤儿化敞口还开着，\n"
+                    "  它会继续跑完 spawn 真花钱（教程 24 章那次事故的根因）。")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                if orch_pid and _alive(orch_pid):
+                    try:
+                        os.kill(orch_pid, signal.SIGKILL)
+                    except OSError:
+                        pass
 
 
 class TestOrphanSpawns:

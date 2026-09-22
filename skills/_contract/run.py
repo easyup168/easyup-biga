@@ -133,16 +133,11 @@ _ORCHESTRATED = [
     (RunState.CARD_PERSISTED, RunState.COMPLETED),
 ]
 
-# 🔴 批 B 的 legacy 粗粒度边：`bin/biga-card` 仍走老路径，把 Specialist 编排
-#    整个交给一个被 spawn 的 LLM —— 那段对 CLI 是**不透明**的。CLI 能诚实观测的
-#    只有「预检过了」和「一张卡落库了」，观测不到中间五个编排态。
-#    ⇒ 它记 PREFLIGHTED → CARD_PERSISTED 这一条粗边，不伪造它没看见的中间态
-#      （伪造 = 造一段看起来被逐段观测过的假路径，违反「当时看到的必须可重建」）。
-#    批 C 的 Orchestrator 上线、`bin/biga-card` 收缩成薄 CLI 之后，这条边的
-#    唯一使用者消失，届时删掉（已记进 TODO.md 批 C 开工清单）。
-_LEGACY = [
-    (RunState.PREFLIGHTED, RunState.CARD_PERSISTED),
-]
+# 🔴 批 B 曾有一条 legacy 粗边 `PREFLIGHTED → CARD_PERSISTED`，专给「编排整个交给
+#    一个被 spawn 的 LLM、中间态对 CLI 不透明」的老路径用。批 C-II 的
+#    DecisionOrchestrator 自己驱动 8 步细粒度链，那条粗边**没有调用方了** ——
+#    已删除，不留一条恒不被走的死边（L-7）。跳过中间态现在一律是非法转移。
+#    （`tools/verify/` 无引用、`bin/biga-card` 已收缩、grep 全仓无残留 —— 见批 C-II 探针 P4。）
 
 #: 在途状态（非终态）—— 失败/超时/取消可以从其中任何一个发生。
 _IN_FLIGHT = tuple(s for s in (
@@ -167,7 +162,7 @@ _INPUT_REQUIRED = [
 
 #: (from_state, to_state) 全体合法转移。`transition()` 只认这里有的。
 LEGAL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
-    _ORCHESTRATED + _LEGACY + _FAILURE + _INPUT_REQUIRED
+    _ORCHESTRATED + _FAILURE + _INPUT_REQUIRED
 )
 
 

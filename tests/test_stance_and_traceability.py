@@ -32,7 +32,7 @@ from _contract import (  # noqa: E402
     Evidence,
     MissingItem,
 )
-from _consistency import assert_matches_source, built_agents  # noqa: E402
+from _consistency import assert_matches_source, built_specialists  # noqa: E402
 
 
 def _ev(field="sh_close", source="sina:kline/sh000001", raw_hash="abc123"):
@@ -113,10 +113,11 @@ class TestStanceVocabMatchesContracts:
         独立事实：`agents/` 目录下有没有这个 agent）。
         """
         assert_matches_source(
-            set(STANCE_VOCAB), built_agents(),
-            what="STANCE_VOCAB 的 key 集合 vs 已建好的 agent",
-            fix_hint="新建一个 agent 时，在 `_contract/verdict.py` 的 "
-                      "STANCE_VOCAB 里登记它的词表")
+            set(STANCE_VOCAB), built_specialists(),
+            what="STANCE_VOCAB 的 key 集合 vs 已建好的 Specialist",
+            fix_hint="新建一个 specialist 时，在 `_contract/verdict.py` 的 "
+                      "STANCE_VOCAB 里登记它的词表；若是 support 类（不产 stance，"
+                      "如 synthesizer），登记进 `_consistency.SUPPORT_AGENTS`")
 
     @pytest.mark.parametrize("agent", sorted(STANCE_VOCAB))
     def test_每个词都出现在该agent的契约里(self, agent):
