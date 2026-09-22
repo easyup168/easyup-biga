@@ -771,14 +771,25 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `Evidence` 加 `evidence_set_id`（还 D-II 的账，CROSS_CHECK 升级为优先
         比它）；试点迁 `emotion`（`build_fact_bundle`）。市场/板块/技术/新闻/
         风险五个未动，`amend_verdict.py` 未退役。教程 ch 27。
-  - [ ] 批 E-II · 迁 market/sector/technical/news 四个 —— 分发提示词已就绪
-        E-I 交下来的①②两个设计问题已裁定（见设计文档 §6 批 E 附注，2026-09-23）：
-        ① Agent 追加的「限制」缺失项改成 skill 自己检测写进 `FactBundle.missing`，
-        不给 `AgentAssessment` 加字段；② 消费方不改读 `AgentOutcome`，继续吃
-        `load_verdict` 的兼容垫（没有消费方，提前收敛是 L-1）。
-        这一批也是第一次让**读冻结快照**（market/sector/technical）与**参与
-        `CROSS_CHECK_PAIRS`**（market/technical）的 Specialist 走新形状——
-        E-I 的试点 `emotion` 两者都不碰，没被真正测过。
+  - [~] 批 E-II · 迁 market/sector/technical/news 四个 —— **实现完成、离线全绿
+        （1039→1062），六道探针（P1–P6）+ 四道红灯演练全见过红并已还原，
+        `biga-card --check` 回放一致、`audit --worktree` 十一项全绿，待独立评审**
+        （不自宣通过）。四个 skill `build_verdict→build_fact_bundle`、产 `FactBundle`；
+        消费方零改动。教程 ch 29。
+        **①的裁定落地查了真实数据库**（不照抄例子）：四个 skill 历史 `--add-missing`
+        限制全部已由 skill 自检（`market.breadth.*`、`sector.board.pre_session`），
+        ①不新增检测代码。唯一例外 `market.trend.no_history` 命中 escape hatch ——
+        实测 5 次修订原件都带 `volume_ratio`（有整段序列），是**判断边界**（同 sector
+        「板块持续性」）不是数据缺口 ⇒ 裁定**范围外、skill 不产它**，caveat 归 agent
+        「需要注意」自由文本。② 维持不改（消费方继续吃 `load_verdict` 兼容垫）。
+        🔴 第五交付物：修 `agents/market/AGENTS.md` 模板（设计 owner 授权的 AGENTS.md
+        例外）—— 删掉 `--add-missing market.trend.no_history … --verdict WARNING` 组合命令
+        （agent 事后覆盖 skill 完整度的旧洞，迁移后会被拒、不改就是 F9 式抖动），
+        caveat 改走「需要注意」。
+        ⏭ **后续文档收敛（未做，非阻塞）**：sector/technical/news 的 AGENTS.md 里还留着
+        **可选**的 `--add-missing X.partial` 示例命令。它们对应 genuine 数据缺口、skill
+        已自检，agent 正常只需 `--stance` 转述、不会撞上，破坏概率远低于 market；但示例
+        本身迁移后同样会被 fact 行拒 ⇒ 建议随 E-III 或一次文档 pass 一并清掉。
   - [ ] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py`（等 E-II 评审通过、
         四个新形状稳定之后再写分发提示词）
         `risk` 单独一批：它也有 `stance`（`VETO_STANCE` = 制衡层最安全关键的
@@ -805,16 +816,47 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       留给"任何引入同 decision_id 重试"的批次开工前处理。
       🔴 2026-09-22 复盘：把 run_id **字段补上存下来**这部分不该也一起排期——
       现在就有消费方（batch B 起 run_id 就存在），且批 E 正在同一层做迁移，
-      晚做要再开一次刀。已拆成独立小批，见下方「批 E-I 收尾」。
-- [ ] 批 E-I 收尾 · run_id 贯穿全链 —— 分发提示词已就绪，等批 C-III 与批
-      E-I **都**合并之后开工（两者都会碰 `orchestrator.py`，等两边落定
-      避免三批抢同一批文件）
-      只做 capture：`agent_verdicts` 加列，六个 skill 脚本各加可选
-      `--run-id`，`VerdictRef`/`DecisionCard` 各加字段。不做 enforce
-      （`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等真正的重试批次。
+      晚做要再开一次刀。已拆成独立小批，见下方「批 J」。
+- [ ] 批 J · 身份闭环 —— **原「批 E-I 收尾 · run_id 贯穿全链」，2026-09-23 扩容并改名**
+      （设计见 SSOT §6 批 J；改名理由：实测发现 `run_id` 在库里指**三个**
+      互不相同的东西，另外两处必须与第一处一起改，名字再叫「E-I 收尾」
+      会让开工会话按扫尾活的体量安排验证）
+  - [ ] 批 J-I · `run_id` capture 贯穿全链 —— 分发提示词已就绪
+        范围与原「E-I 收尾」**一字未改**：`agent_verdicts` 加列，六个 skill
+        脚本各加可选 `--run-id`，`VerdictRef`/`DecisionCard` 各加字段。
+        不做 enforce（`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等
+        真正的重试批次。
+        ⚠️ 等批 E-II **与** E-III 都合并之后开工（三批都要碰同一批 skill 脚本）
+  - [ ] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
+        —— 分发提示词已就绪
+        两处同名清掉。`agent_runs.run_id` 是 `INTEGER PRIMARY KEY
+        AUTOINCREMENT` 账本行号，**实测全仓没有任何代码读它** ⇒ 现在改免费；
+        `SpawnHandle.run_id` 其实是 `runtime_run_id`，落库之后
+        `spawn_check.py` 能从 `payload_json LIKE '%决策号%'` 文本匹配
+        升级成结构化 join（F3 残留，§4 早就记着）。
+        两半合一批做：动的是同一张只追加表，拆开=对它连开两次刀
+- [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
+      (sort_keys=True)`），而建表注释断言「不做任何归一化」。排在批 J 之后、
+      批 F 之前：它给 raw 加溯源字段，那些字段要指向一个不含歧义的 `run_id`
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
+- [ ] 批 K · Pipeline Registry + Agent Registry —— 2026-09-21 `news` 没被
+      spawn 那次事故的结构性解法（现在只有对账测试，不是单一源）；
+      顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）
+- [ ] 批 L · `cn.trading_calendar` —— P0 六个 dataset 里**今天**唯一有
+      被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
+      定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
+      体量小的数据集把 Provider→Raw→Normalize→Quality→Snapshot 走第二遍
+      （第一遍是已完成的 index_daily）。
+      🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
+      Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
+
+🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
+`multi-agent-data-architecture` + `data-platform-development-plan` 两份），
+并经同日到手的**总体设计**（`baga-full-system-architecture`，位阶最高）复核过。
+采纳/不采纳的分界、Parquet 那条改判、以及批 J 为什么是下一步（总体设计 §43
+短期重点前三条全落在它里面），写在设计 SSOT §0 与 §6，**不在这里重复**。
 
 出口条件 12 条 → 见设计文档 §11。
 
