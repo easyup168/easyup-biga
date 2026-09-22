@@ -235,12 +235,27 @@ P1/P2 live 补验（`71789b5`）**都已经落地**——不照单接收既包�
 评审指出的这批字段缺口（`agent_verdicts`/`evidence_sets`/`DecisionCard`/
 `VerdictRef` 都不认 `run_id`）到那一天就会从「潜在」变成「立即可利用」。
 
-⇒ **不作为紧急修复，作为一条排期约束**：**任何**引入「同一 decision_id
-可以被多次尝试」的批次（目前排位上最可能是批 G 的可靠性/重跑相关工作，
-但确切落在哪一批要看到时候的实际设计）**开工前**，`run_id` 必须先贯穿
-`agent_verdicts` → `evidence_sets` → `VerdictRef` → `DecisionCard` 这条链。
-这件事本身不建议现在单独开一批去做——没有重试路径去消费它，提前建是
-L-1（没有消费方的结构）。
+🔴 **2026-09-22 复盘：上面「不建议现在单独开一批」这句判断本身错了一个变量。**
+它把两件成本曲线完全不同的事混成了一件：
+
+| | 把字段补上、存下来（capture） | 靠字段做强制校验（enforce，拒绝跨 run 串读） |
+|---|---|---|
+| 现在有没有消费方 | 有——`run_id` 本身从批 B 就存在并被写入 `decision_runs`/`run_events`，这里只是让 `agent_verdicts` 等**已经在写别的字段**的表顺手多存一列 | 没有——`latest_verdict_ids()` 按 `run_id` 过滤这件事，只有重试路径存在才有意义 |
+| 现在不做，以后会怎样 | 越晚做越贵：批 E 系列正在**同一层**（`_contract/verdict.py`、`_store/schema.py`）做迁移，晚一步就要在这层上再开一次刀，还要处理期间新落的历史数据 | 不会变贵——加一个 `WHERE run_id = ?` 不会因为多等几批而变难写 |
+| 结论 | **现在排期，紧跟在当前这轮 schema 改动后面** | 维持原判：等真正的重试批次开工前再做 |
+
+分界线是「记账」与「用账」——这个项目里 `Evidence.raw_hash` 就是先例：先有字段
+被老老实实填上，很久之后才等到 D-II 给它写出真正严格的消费逻辑，中间那段
+「填了但没人查」的时间不是浪费，是在为将来的消费方攒数据。`run_id` 现在要做的
+是同一件事，不是提前建枚举。
+
+⇒ **capture 部分排期为独立小批「批 E-I 收尾 · run_id 贯穿全链」**，
+等批 C-III 与批 E-I **都**合并之后开工（两者都会碰 `orchestrator.py`/
+schema 层，等两边落定再动一次，不是三批人马同时抢同一批文件）——
+详见 `orchestration-kickoff-prompt.md`。**enforce 部分维持原判**：
+任何引入「同一 decision_id 可以被多次尝试」的批次开工前，
+`latest_verdict_ids()` 按 run_id 过滤 + 拒绝跨 run 混読的校验必须先补上，
+但这部分现在确实没有消费方，留在那时候再做。
 
 #### 追加 5.2 · Stage 1 部分失败的 cleanup 缺口，恰好是 `cancel()` 一直缺的那个真调用方
 
@@ -440,15 +455,24 @@ Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet �
 
 ### 批 E · Facts / Assessment 拆分
 
+> ✅ **E-I 已落地（2026-09-22）。** 契约三型（`_contract/facts.py`）+ `LegacyAdapter`
+> + 存储（schema v8 `kind` 列，新旧同住 `agent_verdicts`）+ `Evidence.evidence_set_id`
+> （顺带还了 D-II 的账）+ risk CROSS_CHECK 升级 + **试点 `emotion`** 已迁到新三型。
+> 其余五个 skill（market/sector/technical/news/risk）**未迁**，仍产 `AgentVerdict`。
+> 落地细节冻结在教程第 27 章；当前状态见 `architecture.md` §4.1.2。**E-II 起迁剩下五个**
+> —— 要等 E-I 落地的真实类型形状之后才写分发提示词（同 D 的道理）。
+
 ```
 旧 AgentVerdict  →  LegacyAdapter  →  FactBundle + AgentAssessment + AgentOutcome
 ```
 
 逐个 Specialist 迁，允许一段时间新旧并存。做完之后
-`amend_verdict.py`（skill 先写 verdict、agent 再补 stance 的那条补丁路径）可以退役。
+`amend_verdict.py`（skill 先写 verdict、agent 再补 stance 的那条补丁路径）可以退役
+（退役前提是**全部** Specialist 迁完；E-I 只迁了一个，**未退役**）。
 
 ⚠️ 这是七批里最贵的一批：六个 skill 的输出结构、契约层、存储层、回放、
-以及 745 条测试里相当一部分都会被触及。**不与批 C 并行做。**
+以及大量测试都会被触及。**不与批 C 并行做。** ⇒ 分发时拆成 E-I（基础设施 + 一个试点）
+/ E-II（其余五个），同 A/C/D 的拆分理由。
 
 ### 批 F · Risk 拆两层
 
