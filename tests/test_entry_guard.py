@@ -243,8 +243,12 @@ class TestWiredIntoEntrypoint:
     def test_守卫排在第一次花钱之前(self):
         """顺序判据：熔断 → ownership → 锁 → 预算 → 第一次付费调用。
 
-        🔴 顺序错了等于没有：守卫排在 `$BIGA agent` 后面，
-        每次拒绝仍然要付一个 main 轮次 —— 事故里那 \\$8.99 就是这么来的。
+        🔴 顺序错了等于没有：守卫排在付费动作后面，每次拒绝仍然要付一轮 ——
+        事故里那 \\$8.99 就是这么来的。
+
+        ⚠️ 批 C-II 收缩之后，第一次花钱的动作从 `$BIGA agent --agent main`（喂提示词
+           给 main）变成 `orchestrator.py`（程序驱动、经 Adapter 真 spawn）。守卫顺序
+           必须原样跟着这个新的付费点排 —— 换的是「谁花钱」，不是「守卫排哪」。
         """
         text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
         run = text.split("# ── 出新卡")[1]
@@ -253,7 +257,7 @@ class TestWiredIntoEntrypoint:
                              ("ownership", "entry_guard"),
                              ("锁", "flock -n 9"),
                              ("预算", "check_budget"),
-                             ("付费调用", '"$BIGA" agent --agent main')):
+                             ("付费调用", "orchestrator.py")):
             i = run.find(needle)
             assert i >= 0, f"出卡流程里找不到「{name}」这一道（{needle}）"
             order.append((i, name))
@@ -266,17 +270,34 @@ class TestWiredIntoEntrypoint:
 #
 # 🔴 这一条是**修复过程中犯的错**催生的，不是设计时想到的。
 #
-# `test_agent调用出卡命令会被拒` 第一版没有把 `BIGA` 换成桩。
-# 「逻辑上」它走不到 agent 调用 —— 守卫在前面。但**探针恰恰是把守卫拆掉**，
+# `test_agent调用出卡命令会被拒` 第一版没有把付费调用换成桩。
+# 「逻辑上」它走不到那里 —— 守卫在前面。但**探针恰恰是把守卫拆掉**，
 # 于是那次探针跑了一次真实出卡：占号 -025、4 个 specialist、$0.79。
 #
 # > 验证 fail-closed 的测试，本身不能有 fail-open 的代价。
 # > 这句话写在教程第 19 章，然后在下一个小时里被违反了。
 #
-# ⇒ 判据不能是「记得加桩」。任何在测试里跑出卡入口的地方，
-#   都必须显式覆盖 `BIGA`，否则红。
+# ⚠️ 批 C-II 收缩把**第一次花钱的动作**从 `$BIGA agent --agent main` 挪到了
+#    `orchestrator.py`（程序驱动、经 Adapter 真 spawn）。而 Adapter 用的是
+#    `DEFAULT_BIGA`（写死的真实路径），**根本不读 `BIGA` 环境变量** —— 所以
+#    「把 BIGA 换成桩」这条老判据从此拦不住花钱了。守卫必须跟着付费点一起挪，
+#    否则就是本仓库反复踩的 L-13：**守卫查的地方，和它声称守的地方，不是同一处。**
+#
+# ⇒ 判据改成：任何在测试里跑出卡入口、又能走到付费点的地方，都必须能看出
+#   **付费调用被中和**了 —— 桩掉 orchestrator.py（`_seeded_repo` 系列），
+#   或让某道守卫先把它拦下（总闸 / ownership / 只读子命令）。否则红。
 
 _ENTRYPOINT = "biga-card"
+
+#: 「这次调用花不了钱」的证据。命中任一即安全（判据落在**调用点附近**，
+#: 不做文件级放行 —— 文件级会被「同文件另一个测试加了桩」满足，那正是 L-13）。
+_PAID_NEUTRALIZED = (
+    "_seeded_repo", "_orch_path", "_orch_stub",  # 桩掉了 orchestrator.py（付费点）
+    "OpenClawRuntimeAdapter",                     # _run 自证「orchestrator 是桩」的断言
+    "OPENCLAW_SERVICE_KIND",                      # 触发 ownership 守卫拒绝
+    ".biga-card-stop",                            # 触发总闸拒绝
+    "--list", "--show", "--check", "--status",    # 只读子命令，根本不花钱
+)
 
 
 def _tests_invoking_entrypoint() -> list[tuple[str, int, str]]:
@@ -313,29 +334,28 @@ def test_扫到了出卡调用点():
     assert len(hits) >= 3, f"只扫到 {len(hits)} 处，AST 判据可能坏了"
 
 
-def test_测试里跑出卡必须把BIGA换成桩():
-    """🔴 判据是**这个调用自己的 env 里有 `BIGA`**，不是「文件里某处有」。
+def test_测试里跑出卡必须把付费调用换成桩():
+    """🔴 判据落在**调用点附近**，不做文件级放行。
 
     只查文件级会被「同文件里另一个测试加了桩」满足 ——
     那正是本仓库反复踩的「守卫查的地方和它声称守的地方不是同一处」（L-13）。
+
+    ⚠️ 收缩后付费点是 `orchestrator.py`，不再是 `$BIGA agent`（见上方注释块）。
+       所以这里查的是「付费调用被中和」的证据，而不再是「BIGA 被换成桩」。
     """
     bad = []
     for fname, lineno, blob in _tests_invoking_entrypoint():
-        # `env=` 里出现 `"BIGA"` 键，或者传了一个前面构造好的 env 变量
-        # ⇒ 后者无法静态确认，所以要求调用处能看到 BIGA 这个字面量，
-        #   或者 env 变量名本身带 env/stub 提示且同函数内出现过 "BIGA"。
-        if '"BIGA"' in blob or "'BIGA'" in blob:
-            continue
-        # 允许一种情况：调用传的是 env 变量，而该变量在**同一个函数体**里
-        # 被赋值且含 "BIGA" —— 用行距近似「同一函数」，10 行内。
+        # 调用点前 40 行 + 调用本身：足以覆盖「先 _seeded_repo 造沙盒、再 _run」
+        # 和「先写 .biga-card-stop、再跑」这类紧邻的写法，又不至于宽到退化成文件级。
         src = (REPO / "tests" / fname).read_text(encoding="utf-8").splitlines()
-        window = "\n".join(src[max(0, lineno - 25):lineno])
-        if '"BIGA"' in window or "'BIGA'" in window:
+        window = "\n".join(src[max(0, lineno - 40):lineno]) + "\n" + blob
+        if any(sig in window for sig in _PAID_NEUTRALIZED):
             continue
         bad.append(f"{fname}:{lineno}  {blob[:90]}")
     assert bad == [], (
-        "这些测试会跑真实的出卡入口，却没有把 `BIGA` 换成桩：\n"
+        "这些测试会跑真实的出卡入口，却看不出付费调用被中和了：\n"
         + "".join(f"  · {b}\n" for b in bad)
         + "  🔴 一旦被测的守卫被拆掉（探针就是这么干的），它们会**真的花钱**。\n"
           "     实测代价：$0.79 / 次（占号 + 4 个 specialist）。\n"
-          "  加上 `\"BIGA\": str(stub)` 与 `\"BIGA_DB_PATH\": str(tmp/...)`。")
+          "  收缩后付费点是 orchestrator.py（Adapter 走 DEFAULT_BIGA，不读 BIGA）——\n"
+          "  用 `_seeded_repo` 桩掉它，或让总闸 / ownership / 只读子命令先拦下。")

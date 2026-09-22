@@ -66,6 +66,7 @@ A 股短线**决策辅助**系统。
 | 21 | [值对象与不变量](21-value-objects-and-invariants.md) | 确定性编排批 A-II：`MissingItem` 身份改基于 code；冻结对象为什么要两步；重复 vs 缺席该用不同的严格度；schema 版本号被提前占用 | ✅ |
 | 22 | [运行身份与状态机](22-run-identity-and-state-machine.md) | 确定性编排批 B：一个 id 扛五件事的代价；状态为什么事件溯源而不是一个 `state` 列；CAS 靠唯一约束不靠「先查再写」；13 个状态凭什么是 13 个；每个状态都要能指出谁写谁读 | ✅ |
 | 23 | [Python 驱动 spawn：运行时适配层](23-runtime-adapter.md) | 确定性编排批 C-I：不经 LLM 轮次 spawn Specialist；状态归一化为什么值一层；grant 生命周期与 groupId 硬约束；先抓真实响应形状再写解析（别测自己的假货）；cancel 的意外（active 顺序≠spawn 顺序） | ✅ |
+| 24 | [把编排变成程序：生产入口切换](24-deterministic-orchestrator.md) | 确定性编排批 C-II：「谁能启动」从「拦住」变成「够不到」；判官为什么是叶子 agent；一个被总闸掩盖的 `set -u` bug；**付费点挪了地方而守卫盯着老地方——我在这一批亲手踩了它、真花了钱** | ✅ |
 
 ---
 

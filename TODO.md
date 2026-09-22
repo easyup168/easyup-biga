@@ -636,12 +636,40 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       无 N=2 专属 bug——残留风险收窄为「运行时在这些场景下是否真的保持同位
       对应」，线下无法验证，已作为条件性探针 P5 带进批 C-II（只在 Orchestrator
       真的调用 cancel() 时才适用，否则要求原样记进已知问题，见分发提示词）
-- [ ] 批 C-II · DecisionOrchestrator + 生产入口切换 ★ —— 分发提示词已就绪，可开工
-      这次升级第一次改动生产入口（`bin/biga-card`）。
-      🔴 批 B 欠的一笔要在这里还：`LEGAL_TRANSITIONS` 里 `PREFLIGHTED →
-      CARD_PERSISTED` 是 legacy 粗边（`bin/biga-card` 观测不到中间五个编排态
-      才用它）。Orchestrator 上线、`bin/biga-card` 收缩成薄 CLI 之后，这条边的
-      唯一使用者消失 —— **删掉它**，否则它变成一条恒不被走的死边（L-7）。
+- [ ] 批 C-II · DecisionOrchestrator + 生产入口切换 ★ —— **实现完成，待独立评审 + P1/P2 live**
+      这次升级第一次改动生产入口（`bin/biga-card`）。已落地（离线全绿，948 条）：
+      · `DecisionOrchestrator`（`skills/decision-card/scripts/orchestrator.py`）程序
+        驱动 8 步细粒度状态链（RECEIVED→…→COMPLETED），占号在 `open_run` 之前
+        （`decision_id` 从头非空）；Stage 1 五路 fan-out 共用一个 groupId、Stage 2
+        risk、Stage 3 spawn `synthesizer` 判官（**新建**的 `allowAgents=[]` 叶子 agent，
+        靠 `outputSchema` 拿结构化 status/headline/synthesis，程序组装 Card，
+        数据不经判官搬运）。
+      · `bin/biga-card` 收缩成薄 CLI：五道守卫（顺序原样）→ 调 orchestrator →
+        spawn_check + readback_check → 退出码。**不再 spawn main、不再抽提示词。**
+      · legacy 粗边 `PREFLIGHTED → CARD_PERSISTED` **已删**（唯一使用者消失，L-7）。
+      · `ORCHESTRATION.md` 收缩成各角色指令口径（PROMPT 块删除，`--decision-id`
+        三处自相矛盾随之消失——代码里 orchestrator 永远显式传号、synthesize.py
+        永远优先用证据自带号）；`AGENTS.md` 的「你就是执行者」整段改成「出卡是程序，
+        你没有一步可做」（⚠️ 这动了 main 的 AGENTS.md，见评审交接说明的取舍）。
+      · 修了一个收缩引入的**生产级 bug**：`echo "…约 $1.2…"` 在 `set -u` 下裸 `$1`
+        未绑定会当场终止脚本（总闸开着时撞不到，一解除就咬人）——已转义。
+      探针：P3 守卫顺序前后判据不变（既有守卫顺序/拒绝测试逐字节钉住）；
+      P4 全仓无 legacy 粗边引用（新增 AST 扫描，非测试文件）。
+      **评审回合一 · 两条阻塞项已修**（均改代码）：
+        · 阻塞 1 — `orchestrator.py` 的 `main()` 加 ownership 守卫（`entry_guard.
+          classify_caller`）：agent 血缘 → `exit 3`，人/cron → 放行。补上了 `main` 用
+          shell `exec orchestrator.py` 绕过 bin/biga-card 的活口子 ——「够不到」现在在
+          exec 面也成立（这就是 P2 的血缘面）。探针见红：关守卫→桩 run() 炸→红。
+        · 阻塞 2 — `bin/biga-card` 加 `trap`（EXIT/TERM/INT/HUP）收养兜底：编排放后台
+          +wait，wrapper 一死就 kill 编排子进程。孤儿化事故根因是外层 timeout 杀 shell
+          后孙进程孤立（不是 `$1.2` bug），需代码兜底不是「以后小心」。探针见红：
+          `_reap_orch` 改空操作→真杀 wrapper 后子进程存活→红。
+      P1（真跑端到端走 8 步链）/ P2 的 live 面（把 L-14 提示词贴给真 main 会话）需
+      **重启网关加载 synthesizer 后 live 跑** —— 见下方待办，未做完不算收口。
+- [ ] 批 C-II 收尾 · P1/P2 live 补验（需 $1.2 授权 + 新会话）
+      重启 gateway 让 `synthesizer` 进 roster → 真跑一次端到端出卡，断言 run_events
+      走 8 步细粒度链、`subagent_runs` 有 synthesizer；再复述 L-14 那句提示词给 main，
+      断言它**没有工具能到达** DecisionOrchestrator（够不到，不是被拒）。
 - [ ] 批 D · SnapshotCoordinator
 - [ ] 批 E · Facts / Assessment 拆分
 - [ ] 批 F · RiskPolicy 前移
@@ -649,6 +677,26 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
 
 出口条件 12 条 → 见设计文档 §11。
+
+### 🔶 批 C-II 残留风险（评审时一并看）
+
+**P5 · `cancel()` 的 active[]/tasks[] 同序映射仍只在 N=2、无 drain 下实测过。**
+这一批的 `DecisionOrchestrator` **没有调用 `adapter.cancel()`**：部分失败/超时的处理是
+「缺席的 agent 记 `missing`、照常出卡」，还在跑的兄弟 spawn 由各自的
+`runTimeoutSeconds`（C-I 定死的硬约束，运行时到点收）兜住，不主动取消。所以 C-I 评审
+留下的那条 —— 「N≥3、且至少一个 spawn 已离场（active→recent）时，取消是否仍命中对的
+那一个」—— **没有被这一批消费**，原样带下去：谁第一个真的让 Orchestrator 调 `cancel()`
+（批 F RiskPolicy 前移可能会），谁先补这个 live 场景。不调 cancel 是**保守选择**——
+`cancel` 的同位对应风险，大于它能省下的那点并行成本。
+
+**stall_watchdog 现在零消费方。** 老 `bin/biga-card` 的 bash 轮询循环（看门狗挂在那里防
+非交互 `ask_user` 死锁）被收缩掉了。新路径里每个 spawn 带 `runTimeoutSeconds`，一个卡在
+`ask_user` 的会话**理应**被运行时按 timeout 收掉、`agents_wait` 记成缺席 —— 但
+「`runTimeoutSeconds` 是否在 `blocked_tool_call` 状态下真的开火」读代码验不了。
+⇒ 模块与其单元测试**原样保留**（没验证「运行时确实兜住」之前不删这道安全网，R-3）。
+下一批二选一：① 验证运行时会收掉阻塞会话 → 正式退役看门狗；② 把 `find_blocked` 接到
+orchestrator 的超时诊断路径（超时时判一下是不是 `ask_user` 死锁、记进 detail/missing），
+给它一个真实消费方。这条同 P5 一样，是「这一批用不到但不让它悄悄消失」。
 
 ### ⚠️ `.biga-card-stop` 的解除条件看起来已经满足，但没解除
 

@@ -132,7 +132,10 @@ class SpawnResult:
 
     Attributes:
         status: `SpawnStatus` 之一（归一化，**不是**运行时原始词）。
-        result: Specialist 返回的结构化/文本结果（成功时）。
+        result: Specialist 返回的**文本**回答（成功时）。
+        structured: 🔴 用 `output_schema` spawn 时，`agents_wait` 会额外带一份
+            **结构化**结果（`completed[].structured`），比解析 `result` 文本可靠。
+            没传 schema 时为 None。C-II 的 synthesizer 判官靠它拿 status/headline/synthesis。
         usage: `{"input": n, "output": n}`，来自 `agents_wait` 的 usage。
             🔴 只带出来，**不在 Adapter 里写库**（C-II 写进 run_events.detail）。
         error: 失败时的原因（结构化文本），成功时为 None。
@@ -142,6 +145,7 @@ class SpawnResult:
     handle: SpawnHandle
     status: str
     result: Any | None = None
+    structured: dict | None = None
     usage: dict[str, int] | None = None
     error: str | None = None
     raw_status: str | None = None
@@ -257,11 +261,14 @@ class OpenClawRuntimeAdapter:
                 if h is None:
                     continue
                 raw = entry.get("status")
+                norm = normalize_status(raw)
+                struct = entry.get("structured")
                 results[rid] = SpawnResult(
-                    handle=h, status=normalize_status(raw),
+                    handle=h, status=norm,
                     result=entry.get("result"),
+                    structured=struct if isinstance(struct, dict) else None,
                     usage=_usage_of(entry.get("usage")),
-                    error=entry.get("error") if normalize_status(raw) != SpawnStatus.SUCCEEDED else None,
+                    error=entry.get("error") if norm != SpawnStatus.SUCCEEDED else None,
                     raw_status=raw)
         for rid, h in by_id.items():  # 到期还没回来的
             results[rid] = SpawnResult(

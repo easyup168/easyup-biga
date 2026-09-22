@@ -195,18 +195,17 @@ class TestHappyPath:
             transition(rid, frm, to, path=db)
         assert current_state(rid, path=db) == RunState.COMPLETED
 
-    def test_legacy粗粒度路径合法(self, db):
-        """bin/biga-card 走的那条：预检后直接观测到卡落库。"""
+    def test_legacy粗边已删除_跳中间态非法(self, db):
+        """批 C-II（P4）：批 B 的 legacy 粗边 PREFLIGHTED → CARD_PERSISTED 已删。
+
+        DecisionOrchestrator 自己走 8 步细粒度链，不再有「中间态对 CLI 不透明」
+        的老路径。跳过中间五个编排态现在一律是非法转移。
+        """
+        assert (RunState.PREFLIGHTED, RunState.CARD_PERSISTED) not in LEGAL_TRANSITIONS
         rid = _open(db)
         transition(rid, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
-        transition(rid, RunState.PREFLIGHTED, RunState.CARD_PERSISTED,
-                   detail={"decision_id": "BIGA-20260922-007"}, path=db)
-        transition(rid, RunState.CARD_PERSISTED, RunState.COMPLETED, path=db)
-        j = run_journey(rid, path=db)
-        assert j["current_state"] == RunState.COMPLETED
-        # detail 里带回了发现的决策号（run 头那侧占号时它还不存在）
-        persisted = [e for e in j["events"] if e["to_state"] == "CARD_PERSISTED"][0]
-        assert persisted["detail"]["decision_id"] == "BIGA-20260922-007"
+        with pytest.raises(IllegalTransition, match="不是合法转移"):
+            transition(rid, RunState.PREFLIGHTED, RunState.CARD_PERSISTED, path=db)
 
     def test_run_events序列能完整复述走过的路(self, db):
         """判据：一条运行的 run_events 序列可以完整复述它走过的路。"""
@@ -242,11 +241,12 @@ class TestTransitionRejects:
             transition(rid, RunState.PREFLIGHTED, RunState.RECEIVED, path=db)
 
     def test_expected传错被拒(self, db):
-        """图里 RECEIVED→PREFLIGHTED 合法，但 run 现在在 RECEIVED，
-        谎称它在 PREFLIGHTED 会被 compare 挡下。"""
+        """SNAPSHOT_FROZEN→STAGE1_RUNNING 是合法边，但 run 现在在 RECEIVED，
+        谎称它在 SNAPSHOT_FROZEN 会被 compare 挡下（这才是 CAS 的 expected 不符，
+        与「边本身非法」两条不同的路径）。"""
         rid = _open(db)
         with pytest.raises(IllegalTransition, match="CAS 失败|现在在"):
-            transition(rid, RunState.PREFLIGHTED, RunState.CARD_PERSISTED, path=db)
+            transition(rid, RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING, path=db)
 
     def test_终态出不去(self, db):
         rid = _open(db)
@@ -335,30 +335,46 @@ class TestAppendOnly:
                 c.execute("UPDATE evidence_sets SET manifest_json='{}'")
 
 
-# ══ bin/biga-card 的 _move 调用都得是合法转移 ═══════════════════════════════
+# ══ 批 C-II：状态转移归 orchestrator，bin/biga-card 不再自己写状态 ═════════════
 #
-# bin/biga-card 是 bash，它记 run 的每一步 `_move FROM TO` 里的状态名是**字面量**，
-# 不经类型检查。而 legacy 出卡路径受总闸拦着、跑一次要 3 分钟 / $1.2，端到端
-# 覆盖不到它 —— 一个 `_move PREFLGHTED …` 的拼写错误会 best-effort 地静默失败，
-# 没有任何测试会红。这条守卫把那些字面量捞出来，逐一核对是否在 LEGAL_TRANSITIONS 里。
+# 批 B 时 bin/biga-card 里有一堆 `_move FROM TO` 的 best-effort 记账。批 C-II
+# 把编排收进 Python：run 记账（open_run + 全部 transition）只在
+# DecisionOrchestrator 里做，bin/biga-card 收缩成薄 CLI。这条守卫钉住那个收缩 ——
+# 别让 bin/biga-card 又长回自己写状态的老样子（那会变成第二处写状态的地方）。
 
 
-_MOVE_RE = re.compile(r"^\s*_move\s+([A-Z_]+)\s+([A-Z_]+)", re.MULTILINE)
-
-
-class TestBigaCardWiring:
-    def test_biga_card里的每个_move都是合法转移(self):
+class TestBigaCardIsThin:
+    def test_biga_card不再自己写运行状态(self):
         card = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
-        pairs = _MOVE_RE.findall(card)
-        assert pairs, "一个 _move 都没扫到 —— 要么脚本变了，要么正则坏了（等于没测）"
-        bad = [(f, t) for f, t in pairs if (f, t) not in LEGAL_TRANSITIONS]
+        assert "_move " not in card, "bin/biga-card 又出现 _move —— 状态转移应归 orchestrator"
+        assert "run_ledger.py move" not in card and "$RL move" not in card, \
+            "bin/biga-card 不该自己 move 状态；它只在 --status 时用 run_ledger 读"
+
+    def test_全仓不再引用已删的legacy粗边(self):
+        """P4：删掉 legacy 粗边后，确认没有代码/测试还在构造它。
+
+        判据取「同一处源码里 PREFLIGHTED 与 CARD_PERSISTED 紧挨着出现」——
+        真正引用这条边的地方（`transition(... PREFLIGHTED, CARD_PERSISTED)` /
+        `(PREFLIGHTED, CARD_PERSISTED)` 元组）都是这个形状。
+        """
+        import ast
+        from _scan import repo_files
+        bad = []
+        for f in repo_files(".py"):
+            # 只扫生产代码：tests/ 里断言「这条边已没了」的检查本身会提到这两个名字，
+            # 那是合法的「验它不存在」，不是「引用它当合法转移」。
+            if f.parent.name == "tests" or "tests/" in str(f.relative_to(REPO)):
+                continue
+            src = f.read_text(encoding="utf-8")
+            for node in ast.walk(ast.parse(src, filename=str(f))):
+                # 找形如 (..., PREFLIGHTED, CARD_PERSISTED, ...) 的相邻实参/元素
+                if isinstance(node, (ast.Tuple, ast.Call)):
+                    names = [a.attr for a in getattr(node, "elts", None)
+                             or getattr(node, "args", [])
+                             if isinstance(a, ast.Attribute)]
+                    for i in range(len(names) - 1):
+                        if names[i] == "PREFLIGHTED" and names[i + 1] == "CARD_PERSISTED":
+                            bad.append(f"{f.relative_to(REPO)}:{node.lineno}")
         assert not bad, (
-            f"bin/biga-card 里这些 _move 不是合法转移：{bad}\n"
-            "  bash 字面量不经类型检查，而 legacy 出卡路径端到端测不到 —— "
-            "拼错一个状态名就静默失效。")
-
-    def test_biga_card用到的状态都真实存在(self):
-        card = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
-        used = {s for pair in _MOVE_RE.findall(card) for s in pair}
-        ghost = used - RUN_STATES
-        assert not ghost, f"bin/biga-card 用了不存在的状态名：{sorted(ghost)}"
+            f"这些地方还在引用已删的 legacy 粗边 PREFLIGHTED→CARD_PERSISTED：{bad}\n"
+            "  它已从 LEGAL_TRANSITIONS 删除，任何引用都会在运行时被 CAS 拒。")

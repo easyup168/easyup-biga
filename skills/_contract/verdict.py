@@ -29,6 +29,7 @@ __all__ = [
     "is_adhoc_task_id",
     "STAGE1_AGENTS",
     "STAGE2_AGENTS",
+    "SYNTHESIZER_AGENT",
     "STANCE_VOCAB",
     "VETO_STANCE",
     "AgentVerdict",
@@ -88,6 +89,17 @@ CROSS_CHECK_PAIRS: tuple[tuple[str, str, str, str, str], ...] = (
 #: 然后那个检查就被忽略了。
 STAGE1_AGENTS = ("market", "sector", "news", "technical", "emotion")
 STAGE2_AGENTS = ("risk", "discipline")
+
+#: 🔴 综合判官 —— 确定性编排批 C-II 的 Stage 3 判断者（**唯一定义**）。
+#:
+#: 它不是 Specialist：不产 AgentVerdict、不进 STAGE1/STAGE2、不进 STANCE_VOCAB。
+#: 它读冻结 verdict、产出 Card 的 status/headline/synthesis。名字单点定义在这里，
+#: orchestrator / `tests/_consistency.SUPPORT_AGENTS` / 运行时配置都引用它，不手抄。
+#:
+#: 结构性安全（比让 orchestrator spawn main 当判官强的全部原因）：它在配置里
+#: `subagents.allowAgents=[]`，是叶子节点，**没有任何 spawn 能力** —— 不是「这次
+#: 调用被限制」，是「这个 agent 从来没有这个能力」。
+SYNTHESIZER_AGENT = "synthesizer"
 
 #: 🔴 制衡层的否决。它是一个**权限**，不是一句措辞 ——
 #:    `DecisionCard` 用它拦住 BUY，所以这个字面量只许有一处定义。

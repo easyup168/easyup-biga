@@ -254,8 +254,11 @@ class TestContractsTeachTheSafePath:
             f"{path.name} 仍在示范 --verdicts（贴 JSON）—— 应改用 --verdict-ids"
 
     @pytest.mark.parametrize(
-        "path", sorted((REPO / "agents").glob("*/AGENTS.md")))
+        "path", sorted(p for p in (REPO / "agents").glob("*/AGENTS.md")
+                       if p.parent.name not in __import__("_consistency").SUPPORT_AGENTS))
     def test_契约讲清楚了第一次去哪拿verdict_ref(self, path):
+        # SUPPORT_AGENTS（如 synthesizer）不产 verdict_ref —— 它读别人的 verdict、
+        # 产出 Card 判断，没有「第一次去哪拿 verdict_ref」这回事，故排除。
         """🔴 判据不是「提到了这个词」，是「讲清楚了第一次去哪拿」。
 
         F9 的要害在这里：`news/AGENTS.md` 里 "verdict_ref" 本来就出现了 3 次

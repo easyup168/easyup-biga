@@ -28,15 +28,47 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    CONTRACT_VERSION,
     AgentVerdict,
     CardStatus,
     DecisionCard,
     MissingItem,
     VerdictRef,
 )
-from _store import load_online_card, save_card  # noqa: E402
+from _store import (  # noqa: E402
+    load_online_card,
+    load_verdict,
+    load_verdict_meta,
+    save_card,
+)
 
-__all__ = ["Judgment", "synthesize", "persist", "SYNTHESIS_VERSION"]
+__all__ = ["Judgment", "synthesize", "persist", "load_verdicts_and_refs",
+           "SYNTHESIS_VERSION"]
+
+
+def load_verdicts_and_refs(
+    verdict_ids: list[int],
+) -> tuple[list[AgentVerdict], list[VerdictRef]]:
+    """按 `verdict_id` 取回原件并配套构建 `VerdictRef` —— 在线合成与
+    DecisionOrchestrator **共用的一份**（dev-workflow 第五问：不手抄第二份）。
+
+    🔴 `content_sha256` 取自 `agent_verdicts` 那一列**当时写入的值**（`load_verdict_meta`），
+    不是把对象重新序列化再算 —— 见 A6/追加 4，重算会让 A-I 之前落库的行集体对不上。
+    """
+    verdicts: list[AgentVerdict] = []
+    refs: list[VerdictRef] = []
+    for vid in verdict_ids:
+        v = load_verdict(vid)
+        if v is None:
+            raise ValueError(
+                f"verdict_id={vid} 在 agent_verdicts 里不存在 —— "
+                f"确认 Specialist 跑 skill 时没有加 --no-store（加了就不落原件）。")
+        meta = load_verdict_meta(vid)
+        verdicts.append(v)
+        refs.append(VerdictRef(agent=v.agent, verdict_id=vid,
+                               content_sha256=meta["content_sha256"],
+                               contract_version=CONTRACT_VERSION))
+    return verdicts, refs
 
 #: 组装逻辑的版本。改了组装方式就要 +1，
 #: 否则「回放结论变了」会分不清是模型变了还是代码变了。

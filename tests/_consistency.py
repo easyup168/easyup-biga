@@ -23,20 +23,50 @@ from __future__ import annotations
 
 import pathlib
 
+from _contract import SYNTHESIZER_AGENT
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
-def built_agents() -> set[str]:
-    """已经建好的 Specialist —— 有 `agents/<name>/` 目录就算建了。
+#: **非 Specialist 的已建 agent** —— 有 `agents/<name>/` 目录、要进配置白名单，
+#: 但**不产出 AgentVerdict/stance**，所以不进 `STANCE_VOCAB`、不受「每个 stance 词
+#: 都要在契约里出现」这类 specialist 专属检查约束。
+#:
+#: 首个成员：`synthesizer`（确定性编排批 C-II 的综合判官）——它读冻结 verdict、
+#: 产出 Card 的 status/headline/synthesis，不是一个领域 Specialist。
+#: 名字单点定义在 `_contract.SYNTHESIZER_AGENT`，这里引用它，不手抄一份。
+#:
+#: 🔴 为什么要显式列出来，而不是「目录存在就当 specialist」：
+#: `built_agents()` 原本把「有目录」直接等同于「是 specialist」，靠的是当时
+#: 目录里恰好只有 specialist。加一个非 specialist 的 agent 就打破这个隐含前提 ——
+#: 与其让 `STANCE_VOCAB == built_agents()` 静默要求 synthesizer 也有 stance 词表
+#: （它没有），不如把「哪些是 support 类」这件事**显式登记**在这里。
+SUPPORT_AGENTS: frozenset[str] = frozenset({SYNTHESIZER_AGENT})
 
-    这是本仓库里"agent 名册"唯一的权威源：目录本身。任何测试需要
-    "当前有哪些 agent"时都应该调用这个函数，而不是各自维护一份名单
-    （那正是 F8/F10 反复踩的坑）。
+
+def built_agents() -> set[str]:
+    """**全部**已建 agent —— 有 `agents/<name>/` 目录就算建了（含 Specialist 与
+    support 类如 `synthesizer`）。
+
+    这是本仓库里"agent 名册"唯一的权威源：目录本身。需要"配置白名单是否覆盖了
+    所有已建 agent"用它（配置要覆盖 specialist **和** support，否则 orchestrator
+    spawn 不到 synthesizer）。需要"哪些是产出 stance 的 specialist"用
+    `built_specialists()`。
 
     `discipline` 推到 Phase 3（裁定 13），不该出现在任何名册里——
     调用方如需处理这个例外，自己在结果上减掉，不在这里特判。
     """
     return {p.name for p in (REPO / "agents").iterdir() if p.is_dir()}
+
+
+def built_specialists() -> set[str]:
+    """已建的 **Specialist**（产出 AgentVerdict/stance 的）—— `built_agents()` 减去
+    `SUPPORT_AGENTS`。
+
+    `STANCE_VOCAB` 该与这个相等（每个 specialist 一套 stance 词表），
+    而不是与 `built_agents()` 相等 —— 后者含 synthesizer 这类不产出 stance 的。
+    """
+    return built_agents() - SUPPORT_AGENTS
 
 
 def assert_matches_source(

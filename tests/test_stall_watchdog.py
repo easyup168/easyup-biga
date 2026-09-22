@@ -184,40 +184,25 @@ class TestParserRobustness:
         assert wd.UNIT.endswith("-biga.service")
 
 
-class TestWiredIntoCardFlow:
-    """L-1：新增组件必须有**被证明的**调用方。"""
-
-    def test_出卡流程会调看门狗(self):
-        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
-        run = text.split("# ── 出新卡")[1]
-        assert "stall_watchdog" in run, (
-            "看门狗没接进出卡流程 —— 一个不会被跑到的检查等于没有。")
-        assert "exit 5" in run, "死锁要有自己的退出码，不能混进 timeout"
-
-    def test_它在轮询循环里而不是新守护进程(self):
-        """🔴 判据：它和 `sleep 5` 在同一段。
-
-        新建守护进程会变成又一个「建了但没人跑」的组件（§9 L-1），
-        而且那样它会看到**全局**会话，把交互式的 `ask_user` 也连坐。
-        """
-        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
-        i, j = text.index("stall_watchdog"), text.rindex("sleep 5")
-        assert 0 < j - i < 2500, "看门狗不在等卡的轮询循环里"
-
-    def test_不自动重试(self):
-        """评审 §23：`INTERACTION_UNAVAILABLE` 默认 `retry=false` ——
-        同一个请求很可能再次 `ask_user`，那是成本循环。"""
-        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
-        assert "不自动重试" in text
-
-    def test_死锁与超时是不同退出码(self):
-        """评审 §15：不要把所有异常都归成一个码。
-
-        `5`（没人能回答）和 `1`（超时）要人做的事不一样。
-        """
-        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
-        assert "INTERACTION_UNAVAILABLE" in text
-        assert text.count("exit 5") == 1
+# ─────────────────────────── 看门狗与出卡流程的接线：批 C-II 之后不在这里了
+#
+# 老路径里 `bin/biga-card` 有一段 bash 轮询循环（`sleep 5` 等 main 的子会话落库），
+# 看门狗就挂在那个循环里，专治「非交互会话卡在 `ask_user` 上永久死锁」。
+#
+# 批 C-II 把「等待」整段挪进了 `DecisionOrchestrator`（Python，同步）——
+# bin/biga-card 不再有轮询循环，这段接线**按设计消失了**，原来钉它的
+# `TestWiredIntoCardFlow` 也随之删除（它断言的 `sleep 5` / `stall_watchdog` /
+# `exit 5` 都已不在脚本里）。
+#
+# 🔴 但「ask_user 死锁被有限化」这件事**不能静默丢**：
+#    新路径里每个 spawn 都带 `runTimeoutSeconds`（Adapter 硬约束），
+#    一个卡在 `ask_user` 的 specialist 理应被运行时按 timeout 收掉、
+#    `agents_wait` 把它记成缺席。但「runTimeoutSeconds 是否在 `blocked_tool_call`
+#    状态下真的开火」读代码验不了 —— 这条残留风险已按 P5 同样的处置写进
+#    `TODO.md`「已知问题」，连同 stall_watchdog 模块目前**零消费方**这件事：
+#    下一批要么验证运行时会收掉阻塞会话后正式退役它，要么把 find_blocked
+#    接到 orchestrator 的超时诊断路径上。模块与其单元测试**原样保留**，
+#    不在没验证「运行时确实兜住」之前就把一道安全网删掉（R-3：宁可留着待裁定）。
 
 
 def test_fixture真的被git跟踪():

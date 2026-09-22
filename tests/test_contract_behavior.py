@@ -493,8 +493,8 @@ class TestCardRoster:
 
     def test_roster参照的是STANCE_VOCAB不是自成一套(self):
         """dev-workflow 第五问：这份「已建成的 roster」清单不该是第二份手抄。"""
-        from _consistency import built_agents
-        assert set(STANCE_VOCAB) == built_agents()
+        from _consistency import built_specialists
+        assert set(STANCE_VOCAB) == built_specialists()
 
 
 class TestCardBasics:
