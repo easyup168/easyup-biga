@@ -171,6 +171,20 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
   **按 raw 层永不改写的原则，这两行不修改** —— 在此标注，
   做任何时延分析时跳过它们。schema v3 之后落的卡不再有这个问题
 
+- ⚠️ **`latency_report.py --parallel-check` 的总量测量还按老架构的假设写。**
+  批 C-II 之后对 `BIGA-20260922-001` 真跑了一次，暴露两处：① 报告说「窗口内
+  没有 main 的任何轮次，这份分解缺了最大的一块」——它假设 Supervisor 会有
+  自己的一轮 LLM 调用，但 C-II 之后编排完全由 `orchestrator.py` 驱动，
+  `agent:main:orchestrator-<run_id>` 只是一个 grant 会话，不是一次真正的
+  main 轮次，这个假设从 C-II 起就不成立了；② 调度器记录的几次执行
+  （cli news/sector/market 若干次、subagent risk）在 trajectory 里对不上号，
+  报告自己承认「合计偏小」。
+  **核心判据（Stage 1 是否真并行）没受影响**——那次实测区间两两相交、
+  最小重叠 36.3s，`✅ 真并行` 结论可信,只是"等卡墙钟"与总成本这两个数字
+  不能再当真。批 D-II 收尾时没有单独修它，先记在这里，不阻塞批 E——
+  这是报告工具的观测口径滞后，不是生产路径的 bug（区别于已修的
+  `agent_runs` 那条：那条是生产路径自己的验证闸门坏了）
+
 ---
 
 ## 待测（有明确判据，缺的是数据）
