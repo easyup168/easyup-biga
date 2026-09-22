@@ -15,6 +15,23 @@
 
 ## [未发布]
 
+### 新增 · 批 C 分发提示词：拆成 C-I（Adapter）/ C-II（Orchestrator ★）
+
+批 B 评审通过后，`docs/guide/orchestration-kickoff-prompt.md` 补写批 C 的
+开工段——此前一直是「等 B 落地后再写」的占位。
+
+拆成两个会话的理由与批 A 拆成 A-I/A-II 相同：耦合面不同，且低风险的一半
+能给高风险的一半兜底。C-I（`OpenClawRuntimeAdapter` + 补验 spike 留下的
+三个未知数）完全不碰 `bin/biga-card`，可以独立验证「Python 能不能在不经
+LLM 轮次的情况下驱动一次 spawn」；C-II（`DecisionOrchestrator` + 生产
+入口切换）是这次升级第一次改动「出卡到底怎么被触发」这条路径——批 A-I/
+A-II/B 都是新增或加固既有校验，只有这一步是把生产入口本身换掉，代价与
+前面几批不对称，值得单独隔出一轮评审，不跟 C-I 混在一次交付里。
+
+顺带把 TODO.md 里批 C 那一行也拆成两行，并在 C-II 上标注它要还批 B 欠的
+一笔账（删掉 `LEGAL_TRANSITIONS` 里 `PREFLIGHTED → CARD_PERSISTED` 那条
+legacy 粗边，防止它变成 L-7 死边）。
+
 ### 🔴 新增 · 批 B：运行身份 + 状态机（schema v7）
 
 设计文档 §4「身份模型」与 §5「显式状态机」。899 条测试全绿（837 → 899，+62）。
