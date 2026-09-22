@@ -49,7 +49,8 @@ from _store.runtime import AgentTurn, RuntimeProbe  # noqa: E402
 
 #: 用了这套口径的工具。判据是「它自己 import 了 `_verdict`」。
 _WIRED = ["isolation.py", "latency_report.py", "agent_trace.py",
-          "missing_ledger.py", "phase1_acceptance.py", "spawn_check.py"]
+          "missing_ledger.py", "phase1_acceptance.py", "spawn_check.py",
+          "readback_check.py"]
 
 
 class TestSingleDefinition:

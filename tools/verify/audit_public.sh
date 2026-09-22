@@ -67,11 +67,55 @@ echo "扫描范围：$SCOPE"
 #
 FAIL=0
 # grep -v '^+chk "' 仍然保留：模式之外的说明文字也可能撞上关键词。
-chk() { c=$(printf '%s' "$DIFF" | grep -E "^\+.*$2" | grep -vc '^+chk "' || true); \
-        [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"; }
+#
+# 🔴 可选第三参数 `$3`：**豁免**模式，只用于 Gateway token 那一条。
+#
+#    豁免必须是**加法**：默认仍然是全量命中，例外要自己举手——
+#    这与只追加触发器「新表默认就该在清单里」、测试计数守卫「默认必须
+#    最新，例外自己标冻结」是同一条原则。反过来把正例判据收窄成
+#    「只在某种上下文才命中」，会把默认状态从「安全」改成「需要举证
+#    才安全」，方向是错的（评审 F-1：`--token <hex>` / `Authorization:
+#    Bearer <hex>` 这类真实泄露形状会因此漏检）。
+#
+#    🔴 豁免的**粒度**必须等于命中的粒度（评审 F-1b）：命中的单位是
+#    「一个十六进制串」，豁免就只能豁免**那一个串**，不能豁免它所在的
+#    整行——按整行豁免，会让同一行里另一个真令牌跟着被放过（例如
+#    `{"token":"<真令牌>","sha256":"<内容哈希>"}` 这一行，`sha256` 一词
+#    足以让整行豁免，`token` 那个真令牌也被一起放过了）。
+#    ⇒ `$3` 匹配到的不是「该不该数这一行」，而是**该从这一行里抠掉哪一段**
+#    ——用 `sed` 把「自称哈希的那个键 + 赋值 + 十六进制串」这一小段原地
+#    抹掉，抹完剩下的文本里如果还有裸十六进制，该命中的仍然命中。
+chk() {
+    body=$(printf '%s' "$DIFF")
+    [ -n "${3:-}" ] && body=$(printf '%s' "$body" | sed -E "s/$3//g")
+    c=$(printf '%s' "$body" | grep -E "^\+.*$2" | grep -vc '^+chk "' || true)
+    [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"
+}
 
 chk "凭据/私钥"      '([s]k-ant|[o]at[0-9]{2}_|[g]hp_|[g]ithub_pat_|[t]vly-|[B]EGIN [A-Z ]*PRIVATE KEY|[s]sh-(ed25519|rsa) AAAA)'
-chk "Gateway token" '([b]ootstrapToken=|[g]ateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)'
+#
+# 🔴 第三个分支是裸 `\b[0-9a-f]{64}\b`——任何 64 位十六进制都命中。
+#    sha256 恰好也是 64 位十六进制，于是 `payload_sha256` 的内容哈希
+#    （raw_market_snapshot / agent_verdicts 的 `content_sha256`，
+#    以及任何把它写进 fixture 的测试）会被一起命中。
+#
+#    第一版的修法是反过来收窄正例（要求「token 标识符 + 赋值 + 十六进制」
+#    才算令牌）——评审 F-1 指出这个方向是错的：`biga attach --token <hex>`
+#    （空格分隔，不含 `:`/`=`）、`Authorization: Bearer <hex>`（key 是
+#    Authorization 不是 token）、裸贴一个值，这些**真实的泄露形状**全部
+#    会因此漏检。安全检查的默认必须是「命中」，例外要自己举手——
+#    与只追加触发器「新表默认就该受保护」、测试计数守卫「默认必须最新」
+#    是同一条原则，反过来收窄正例等于把默认状态从「安全」改成「需要
+#    举证才安全」。
+#
+#    ⇒ 保留裸十六进制作为默认命中，只**豁免**明确自称哈希的赋值/键值
+#      形式——`sha256`/`content_sha256`/`raw_hash` 紧跟着 `:`/`=` 和它
+#      自己的那个十六进制串时，抠掉那一段再判。豁免判据仍然是**这一小段
+#      本身的语法结构**，不按文件名放行、也不按整行放行（都是 L-13 的
+#      形状——前者「文件名像 fixture 就不查」，后者「行里有别的东西提过
+#      哈希这个词就不查这一行」，宽窄不同，形状是同一个）。
+chk "Gateway token" '([b]ootstrapToken=|[g]ateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)' \
+     '(content_)?([s]ha256|[r]aw_hash)("|'"'"')?[[:space:]]*[:=][[:space:]]*("|'"'"')?[0-9a-f]{64}'
 chk "家目录路径"     '/[h]ome/[a-z][a-z0-9_-]*'
 chk "个人邮箱"       '[a-zA-Z0-9._%-]+@([g]mail|[q]q|163|126|[o]utlook|[h]otmail|[f]oxmail|[s]ina)\.'
 chk "邻居可识别细节" '([E]ASYUP|\b[Q]MT\b|[m]arket\.db|[n]odeenv|[f]ind_node_bin|[0-9]+ 个 systemd|[a]nthropic:openclaw)'

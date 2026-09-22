@@ -53,6 +53,19 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = _REPO_ROOT / "data" / "biga.db"
 
 
+def _canonical_dumps(payload: Any) -> str:
+    """规范序列化 —— 只用于**新增**的持久化载荷（card_json / verdict_json）。
+
+    🔴 与 `payload_sha256` 是两个不同的函数，且不能合并成一个：
+    历史哈希已经建立在 `payload_sha256` **不带 `separators`** 的输出上；
+    这里的 `separators` 只影响新写入的载荷，不回头改变任何已落库的哈希。
+    `allow_nan=False` 保证写进去的字节本身就是合法 JSON，不是「Python 能读、
+    RFC 8259 不认」的裸 `NaN`/`Infinity`。
+    """
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                       allow_nan=False, separators=(",", ":"))
+
+
 class StoreNotInitialised(RuntimeError):
     """只读打开一个还不存在的库。
 
@@ -177,7 +190,26 @@ def save_card(
             + "；".join(f"{a} 写着 {t}" for a, t in foreign) + "\n"
             "  一张卡上的每一条判定都必须属于同一次决策。\n"
             "  历史卡可以读（回放），但不能再写回库。")
-    payload = json.dumps(card.to_dict(), ensure_ascii=False, sort_keys=True)
+    payload = _canonical_dumps(card.to_dict())
+    # 🔴 写边界重校验（设计文档 §6 A3）：不信任调用方交进来的对象本身，
+    #    只信任「它序列化之后还能不能重建出来」——
+    #    `card.missing.append(...)` 这类构造后直接改字段的写法会绕过
+    #    `__post_init__`，上面的 `foreign` 检查只堵得住身份这一项，
+    #    其余不变量（铁律 2、重述缺失项……）全靠这一行兜底。
+    #
+    #    ⚠️ 不能直接调 `DecisionCard.from_dict(json.loads(payload))`——
+    #    它默认 `from_store=True`，会把新卡的严格校验悄悄降级成历史卡的
+    #    宽松校验。
+    #
+    #    ⚠️ 也不能传 `card.from_store`——那是 `DecisionCard` 一个**可变**属性
+    #    （它还不是 `frozen`，那是 A-II 的 A2），`card.from_store = True`
+    #    不会报错，会把这一行重校验连同上面的意图一起绕过：
+    #    「新卡严、旧卡宽」的档位就被对象自己说了算，而对象正是这次要防的
+    #    篡改对象。改用 `replay_of` 这个**调用参数**推导档位——它由
+    #    `card_ops.persist()` 的调用方（`synthesize.py` 在线路径永远不传，
+    #    `replay.py --store` 永远传原始 `record_id`）决定，不受 `card` 本身
+    #    的状态影响，档位判断因此挪出了可被篡改的对象。
+    DecisionCard.from_dict(json.loads(payload), from_store=replay_of is not None)
     try:
         return _insert_card(card, payload, replay_of, path)
     except sqlite3.IntegrityError as e:
@@ -360,7 +392,23 @@ def save_verdict(
             "    · 由 Supervisor 在 Stage 0 占号并用 --task-id 传下来；\n"
             "      占号命令 python3 skills/decision-card/scripts/new_decision.py\n"
             "    · 只是手工看一眼输出 ⇒ 加 --no-store")
-    blob = json.dumps(v.to_dict(), ensure_ascii=False, sort_keys=True)
+    blob = _canonical_dumps(v.to_dict())
+    # 🔴 写边界重校验（设计文档 §6 A3）：同上，不信任对象本身，
+    #    只信任「序列化之后还能不能重建出来」。
+    #    这里没有 `from_store` 这道口子要留 —— AgentVerdict 没有历史宽松语义，
+    #    from_dict 就是它唯一的重建路径。
+    AgentVerdict.from_dict(json.loads(blob))
+    # 🔴 `content_sha256` 是**这次写入的 `blob` 文本**的哈希，不是从
+    #    `AgentVerdict` 对象独立重算出来的哈希——它直接对刚刚生成的
+    #    `blob` 取 sha256，因此永远与同一行的 `verdict_json` 自洽，
+    #    但**不代表**「用今天的 `_canonical_dumps` 重新序列化这个对象
+    #    也会得到同一个哈希」。`_canonical_dumps` 的格式本身不是冻结的
+    #    （这一批就刚加过 `separators`）——历史行的哈希锚定的是「当时」
+    #    的序列化格式，不是这个对象的规范形式。
+    #    ⚠️ 批 A-II 的 A6（`VerdictRef.content_sha256` 上卡校验）如果改成
+    #    「重新序列化对象再比对」而不是「直接比对存量 `verdict_json` 文本
+    #    的哈希」，这一批之前落库的行会集体核对不上——而且是静默的。
+    #    `tests/test_write_boundary.py` 钉了这一点，别让它变红。
     with connect(path) as conn:
         cur = conn.execute(
             """INSERT INTO agent_verdicts
@@ -503,9 +551,20 @@ def payload_sha256(payload: Any) -> str:
     采集层用它给 `Evidence.raw_hash` 赋值。两边必须是同一个函数：
     各算各的，某天序列化参数改了一处，`raw_hash` 就再也对不上 raw 层 ——
     而那种失效是静默的（两串 sha 都「看起来正常」）。
+
+    🔴 **不加 `separators`。** 这个函数早于 `_canonical_dumps` 存在，
+    历史哈希已经建立在它当前的输出格式上 —— 改格式会静默改变所有历史哈希
+    （两串 sha 都「看起来正常」，只是再也对不上当时存的那个）。
+    `tests/fixtures/payload-sha256-vectors.json` 钉死这一点：那份向量
+    是在本次改动**之前**用当时的实现生成的，任何时候都必须能重新对上。
+
+    只加 `allow_nan=False`：对不含 NaN/Infinity 的历史数据，输出逐字节不变；
+    只有本来就不该写进去的值，才会从「静默写入一个 Python 能读、
+    RFC 8259 不认的裸 NaN」变成「在写入前就报错」。
     """
     return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                   allow_nan=False).encode("utf-8")
     ).hexdigest()
 
 
@@ -529,6 +588,10 @@ def save_raw_snapshot(
     而归一化规则是各数据源特有的，不属于通用存储层。
     """
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    # 🔴 严格 JSON（设计文档 §6 A4）：raw payload 没有契约对象、没有不变量，
+    #    这里能查的只有「是不是合法 JSON」——`payload_sha256` 已经
+    #    `allow_nan=False`，且这行**在 `connect()` 之前**执行，
+    #    NaN/Infinity 会在任何 DB IO 发生之前就地抛错，不需要再加一道。
     sha = payload_sha256(payload)
     with connect(path) as conn:
         cur = conn.execute(

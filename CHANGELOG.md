@@ -101,6 +101,154 @@
 正在引用这条规则、还是抄了真值。
 ⇒ 分发提示词里因此多了一句：这类探针的内容只写进临时文件，跑完删掉。
 
+### 🔴 修复 · 写边界重校验 + 严格 JSON（确定性编排批 A-I）
+
+`save_verdict` / `save_card` / `save_raw_snapshot` 曾经只在**读**的时候校验
+契约不变量（`from_dict()` 重跑一遍 `__post_init__`），写的时候完全不校验。
+`v.missing.append(...)` 这类构造后直接改字段的写法能绕过 `__post_init__`：
+
+```
+save_verdict(非法对象)   →  ✅ 成功落库
+load_verdict(同一行)     →  ❌ ValueError（铁律 1）
+```
+
+而 `agent_verdicts` / `decision_records` 都是只追加表（触发器强制）——
+**一次误写就让那次决策永久无法回放，一个可修复的错误变成了不可修复的错误**。
+当前生产库是干净的（239 条 verdict / 37 张卡，读不回来的 0 条，含 NaN/Infinity
+的 0 条）：这是预防性修复，不是救火。
+
+#### 改了什么
+
+三个写函数在 INSERT 之前都加了一道：
+`Domain Object → 规范序列化（拒绝 NaN/Infinity）→ 严格重建 → 不变量校验 → DB`。
+
+| 函数 | 重建走的路径 | 为什么这么走 |
+|---|---|---|
+| `save_verdict` | `AgentVerdict.from_dict(json.loads(blob))` | 没有历史宽松语义要留，直接触发完整校验 |
+| `save_card` | `DecisionCard.from_dict(json.loads(payload), from_store=replay_of is not None)` | 🔴 **不能**省略 `from_store` 这个参数——`from_dict()` 原来硬编码 `from_store=True`，如果重建时也用默认值，新卡的严格校验会被写路径自己悄悄降级成历史卡的宽松校验，「新卡严、旧卡宽」的三段式语义就被削平了。为此给 `DecisionCard.from_dict()` 新增了这个仅影响重建路径的可选参数，默认值不变，所有现有调用点不受影响。档位**不**从 `card.from_store` 读——那是评审复核纠正的一处，见下 |
+| `save_raw_snapshot` | 不需要新代码 | raw payload 没有契约对象、没有不变量；`sha = payload_sha256(payload)` 本来就在 `connect()` 之前执行，只要 `payload_sha256` 拒绝 NaN，这行天然就是写边界 |
+
+严格 JSON 拆成了两个函数而不是改一个：
+
+- **新的** `_canonical_dumps()`（含 `separators=(",", ":")` + `allow_nan=False`）
+  —— 只用于 `card_json` / `verdict_json` 这类**新增**载荷
+- `payload_sha256`（raw 层内容哈希）**只加 `allow_nan=False`**，分隔符维持原状
+
+原因：外部评审的 drop-in 建议统一加 `separators`，但 `payload_sha256` 早于它
+存在，`Evidence.raw_hash` 与 raw 层的对应关系建立在这个哈希**当前**的输出
+格式上——直接改会静默改变所有历史哈希（两串 sha 都「看起来正常」，只是
+再也对不上当时存的那个）。`tests/fixtures/payload-sha256-vectors.json`
+在改动**之前**用旧实现生成并立刻 `git add`，钉死这一点。
+
+#### 探针（G-1）—— 每一道都见过红
+
+| 探针 | 怎么弄坏 | 红的证据 |
+|---|---|---|
+| P1 | 合法 verdict 构造后 `missing.append(...)`，`save_verdict` | 暂时删掉重建那一行 → `DID NOT RAISE` |
+| P2 | 合法 BUY 卡构造后 `missing.append(...)`（特意避开身份维度，因为 `save_card` 原有的 `foreign` 检查已经管得到身份——用它做探针测不出这一批**新加**的部分） | 同上删掉重建那一行 → `DID NOT RAISE` |
+| P3 | 见 P1/P2 —— 把 A3 的重建调用临时注释掉 | 两条测试均变红（`DID NOT RAISE <class 'ValueError'>`），还原后复跑回绿 |
+| P4 | `result` 里塞 `nan`/`inf`/`-inf`（覆盖 save_verdict、save_card、save_raw_snapshot 三条路径） | 临时去掉 `_canonical_dumps` 里的 `allow_nan=False` → 6 条经过它的用例变红，3 条走 `payload_sha256` 的用例仍绿（证明两条路径互相独立，不是同一处代码在兜底） |
+| P5 | 历史哈希向量：**改动前**用旧实现生成 `tests/fixtures/payload-sha256-vectors.json` 并立刻 `git add`，全程未重新生成 | `test_历史向量逐条吻合` 全程未红过（这正是要的结果——它钉住的是「不变」） |
+| P6 | 新增 `tools/verify/readback_check.py`（只读遍历两张表，逐行 `load_verdict`/`load_card`），手工在测试库里裸 `INSERT` 一行「BUY + missing 非空」/「missing 非空 + PASS」的毒行 | `scan_verdicts`/`scan_cards` 各自抓到 1 条，`main()` 返回 `FAIL`；对生产库只读运行确认 0 条毒行 |
+
+真实回放确认（设计文档 §6 A3 明确要求）：在 `data/biga.db` 的一份 scratch
+副本上跑 `replay.py --store`——干净卡与「同一件事报了两遍」的历史卡都正常
+追加成功；`BIGA-20260919-002`（verdict 写着别的 task_id 的老卡）在
+**改动前就已经**被 `save_card` 原有的身份检查拒绝，不是这次新加的回归。
+生产库 `data/biga.db` 全程只读，mtime 未变。
+
+#### 新增
+
+- `tools/verify/readback_check.py`：毒行巡检，接入 `_verdict` 退出码三态、
+  `test_verify_exit_codes.py::_WIRED`、`test_store.py` 的巡检工具烟雾测试
+- `tests/test_write_boundary.py`：P1/P2/P4/P5 的永久回归测试
+- `tests/test_readback_check.py`：P6 的永久回归测试
+- `tests/fixtures/payload-sha256-vectors.json`：历史哈希向量
+
+#### 外部评审复核（同会话内、代码合并前发现，三条，均已处理）
+
+**F-1（阻塞，已修复）· `audit_public.sh` 的令牌判据收窄方向反了。**
+第一版把「Gateway token」的裸十六进制分支改成「必须有 token 标识符 + 赋值
+才算令牌」，为的是不再误伤 `payload_sha256` 的内容哈希（见下方 P5 相关段落）。
+评审用真实泄露形状逐条对照：`biga attach --token <hex>`（空格分隔，不含
+`:`/`=`）、`Authorization: Bearer <hex>`（key 是 Authorization 不是
+token）、散文里裸贴一个值——三种都是**真实存在**的泄露形状（前两种就是
+`biga attach --print-config` 铸 grant 时终端上会出现的原文），而收窄之后
+全部漏检。**方向错了**：安全检查的默认必须是「命中」，例外要自己举手——
+与只追加触发器「新表默认就该受保护」、测试计数守卫「默认必须最新」是同一条
+原则，反过来收窄正例等于把默认状态从「安全」改成「需要举证才安全」。
+
+⇒ 改法倒过来：**保留**裸 `\b[0-9a-f]{64}\b` 作为默认命中，只在同一行**也**
+出现 `sha256` 或 `raw_hash` 这类明确自称哈希的词时豁免。`chk()` 因此加了
+一个可选的第三参数（豁免模式），默认不传时九条既有检查行为逐字节不变。
+探针：造 9 行覆盖评审列出的全部形状——`OPENCLAW_MCP_TOKEN=`/`"token":`/
+`--token <空格>`/`Authorization: Bearer`×2/裸贴一次，以及
+`content_sha256 =`/`"sha256":`/`raw_hash=`——前 6 行命中、后 3 行豁免，
+与评审的对照表逐行吻合；删除探针文件后复扫回到十一项全绿。
+
+**F-1b（评审在复核 F-1 修法时发现，已修复）· 豁免的粒度是整行，命中的粒度
+是一个十六进制串——两者不相等就是漏检面。** `grep -Ev "$3"` 一旦命中就
+扔掉**整行**，于是同一行里只要出现过 `sha256`/`raw_hash` 字样，那一行上
+的**所有**十六进制（包括一个真令牌）都会被一并放过。例如
+`{"token":"<真令牌>","sha256":"<内容哈希>"}` 或者一段解释这条检查本身的
+文档散文（"OPENCLAW_MCP_TOKEN 和 sha256 长得一样"）——后者尤其值得警惕：
+这正是本仓库已经栽过五次的「描述规则时抄了真值」最容易发生的地方，残余
+风险恰好压在经验上最脆弱的一处。
+
+⇒ 豁免的粒度改成与命中的粒度相等：`$3` 不再决定「扔不扔整行」，而是先用
+`sed -E "s/$3//g"` 把「自称哈希的键 + 赋值 + 它自己的十六进制串」这一小段
+**从文本里抠掉**，再对剩下的文本做正例匹配——同一行里其他独立的十六进制
+（不管是不是紧跟在 `sha256`/`raw_hash` 后面）该命中的仍然命中。
+`chk()` 因此从「按行豁免」改成「按子串抠除」。
+探针：把 F-1 的 9 行与 F-1b 指出的 4 种复合场景（令牌与哈希同键值对、
+令牌与哈希分列同一散文句/表格行、CLI 参数注释里顺带提哈希）合成 13 行，
+命中的行与预期精确对上（1–6、10–13 共 10 行命中，7–9 共 3 行豁免）；
+对整个真实工作区做同样的处理，命中 0 条（fixture 与本文件自身均不受影响）。
+
+**F-2（应修复，已修复）· 写边界的档位不该由对象自己的可变属性决定。**
+`from_store=card.from_store` 信任的是 `DecisionCard` 一个尚未 `frozen`
+的属性（那是批 A-II 的 A2）：`card.from_store = True` 不会报错。实测验证
+过，合法构造一张新卡后依次 `card.missing.append(重述的缺失项)` 与
+`card.from_store = True`，`_check_restated_missing()` 会被当成「历史卡」
+降级成警告而不是拒绝，`save_card` 因此成功落库——身份维度不受影响（另有
+一道不看 `from_store` 的独立检查兜底），暴露的只有重述缺失项这一条。
+
+🔴 评审同时纠正了一处因果表述：这**不是**「A-I 没碰过的旧洞」——`from_store`
+一直可变，但在 A-I 之前它只影响**构造期**的宽严；A-I 把它接进了**写边界**
+之后，篡改这一个字段的杀伤半径变大了（从「显示层多一条警告」变成「绕开
+新加的写边界重校验」）。这句因果要写准，不能记成恰好被顺手发现的旧问题。
+
+⇒ 改成从**调用参数**推导档位：`from_store=replay_of is not None`。
+`replay_of` 由 `card_ops.persist()` 的调用方决定（`synthesize.py` 在线
+路径永远不传，`replay.py --store` 永远传原始 `record_id`），不受 `card`
+对象自身状态影响，篡改 `card.from_store` 因此不再有任何效果。探针：原样
+重跑上面那个攻击，`save_card` 正确拒绝；三个真实历史决策（干净卡 / 带
+`restate_warning` 的卡 / 带 `identity_warning` 的卡）在 scratch 副本上
+`replay.py --store` 逐一重新验证，行为与改动前逐字节相同。
+
+**F-3（应修复，已修复）· `content_sha256` 是「存量文本」的哈希，
+不是「对象」的哈希，这个区别要为批 A-II 写下来。**
+`_canonical_dumps` 的格式不是冻结的（这一批就刚加过 `separators`）。
+批 A-II 的 A6（`VerdictRef.content_sha256` 上卡校验）如果核对时重新序列化
+对象再比对，而不是直接比对存量 `verdict_json` 文本的哈希，这一批之前落库
+的行会集体核对不上，而且是静默的——两串 sha256 都「看起来正常」。
+
+⇒ 在 `save_verdict` 里补了这条区别的注释，并加了一条钉住它的测试：
+`content_sha256 == sha256(存量 verdict_json 文本)` 永远成立，
+`content_sha256 == sha256(今天重新序列化对象)` 只在序列化格式从未变过时
+碰巧成立。探针：把 `content_sha256` 的计算临时改成对 `blob` 多拼一个空格
+再哈希，测试立即报出两串不同的 sha256；还原后复跑回绿。
+
+### 已知问题
+
+- **`tools/verify/readback_check.py` 目前没有任何自动调用方**——只有测试
+  和文档提到它，没有一条真实路径（`bin/biga-card` 或 cron 等）会跑它。
+  与 `spawn_check.py` 同一个形状：需要一个真实库才有东西可查，而
+  `data/biga.db` 只在出过卡之后才存在，pytest 覆盖不到生产库。这是分发
+  提示词 P6 没写清楚，不是这一批漏做——留给批 A-II 的分发提示词补
+  「接进 `bin/biga-card` 出卡之后那一段，只读、零成本，紧挨着
+  `spawn_check.py`」。
+
 ### 变更 · 解除 `.biga-card-stop` 总闸（2026-09-22）
 
 2026-09-21 21:47 事故期间加的紧急止血文件，现已删除。**它自己写的两条解除条件

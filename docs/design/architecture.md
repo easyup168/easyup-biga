@@ -165,6 +165,7 @@ BigA 哪天不小心装错位置，生产侧当场报红。
     │        agent_trace.py     各 agent 的工具调用序列
     │        latency_report.py  延迟/成本分解 + Stage 1 并行判据
     │        missing_ledger.py  缺失项台账（出口条件 4）
+    │        readback_check.py  毒行巡检：agent_verdicts/decision_records 里存在但读不回来的行
     │        audit_public.sh    公开内容审查（十一项）
     │        probe.sh           在一次性库上跑手工探针
     │        budget_report.py   当日出卡用量与闸门状态
@@ -505,6 +506,28 @@ Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 `tests/test_store.py::test_每张表都有只追加触发器` ——
 它扫 `sqlite_master` 里**实际有哪些表**，例外要在 `EXEMPT` 里自己举手。
 **新表默认就该受保护**，而手写的数字只会在下一次加表时再错一遍。
+
+#### 5.3.3 写边界重校验 + 严格 JSON（确定性编排批 A-I 加的）
+
+`save_verdict` / `save_card` 曾经只在**读**的时候校验（`from_dict()` 重跑
+`__post_init__`），写的时候不校验：`v.missing.append(...)` 这类构造后直接
+改字段的写法能绕过契约层，`save_verdict(非法对象)` 会成功落库，
+只有下一次 `load_verdict()` 才炸出 `ValueError`——而 `agent_verdicts` /
+`decision_records` 都是只追加表，**一次误写就让那次决策永久无法回放**。
+
+⇒ 三个写函数在 INSERT 之前都先走一遍：
+`Domain Object → 规范序列化（拒绝 NaN/Infinity）→ 严格重建 → 不变量校验 → DB`。
+`save_card` 的重建显式传回 `card.from_store`，不能让它被 `DecisionCard.from_dict()`
+的默认值悄悄改成「历史卡」对待，否则「新卡严、旧卡宽」的三段式语义就被削平了。
+
+`payload_sha256`（raw 层的内容哈希）与这条新的规范序列化是**两个函数**，
+不能合并：历史哈希建立在 `payload_sha256` 不带 `separators` 的输出上，
+合并会静默改变所有历史哈希。`tests/fixtures/payload-sha256-vectors.json`
+钉死这一点。
+
+配套巡检：`tools/verify/readback_check.py` 只读遍历两张表，
+统计「存在但读不回来」的行数——写边界只能挡住**新写入**，
+巡检负责发现历史上是否已经存在这类行（当前生产库：0 条）。
 
 ---
 

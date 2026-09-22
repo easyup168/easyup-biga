@@ -604,7 +604,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       实测（2026-09-22）：`biga attach --print-config` 铸 grant → MCP-over-HTTP
       `sessions_spawn` → `subagent_runs` 五项证据全齐、零 `main` LLM 轮次；
       `agents_wait` 3.3s 同步返回，带 usage。结论与三条硬约束见设计文档 §7
-- [ ] 批 A-I · 写边界重校验 + 严格 JSON（A3 / A4）
+- [x] 批 A-I · 写边界重校验 + 严格 JSON（A3 / A4）—— 待评审会话复核
 - [ ] 批 A-II · 值对象与不变量（A1 / A2 / A5 / A6 / A7 / A8）
 - [ ] 批 B · 运行身份 + 状态机（schema v6）
 - [ ] 批 C · Runtime Adapter + DecisionOrchestrator ★（spike 已通过，可开工）
