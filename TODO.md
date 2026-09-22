@@ -781,8 +781,17 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       预算互不感知,加总可能超过 `deadline_sec`，只靠外层 bash timeout 硬顶）。
       评审里"run_id 未贯穿 Verdict/EvidenceSet/Card"那条断言是真的，但据此
       构造的"重试跨 run 串读"场景目前打不中（`decision_id` 现在恒为新铸，
-      没有重试路径）——按追加 5.1，这是排期约束不是紧急修复，留给"任何引入
-      同 decision_id 重试"的批次开工前处理，现在提前建就是 L-1。
+      没有重试路径）——按追加 5.1，靠 run_id 做强制校验这部分仍是排期约束，
+      留给"任何引入同 decision_id 重试"的批次开工前处理。
+      🔴 2026-09-22 复盘：把 run_id **字段补上存下来**这部分不该也一起排期——
+      现在就有消费方（batch B 起 run_id 就存在），且批 E 正在同一层做迁移，
+      晚做要再开一次刀。已拆成独立小批，见下方「批 E-I 收尾」。
+- [ ] 批 E-I 收尾 · run_id 贯穿全链 —— 分发提示词已就绪，等批 C-III 与批
+      E-I **都**合并之后开工（两者都会碰 `orchestrator.py`，等两边落定
+      避免三批抢同一批文件）
+      只做 capture：`agent_verdicts` 加列，六个 skill 脚本各加可选
+      `--run-id`，`VerdictRef`/`DecisionCard` 各加字段。不做 enforce
+      （`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等真正的重试批次。
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）

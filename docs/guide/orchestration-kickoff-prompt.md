@@ -709,9 +709,11 @@ TIMEOUT 处理进入 FAILED。
   `tools/verify/` 或新开 `tools/maintenance/`），但**不要**接 cron 或
   systemd timer——那是批 G 的地盘（"配置进仓库"本来就包含这类调度配置）
 - 不要动 `run_id` 贯穿 `agent_verdicts`/`evidence_sets`/`VerdictRef`/
-  `DecisionCard` 这条链——设计文档 §2 追加 5.1 已经说清楚：这是一条排期
-  约束（任何引入"同 decision_id 重试"的批次开工前必须先做），不是现在
-  就要做的事，没有消费方提前建是 L-1
+  `DecisionCard` 这条链——这件事有专门的一批（「批 E-I 收尾 · run_id
+  贯穿全链」），且明确等**这一批也合并之后**才开工，因为它要改
+  `orchestrator.py::_specialist_task()` 的调用参数，跟 C-III 改的
+  `run()` 内部逻辑是同一个文件。这里不是"没有消费方"（设计文档 §2
+  追加 5.1 2026-09-22 已修正这个判断），只是排在 C-III 后面
 - 不要碰批 E-I 正在改的 `_contract/verdict.py`、`_contract/evidence.py`、
   `_store/schema.py`——两批同时在跑，文件层面不该有交集；如果发现非改
   不可，停下来先确认没有跟 E-I 撞车
@@ -1063,6 +1065,77 @@ P5  跨类型的铁律探针：造一个 `FactBundle.missing` 非空但对应
 P6  回归：对**还没迁移**的某个 Specialist（比如 `market`），走一遍
     `amend_verdict.py` 补 stance 的旧路径，断言它跟这一批之前完全一样
     地工作——这一批不能让老路径先坏
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 E-I 收尾 · run_id 贯穿全链
+
+⚠️ **批 C-III 与批 E-I 都合并之后才开这一批。** 两者都会碰
+`orchestrator.py`（C-III 改 `run()` 内部逻辑，这一批改
+`_specialist_task()` 的调用参数）和 schema/契约层（E-I 迁移
+`agent_verdicts` 存储形状，这一批只是在那之上多加一列）——等两边都落定，
+在同一层上只开一次刀，不是三批人马抢同一批文件。
+
+🔴 **来源**：`docs/design/deterministic-orchestration.md` §2 追加 5.1
+2026-09-22 的复盘。原判断把「把 run_id 字段补上存下来」和「靠 run_id
+做强制校验（拒绝跨 run 串读）」当成一件事，认为都没有消费方、都该无限期
+排期。复盘发现前者其实一直有消费方——`run_id` 从批 B 就存在，这里只是让
+`agent_verdicts` 等表顺手多存一列，且**现在**恰好是最便宜的时机：批 E
+系列正在这一层做迁移，晚一步就要在同一层再开一次刀。**只做 capture，
+不做 enforce**——后者仍然要等真正的重试路径出现才做，读追加 5.1 全文。
+
+```text
+只做一件事：让 run_id 能够被存下来、传下去，但不改变任何现有的判定/
+过滤逻辑。做完之后，`agent_verdicts`/`evidence_sets`/`VerdictRef`/
+`DecisionCard` 都能查到自己是哪次 run 产生的——仅此而已，不多做。
+
+## 做什么
+
+1. `_store/schema.py`：给 `agent_verdicts` 加 `run_id TEXT`（nullable，
+   历史行读回来是 None，不回填、不假装知道）。检查 `evidence_sets`
+   是否已经有等价字段——如果批 D 系列已经顺手加过，这里就不用重复加。
+2. 六个 skill 脚本（market/sector/technical/emotion/news/risk）各加一个
+   可选的 `--run-id`（参照 `--evidence-set-id` 已经用的那套 CLI 参数
+   模式：可选、默认 None、直接传进 `save_verdict()`），不是新发明一套
+   传参方式。
+3. `orchestrator.py::_specialist_task()`：给**每一个** agent 的任务文本
+   都带上 `--run-id {ctx.run_id}`——不是只给读冻结快照的那三个，六个
+   都要有，因为六个都在产生 verdict。
+4. `orchestrator.py` 里调 `SnapshotCoordinator.freeze_index_daily()` /
+   `save_evidence_set()` 的地方，直接把 `ctx.run_id` 传进去——这是
+   Python 内部调用，不经过 CLI，不要多绕一层。
+5. `skills/_contract/verdict.py::VerdictRef` 加 `run_id: str | None = None`，
+   从存量 verdict 行的 `run_id` 列直接搬过来。
+6. `DecisionCard` 加 `run_id: str | None = None`，`card_ops.synthesize()`
+   从 `ctx.run_id` 填入。
+
+## 不要做
+
+- 不要改 `latest_verdict_ids()` 的过滤逻辑——它现在按 `decision_id` 聚合，
+  这一批不改成按 `run_id`，那是 enforce，属于追加 5.1 说的「等重试路径
+  出现再做」
+- 不要加任何「run_id 不一致就拒绝」的校验——同上，没有消费方
+- 不要把 `run_id` 做成必填/NOT NULL——历史行没有这个值，做成必填等于
+  强迫历史数据造假
+- 不要碰批 E-II 起的五个 Specialist 迁移——那是另一批的事，这一批六个
+  脚本只加一个可选 CLI 参数，不改它们的契约形状
+
+## 必须做的探针（G-1）
+
+P1  跑一次完整的在线 verdict 落库，断言存量行的 `run_id` 列等于
+    `ctx.run_id`（不是「没报错」，是取出来比对字符串）
+P2  拿一条**没有** `run_id` 的历史行（模拟迁移前数据）走现有的读取/校验
+    路径，断言不因为 `run_id` 是 None 就报错或被拒
+P3  合成一张不经过 replay 的 Card，断言 `DecisionCard.run_id` 与
+    `VerdictRef.run_id` 都能追到同一个 `ctx.run_id`
+P4  回放（`replay_of` 不为 None）一张历史 Card，断言不会给它凭空捏造一个
+    `run_id`——回放路径不生产新事实，这条铁律不因为加了新字段就松
 
 ## 做完之后
 
