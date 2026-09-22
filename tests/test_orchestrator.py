@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import pathlib
 import sys
+import time
 import uuid
 from datetime import timedelta
 
@@ -32,7 +33,7 @@ from _contract import (  # noqa: E402
     new_run_context,
     now_cn,
 )
-from _runtime import SpawnHandle, SpawnResult, SpawnStatus  # noqa: E402
+from _runtime import SpawnHandle, SpawnResult, SpawnStartError, SpawnStatus  # noqa: E402
 from _snapshot import SnapshotCoordinator  # noqa: E402
 from _sources import parse_index_daily  # noqa: E402
 from _store import (  # noqa: E402
@@ -63,28 +64,49 @@ def _verdict(agent: str, task_id: str) -> AgentVerdict:
 
 
 class FakeAdapter:
-    """假 adapter：start() 替在场 agent 写 verdict；wait() 返回归一化结果。"""
+    """假 adapter：start() 替在场 agent 写 verdict；wait() 返回归一化结果。
 
-    def __init__(self, db, *, judgment=None, absent=(), synth_status=SpawnStatus.SUCCEEDED):
+    `fail_start_at=N` ⇒ 第 N 次 `start()` 抛 `SpawnStartError`（模拟 Stage 1 中途
+    某一路起不来，用于 C-III 的 cancel 探针）；`cancelled` / `started_handles`
+    记录取消调用与已成功启动的 handle，供探针核对身份。
+    `wait_calls` 记录每次 wait 收到的 timeout（供 C3-4 预算收窄探针核对）。
+    """
+
+    def __init__(self, db, *, judgment=None, absent=(), synth_status=SpawnStatus.SUCCEEDED,
+                 fail_start_at=None):
         self.db = db
         self.judgment = judgment
         self.absent = set(absent)
         self.synth_status = synth_status
         self.spawned: list[tuple[str, str]] = []      # (agent, group_id)
         self.output_schemas: dict[str, dict] = {}
+        self.fail_start_at = fail_start_at
+        self._start_n = 0
+        self.started_handles: list[SpawnHandle] = []  # 成功 start 返回的 handle
+        self.cancelled: list[SpawnHandle] = []        # 收到 cancel() 的 handle
+        self.wait_calls: list[tuple[tuple[str, ...], float]] = []  # (agents, timeout)
 
     def start(self, agent, task_id, task, *, group_id, run_timeout_sec=None,
               task_name=None, output_schema=None):
+        self._start_n += 1
+        if self.fail_start_at is not None and self._start_n == self.fail_start_at:
+            raise SpawnStartError(f"[{agent}] 故意起不来（第 {self._start_n} 个 start）")
         self.spawned.append((agent, group_id))
         if output_schema is not None:
             self.output_schemas[agent] = output_schema
         rid = f"run-{agent}-{uuid.uuid4().hex[:6]}"
         if agent != SYNTHESIZER_AGENT and agent not in self.absent:
             save_verdict(_verdict(agent, task_id), path=self.db)
-        return SpawnHandle(run_id=rid, agent=agent, task_id=task_id,
-                           group_id=group_id, session_key=f"sk-{rid}")
+        h = SpawnHandle(run_id=rid, agent=agent, task_id=task_id,
+                        group_id=group_id, session_key=f"sk-{rid}")
+        self.started_handles.append(h)
+        return h
+
+    def cancel(self, handle):
+        self.cancelled.append(handle)
 
     def wait(self, handles, timeout_sec):
+        self.wait_calls.append((tuple(h.agent for h in handles), timeout_sec))
         out = []
         for h in handles:
             if h.agent == SYNTHESIZER_AGENT:
@@ -207,6 +229,17 @@ class TestHappyPath:
         assert "usage" in s1c["detail"]
         assert s1c["detail"]["usage"].get("market") == {"input": 10, "output": 5}
 
+    def test_CARD_PERSISTED带真实record_id(self, db):
+        """C3-1（设计文档 §2 追加 5 §17-18）：转移的 detail 里是 persist() 返回的
+        真实 record_id，不是占位串 —— 转移写在 persist() 成功拿到 record_id 之后。"""
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        orch.run(ctx)
+        ev = [e for e in run_events(ctx.run_id, path=db)
+              if e["to_state"] == RunState.CARD_PERSISTED][0]
+        assert isinstance(ev["detail"]["record_id"], int)
+        assert ev["detail"]["record_id"] >= 1
+
 
 class TestPartialAndFailure:
     def test_缺席specialist进缺失项且照常出卡(self, db):
@@ -240,6 +273,79 @@ class TestPartialAndFailure:
         with pytest.raises(OrchestratorError, match="零证据"):
             orch.run(ctx)
         assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
+
+    def test_stage1中途start失败_已启动的handle被cancel(self, db):
+        """C3-2（设计文档 §2 追加 5.2）：Stage 1 五路 fan-out 里第 3 个 start() 抛错，
+        之前已成功 start 的两个兄弟 handle 必须被 cancel() —— 否则它们会空跑到各自
+        runTimeoutSeconds 才停，白烧钱。这恰好是 `OpenClawRuntimeAdapter.cancel()`
+        一直缺的那个真调用方（N 可达 5、天然有 drain 的真实取消场景）。"""
+        assert len(STAGE1_AGENTS) >= 3  # 前置：够第 3 个才谈得上「前两个」
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, fail_start_at=3)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        with pytest.raises(OrchestratorError):
+            orch.run(ctx)
+        # 第 3 个 start 抛错 ⇒ 前两个已成功启动
+        assert len(fake.started_handles) == 2
+        # 🔴 前两个都被 cancel —— 身份一致，不只是数量对
+        assert fake.cancelled == fake.started_handles
+        # start 阶段就崩，没进 wait；死在 STAGE1_RUNNING → FAILED
+        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
+
+    def test_persist抛异常时run_events无CARD_PERSISTED(self, db, monkeypatch):
+        """C3-1（设计文档 §2 追加 5 §17-18）：CARD_PERSISTED 必须写在 persist()
+        成功之后。否则 persist() 抛错会在 run_events 里留一条「已落库」的假记录，
+        而库里其实没有这张卡 —— 一个可修复的失败被记成了不可修复的谎。
+        这条正是外部评审建议的回归测试。"""
+        import card_ops
+
+        def boom(card, **kw):
+            raise RuntimeError("落库炸了（人工注入）")
+
+        monkeypatch.setattr(card_ops, "persist", boom)
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        with pytest.raises(OrchestratorError):
+            orch.run(ctx)
+        states = [e["to_state"] for e in run_events(ctx.run_id, path=db)]
+        assert RunState.CARD_PERSISTED not in states  # 没落成就不许有这条假记录
+        assert states[-1] == RunState.FAILED           # 死在 persist 之前（SYNTHESIZING→FAILED）
+
+
+class TestDeadlineBudget:
+    """C3-4（设计文档 §2 追加 5 §35）：各阶段不再各用各的固定预算，而是按总
+    deadline 还剩多少收窄 —— 三段之和不会超过 `deadline_sec`，不靠外层 bash
+    `timeout` 当唯一防线。"""
+
+    def test_各阶段等待被剩余deadline收窄(self, db):
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        # 总预算远小于任一阶段自己的固定预算 ⇒ 三段都应被压到总预算以内。
+        orch.deadline_sec = 50
+        orch.stage1_sec, orch.risk_sec, orch.synth_sec = 300, 180, 180
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        orch.run(ctx)  # 假 wait 是瞬时的 ⇒ 仍能跑到 COMPLETED
+        timeouts = [t for _, t in fake.wait_calls]
+        assert len(timeouts) == 3  # stage1 / risk / synth 各一次 wait
+        s1_to, risk_to, synth_to = timeouts
+        # 每一段都 ≤ 总预算，且严格小于它自己那段固定值（证明真的被收窄了）。
+        assert 0 < s1_to <= 50 and s1_to < 300
+        assert 0 < risk_to <= 50 and risk_to < 180
+        assert 0 < synth_to <= 50 and synth_to < 180
+
+    def test_stage_timeout取剩余与阶段预算的较小者(self, db):
+        orch, _, _ = _make_orch(db)
+        now = time.monotonic()
+        # 剩余很多 → 用阶段自己的预算
+        assert orch._stage_timeout(now + 1000, 180) == pytest.approx(180, abs=2)
+        # 剩余很少 → 收窄到剩余
+        assert 25 <= orch._stage_timeout(now + 30, 180) <= 30
+
+    def test_stage_timeout预算耗尽则抛错_进而FAILED(self, db):
+        """remaining <= 0 时不再等，抛 OrchestratorError（run() 的 except 据此进
+        FAILED，与零证据/判官失败同一条失败路径）。"""
+        orch, _, _ = _make_orch(db)
+        past = time.monotonic() - 1  # deadline 已经过去
+        with pytest.raises(OrchestratorError, match="预算"):
+            orch._stage_timeout(past, 180)
 
 
 class TestSnapshotFreeze:
