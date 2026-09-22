@@ -152,6 +152,7 @@ BigA 哪天不小心装错位置，生产侧当场报红。
     ├── skills/
     │   ├── _contract/   evidence.py verdict.py card.py run.py ← 契约唯一实现
     │   ├── _store/      db.py  runs.py  schema.py            ← 唯一 DB 入口
+    │   ├── _runtime/    mcp.py  adapter.py                   ← Specialist 生命周期唯一入口（批 C-I）
     │   ├── emotion-calc/  SKILL.md  scripts/                ← Phase 1 唯一业务技能
     │   ├── market-data/   sector-data/   news-fetch/
     │   ├── technical-calc/  risk-check/  discipline-check/
@@ -317,6 +318,31 @@ Supervisor 做最终合成与矛盾裁定，用 Opus。
 但两者输入不相交（risk 看市场与个股、discipline 看人的行为史），
 且文档 §5 自己就把它们并列为「制衡层」。并行省 10-15s。
 **若将来发现 discipline 需要读 risk 的结论，立刻改回串行** —— 由 §12 的验收项守着。
+
+#### 3.3.1 运行时适配层 `skills/_runtime/`（确定性编排批 C-I 加的）
+
+上图里「spawn 一个 Specialist」这个动作，批 C-I 之前只有 LLM 轮次能做
+（`sessions_spawn` 是暴露给 agent 的 MCP 工具，CLI 里没有对应子命令）。
+spike（设计文档 §7）证明了 Python 能不经 LLM 轮次驱动它：`biga attach
+--print-config` 铸一个 MCP grant，再对 `127.0.0.1:<临时端口>/mcp` 做 JSON-RPC。
+
+批 C-I 把这条通路收成一层，**Specialist 生命周期的唯一入口**：
+
+* `skills/_runtime/mcp.py` —— 传输层。`Grant`（铸/持/删那个临时 `.mcp.json`，
+  context manager）+ `MCPClient`（`initialize` 握手 + `tools/call` 的 JSON-RPC，
+  SSE/JSON 两种响应都认）。
+* `skills/_runtime/adapter.py` —— `OpenClawRuntimeAdapter.start / wait / cancel /
+  status`。🔴 **状态归一化**：对外只暴露自定义的 `SpawnStatus`
+  （running/succeeded/failed/timeout/cancelled/**unknown**），运行时原始措辞
+  （accepted/queued/done/killed/forbidden…）只在这一层翻译 —— 运行时改一个词，
+  只改这里的映射表。认不出来的状态落 `UNKNOWN`，**绝不当 SUCCEEDED**（R-3）。
+* `tools/verify/adapter_spike.py` —— 对着**真实运行时**把 spike 的三个未知数
+  测掉（五路并行相交 / grant 撑过 780s / 失败结构化），运行时升级后可重跑复验。
+  🔴 它驱动真实的 `OpenClawRuntimeAdapter`（不另写一套 MCP 调用），且**会花钱**。
+
+🔴 **批 C-I 不接生产入口**：`bin/biga-card` 一个字都不改。把 Adapter 接进
+`DecisionOrchestrator`、让程序而非 LLM 驱动 Stage 0→3，是批 C-II。这一批只是
+把地基验实、把入口建好。
 
 ---
 

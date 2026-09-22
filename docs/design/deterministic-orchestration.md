@@ -463,15 +463,22 @@ Python 客户端**天然没有 requesting run**（它不是一次 agent 轮次�
 ⚠️ 但**不要**顺手把它写进 `agent_runs` —— v2 删掉 token 列的理由仍然成立：
 唯一真相源是运行时。先只在 `run_events` 里留一条，等真有消费方再说（L-1）。
 
-### 仍然未验的部分
+### 仍然未验的部分 —— ✅ 批 C-I 已全部测掉（2026-09-22）
 
 | 项 | 状态 |
 |---|---|
-| 五个并行 fan-out（同一个 `groupId`） | ⬜ 只验了 1 个。批 C 要验区间相交 |
-| grant 在 780s 长跑里的稳定性 | ⬜ 本次只跑了 3.3s |
-| `sessions_spawn` 失败/超时的结构化错误面 | ⬜ 只见过一种（`collect` 缺 groupId） |
+| 五个并行 fan-out（同一个 `groupId`） | ✅ 实测**峰值同时 5/5 在 RUNNING**（真并行，非排队）。`adapter_spike.py parallel` |
+| grant 在 780s 长跑里的稳定性 | ✅ 实测等 780s 后同一 grant 复验仍可用、`.mcp.json` 退出即删。`adapter_spike.py grant-longevity` |
+| `sessions_spawn` 失败/超时的结构化错误面 | ✅ 不存在的 agent → `{status:forbidden}` → 翻成 `SpawnStartError`。`adapter_spike.py failure` |
 
-⚠️ **这三项不是「应该没问题」，是「没测过」。** 批 C 的第一件事是把它们测掉。
+批 C-I 把这三项从「没测过」变成「测过」，落成 `skills/_runtime/` 的
+`OpenClawRuntimeAdapter`。`adapter_spike.py` 可在运行时升级后重跑复验 ——
+这三条 API 约束哪条破了，当场就知道。
+
+⚠️ 顺带实测出一条 spike 没提的 cancel 约束：运行时取消只认
+`subagents.tasks[].taskId`（传 runId / taskName 都被 `Task outside session
+tree` 拒），且 `active[]` 顺序不是 spawn 顺序 —— 详见 `architecture.md` §3.3.1
+与教程第 23 章。
 
 ## 8. §29 包结构重组 —— 采纳，并记下代价
 

@@ -15,6 +15,69 @@
 
 ## [未发布]
 
+### 🔴 新增 · 批 C-I：Runtime Adapter + spike 补验
+
+设计文档 §6 批 C 的 `OpenClawRuntimeAdapter` 部分 + §7 剩下未验的三项。
+938 条测试全绿（899 → 938，+39：32 条离线适配器测试 + 7 条文档校验参数）。
+
+**为什么**：整个确定性编排升级压在一个假设上 —— Python 编排器能**不经 LLM
+轮次**驱动一次 spawn 并拿到同等运行时证据（`sessions_spawn` 是暴露给 agent 的
+MCP 工具，CLI 里没有对应子命令）。spike（§7）证明能，但只跑了 **1 次** spawn。
+批 C-II 是第一次改生产入口，不能带着三个没测过的假设开工：五路并行是不是真并行、
+grant 撑不撑得住 780s、失败报错是不是结构化的。C-I 把这三个「应该」变成「测过」。
+
+**做了什么**：
+
+- `skills/_runtime/mcp.py` —— 传输层。`Grant`（`biga attach --print-config` 铸
+  grant、持 token/url、用完删临时 `.mcp.json`，context manager）+ `MCPClient`
+  （`initialize` 握手 + `tools/call` 的 JSON-RPC，SSE/JSON 两种响应都认）。
+- `skills/_runtime/adapter.py` —— `OpenClawRuntimeAdapter.start / wait / cancel /
+  status`，加**状态归一化**。
+- `tools/verify/adapter_spike.py` —— 对着真实运行时把三个未知数测掉，运行时升级后
+  可重跑复验。🔴 它驱动**真实的** `OpenClawRuntimeAdapter`（不另写一套 MCP 调用，
+  否则测的是脚本不是产品 —— F3/L-13），且**会花钱**。
+
+**为什么单独一层 + 状态归一化**：`sessions_spawn`/`agents_wait`/`subagents` 回的
+状态是运行时自己的措辞（实测：`accepted`/`queued`/`running`/`done`/`killed`/
+`forbidden`），会随运行时版本变。适配器对外只暴露自定义的 `SpawnStatus`
+（running/succeeded/failed/timeout/cancelled/**unknown**），原始词只在这一层翻译 ——
+运行时改一个词只改一张映射表，不波及编排链。🔴 R-3 落在这里：认不出来的原始词映射到
+`UNKNOWN`，**绝不当 SUCCEEDED**（映射表是白名单 `.get(raw, UNKNOWN)`，不是「不是失败就算成功」）。
+
+**两条 API 硬约束（§7，不是设计选择）**：① `collect=true` 无 requesting run 时必须带
+`groupId`，fan-out 一批共用一个；② grant 带 TTL、不自回收只到期 ⇒ TTL 必须 ≥ 总预算
+（780s），用完主动删 `.mcp.json`。
+
+**cancel 的实测坑**：运行时的取消只认 `subagents.tasks[].taskId`（传 runId / taskName
+都被 `Task outside session tree` 拒），而它与 spawn 返回的 runId **无直接关联字段**，
+只能靠 `active[i]`（带 runId）↔ `tasks[i]`（带 taskId）同序对应映射。🔴 而 `active[]`
+顺序**不是** spawn 顺序（实测先 spawn market 再 emotion，active[] 里是 [emotion,
+market]）—— 必须按 `active[i].runId==目标` 定位 i，不能按 spawn 序 index。
+
+**token 用量**：`agents_wait` 带 `usage: {inputTokens, outputTokens}`，随
+`SpawnResult.usage` 带出来，但**这一批不写库** —— C-I 不接任何 run，没有 run_events
+可写；写库（进 `run_events.detail`，不进 `agent_runs`）是 C-II 的事。在有消费方之前
+建写入路径就是 L-1。
+
+🔴 **批 C-I 不接生产入口**：`bin/biga-card` 一个字都不改。把 Adapter 接进
+`DecisionOrchestrator`、让程序驱动 Stage 0→3，是批 C-II。
+
+**验证（G-1；live 三项走共享凭据、真实 spawn，已获授权）**：
+
+- **P1 五路并行**（`adapter_spike.py parallel`）：五个 Specialist 共用一个 groupId
+  fan-out，实测**峰值同时 5/5 在 RUNNING** —— 真并行（不是排队）。判据是区间相交，
+  不是「五个都成功」（成功但排队执行看起来完全正常，那是「延迟其实是正确性 bug」形状）。
+- **P3 失败结构化**（`adapter_spike.py failure`）：起一个不存在的 agent →
+  运行时 `{status:forbidden}` → Adapter 翻成 `SpawnStartError`，没让裸异常漏出去。
+- **cancel 对应**（`adapter_spike.py cancel`）：起两个、取消第一个，实测死的正是第一个、
+  第二个仍在跑 —— 同序对应映射正确（`active[]` 当时是乱序的，正好验到这一点）。
+- **P2 grant 长跑**（`adapter_spike.py grant-longevity`）：TTL=840s，t=0 真实起一次成功
+  （usage 123/5），**实测等 780s 后用同一 grant 复验仍可用**，退出后 `.mcp.json` 已删 ——
+  §7-2「grant 不自回收只到期」这句话原来没验过，这次跑了一次真实场景钉死它。
+- **P4 状态归一化探针**（离线）：把 `status()` 从 `normalize_status(raw)` 改成
+  `return raw`，`test_对外永远是归一化状态而非原始词` 当场报红
+  （`assert 'killed' == 'cancelled'`）。已还原。
+
 ### 新增 · 批 C 分发提示词：拆成 C-I（Adapter）/ C-II（Orchestrator ★）
 
 批 B 评审通过后，`docs/guide/orchestration-kickoff-prompt.md` 补写批 C 的
