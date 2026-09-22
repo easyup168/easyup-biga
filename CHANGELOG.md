@@ -15,6 +15,95 @@
 
 ## [未发布]
 
+### 🔴 修复 · 批 C-III：Orchestrator 健壮性四处收尾（外部架构复审复核）
+
+来源：2026-09-22 一份外部架构复审，逐条复核记在设计文档 §2 追加 5。这一批只做
+追加 5 里标了 ✅ 且判定「值得马上修」的四条，彼此独立。**实现完成、离线全绿
+（1005 → 1016：+7 条 C-III 探针/单测，+4 条本章带出的参数化 docs 测试），四道探针
+全见过红并已还原，`biga-card --check BIGA-20260922-001`
+回放一致、`audit_public.sh --worktree` 十一项全绿，但未交独立评审 —— 不自宣通过。**
+
+⚠️ 本批在**独立 git worktree（分支 `c-iii`，基于 `2e5e8ea`）**上做 —— 批 E-I 的
+未提交改动同时在主工作区里（那份 WIP 当时让测试红 25 条）。两批文件层面只在
+`_store/db.py` 相交，且区域不交叠（E-I 加的是新函数、C3-3 改的是既有
+`verify_verdict_refs`）。这是本项目第一次两批**真正并行**（A–E-I 之前都是串行、
+每批开工前上一批已提交），隔离开工是为了给 C-III 一个绿色基线、且不把 E-I 的
+半成品扫进 C-III 的提交。合并回 `orchestration` 时须重新核对是否真无冲突，
+不凭这次 diff 快照就认定安全。
+
+**C3-1 · `CARD_PERSISTED` 转移必须写在 `persist()` 成功之后**（评审 §17-18）
+原来 `transition(..., CARD_PERSISTED)` 先于 `card_ops.persist(card)`。为什么这是
+真 bug：`persist()` 抛错时，`run_events` 会留一条「已落库」的假记录，而库里其实
+没有这张卡 —— `run_events` 只追加、删不掉，于是**一个可修复的失败被记成了不可
+修复的谎**，`--status` 从此对这次运行说假话。改法：先 `record_id = persist(card)`、
+成功拿到号后才转移，`detail` 带真实 `record_id`（不再是占位串
+`{"record":"persisting"}`）。
+探针 P1：monkeypatch `card_ops.persist` 抛异常 → 断言 `run_events` 不含
+`CARD_PERSISTED`。未改代码时报红（`assert 'CARD_PERSISTED' not in [...]` 失败——
+状态链里确实多出这条假记录），改后绿、已还原。另一条断言 `detail.record_id` 是
+真实 `int`（未改时 `{"record":"persisting"}` → KeyError）。
+
+**C3-2 · Stage 1 部分启动失败时取消已启动的 handle**（评审 §28 + 追加 5.2）
+`handles = [ad.start(a, ...) for a in STAGE1_AGENTS]` 中途某个 `start()` 抛错时，
+之前已成功 start 的 handle 被直接丢弃 —— 那些 Specialist 会话继续跑到各自
+`runTimeoutSeconds` 才停，白烧钱。为什么值得单独记：这恰好是
+`OpenClawRuntimeAdapter.cancel()` 建好以来**一直缺的那个真调用方**（批 C-I/D-I/D-II
+三次评审都把它记为残留风险：`cancel()` 只在 N=2、无 drain 场景验过）——Stage 1
+五路正是 N 可达 5、天然有 drain 的真实取消场景。改法：列表推导换成显式循环 +
+已启动 handle 列表，`except` 分支里对已启动的逐个 `cancel()`（cancel 本身失败用
+`contextlib.suppress` 兜住，不盖原始异常）再抛。
+探针 P2：桩 adapter 第 3 个 `start()` 抛 `SpawnStartError` → 断言前两个已启动的
+handle 收到 `cancel()`（比对身份，不只数量）。未改代码时报红（`cancelled == []`——
+两个 handle 被孤儿化），改后绿、已还原。
+⚠️ 这是**离线**用桩 adapter 验证「调用发生」；真实 adapter 上 N=5/drain 的取消
+**命中正确性**（`active[]`↔`tasks[]` 同序映射）本批未在活运行时重跑 —— 见「已知问题」。
+
+**C3-3 · `verify_verdict_refs` 补 `agent` 字段核对**（评审 §8-16 的一部分）
+原来只核对 `verdict_id` 存在 + `content_sha256` 一致，不核对
+`ref.agent == 存量.agent`。为什么这是洞：`verdict_id` 是**跨 agent 的全局自增**
+（不按 agent 分号段），所以一条手工拼的 ref 可以声称「这是 market 的原件」、
+`verdict_id` 与 `sha` 却全指向 news 那一行 —— 此时「能找到 + hash 对」两道检查
+都通过，只有 agent 核对能拦下这种张冠李戴。`VerdictRef.agent` 的 docstring 早写明
+它必须与被引用行一致，这里补上真正强制那句话的检查。改法：`load_verdict_meta`
+已返回 `agent`，加一行比较，不一致就报（与 hash 检查各自独立，可同时报）。
+探针 P3：造两条不同 agent 的原件（market/news），伪造一条声称 market、
+`verdict_id`+`sha` 全指向 news 的 ref。前置断言：一条「agent 也说 news」的 ref
+核对通过（证明 forged 唯一破绽就是 agent，存在性/hash 都不触发——避开 A-I 评审
+栽过的「探针没命中目标条件」坑）。未改代码时报红（返回 `[]`，`assert len==1`
+失败），改后绿、已还原。真实数据零误伤：扫 37 张在线卡（1 张带 refs），新检查报
+0 问题。
+
+**C3-4 · Orchestrator 感知总预算，各阶段按剩余时间收窄**（评审 §35）
+`stage1_sec`/`risk_sec`/`synth_sec` 各自独立、互不感知 `deadline_sec` 还剩多少。
+Stage 1 吃满自己预算后，Risk 与 Synth 仍各自等全额，三段之和可以超过
+`deadline_sec`，只靠外层 bash `timeout` 硬顶 —— 纵深防御的最后一层，不该是唯一
+一层。改法：`run()` 里 `deadline = time.monotonic() + self.deadline_sec`，每段的
+`ad.wait()` 用 `_stage_timeout(deadline, 该段预算) = min(该段预算, 剩余)`；
+`remaining <= 0` 抛 `OrchestratorError` → 进 FAILED（与零证据/判官失败同一条失败
+路径）。顺带用上了 `orchestrator.py` 里一直是死代码的 `import time`。
+探针 P4：总预算设 50s（远小于任一段固定预算），断言三段 `wait` 拿到的 timeout
+都被压到 ≤50 且严格小于各自固定值。未改代码时报红（stage1 拿到 300，
+`300 <= 50` 失败），改后绿、已还原。另两条单测钉住 `_stage_timeout` 取较小者、
+剩余耗尽抛错。
+
+⚠️ 本批**不碰**（设计文档 §2 追加 5 明确划出的排期边界）：`run_id` 贯穿
+`agent_verdicts`/`evidence_sets`/`VerdictRef`/`DecisionCard` 这条链（追加 5.1：
+排期约束，没有「同 decision_id 重试」的消费方之前提前建是 L-1）；§26 的
+budget/flock 从 bash 挪进 Python（比这四件更大的一批）；§24-25 stale-run reaper
+的 cron/timer 调度（批 G 的地盘）。
+
+#### 已知问题（批 C-III）
+
+- **C3-2 的取消在真实运行时上未跑过 N=5/drain。** 离线探针证明的是
+  Orchestrator **会**对已启动的兄弟调 `cancel()`、且调在对的 handle 上（桩
+  adapter）。而 `cancel()` 内部把 `runId` 映射到 `taskId` 用的是 `active[]`↔
+  `tasks[]` 的**同序对应**，这条只在 C-I 的 `adapter_spike.py cancel` 里对
+  N=2、无 drain 实证过。C3-2 现在给了它第一个真实调用方（Stage 1 部分启动
+  失败），也就是说这条 live 场景**从此可被触发**，但本批（纯离线）没有在活
+  运行时上跑一次真实部分失败。⇒ 「`cancel()` 缺真实调用方」这半条残留风险
+  **已由 C3-2 解决**；「真实运行时 N=5/drain 同序映射正确性」这半条仍是 live
+  补验项，随第一次真实 Stage 1 部分失败（或专门造一次）补上。
+
 ### 🔴 修复 · `agent_runs` 记账在批 C-II 之后再没被写过（live 验证才暴露）
 
 批 C-II 把出卡入口从 main 的提示词驱动切到 `DecisionOrchestrator`（程序驱动）
