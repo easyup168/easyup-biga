@@ -15,6 +15,60 @@
 
 ## [未发布]
 
+### 🔴 变更 · 批 D-II：Specialist 改口读冻结快照（切三个 skill 的实际行为）
+
+设计文档 §6 批 D 剩下的部分。**这是 D 系列真正的高风险段** —— D-I 只在旁边把机制
+建好，这一批真正切 `market_calc.py` / `sector_calc.py` / `technical_calc.py` 的
+`fetch_index_daily` 调用点。**实现完成、离线全绿（985 → 1003），四道探针全见过红并已
+还原，但未交独立评审 —— 不自宣通过。**
+
+**为什么**：D-I 之后 `freeze_index_daily` 一直没有调用方，「所有 Specialist 看同一份
+数据」仍只是「机制上可以」。这一批让编排器真的冻结一次、三个日线消费者真的读同一份，
+把那句话从「可行」变成「这次决策真的如此」——而且**留了一条能报红的检查**，将来谁
+悄悄退回独立抓取会被抓到，不是改完就没人管了。
+
+**做了什么**：
+
+- **`orchestrator.py` 的 `SNAPSHOT_FROZEN` 接了真东西**：Stage 1 fan-out 之前调
+  `SnapshotCoordinator.freeze_index_daily(did, ["sh000001","sz399106"], bars=120)`
+  （🔴 **120 不是 25** —— 消费者里最大的是 `technical_calc.py::BAR_COUNT=120`，
+  D-I 评审复核时核过），evidence_set_id 存进转移 detail + `RunContext`（批 B 起就有
+  这个字段、一直是 None，这一批第一次真填）。freeze 失败 ⇒ 整体 FAILED（fail-closed，
+  不退回各自抓一份、悄悄丢掉共享保证）。`_specialist_task()` 只给日线三个 agent 的任务
+  文本加 `--evidence-set-id`（emotion/news 的 skill 没这个参数）。
+- **三个 skill 加可选 `--evidence-set-id`**（参照 `--task-id`，缺省 `None`）：给了就
+  `read_index_daily()` 读冻结、不联网、不重复落盘；没给就跟今天一样 `fetch_index_daily`。
+  🔴 **没给不当成更严格的版本** —— 手工单跑某个 skill 调试的路径不被连坐拦掉。
+  🔴 **给了坏号 fail-closed**：`SnapshotReadError` 直接上抛，**绝不静默退回独立抓取**
+  （那是最危险的：假装什么都对）。
+- **`raw_hash` 语义**：读冻结的 skill，`Evidence.raw_hash` 取冻结集登记的
+  `content_sha256`（整份 raw 的指纹，`SnapshotCoordinator.frozen_content_sha256()`
+  新增的只读访问器给），**不对自己读到的那一截重算** —— 不同消费者读 2/25/120 根，
+  对切片重算会得到三个不同哈希，而它们本该指向同一份。
+- **`CROSS_CHECK_PAIRS` 改判据，不是删**（`risk_check.py`）：`market.sh_close` ↔
+  `technical.close` 在共享同一份冻结数据后**值必然相等**，比值就退化成恒真死配置（L-7）。
+  改成核对两条 `Evidence.raw_hash` 是否相同：都读冻结 ⇒ 相同 ⇒ 不报；某个退回独立
+  抓取 ⇒ 出自另一份 ⇒ 不同 ⇒ 报红。守的东西从「数值凑巧对上」变成「真的共享了同一份」。
+
+🔴 **探针记录（每道新守卫「怎么弄坏 / 报红输出 / 已还原」，L-13）**：
+
+- **P5（坏号 fail-closed）**：让 technical 的冻结分支 `except: 退回 fetch` ⇒
+  `test_P5` 红：`assert 1 == 0`（fetch 被调了，本该 0）。已还原。
+- **P4（raw_hash 取冻结集那份、不对切片重算）**：让 sector 对读到的 2 根重算 hash ⇒
+  `test_P1` 红：sector 的 `d80e…` ≠ 冻结集 `f01a…`。已还原。
+- **P2（CROSS_CHECK 判据换了、且仍会红）**：把判据退回「比值」⇒ `test_P2` 与
+  `test_值相等也照报` 双红（值相等 ⇒ 漏掉 raw_hash 不一致，`assert []`）。已还原。
+- **freeze 真的接进编排**：把 `freeze_index_daily` 换成假号、跳过冻结 ⇒
+  `test_一次决策只冻2行raw` 红：`assert 0 == 2`。已还原。
+- 还原核对：`grep -rn PROBE skills tests` 无残留；三个 skill 的既有离线测试与
+  `test_orchestrator`/`test_risk_check` 全绿。
+
+**这一批明确没做**（留给后面）：不迁 breadth/pool/news/emotion 的抓取（不属于
+「三个日线消费者改口」）；不改 `SnapshotCoordinator` 的 `read_index_daily` 签名
+（只**新增**了只读访问器 `frozen_content_sha256`，属于分发提示词说的「签名接不上」）；
+不给 `Evidence` 加 `evidence_set_id` 字段（那是批 E 的契约改动，CROSS_CHECK 因此用
+已有的 `raw_hash` 而非 `evidence_set_id`）。
+
 ### 新增 · 批 D-I：SnapshotCoordinator 基础设施（冻结一次、多处读）
 
 设计文档 §6 批 D 的第一段。**实现完成、离线全绿（956 → 985），五道探针全见过红并

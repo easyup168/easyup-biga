@@ -258,26 +258,42 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
                 break
     add("tripped_thresholds", tripped, "被触发的风险阈值")
 
-    # --- 被声明的重复事实：两个 agent 独立取的同一个值，必须相等 ---
-    # 🔴 这是裁定 15 的受控例外：允许重复，**前提是有人核对**。
-    #    不一致意味着两者看到的不是同一份数据 —— 那时它们的结论没有共同基准。
-    by_agent = {v.agent: v.result for v in upstream}
+    # --- 被声明的重复事实：两个 agent 从同一个源取同一个值 ---
+    # 🔴 裁定 15 的受控例外：允许重复，**前提是有人核对**。
+    #
+    # 判据从「值相等」改成「出自同一份冻结数据」（批 D-II）。批 D-II 之后
+    # market 与 technical 读的是**同一份**冻结快照（SnapshotCoordinator 冻结、
+    # 二者都带 --evidence-set-id 读），sh_close 与 close 由同一份数据算出，
+    # **值必然相等** —— 再比值就退化成恒真死配置（L-7，设计文档 §6 批 D 点名要防）。
+    #
+    # 改成核对两条 Evidence 的 raw_hash（= 冻结集登记的 content_sha256，整份 raw
+    # 的指纹）是否相同：
+    #   · 都读了同一份冻结快照 ⇒ 两个 raw_hash 都是那份的指纹 ⇒ 相同 ⇒ 不报。
+    #   · 某个 Specialist 没传 --evidence-set-id 悄悄退回独立抓取 ⇒ 它的 raw_hash
+    #     出自另一份数据（根数不同 / 抓取时刻不同）⇒ 不同 ⇒ 报红。
+    # 它仍然会红（探针 P2 钉住），只是守的东西从「数值凑巧对上」变成「真的共享了
+    # 同一份数据」—— 共享之后这条检查才不是恒真，而是「谁没读冻结快照」的探照灯。
+    ev_by_agent = {v.agent: {e.field: e for e in v.evidence} for v in upstream}
     xconf: list[str] = []
     for a, fa, b, fb, label in CROSS_CHECK_PAIRS:
-        va, vb = by_agent.get(a, {}).get(fa), by_agent.get(b, {}).get(fb)
-        if va is None or vb is None:
-            continue
-        try:
-            same = abs(float(va) - float(vb)) < 1e-6
-        except (TypeError, ValueError):
-            same = va == vb
-        if not same:
-            xconf.append(f"{label}: {a}.{fa}={va} vs {b}.{fb}={vb}")
-    add("cross_check_conflict", xconf, "跨源校验不一致之处")
+        ea = ev_by_agent.get(a, {}).get(fa)
+        eb = ev_by_agent.get(b, {}).get(fb)
+        if ea is None or eb is None:
+            continue  # 某一方没产出这条证据 —— 归覆盖率/缺失项管，不在这里判
+        ha, hb = ea.raw_hash, eb.raw_hash
+        if ha is None or hb is None:
+            # sh_close/close 都有 raw 来源，raw_hash 为空本身就是异常：无从核实
+            # 是否同源 ⇒ 按不一致处理（fail-closed，不给「查不了就放过」）。
+            xconf.append(f"{label}: {a}.{fa} 或 {b}.{fb} 没有 raw_hash，无法核实是否同源")
+        elif ha != hb:
+            xconf.append(f"{label}: {a}.{fa} 与 {b}.{fb} 出自不同数据"
+                         f"（raw_hash {ha[:12]}… ≠ {hb[:12]}…）")
+    add("cross_check_conflict", xconf, "跨源校验：两者是否读同一份冻结数据")
     if xconf:
         missing.append(MissingItem(
             "风险判断的事实基准 —— " + "；".join(xconf)
-            + " —— 两个 Agent 取的是同一个源，值却不同，说明它们看到的不是同一份数据",
+            + " —— 两个 Agent 本该读同一份冻结快照，raw_hash 却不同，"
+            "说明至少一方退回了独立抓取，它们看到的不是同一份数据",
             "risk.upstream.cross_check_conflict"))
 
     # --- 上游 stance 互斥 ---

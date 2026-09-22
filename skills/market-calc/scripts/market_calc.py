@@ -88,6 +88,7 @@ from _store import (  # noqa: E402
     save_raw_snapshot,
     save_verdict,
 )
+from _snapshot import SnapshotCoordinator  # noqa: E402
 
 AGENT = "market"
 CALC_VERSION = "market-calc/1"
@@ -125,11 +126,15 @@ _EXPECTED_FIELDS = 15
 class Collector:
     """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
 
-    def __init__(self, date: str | None, break_source: set[str], store: bool):
+    def __init__(self, date: str | None, break_source: set[str], store: bool,
+                 evidence_set_id: str | None = None):
         self._lock = threading.Lock()
         self.date = date
         self.break_source = break_source
         self.store = store
+        # 给了就读冻结快照（不联网、不重复落盘），没给自己抓（手工调试路径）。
+        self.evidence_set_id = evidence_set_id
+        self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
         self.daily: dict[str, IndexDaily] = {}
         self.quotes: dict[str, IndexQuote] = {}
         self.breadth: BreadthResult | None = None
@@ -177,12 +182,18 @@ class Collector:
                 f"{label}日线 —— 数据源被人为中断（--break-source sina_{key}）",
                 "market.index_daily.source_broken"))
             return
-        try:
-            d = fetch_index_daily(symbol, bars=BAR_COUNT)
-        except (SourceError, ValueError) as e:
-            self._note(missing=MissingItem(f"{label}日线 —— 数据源不可用: {e}",
-                                          "market.index_daily.unavailable"))
-            return
+        if self._coord is not None:
+            # 🔴 fail-closed：读冻结失败直接上抛 SnapshotReadError，不静默退回
+            #    fetch_index_daily（P5）。读的是本次决策冻结的那份，与 sector/
+            #    technical 同源。
+            d = self._coord.read_index_daily(self.evidence_set_id, symbol, bars=BAR_COUNT)
+        else:
+            try:
+                d = fetch_index_daily(symbol, bars=BAR_COUNT)
+            except (SourceError, ValueError) as e:
+                self._note(missing=MissingItem(f"{label}日线 —— 数据源不可用: {e}",
+                                              "market.index_daily.unavailable"))
+                return
 
         if self.date is not None and d.trade_date != self.date:
             # 显式指定了日期 = 一个契约。对不上就是没拿到要的东西。
@@ -193,7 +204,14 @@ class Collector:
 
         with self._lock:
             self.daily[key] = d
-        self._keep_raw(f"sina:kline/{symbol}", d.raw, d.server_as_of or now_cn())
+        if self._coord is not None:
+            # raw 已由 freeze 落库，这里不重复落盘；hash 用冻结集登记的整份 raw 指纹
+            # —— 与 technical 读同一 symbol 时得到同一个 raw_hash（risk CROSS_CHECK 靠它）。
+            with self._lock:
+                self.hashes[f"sina:kline/{symbol}"] = \
+                    self._coord.frozen_content_sha256(self.evidence_set_id, symbol)
+        else:
+            self._keep_raw(f"sina:kline/{symbol}", d.raw, d.server_as_of or now_cn())
 
     def collect_quotes(self) -> None:
         if "tencent" in self.break_source:
@@ -260,9 +278,10 @@ def build_verdict(
     break_source: set[str],
     store: bool,
     task_id: str,
+    evidence_set_id: str | None = None,
 ) -> AgentVerdict:
     t_start = time.monotonic()
-    c = Collector(date, break_source, store)
+    c = Collector(date, break_source, store, evidence_set_id)
 
     jobs = [lambda: c.collect_daily("sh"), lambda: c.collect_daily("sz"),
             c.collect_quotes, c.collect_breadth]
@@ -487,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="A 股市场状态事实计算 → AgentVerdict JSON")
     ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="给了就读这份冻结快照的日线（编排出卡时传）；缺省自己联网抓（手工调试）")
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练用：人为中断某个数据源 (sina_sh|sina_sz|tencent|breadth)")
     ap.add_argument("--no-store", action="store_true", help="不写 raw_market_snapshot")
@@ -498,7 +519,8 @@ def main(argv: list[str] | None = None) -> int:
         init_schema()
 
     v = build_verdict(date=args.date, break_source=set(args.break_source),
-                      store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
+                      store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                      evidence_set_id=args.evidence_set_id)
     # 🔴 判定原件直接落库，返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：
     #    15 条 evidence 的 retrieved_at 转述后一条不剩。

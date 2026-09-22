@@ -341,13 +341,18 @@ schema v4 建 `decision_ids` 时漏过一次，代价是整套决策身份机制
 
 ### 批 D · SnapshotCoordinator
 
+> ✅ **D-I / D-II 已落地（2026-09-22）。** D-I 建 `skills/_snapshot/`（冻结一次、多处读），
+> D-II 把 market/sector/technical 的 `fetch_index_daily` 切到 `read_index_daily`。
+> 落地细节冻结在教程第 25 / 26 章；当前状态见 `architecture.md` §6.3。
+> breadth / pool / news / emotion 的迁移仍未做（下面第二条）。
+
 ```
 Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet → Specialists
 ```
 
-* 先迁共用最多的：`fetch_index_daily`（**当前被三个 skill 各抓一次**）
-* 再迁 breadth / pool，最后 news / emotion
-* 冻结之后 Stage 1 / Risk / Replay **全部只读**，Specialist 不联网
+* 先迁共用最多的：`fetch_index_daily`（**原本被三个 skill 各抓一次** ✅ 已迁）
+* 再迁 breadth / pool，最后 news / emotion（**未做**）
+* 冻结之后 Stage 1 / Risk / Replay **全部只读**，Specialist 不联网（日线部分 ✅ 已达成）
 
 🔴 **要说准它解决什么。** 它**不**直接消除 §3.11 的交易日分裂 ——
 当天日线在收盘后约 33~38 分钟才发布，这是数据源的物理限制。
@@ -357,8 +362,15 @@ Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet �
 
 副作用值得记：`CROSS_CHECK_PAIRS`（market.sh_close ↔ technical.close）
 是为了**检测**这个问题而建的。共享快照之后它会恒真 ——
-届时要么删掉它、要么改成核对「两者是否引用同一个 evidence_set_id」，
+届时要么删掉它、要么改成核对「两者是否引用同一份数据」，
 **不能留一条恒真的检查**（L-7 死配置）。
+
+> ✅ **D-II 采了后者**（`risk_check.py`）：判据从「比值」改成「比 `Evidence.raw_hash`
+> 是否相同」——两个 Specialist 读同一份冻结快照 ⇒ raw_hash 都是那份的指纹 ⇒ 相同 ⇒
+> 不报；某个悄悄退回独立抓取 ⇒ raw_hash 出自另一份 ⇒ 不同 ⇒ 报红。它因此不是恒真，
+> 而是「谁没读冻结快照」的探照灯（探针 P2 钉住它仍会红）。没用 `evidence_set_id`
+> 直接比，是因为 `Evidence` 上没有这个字段而 `raw_hash` 已经有 —— 加字段是批 E 的
+> 契约改动，不在这一批。
 
 ### 批 E · Facts / Assessment 拆分
 

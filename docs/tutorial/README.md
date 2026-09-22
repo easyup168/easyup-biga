@@ -68,6 +68,7 @@ A 股短线**决策辅助**系统。
 | 23 | [Python 驱动 spawn：运行时适配层](23-runtime-adapter.md) | 确定性编排批 C-I：不经 LLM 轮次 spawn Specialist；状态归一化为什么值一层；grant 生命周期与 groupId 硬约束；先抓真实响应形状再写解析（别测自己的假货）；cancel 的意外（active 顺序≠spawn 顺序） | ✅ |
 | 24 | [把编排变成程序：生产入口切换](24-deterministic-orchestrator.md) | 确定性编排批 C-II：「谁能启动」从「拦住」变成「够不到」；判官为什么是叶子 agent；一个被总闸掩盖的 `set -u` bug；**付费点挪了地方而守卫盯着老地方——我在这一批亲手踩了它、真花了钱** | ✅ |
 | 25 | [冻结一次、多处读：SnapshotCoordinator 的地基](25-snapshot-coordinator.md) | 确定性编排批 D-I：把抓取与读取拆开；为不写第二套解析而拆 `fetch`/`parse`（L-3）；manifest 要能反查不是好看；只建地基不改 Specialist（显式登记的施工空档）；分发提示词里一个过期的数字被实测抓出（120 不是 25） | ✅ |
+| 26 | [让 Specialist 改口读冻结快照](26-specialists-read-frozen.md) | 确定性编排批 D-II：切三个 skill 的实际行为；`--evidence-set-id` 为何可选、坏号为何 fail-closed；`raw_hash` 取冻结集那份不对切片重算；恒真检查**改判据**而不是删；两个 fail-closed 点互相兜底、探针从没预期处报红 | ✅ |
 
 ---
 

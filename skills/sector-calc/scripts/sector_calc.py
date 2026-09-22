@@ -77,6 +77,7 @@ from _store import (  # noqa: E402
     save_raw_snapshot,
     save_verdict,
 )
+from _snapshot import SnapshotCoordinator  # noqa: E402
 
 AGENT = "sector"
 CALC_VERSION = "sector-calc/1"
@@ -106,10 +107,14 @@ def _brief(b) -> dict[str, Any]:
 
 
 class Collector:
-    def __init__(self, break_source: set[str], store: bool):
+    def __init__(self, break_source: set[str], store: bool,
+                 evidence_set_id: str | None = None):
         self._lock = threading.Lock()
         self.break_source = break_source
         self.store = store
+        # 给了就读冻结快照的日线（交易日），没给自己抓（手工调试路径）。
+        self.evidence_set_id = evidence_set_id
+        self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
         self.boards: dict[str, BoardResult] = {}
         self.daily: IndexDaily | None = None
         self.missing: list[MissingItem] = []
@@ -172,6 +177,16 @@ class Collector:
                 "交易日 —— 数据源被人为中断（--break-source date）",
                 "sector.trade_date.source_broken"))
             return
+        if self._coord is not None:
+            # 🔴 fail-closed：读冻结失败直接上抛 SnapshotReadError，不静默退回
+            #    自己抓（P5）。交易日与 market/technical 取自**同一份**冻结日线，
+            #    三者的 trade_date 因此必然一致（这正是 risk CROSS_CHECK 要的共享）。
+            self.daily = self._coord.read_index_daily(self.evidence_set_id, _DATE_SYMBOL, bars=2)
+            with self._lock:
+                # raw 已由 freeze 落库，不重复落盘；hash 用冻结集登记的那份（整份 raw）。
+                self.hashes[f"sina:kline/{_DATE_SYMBOL}"] = \
+                    self._coord.frozen_content_sha256(self.evidence_set_id, _DATE_SYMBOL)
+            return
         try:
             self.daily = fetch_index_daily(_DATE_SYMBOL, bars=2)
         except (SourceError, ValueError) as e:
@@ -183,9 +198,10 @@ class Collector:
                        self.daily.server_as_of or now_cn())
 
 
-def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> AgentVerdict:
+def build_verdict(*, break_source: set[str], store: bool, task_id: str,
+                  evidence_set_id: str | None = None) -> AgentVerdict:
     t_start = time.monotonic()
-    c = Collector(break_source, store)
+    c = Collector(break_source, store, evidence_set_id)
 
     jobs = [lambda: c.collect_board("industry", "行业板块榜"),
             lambda: c.collect_board("concept", "概念板块榜"),
@@ -325,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练：人为中断 (industry|concept|date)")
     ap.add_argument("--task-id")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="给了就读这份冻结快照的日线（编排出卡时传）；缺省自己联网抓")
     ap.add_argument("--no-store", action="store_true")
     ap.add_argument("--render", action="store_true")
     args = ap.parse_args(argv)
@@ -333,7 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
     v = build_verdict(break_source=set(args.break_source), store=store,
-                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
+                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                      evidence_set_id=args.evidence_set_id)
     ref = save_verdict(v) if store else None
 
     print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))

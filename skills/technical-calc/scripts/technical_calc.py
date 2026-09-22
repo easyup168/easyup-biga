@@ -67,6 +67,7 @@ from _store import (  # noqa: E402
     save_raw_snapshot,
     save_verdict,
 )
+from _snapshot import SnapshotCoordinator  # noqa: E402
 
 AGENT = "technical"
 CALC_VERSION = "technical-calc/1"
@@ -133,7 +134,8 @@ def _rsi(closes: list[float], n: int = RSI_WINDOW) -> float | None:
     return round(100 - 100 / (1 + ag / al), 2)
 
 
-def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> AgentVerdict:
+def build_verdict(*, break_source: set[str], store: bool, task_id: str,
+                  evidence_set_id: str | None = None) -> AgentVerdict:
     t_start = time.monotonic()
     missing: list[MissingItem] = []
     warnings: list[str] = []
@@ -143,11 +145,20 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
     as_of: datetime | None = None
     raw_hash: str | None = None
 
+    # 🔴 给了 evidence_set_id 就读本次决策的冻结快照（不联网、不重复落盘），
+    #    没给就跟今天一样自己抓（手工调试单跑不被连坐拦掉，批 D-II 做什么第 2 条）。
+    coord = SnapshotCoordinator() if evidence_set_id is not None else None
+
     daily = None
     if "daily" in break_source:
         missing.append(MissingItem(
             f"{SYMBOL_LABEL}日线 —— 数据源被人为中断（--break-source daily）",
             "technical.daily.source_broken"))
+    elif coord is not None:
+        # 🔴 fail-closed：读冻结失败（号不存在 / 没冻这个 symbol / 冻的根数不够）
+        #    直接上抛 SnapshotReadError，**绝不静默退回 fetch_index_daily**——
+        #    那是探针 P5 要防的（悄悄退回独立抓取 = 假装什么都对）。
+        daily = coord.read_index_daily(evidence_set_id, SYMBOL, bars=BAR_COUNT)
     else:
         try:
             daily = fetch_index_daily(SYMBOL, bars=BAR_COUNT)
@@ -165,12 +176,19 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
 
     if daily is not None:
         src = f"sina:kline/{SYMBOL}"
-        raw_hash = payload_sha256(daily.raw)
+        if coord is not None:
+            # 🔴 raw_hash 指向冻结集登记的 content_sha256（整份 raw 的指纹），
+            #    不对自己读到的这一截重算 —— 三个消费者读不同根数才能得到同一个
+            #    raw_hash，risk 的 CROSS_CHECK 靠它判断是否真的共享同一份（P4）。
+            #    raw 已由 freeze 落库，这里不重复落盘。
+            raw_hash = coord.frozen_content_sha256(evidence_set_id, SYMBOL)
+        else:
+            raw_hash = payload_sha256(daily.raw)
         trade_date = daily.trade_date
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
             warnings.append(as_of_warning)
-        if store:
+        if store and coord is None:
             save_raw_snapshot(source=src, as_of=as_of.isoformat(),
                               retrieved_at=retrieved.isoformat(), payload=daily.raw)
 
@@ -285,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练：人为中断 (daily)")
     ap.add_argument("--task-id")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="给了就读这份冻结快照（编排出卡时传）；缺省自己联网抓（手工调试）")
     ap.add_argument("--no-store", action="store_true")
     ap.add_argument("--render", action="store_true")
     args = ap.parse_args(argv)
@@ -293,7 +313,8 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
     v = build_verdict(break_source=set(args.break_source), store=store,
-                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
+                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                      evidence_set_id=args.evidence_set_id)
     ref = save_verdict(v) if store else None
 
     print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
