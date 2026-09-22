@@ -675,7 +675,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       走 8 步细粒度链、`subagent_runs` 有 synthesizer；再复述 L-14 那句提示词给 main，
       断言它**没有工具能到达** DecisionOrchestrator（够不到，不是被拒）。
 - [ ] 批 D · SnapshotCoordinator —— **拆成 D-I / D-II 两个会话**（同 A、C 的理由：耦合面不同）
-  - [ ] 批 D-I · SnapshotCoordinator 基础设施 —— **实现完成、离线全绿（985）、五道探针全见过红，待独立评审**（不自宣通过）
+  - [x] 批 D-I · SnapshotCoordinator 基础设施 —— ✅ 评审复核通过（`4a8841c`）
         建 `skills/_snapshot/`（`SnapshotCoordinator.freeze_index_daily` / `read_index_daily` /
         `frozen_snapshot_ids`）：一次决策里每个 `(source, symbol)` **只真实抓一次**，多个消费者
         从同一份冻结数据切各自要的根数（sector 2 / market 25 / technical 120）。`evidence_sets`
@@ -686,7 +686,14 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         探针见红并还原：P1（read 不重抓，改成重抓→实测 4 次≠1）/ fail-closed 越界（拆掉检查→
         DID NOT RAISE）/ P4（拆掉 evidence_sets 触发器→UPDATE/DELETE 通过，且 `test_每张表都有
         只追加触发器` 一并抓到）/ P5（manifest 去掉 snapshot_id→反查红）—— 详见 CHANGELOG。
-  - [ ] 批 D-II · Specialist 改口读冻结快照（切 market/sector/technical 的实际调用点，改现有 skill 行为，高风险，等 D-I 评审通过）
+        评审复核：P1、P4 两条独立复现过红（P4 的动态守卫零改动跨批自动生效，值得记）。
+        自报的弱点（freeze 跨 decision_id 调用不幂等）复核后**认为不该在这一批修**——
+        真正该成立的是「一个 run 只冻一次」，不是「一个 decision 只冻一次」（decision
+        允许对应多个 run，重试该拿新数据），coordinator 现在按 decision_id 收参，连表达
+        per-run 约束的手段都没有，留给 D-II 按 run_id 认。顺带发现分发提示词把
+        technical 的 `bars` 写错成 25（实测 120）——已在 `orchestration-kickoff-prompt.md`
+        改正。
+  - [ ] 批 D-II · Specialist 改口读冻结快照（切 market/sector/technical 的实际调用点，改现有 skill 行为，高风险）—— 分发提示词已就绪，可开工
 - [ ] 批 E · Facts / Assessment 拆分
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
