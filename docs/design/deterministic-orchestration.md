@@ -192,6 +192,72 @@ A-I 之前落库的 239 条原件会集体核对不上，而且是静默的（�
 > 自身**——后者在对象冻结之前永远可以被绕过，冻结之后也只是「更难绕过」，
 > 不是「不需要想清楚判据该建在哪」。
 
+### 追加 5 · 2026-09-22 外部架构复审的断言复核
+
+🔴 **这份评审审的是一份 zip 快照，落在批 D-I 合并之后、批 D-II 开工之前**
+（它自己给的测试数是 985，与 D-I 落地那一刻的数字完全对应；它把 D-II、
+C-II 的 P1/P2 live 补验都列在「尚未完成」里）。复核这份评审时，D-II
+（`e81f94b`）、C-II 的 `agent_runs` 回归修复（`e8518ed`）、C-II 收尾的
+P1/P2 live 补验（`71789b5`）**都已经落地**——不照单接收既包括「断言本身
+对不对」，也包括「断言现在还成立吗」。
+
+| # | 断言 | 复核 |
+|---|---|---|
+| §4-6 | `test_isolation.py` 因 `check_namespaces` 漂移而失败 | 🔶 结构性观察成立（mock 清单确实只列了 4/5 个检查函数），但在本仓库当前环境里**不会真的失败**——`check_namespaces` 在装了 systemd 单元的机器上返回 PASS，不会踩进评审描述的 UNKNOWN 分支 |
+| §5 | `test_scan_fallback.py` 断言 `scan_mode()=="git"` 会因为 zip 没有 `.git` 而失败 | ❌ 不是本仓库的 bug——这里是真实 git checkout，这条测试跑得过；评审自己在 §3 也承认「ZIP 中没有 `.git`」 |
+| §6 | `latency_report.py` 的 UNKNOWN 诊断走 stdout，但有测试要 stderr | ❌ 查无此测试——`test_verify_exit_codes.py` 断言的正是 stdout，且现在跑得过 |
+| §8-16 | `run_id` 未贯穿 `agent_verdicts`/`evidence_sets`/`DecisionCard`/`VerdictRef`；`latest_verdict_ids` 按 `decision_id` 不按 `run_id` 聚合；`verify_verdict_refs` 不核对 `ref.agent==存量.agent` | ✅ 事实成立，字段确实都不存在。**但评审据此构造的「重试时跨 run 串读」场景目前打不到**——见追加 5.1 |
+| §17-18 | `CARD_PERSISTED` 转移写在 `card_ops.persist()` 之前，`persist()` 抛错会留下「已落库」的假状态 | ✅ 成立，`orchestrator.py` 里 `transition(..., CARD_PERSISTED, ...)` 确实先于 `persist(card)`。真实 bug，值得修——见批 C-III |
+| §19-20 | `SNAPSHOT_FROZEN` 的 `detail` 仍写着「SnapshotCoordinator 未接入」，状态名与事实不符 | ⚠️ **已被 D-II 解决**——现在的 `detail` 是真实的 `{"evidence_set_id":..., "symbols":[...], "bars":120}`，不再是假话 |
+| §26 | `orchestrator.py` 被直接调用能绕过总闸/预算/单实例锁 | 🔶 ownership 这条已被 C-II 评审堵住（`entry_guard.classify_caller()`），但预算与 flock 确实还只在 `bin/biga-card` 的 bash 层——评审说的「三层」里堵了一层，另两层是真缺口 |
+| §28 | Stage 1 部分 spawn 成功后没有 cleanup，已启动的会孤儿化 | ✅ 成立，`handles=[ad.start(...) for a in STAGE1_AGENTS]` 中途抛错时，已经 start 成功的 handle 不会被 `cancel()`——真实成本泄漏，见追加 5.2 |
+| §24-25 | 没有 stale-run reaper：进程被外部信号杀掉时，run 可能永久卡在非终态 | ✅ 成立，C-II 的 `trap` 只保证子进程被杀，不保证 `run_events` 写终态；`~/.openclaw-biga/cron` 目前是空的 |
+| §29-30 | `MissingItem` 的「无响应」code 不分 agent；`AgentVerdict`/`DecisionCard` 只是浅冻结 | ✅ 两条都成立，都是精度/硬化类问题，不是安全洞 |
+| §32 | risk 的新鲜度用 `retrieved_at - as_of`（源端延迟），不是「risk 评估那一刻」的年龄 | ✅ 成立，但**评审建议的修法本身没错**——`evaluated_at` 只要在 risk verdict 自己构造时定一次（跟今天 `retrieved_at` 的定法一样），不会破坏回放确定性；这不是「现在的做法错了」，是「现在测的是另一个更早的时间点」 |
+| §35 | 各阶段（Stage1/risk/synth）各自固定预算，互相不感知总 deadline 还剩多少 | ✅ 成立，`self.stage1_sec`/`risk_sec`/`synth_sec` 各自读各自的环境变量，`deadline_sec` 只用来算 grant TTL。外层 bash `timeout` 兜底，不是没有防线，但内层三段预算之和可以超过 `deadline_sec` 而不自知 |
+
+#### 追加 5.1 · 「重试跨 run 串读」目前打不中，但不是因为已经修了
+
+评审的核心叙事（P1，§8-16）建在这个场景上：同一个 `decision_id` 跑第二次
+（重试），`latest_verdict_ids(decision_id)` 可能把 Run A 的旧 verdict
+和 Run B 的新 verdict混在一起。
+
+复核结论：**这个场景在当前代码里打不中**——不是因为哪个字段挡住了它，
+而是因为「同一个 `decision_id` 跑第二次」这条路径根本不存在。
+`orchestrator.py::run()` 的 Stage 0 永远 `reserve_decision_id()` 现铸一个
+新号（`main()` 传进来的 `ctx.decision_id` 恒为 `None`），`decision_id`
+因此天然是「一次执行尝试」的粒度，客观上顶替了本该由 `run_id` 承担的
+隔离作用。
+
+⚠️ **这不代表评审的断言是错的，代表它是提前量。** 批 B 当年拆出 `run_id`
+本身就是为了给「硬超时收掉一次运行后重试，两次尝试挤在同一个 `decision_id`
+上」这个场景铺路（§4 的身份模型表格原话）——也就是说，重试路径迟早会有，
+评审指出的这批字段缺口（`agent_verdicts`/`evidence_sets`/`DecisionCard`/
+`VerdictRef` 都不认 `run_id`）到那一天就会从「潜在」变成「立即可利用」。
+
+⇒ **不作为紧急修复，作为一条排期约束**：**任何**引入「同一 decision_id
+可以被多次尝试」的批次（目前排位上最可能是批 G 的可靠性/重跑相关工作，
+但确切落在哪一批要看到时候的实际设计）**开工前**，`run_id` 必须先贯穿
+`agent_verdicts` → `evidence_sets` → `VerdictRef` → `DecisionCard` 这条链。
+这件事本身不建议现在单独开一批去做——没有重试路径去消费它，提前建是
+L-1（没有消费方的结构）。
+
+#### 追加 5.2 · Stage 1 部分失败的 cleanup 缺口，恰好是 `cancel()` 一直缺的那个真调用方
+
+批 C-I 建了 `OpenClawRuntimeAdapter.cancel()`，批 C-I/D-I/D-II 三次评审都
+记录过同一句话：它只在 N=2、无 drain 场景下验证过，"谁第一个真的让
+Orchestrator 调用 cancel()"，谁负责把这条残留风险补掉（见 `TODO.md`
+「批 C-II 残留风险」）。
+
+这份评审的 §28 发现的洞——Stage 1 五路 fan-out 中途某一路 `start()` 抛错
+时，已经成功启动的兄弟 handle 被直接丢弃、无人取消——**正好就是那个
+一直没出现的真调用方**。修这个洞需要在 `except` 分支里对已启动的 handle
+挨个调 `cancel()`，这恰好是 N 可以到 5、且天然会有 drain（部分 handle
+已经在 active/recent 之间流转）的真实场景。
+
+⇒ 修 §28 与补 `cancel()` 的残留风险验证是同一个动作，不是两件事——
+批 C-III 把两者一起收掉。
+
 ### 评审的 drop-in 里有一处会出事
 
 §23 建议统一用 `separators=(",", ":")`。但 `_store/db.py::payload_sha256` 目前**不带**它，

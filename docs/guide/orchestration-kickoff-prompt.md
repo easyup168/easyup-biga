@@ -635,6 +635,108 @@ P5  🔴 **仅当这一批的 Orchestrator 会在硬超时/部分失败时调用
 
 ---
 
+## 批 C-III · Orchestrator 健壮性收尾（外部评审）
+
+⚠️ **不依赖 D/E 系列，可以在批 E-I 进行时并行开工。** 这一批只碰
+`orchestrator.py` / `bin/biga-card` / `_runtime/adapter.py` / `_store/db.py`
+里几处与 Facts/Assessment 拆分无关的既有代码；批 E-I 改的是契约层新增类型，
+两者不会撞文件。
+
+🔴 **来源**：2026-09-22 一份外部架构复审（`docs/design/deterministic-
+orchestration.md` §2 追加 5 已经复核过它的断言，✅/⚠️/❌ 三种结论都有——
+先读追加 5 全文，尤其是 5.1、5.2 两条，不要重新论证哪些断言现在还成立）。
+这一批只做追加 5 里标了 ✅ 且判定"值得马上修"的那几条，**不做**标了 ⚠️
+（已被 D-II 解决）或者 追加 5.1 说的"暂不建议现在做"（run_id 贯穿全链）
+的部分。
+
+```text
+做四件独立的小修复，都来自对同一份外部评审的复核（先读设计文档 §2 追加 5，
+不要跳）。四件之间没有依赖，可以按任意顺序做，但每件都要有自己的探针。
+
+## C3-1 · CARD_PERSISTED 的转移必须写在 persist() 成功之后
+
+现在 `orchestrator.py::run()` 里 `transition(..., CARD_PERSISTED, ...)`
+先于 `card_ops.persist(card)` 调用。如果 `persist()` 抛错，`run_events`
+会留下一条"已落库"的假记录，而库里其实没有这张卡。
+
+⇒ 调换顺序：`persist()` 成功拿到 `record_id` 之后才转移，`detail` 里带上
+真实的 `record_id`（不是现在的占位字符串）。
+
+## C3-2 · Stage 1 部分启动失败时，已启动的 handle 要被取消
+
+`handles = [ad.start(a, ...) for a in STAGE1_AGENTS]` 中途某个 `start()`
+抛错时，之前已经成功 start 的 handle 被直接丢弃——那些 Specialist 会话
+继续跑，直到自己的 `runTimeoutSeconds`，白白花钱。
+
+🔴 这恰好是 `OpenClawRuntimeAdapter.cancel()` 一直缺的真实调用方——
+批 C-I/D-I/D-II 三次评审都记录过同一条残留风险："cancel() 的 active[]/
+tasks[] 同序映射只在 N=2、无 drain 场景下验证过"（`TODO.md`「批 C-II 残留
+风险」）。这一批用真实的部分失败场景把它补上，不是另起一个人工场景。
+
+⇒ 改成显式循环 + 已启动 handle 列表，`except` 分支里对已启动的逐个调
+`cancel()`。
+
+## C3-3 · verify_verdict_refs 补上 agent 字段核对
+
+当前只核对 `verdict_id` 存在、`content_sha256` 一致，不核对
+`ref.agent == 存量.agent`。理论上一张手工拼出来的 Card 可以让 VerdictRef
+声称"这是 market 的原件"，实际指向的却是 news 的行（`verdict_id` 相同、
+hash 恰好也一致——注意 `verdict_id` 是跨 agent 的全局自增，不是按 agent
+namespace 的）。
+
+⇒ `verify_verdict_refs()` 加一行比较，agent 不一致就报不一致，不是"能
+找到就算过"。
+
+## C3-4 · Orchestrator 感知总预算，各阶段按剩余时间收窄
+
+`stage1_sec` / `risk_sec` / `synth_sec` 现在各自独立，互不感知
+`deadline_sec` 还剩多少。Stage 1 如果吃满自己的预算，Risk 与 Synth 仍然
+各自等自己的全额——三段之和可以超过 `deadline_sec`，只靠外层 bash 的
+`timeout` 硬顶（纵深防御的最后一层，不该是唯一一层）。
+
+⇒ `run()` 里维护一个 `deadline = time.monotonic() + self.deadline_sec`，
+每进入一个阶段用 `min(该阶段自己的预算, deadline - time.monotonic())`
+作为这次 `ad.wait()` 的 timeout；`remaining <= 0` 时不再等，直接按
+TIMEOUT 处理进入 FAILED。
+
+## 不要做
+
+- 不要碰 §26（直接跑 `orchestrator.py` 绕过预算/单实例锁）——ownership
+  这一层已经被 C-II 堵住，budget/flock 那两层要把校验逻辑从 bash 挪进
+  Python、两个入口共用，是比这四件事更大的一次改动，留给独立的一批
+- 不要碰 §24-25（stale-run reaper 的自动调度）——**可以**写一个纯函数/
+  手工调用的"扫非终态 run、按 deadline 判 TIMEOUT"的工具（放
+  `tools/verify/` 或新开 `tools/maintenance/`），但**不要**接 cron 或
+  systemd timer——那是批 G 的地盘（"配置进仓库"本来就包含这类调度配置）
+- 不要动 `run_id` 贯穿 `agent_verdicts`/`evidence_sets`/`VerdictRef`/
+  `DecisionCard` 这条链——设计文档 §2 追加 5.1 已经说清楚：这是一条排期
+  约束（任何引入"同 decision_id 重试"的批次开工前必须先做），不是现在
+  就要做的事，没有消费方提前建是 L-1
+- 不要碰批 E-I 正在改的 `_contract/verdict.py`、`_contract/evidence.py`、
+  `_store/schema.py`——两批同时在跑，文件层面不该有交集；如果发现非改
+  不可，停下来先确认没有跟 E-I 撞车
+
+## 必须做的探针（G-1）
+
+P1  人工让 `persist()` 抛异常，断言 `run_events` 里不存在
+    `CARD_PERSISTED`（这条本身就是外部评审建议的回归测试，直接照做）
+P2  Stage 1 五个里让第 3 个 `start()` 抛错，断言前两个已启动的 handle
+    收到了 `cancel()` 调用（离线用桩 Adapter 验证调用发生；如果要在真实
+    Adapter 上验证 N=5/drain 场景，那是 live 补验，不在这一批的离线判据里，
+    但要在交接里说清楚这条残留风险是不是已经随之解决）
+P3  伪造一条 `VerdictRef`，`agent` 字段与它指向的存量行不一致、其余字段
+    全部正确，断言 `verify_verdict_refs()` 报不一致
+P4  把某个阶段的预算故意设成会超过 `deadline_sec`，断言后面的阶段拿到的
+    实际等待时间被压缩到剩余预算以内，不是继续用自己那段固定值
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
 ## 批 D-I · SnapshotCoordinator 基础设施
 
 ⚠️ **批 C-II 合并之后才开这一批。** C-II 已于 `d35d286` 合并并通过两轮评审复核。
