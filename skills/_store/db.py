@@ -13,6 +13,7 @@ Card 只能整个对象地存进来，不能拆成字段分别写 —— 这样�
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -23,8 +24,12 @@ from contextlib import contextmanager
 from typing import Any
 
 from _contract import (
+    AgentAssessment,
+    AgentOutcome,
     AgentVerdict,
     DecisionCard,
+    FactBundle,
+    LegacyAdapter,
     is_adhoc_task_id,
     new_task_id,
     now_cn,
@@ -50,6 +55,10 @@ __all__ = [
     "load_raw_snapshot",
     "save_evidence_set",
     "load_evidence_set",
+    "save_fact_bundle",
+    "load_fact_bundle",
+    "save_assessment",
+    "load_outcome",
     "AppendOnlyViolation",
 ]
 
@@ -494,23 +503,38 @@ def latest_verdict_ids(
 def load_verdict(
     verdict_id: int, *, path: pathlib.Path | str | None = None
 ) -> AgentVerdict | None:
-    """按 id 取回判定原件。找不到返回 None —— 由调用方决定这算不算缺失。"""
-    with connect(path, readonly=True) as conn:
-        row = conn.execute(
-            "SELECT verdict_json FROM agent_verdicts WHERE verdict_id=?",
-            (int(verdict_id),),
-        ).fetchone()
-    return AgentVerdict.from_dict(json.loads(row["verdict_json"])) if row else None
+    """按 id 取回判定，**压成旧消费者认识的 AgentVerdict**。找不到返回 None。
+
+    🔴 批 E-I：一行可能是三种形状之一（`kind` 列）——
+      · 旧 `AgentVerdict`（kind NULL/'verdict'）：直接 `from_dict`。
+      · 新 `FactBundle`（kind='fact'）/`AgentAssessment`（kind='assessment'）：
+        走 `load_outcome` 拼成 `AgentOutcome`，再 `to_agent_verdict()` 压回。
+    这样 `card_ops` / `risk_check` / `DecisionCard` **零改动**——它们拿到的永远是
+    一个 AgentVerdict，不管底下是新是旧（分发提示词「让消费方返回值都长一样」）。
+    要看拆开的 FactBundle/AgentAssessment 用 `load_outcome`。
+    """
+    kind = _verdict_kind(verdict_id, path=path)
+    if kind is _MISSING:
+        return None
+    if kind in (None, "verdict"):
+        with connect(path, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT verdict_json FROM agent_verdicts WHERE verdict_id=?",
+                (int(verdict_id),),
+            ).fetchone()
+        return AgentVerdict.from_dict(json.loads(row["verdict_json"])) if row else None
+    oc = load_outcome(verdict_id, path=path)
+    return oc.to_agent_verdict() if oc else None
 
 
 def load_verdict_meta(
     verdict_id: int, *, path: pathlib.Path | str | None = None
 ) -> dict[str, Any] | None:
-    """取回一行的元信息（含修订链），不构造契约对象。"""
+    """取回一行的元信息（含修订链 + `kind`），不构造契约对象。"""
     with connect(path, readonly=True) as conn:
         row = conn.execute(
             "SELECT verdict_id, task_id, agent, amends, amend_reason, "
-            "content_sha256, created_at FROM agent_verdicts WHERE verdict_id=?",
+            "content_sha256, created_at, kind FROM agent_verdicts WHERE verdict_id=?",
             (int(verdict_id),),
         ).fetchone()
     return dict(row) if row else None
@@ -547,6 +571,156 @@ def verify_verdict_refs(
                 f"agent_verdicts 里现在是 {meta['content_sha256'][:12]}… —— "
                 f"这条原件在合成之后被改变过")
     return problems
+
+
+# ──────────────────── FactBundle / AgentAssessment（批 E-I：事实与判断拆开）
+#
+# 新形状与旧 AgentVerdict 同住 agent_verdicts（`kind` 列区分）—— 复用它已有的只追加
+# 触发器与线性修订唯一索引，不另起一张表再维护一套同样的约束（L-3）。
+
+
+_MISSING = object()  # 区分「行不存在」与「kind 是 NULL（旧 AgentVerdict）」
+
+
+def _verdict_kind(verdict_id: int, *, path: pathlib.Path | str | None = None):
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT kind FROM agent_verdicts WHERE verdict_id=?", (int(verdict_id),)
+        ).fetchone()
+    return _MISSING if row is None else row["kind"]
+
+
+def save_fact_bundle(
+    fb: FactBundle, *, path: pathlib.Path | str | None = None
+) -> int:
+    """落一份 `FactBundle`（skill 产出的事实，无 stance），返回行号。
+
+    🔴 **写路径严**（§9）：只收 `FactBundle`。旧 `AgentVerdict` 走 `save_verdict`——
+    新落库路径不接受旧形状，旧格式才会随时间自然清零，不变成第二套要跟着演进的口径。
+    """
+    if not isinstance(fb, FactBundle):
+        raise TypeError(
+            f"save_fact_bundle 只接受 _contract.FactBundle，收到 {type(fb).__name__} —— "
+            "旧 AgentVerdict 走 save_verdict；新落库路径不收旧形状（写路径严，§9）。")
+    if is_adhoc_task_id(fb.task_id):
+        raise ValueError(
+            f"[{fb.agent}] task_id={fb.task_id} 是临时号（序号 000），不能落库。\n"
+            "  由 Supervisor 在 Stage 0 占号并用 --task-id 传下来；只看输出加 --no-store。")
+    blob = _canonical_dumps(fb.to_dict())
+    # 🔴 写边界重校验（A3）：只信「序列化之后还能重建出来」。
+    FactBundle.from_dict(json.loads(blob))
+    with connect(path) as conn:
+        cur = conn.execute(
+            "INSERT INTO agent_verdicts "
+            "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
+            " created_at, kind) VALUES (?,?,?,?,?,?,?,?)",
+            (fb.task_id, fb.agent, None, None, blob,
+             hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+             now_cn().isoformat(), "fact"),
+        )
+        return int(cur.lastrowid)
+
+
+def load_fact_bundle(
+    verdict_id: int, *, path: pathlib.Path | str | None = None
+) -> FactBundle | None:
+    """按 id 取回一条 `FactBundle`。不是 fact 行返回 None。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT verdict_json, kind FROM agent_verdicts WHERE verdict_id=?",
+            (int(verdict_id),),
+        ).fetchone()
+    if row is None or row["kind"] != "fact":
+        return None
+    return FactBundle.from_dict(json.loads(row["verdict_json"]))
+
+
+def save_assessment(
+    a: AgentAssessment, *, fact_id: int,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """落一份 `AgentAssessment`（Agent 的 stance，指回 `fact_id`），返回行号。
+
+    🔴 **不抄事实**：只存 stance + `fact_ref`。`amends=fact_id` 复用线性修订唯一
+    索引 —— 一份事实**最多一个判断**。写库前构造 `AgentOutcome(fact, a)` 走一遍
+    跨型铁律（UNKNOWN 的事实上不许有方向判断）；`fact_id` 必须指向一条同
+    `(task_id, agent)` 的 `fact` 行。
+    """
+    if not isinstance(a, AgentAssessment):
+        raise TypeError(
+            f"save_assessment 只接受 _contract.AgentAssessment，收到 {type(a).__name__}")
+    meta = load_verdict_meta(fact_id, path=path)
+    if meta is None:
+        raise ValueError(
+            f"fact_id={fact_id} 不存在 —— assessment 必须指向一条真实落库的 FactBundle。")
+    if meta["kind"] != "fact":
+        raise ValueError(
+            f"fact_id={fact_id} 不是 FactBundle（kind={meta['kind']!r}）—— assessment "
+            "只能挂在 fact 行上，不能挂到旧 AgentVerdict 或另一个 assessment 上。")
+    if meta["task_id"] != a.task_id or meta["agent"] != a.agent:
+        raise ValueError(
+            f"assessment（{a.agent}/{a.task_id}）与 fact #{fact_id}"
+            f"（{meta['agent']}/{meta['task_id']}）不是同一个 (task_id, agent) —— "
+            "判断不能挂到别人的事实上。")
+    # 🔴 跨型铁律在写库前校验：加载 fact，构造 AgentOutcome 会在 UNKNOWN+方向判断时抛错。
+    fact = load_fact_bundle(fact_id, path=path)
+    AgentOutcome(fact=fact, assessment=dataclasses.replace(a, fact_ref=fact_id))
+    a = dataclasses.replace(a, fact_ref=fact_id)  # 自描述：json 里也带上它指的 fact 行
+    blob = _canonical_dumps(a.to_dict())
+    AgentAssessment.from_dict(json.loads(blob))  # 写边界重校验
+    try:
+        with connect(path) as conn:
+            cur = conn.execute(
+                "INSERT INTO agent_verdicts "
+                "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
+                " created_at, kind) VALUES (?,?,?,?,?,?,?,?)",
+                (a.task_id, a.agent, fact_id, f"assessment stance={a.stance}", blob,
+                 hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+                 now_cn().isoformat(), "assessment"),
+            )
+            return int(cur.lastrowid)
+    except sqlite3.IntegrityError as e:
+        if "ux_verdict_amends_linear" not in str(e) and "agent_verdicts.amends" not in str(e):
+            raise
+        raise ValueError(
+            f"fact #{fact_id} 已经有一个 assessment 了 —— 一份事实最多一个判断（线性修订）。\n"
+            "  要改判断：在已有 assessment 的基础上再修一次，不要指回同一条 fact。"
+        ) from e
+
+
+def load_outcome(
+    verdict_id: int, *, path: pathlib.Path | str | None = None
+) -> AgentOutcome | None:
+    """按 id 取回一个 `AgentOutcome`（FactBundle + 可选 AgentAssessment）。找不到返回 None。
+
+    🔴 三种落库形状都能读回（读路径宽，§9）：
+      · 旧 AgentVerdict → `LegacyAdapter.to_outcome` 拆成新三型；
+      · fact 行 → `AgentOutcome(fact, None)`；
+      · assessment 行 → 顺着 `amends` 找到它的 fact，拼成完整 outcome。
+    """
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT verdict_json, amends, kind FROM agent_verdicts WHERE verdict_id=?",
+            (int(verdict_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        kind, d = row["kind"], json.loads(row["verdict_json"])
+        if kind == "fact":
+            return AgentOutcome(fact=FactBundle.from_dict(d), assessment=None)
+        if kind == "assessment":
+            frow = conn.execute(
+                "SELECT verdict_json FROM agent_verdicts WHERE verdict_id=?",
+                (int(row["amends"]),),
+            ).fetchone()
+            if frow is None:
+                raise ValueError(
+                    f"assessment #{verdict_id} 的 fact #{row['amends']} 找不到了 —— "
+                    "assessment 与 fact 的链断了（只追加表本不该发生）。")
+            return AgentOutcome(fact=FactBundle.from_dict(json.loads(frow["verdict_json"])),
+                                assessment=AgentAssessment.from_dict(d))
+    # 旧 AgentVerdict（kind NULL/'verdict'）—— 出了 with 块再拆，避免嵌套连接。
+    return LegacyAdapter.to_outcome(AgentVerdict.from_dict(d))
 
 
 # ───────────────────────────────────────────────────────────────── agent_runs

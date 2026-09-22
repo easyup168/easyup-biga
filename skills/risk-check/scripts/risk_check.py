@@ -280,11 +280,22 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
         eb = ev_by_agent.get(b, {}).get(fb)
         if ea is None or eb is None:
             continue  # 某一方没产出这条证据 —— 归覆盖率/缺失项管，不在这里判
+        # 🔴 批 E-I：优先比 evidence_set_id —— 结构验证「真的读了同一个冻结集」，
+        #    比 raw_hash 硬。D-II 留的账：两次独立抓取碰巧逐字节相同时 raw_hash 会
+        #    碰巧相等、漏报「悄悄退回独立抓取」；evidence_set_id 不同就是不同，不看内容。
+        #    ⚠️ 两条都有 evidence_set_id 才用它；只要有一条没有（老 Specialist 还没填
+        #    这个字段），退回 raw_hash 比较 —— 不能因为一方字段缺失就让整条检查失效。
+        if ea.evidence_set_id is not None and eb.evidence_set_id is not None:
+            if ea.evidence_set_id != eb.evidence_set_id:
+                xconf.append(
+                    f"{label}: {a}.{fa} 与 {b}.{fb} 出自不同冻结集"
+                    f"（evidence_set_id {ea.evidence_set_id} ≠ {eb.evidence_set_id}）")
+            continue
         ha, hb = ea.raw_hash, eb.raw_hash
         if ha is None or hb is None:
-            # sh_close/close 都有 raw 来源，raw_hash 为空本身就是异常：无从核实
+            # sh_close/close 都有 raw 来源，两个溯源字段都为空本身就是异常：无从核实
             # 是否同源 ⇒ 按不一致处理（fail-closed，不给「查不了就放过」）。
-            xconf.append(f"{label}: {a}.{fa} 或 {b}.{fb} 没有 raw_hash，无法核实是否同源")
+            xconf.append(f"{label}: {a}.{fa} 或 {b}.{fb} 既无 evidence_set_id 又无 raw_hash，无法核实是否同源")
         elif ha != hb:
             xconf.append(f"{label}: {a}.{fa} 与 {b}.{fb} 出自不同数据"
                          f"（raw_hash {ha[:12]}… ≠ {hb[:12]}…）")

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""emotion-calc —— A 股情绪事实计算，输出一份合法的 AgentVerdict。
+"""emotion-calc —— A 股情绪事实计算，输出一份合法的 FactBundle。
+
+🔴 批 E-I 试点：这是第一个迁到「事实与判断拆开」的 skill。它现在产 `FactBundle`
+（只事实、无 stance），stance 由 emotion Agent 事后用 `amend_verdict.py --stance`
+追加一个 `AgentAssessment` —— **不重打这份事实**（补丁路径当年就是为了防这个：
+`BIGA-20260920-002` 那次重打丢了 15 条 evidence 的 retrieved_at）。其余五个 skill
+仍产 `AgentVerdict`（合体），E-II 起再迁。
 
 分工（architecture.md §6 硬约束 S-1 / S-2）
 --------------------------------------------
@@ -65,8 +71,8 @@ sys.path.insert(0, str(_REPO / "skills"))
 from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
     CN_TZ,
-    AgentVerdict,
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
@@ -81,8 +87,8 @@ from _sources import (  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
     payload_sha256,
+    save_fact_bundle,
     save_raw_snapshot,
-    save_verdict,
 )
 
 AGENT = "emotion"
@@ -200,13 +206,13 @@ def _ladder(rows: list[dict[str, Any]]) -> dict[int, int]:
     return dict(sorted(out.items()))
 
 
-def build_verdict(
+def build_fact_bundle(
     *,
     date: str | None,
     break_source: set[str],
     store: bool,
     task_id: str,
-) -> AgentVerdict:
+) -> FactBundle:
     t_start = time.monotonic()
     c = Collector(date, break_source, store)
 
@@ -335,7 +341,10 @@ def build_verdict(
     else:
         status, level = "partial", "UNKNOWN"
 
-    return AgentVerdict(
+    # 🔴 批 E-I：emotion 是试点 —— 产 FactBundle（只事实、无 stance），不再产
+    #    合体 AgentVerdict。stance 由 emotion Agent 事后用 amend_verdict.py 追加一个
+    #    AgentAssessment（不重打这份事实）。其余五个 skill 仍产 AgentVerdict（E-II 再迁）。
+    return FactBundle(
         task_id=task_id,
         agent=AGENT,
         status=status,
@@ -350,7 +359,7 @@ def build_verdict(
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="A 股情绪事实计算 → AgentVerdict JSON")
+    ap = argparse.ArgumentParser(description="A 股情绪事实计算 → FactBundle JSON（批 E-I）")
     ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式："
                                    "数据源返回的日期对不上即进 missing[]")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
@@ -367,41 +376,42 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
 
-    v = build_verdict(
+    fb = build_fact_bundle(
         date=args.date,
         break_source=set(args.break_source),
         store=store,
         task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
     )
-    # 🔴 判定原件直接落库，返回一个 id 供 agent 引用。
+    # 🔴 事实原件直接落库（批 E-I：FactBundle，不含 stance），返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：
-    #    15 条 evidence 的 retrieved_at 转述后一条不剩。
-    #    让数据不经过 LLM，是唯一可靠的修法。
-    ref = save_verdict(v) if store else None
+    #    15 条 evidence 的 retrieved_at 转述后一条不剩。让数据不经过 LLM，是唯一可靠的修法。
+    #    stance 由 emotion Agent 事后 `amend_verdict.py --ref <这个号> --stance <词>` 追加，
+    #    落成一条 AgentAssessment，**不重打这份事实**。
+    ref = save_fact_bundle(fb) if store else None
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
 
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref is not None else "  (未落库)"),
               file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             print(f"  {e.display_label:<16} = {e.value}"
                   f"   as_of {e.as_of:%Y-%m-%d %H:%M}", file=sys.stderr)
-        if v.warnings:
+        if fb.warnings:
             print("  警告:", file=sys.stderr)
-            for w in v.warnings:
+            for w in fb.warnings:
                 print(f"    · {w}", file=sys.stderr)
-        if v.missing:
-            print(f"  ⚠ 缺失项（{len(v.missing)}）:", file=sys.stderr)
-            for m in v.missing:
+        if fb.missing:
+            print(f"  ⚠ 缺失项（{len(fb.missing)}）:", file=sys.stderr)
+            for m in fb.missing:
                 print(f"    · {m}", file=sys.stderr)
 
     # 退出码：0=完整，2=有缺失但核心可用，3=核心缺失
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":

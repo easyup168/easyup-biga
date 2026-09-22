@@ -77,7 +77,8 @@ def build(**kw):
     kw.setdefault("break_source", set())
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return ec.build_verdict(**kw)
+    # 批 E-I：emotion 是试点，现在产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return ec.build_fact_bundle(**kw)
 
 
 class TestHappyPath:
@@ -116,7 +117,8 @@ class TestHappyPath:
         assert v.data_completeness == 1.0
 
     def test_每个result字段都有证据(self, wired):
-        """契约铁律 3 —— 由 AgentVerdict 构造时强制，这里再从外部确认一次。"""
+        """契约铁律 3 —— 由 FactBundle 构造时强制（批 E-I 后 emotion 产 FactBundle），
+        走的是与 AgentVerdict 同一份 `check_fact_invariants`，这里再从外部确认一次。"""
         v = build()
         assert set(v.result) <= {e.field for e in v.evidence}
 

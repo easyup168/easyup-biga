@@ -241,7 +241,7 @@ P1/P2 live 补验（`71789b5`）**都已经落地**——不照单接收既包�
 | | 把字段补上、存下来（capture） | 靠字段做强制校验（enforce，拒绝跨 run 串读） |
 |---|---|---|
 | 现在有没有消费方 | 有——`run_id` 本身从批 B 就存在并被写入 `decision_runs`/`run_events`，这里只是让 `agent_verdicts` 等**已经在写别的字段**的表顺手多存一列 | 没有——`latest_verdict_ids()` 按 `run_id` 过滤这件事，只有重试路径存在才有意义 |
-| 现在不做，以后会怎样 | 越晚做越贵：批 E 系列正在**同一层**（`_contract/verdict.py`、`_store/schema.py`）做迁移，晚一步就要在这层上再开一次刀，还要处理期间新落的历史数据 | 不会变贵——加一个 `WHERE run_id = ?` 不会因为多等几批而变难写 |
+| 现在不做，以后会怎样 | 越晚做越贵：批 E 系列正在**同一层**（`skills/_contract/verdict.py`、`skills/_store/schema.py`）做迁移，晚一步就要在这层上再开一次刀，还要处理期间新落的历史数据 | 不会变贵——加一个 `WHERE run_id = ?` 不会因为多等几批而变难写 |
 | 结论 | **现在排期，紧跟在当前这轮 schema 改动后面** | 维持原判：等真正的重试批次开工前再做 |
 
 分界线是「记账」与「用账」——这个项目里 `Evidence.raw_hash` 就是先例：先有字段
@@ -455,7 +455,7 @@ Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet �
 
 ### 批 E · Facts / Assessment 拆分
 
-> ✅ **E-I 已落地（2026-09-22）。** 契约三型（`_contract/facts.py`）+ `LegacyAdapter`
+> ✅ **E-I 已落地（2026-09-22）。** 契约三型（`skills/_contract/facts.py`）+ `LegacyAdapter`
 > + 存储（schema v8 `kind` 列，新旧同住 `agent_verdicts`）+ `Evidence.evidence_set_id`
 > （顺带还了 D-II 的账）+ risk CROSS_CHECK 升级 + **试点 `emotion`** 已迁到新三型。
 > 其余五个 skill（market/sector/technical/news/risk）**未迁**，仍产 `AgentVerdict`。

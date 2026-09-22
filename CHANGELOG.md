@@ -15,6 +15,90 @@
 
 ## [未发布]
 
+### 🔴 新增 · 批 E-I：把事实和判断拆开（契约基础设施 + 一个试点）
+
+设计文档 §6 批 E 的第一段。**实现完成、离线全绿，六道探针（P1–P6）全见过红并已还原，
+但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。
+
+**为什么**：`AgentVerdict` 把两件东西焊在一个 frozen dataclass 里 —— 事实（skill 算的
+`result`/`evidence`/`missing`）和判断（`stance`，skill 跑完之后 Agent 才补得上）。第一步
+不是照抄设计文档那句「拆开」，是先查 `amend_verdict.py` **到底在补救什么** —— 它不是
+方便功能，是「没有它，Agent 想只加一个判断，就只能把整份事实重打一遍」这件事的补丁。
+这条断层已经咬了三次：`BIGA-20260920-002` 补丁路径建成前 15 条 Evidence 的
+`retrieved_at` 全部转述丢失（L-10）；F8 `amend_verdict.py` 把契约层 stance 校验抄了一遍、
+连盲区一起抄（L-3）；F9 Agent 靠第二条命令后补判断、报错后现读源码重试，Stage 1
+延迟翻倍。三条同源：事实与判断焊在一起，"只加一个判断"没有一条干净的路。
+
+**做了什么**：
+
+- **三个新契约类型**（`skills/_contract/facts.py`）：`FactBundle`（事实 = AgentVerdict
+  减去 stance，skill 产）、`AgentAssessment`（判断 = `stance` + `fact_ref` 指回哪份
+  FactBundle，**不抄事实**，Agent 产）、`AgentOutcome`（组合视图，程序产）。
+  `LegacyAdapter.split()/to_outcome()` 把任何历史 `AgentVerdict` 拆回新三型。
+- **事实层铁律抽成一份共用**（`verdict.py`）：`check_fact_invariants` / `check_stance_vocab`
+  / `check_stance_vs_verdict`，`AgentVerdict` 与 `FactBundle` **调同一份**，防 L-3
+  （F8 就是各写一遍、连盲区一起抄的实测）。跨型铁律（UNKNOWN 的事实上不许挂方向判断）
+  归 `AgentOutcome` 校验 —— 因为只有它同时握着 `verdict`（事实）和 `stance`（判断）。
+- **存储：新旧同住 `agent_verdicts`**（schema v8 加 `kind` 列：NULL/'verdict'=旧合体、
+  'fact'、'assessment'），复用既有的只追加触发器 + 线性 amend 唯一索引，不新开表。
+  `save_fact_bundle`（写严，拒收 `AgentVerdict`）、`save_assessment`（校验 fact_id 是
+  同 task_id/agent 的 fact 行、构造 AgentOutcome 跑跨型铁律、`ux_verdict_amends_linear`
+  兜住「一份事实最多一个判断」）、`load_outcome`。
+- **`load_verdict` 变多态，消费方零改动**：旧合体行直接 `from_dict`；新 fact/assessment
+  行走 `load_outcome` 拼成 AgentOutcome 再 `to_agent_verdict()` 压回。`DecisionCard`
+  的 `isinstance(v, AgentVerdict)` 严格检查、`risk_check` 读 `.stance` 全照旧。
+  🔴 这是刻意取舍：让 AgentOutcome 成为组合视图（`load_outcome` 返回它、探针拿它检查
+  拆分），但**没有**改 card_ops/risk_check/DecisionCard 去字面读它 —— 试点血缘面越小
+  越好，让 DecisionCard 收 AgentOutcome 会涟漪到卡的序列化/回放。收敛留 E-II/后续。
+- **读宽写严**：`LegacyAdapter` 能拆任何历史 verdict（读路径宽），新落库只收新形状
+  （写路径严）⇒ 旧格式随时间自然清零，不驻留成第二套要跟着演进的口径。
+- **试点只迁 emotion**：Phase 1 第一个建成、形状最简、**不进 `CROSS_CHECK_PAIRS`**
+  （那条只连 market↔technical），影响面最小。`emotion_calc.py` 的 `build_verdict`→
+  `build_fact_bundle`（返回 FactBundle）、`save_verdict`→`save_fact_bundle`。其余五个
+  skill **一字未改**，等 E-II。
+- **`amend_verdict.py` 认得 fact 行**：对 fact 行只加 `--stance`（写一行
+  `AgentAssessment`，事实一个字不重打 —— 这正是 L-10 核心的修法）；对 fact 行给
+  `--add-missing` **明确拒绝**并指路 E-II（见「已知问题」）。
+- **顺带还 D-II 的账**：`Evidence` 加可选 `evidence_set_id` 字段；三个日线 skill 读冻结
+  时填上；`risk_check.py` 的 CROSS_CHECK 升级为**优先比 `evidence_set_id`**（结构验证、
+  不看内容），两条都有才用、缺一条退回 `raw_hash`（老 Specialist 还没填这字段，不能
+  因此让检查失效）。D-II 承认的「两次独立抓取碰巧逐字节相同则 raw_hash 碰巧相等、漏报」
+  盲区就此堵上。
+
+🔴 **探针记录（每道守卫「怎么弄坏 / 报红 / 已还原」，L-13）**：
+
+- **P1（LegacyAdapter 往返逐字段一致）**：让 `to_agent_verdict()` 漏拼 `stance` ⇒
+  `test_legacy_adapter_round_trip` 红（还原出的 dict 少一个 stance 键）。已还原。
+- **A（`save_fact_bundle` 写严）**：让它接受 `AgentVerdict` ⇒ 写严测试红（本该 `TypeError`
+  拒收合体类型，却存进去了）。已还原。
+- **B（`load_verdict` 多态不静默丢新行）**：让多态分支对 kind='fact' 也走旧
+  `from_dict` ⇒ 读回来 stance 丢失、消费方拿到残缺 verdict，回归红。已还原。
+- **C（跨型铁律在 AgentOutcome）**：把 `AgentOutcome.__post_init__` 的
+  `check_stance_vs_verdict` 去掉 ⇒ 能给一个 UNKNOWN 的事实挂「亢奋」判断，
+  `test_cross_type_invariant` 红（本该 fail-closed）。已还原。
+- **D（事实层铁律共用一份，L-3）**：把 `check_fact_invariants` 弄坏一处 ⇒
+  `AgentVerdict` 的测试与 `FactBundle` 的测试**一起**红（证明是一份，不是两份）。已还原。
+- **P4（CROSS_CHECK 优先 evidence_set_id、缺失退回 raw_hash）**：禁用 evidence_set_id
+  偏好、一律退回 raw_hash ⇒ `test_同一个evidence_set_id不报` 红（同一个冻结集、两条
+  都无 raw_hash ⇒ 兜底误报「无法核实」）。
+  🔴 **评审复核发现一处假绿并已修**：同一道破坏下，`test_P4_都有evidence_set_id就比它_不同则报`
+  当初**仍绿** —— 它只断言「报了冲突」，而两条都无 raw_hash 的兜底也会印一条冲突，凑巧满足。
+  即「名字像在测这个特性的那条测试，不是真正锁住它的那条」（L-13 的形状）。已把它锚死在
+  只有 evidence_set_id 判据才印的「冻结集」+ 两个 es-id 值上；现在同一道破坏下它**也红**了。
+- 还原核对：`grep -rn PROBE skills tests` 无残留；`test_contract_behavior` /
+  `test_store` / `test_emotion_calc` / `test_facts_split` 全绿。
+
+**这一批明确没做**（留给 E-II）：迁其余五个 skill（market/sector/technical/news/risk）；
+退役 `amend_verdict.py`（要等全部迁完）；把 Agent 追加的「限制」缺失项归位（见下）。
+
+**已知问题 · Agent 追加的缺失项在新形状里还没有落点**：老 `amend_verdict.py` 让 Agent
+一条命令同时加 `stance`（判断）和 `--add-missing`（Agent 观察到的数据限制，比如「只有
+单日快照、无法判断趋势」）。拆开之后 `stance` 有家（`AgentAssessment`），但**Agent 追加
+的缺失项没有** —— 它既不是 skill 的事实（skill 不知道），也不是一个 stance。E-I 对 fact
+行的 `--add-missing` **明确拒绝并指路 E-II**，不静默吞。E-II 要想清它归哪：改由 skill
+自产、还是给 `AgentAssessment` 增一类字段。这是拆「事实 vs 判断」这条线时，一个一直骑在
+缝上的用法逼出来的真实边界问题（已记进 `TODO.md`）。
+
 ### 🔴 修复 · `agent_runs` 记账在批 C-II 之后再没被写过（live 验证才暴露）
 
 批 C-II 把出卡入口从 main 的提示词驱动切到 `DecisionOrchestrator`（程序驱动）

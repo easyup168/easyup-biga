@@ -144,6 +144,7 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str,
     retrieved = now_cn()
     as_of: datetime | None = None
     raw_hash: str | None = None
+    es_id: str | None = None  # 读冻结时填冻结集 id（批 E-I），供 risk CROSS_CHECK 结构核对
 
     # 🔴 给了 evidence_set_id 就读本次决策的冻结快照（不联网、不重复落盘），
     #    没给就跟今天一样自己抓（手工调试单跑不被连坐拦掉，批 D-II 做什么第 2 条）。
@@ -168,11 +169,13 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str,
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
+        derived = source.startswith("derived:")
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=None if source.startswith("derived:") else raw_hash))
+            raw_hash=None if derived else raw_hash,
+            evidence_set_id=None if derived else es_id))
 
     if daily is not None:
         src = f"sina:kline/{SYMBOL}"
@@ -182,6 +185,8 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str,
             #    raw_hash，risk 的 CROSS_CHECK 靠它判断是否真的共享同一份（P4）。
             #    raw 已由 freeze 落库，这里不重复落盘。
             raw_hash = coord.frozen_content_sha256(evidence_set_id, SYMBOL)
+            # 批 E-I：Evidence 直接声明「我出自哪个冻结集」，比 raw_hash 更硬。
+            es_id = evidence_set_id
         else:
             raw_hash = payload_sha256(daily.raw)
         trade_date = daily.trade_date
