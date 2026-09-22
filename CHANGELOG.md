@@ -15,6 +15,64 @@
 
 ## [未发布]
 
+### 新增 · 批 D-I：SnapshotCoordinator 基础设施（冻结一次、多处读）
+
+设计文档 §6 批 D 的第一段。**实现完成、离线全绿（956 → 985），五道探针全见过红并
+已还原，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话，见
+`docs/guide/orchestration-kickoff-prompt.md`）。
+
+**为什么**：`fetch_index_daily` 被 market / sector / technical **各自独立调用**（§2 复核
+成立的那条 §15 断言）——三次网络调用、各落一行 raw，理论上应该拿到同一份数据，但没有
+任何机制保证。「所有 Specialist 看的是同一份数据」（设计文档 §4 `evidence_set_id` 那一行）
+因此**无法验证**。这一批把「抓取」和「读取」拆开，让这句话从一句愿望变成一条可核对的
+属性 —— 但**只建地基、不改任何 Specialist**（那是 D-II，风险高得多，要等这层验实）。
+
+**做了什么**：
+
+- **新增 `skills/_snapshot/`（`SnapshotCoordinator`）**：
+  - `freeze_index_daily(decision_id, symbols, *, bars) -> evidence_set_id` —— 每个 symbol
+    在一次决策里**只真实抓一次**（用调用方给的 `bars` 取全量），原样落 `raw_market_snapshot`，
+    登记一行 `evidence_sets`。
+  - `read_index_daily(evidence_set_id, symbol, *, bars) -> IndexDaily` —— 从已冻结的 raw
+    **切片**出调用方要的根数，**不联网**。sector 要 2 根、market 要 25 根、technical 要
+    120 根，都从同一份底层数据切。🔴 要的根数超过冻结的根数 ⇒ 抛错，绝不静默返回更少
+    （R-3 / L-2：算不出来必须说算不出来，不 fail-open）。
+  - `frozen_snapshot_ids(evidence_set_id)` —— 反查这次冻结登记了哪几行 raw。
+- **`_sources/sina.py` 抽出纯函数 `parse_index_daily(symbol, payload)`**：`fetch_index_daily`
+  = 网络（`get_json`）+ `parse_index_daily`。🔴 **为什么抽**：读冻结快照要从存下来的 raw
+  重建 `IndexDaily`，若在 `_snapshot` 里再写一遍解析，就是同一判据两份实现（L-3）——
+  某天一处改了另一处没改，两条路径对「什么样的日线算合法」给出不同答案，且不报错。
+  抽取是纯空操作，解析逻辑一字未改（`tests/test_snapshot.py::TestParseExtraction` 锁住
+  正常解析 + 每一条形状校验仍在；全量测试条数只增不减）。
+- **`_contract.new_evidence_set_id()`**：`es-<uuid4>` —— 身份铸造只此一处，不让 `_snapshot`
+  自己发明第二套 id 规则。与 `new_run_id` / `new_trigger_id` 同在契约层。
+- **`_store.save_evidence_set` / `load_evidence_set`**：`evidence_sets` 表（批 B 建的）第一次
+  真的被写行。存储层对 `manifest` 结构**不做假设**（只负责严格 JSON 落库）——manifest 长
+  什么样、怎么反查，是冻结方的事，存储层若也内嵌一份就成了第二处要跟着演进的地方（L-3）。
+  `manifest_json` 记每个 symbol 的 `snapshot_id` ⇒ 能被**反向走通**回 raw 层，不是一段
+  只用于展示的自由文本。
+
+🔴 **探针记录（每道新守卫「怎么弄坏 / 报红输出 / 已还原」，L-13）**：
+
+- **P1（read 不重抓）**：在 `read_index_daily` 里加一行 `self._fetch(...)` 假装重抓 ⇒
+  `test_P1` 红：`底层抓取应仍是 1 次，实测 4 次 assert 4 == 1`。已还原。
+- **read fail-closed（越界）**：拆掉 `if bars > len(raw): raise` ⇒ `test_要的根数超过冻结的
+  根数就报错` 红：`DID NOT RAISE SnapshotReadError`（`raw[-6:]` 在 len=5 时静默返回 5 根）。已还原。
+- **P4（`evidence_sets` 只追加）**：临时拿掉 v7 里 `evidence_sets` 的只追加触发器 ⇒
+  `test_P4_UPDATE被拒` / `test_P4_DELETE被拒` 红（改删成功），且 `test_store.py::test_每张表
+  都有只追加触发器` **一并**抓到 `这些表可被改写：['evidence_sets']`（动态守卫也是活的）。已还原。
+- **P5（manifest 可反查）**：freeze 的 manifest 条目去掉 `snapshot_id` ⇒ `TestReverseQuery`
+  两条红（反查取不到行 / 字段不全）。已还原。
+- 还原核对：`grep -rn PROBE skills tests` 无残留，`schema.py` 不在 `git diff` 里（临时改动
+  逐字节复原）。
+
+**这一批明确没做**（留给 D-II，已记进 `TODO.md`「批 D-I 施工空档 + 批 D-II 输入」）：
+不改 market/sector/technical 的调用点；不动 `orchestrator.py` 的 `SNAPSHOT_FROZEN` 转移
+（它的 detail 仍诚实地写着「还没有真东西」——D-I 之后仍没有真消费方）；不动
+`CROSS_CHECK_PAIRS`（Specialist 真共享快照前它仍有意义，删早了是造假阴性窗口）。
+⚠️ 顺带记下：分发提示词把 technical 写成 `bars=25`，实测是 **120**——D-II 接线时冻结
+`bars` 要取 120，否则 technical 读 120 会撞 fail-closed。
+
 ### 🔴 变更 · 批 C-II：DecisionOrchestrator + 生产入口切换 ★
 
 设计文档 §6 批 C 剩下的部分。**这次升级第一次改动生产入口 `bin/biga-card`。**

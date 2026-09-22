@@ -693,6 +693,7 @@ r.server_as_of or now_cn()      # 调用方统一这么写，不必逐处判断
 | `skills/_contract/verdict_ref.py` | 确定性编排升级批 A-II（A6）新增。`VerdictRef(agent, verdict_id, content_sha256, contract_version)`——Card 记下自己用的每条判定原件指向 `agent_verdicts` 哪一行、当时长什么样，`_store.verify_verdict_refs()` 据此核对「现在还认不认」。核对必须比对**存量 `content_sha256` 列**，不能把 `AgentVerdict` 对象重新序列化再算一遍——`_canonical_dumps` 的格式不是冻结的（A-I 就改过一次分隔符），走后者会让序列化格式一变，之前落库的原件集体核对不上且不报错 |
 | `skills/_store/schema.py` | 按版本号递增的迁移列表。**已发布的条目不许改动** —— 跑过 v4 的库不会重放它，所以补触发器只能开 v5 |
 | `skills/_store/runtime.py` | 读 OpenClaw 运行时自己的 trajectory。🔴 **UTC → 北京时间的转换只在这里做一次**，消费方拿到的已经是北京时间 —— 这类 bug 的形状是「差 8 小时但仍是个合法时刻」，不报错 |
+| `skills/_snapshot/coordinator.py` | 确定性编排升级批 D-I 新增。`SnapshotCoordinator.freeze_index_daily()` 把一次决策要用的指数日线**只真实抓一次**、原样落 `raw_market_snapshot` 并登记一行 `evidence_sets`；`read_index_daily()` 让多个消费者从**同一份**冻结数据切出各自要的根数（sector 2 / market 25 / technical 120），而不是各自联网。它把「所有 Specialist 看同一份数据」从**六个 skill 各自的发现**变成**冻结集的一个可核对属性**（§4 `evidence_set_id`）。`fetch_index_daily` 拆成 `fetch`（网络）+ `parse_index_daily`（纯解析）就是为了让读端能从冻结的 raw 重建 `IndexDaily`，不必第二次实现解析（L-3）。🔴 **D-I 只建这层并用 `fetch_index_daily` 证明它工作，不改任何 Specialist**——现在还没有编排层调用方（Specialist 改口读冻结快照是 D-II），是一段**显式登记的施工空档**（同批 B「只建 `evidence_sets` 表」），不是零消费方死配置（L-1）|
 
 #### `sanity.py` —— 量级围栏，抓垃圾值不抓行情
 

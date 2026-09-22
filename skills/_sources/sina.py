@@ -38,7 +38,7 @@ from _contract import now_cn
 from .http import SourceError, get_json
 from .tradetime import as_of_for_trade_date
 
-__all__ = ["DailyBar", "IndexDaily", "fetch_index_daily", "SINA_SYMBOLS"]
+__all__ = ["DailyBar", "IndexDaily", "fetch_index_daily", "parse_index_daily", "SINA_SYMBOLS"]
 
 _BASE = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
          "CN_MarketData.getKLineData")
@@ -105,7 +105,26 @@ def fetch_index_daily(symbol: str, *, bars: int = 25) -> IndexDaily:
 
     url = f"{_BASE}?symbol={symbol}&scale=240&ma=no&datalen={int(bars)}"
     payload = get_json(url, referer=_REFERER)
+    return parse_index_daily(symbol, payload)
 
+
+def parse_index_daily(symbol: str, payload: Any) -> IndexDaily:
+    """把新浪 K 线端点的原始响应（一个 dict 数组）解析成 `IndexDaily`。
+
+    🔴 **纯函数，不联网。** 抽出来是为了让 `SnapshotCoordinator` 能从**已冻结的
+    raw**（`raw_market_snapshot.payload_json` 存的就是这个数组）重建 `IndexDaily`，
+    而不必第二次实现同一套解析 —— 同一判据只有一份实现（L-3）。两条路径共用
+    同一套形状校验与升序/去重断言：`fetch_index_daily` 拿网络响应后调它，
+    读冻结快照的路径对**切片后的** raw 调它，因此两边对「什么样的日线算合法」
+    永远给出同一个答案。
+
+    ⚠️ raw 本身就是升序、无重复日期（否则 `fetch_index_daily` 当初落库前
+    就抛错了）；对它取末尾 N 行（切片）仍然升序、无重复，所以切片后重解析
+    不会新触发这两条断言。
+
+    Raises:
+        SourceError: 形状不对、行内缺字段、日期无法解析、未升序或含重复日期。
+    """
     if not isinstance(payload, list):
         raise SourceError(f"sina:kline/{symbol}: 返回不是数组，而是 {type(payload).__name__}")
     if not payload:
