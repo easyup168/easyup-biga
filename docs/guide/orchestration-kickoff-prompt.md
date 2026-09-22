@@ -418,12 +418,213 @@ P4  登记一个没有读取方的状态，断言「状态必须有消费方」�
 
 ---
 
-## 批 C–H · 现在不写分发提示词
+## 批 C-I · Runtime Adapter + spike 补验
+
+⚠️ **批 B 合并之后才开这一批。** B 已于 `d401cc2` 合并并通过评审复核。
+
+🔴 **批 C 在分发时拆成 C-I / C-II 两个会话** —— 与批 A 拆成 A-I/A-II
+是同一个理由：两者耦合面不同，且 C-I 能给 C-II 兜底。C-I 是纯粹的
+"Python 能不能在不经过 LLM 轮次的情况下驱动一次 spawn 并拿到结构化
+结果"，可以完全独立测试，不碰 `bin/biga-card` 一个字。C-II 要把它接进
+生产入口——那是这次升级里第一次改动"出卡到底怎么被触发"这条路径，
+必须建在一个已经被验实的地基上，不能带着"Adapter 大概没问题"的假设
+往前走。⚠️ 这是分发口径，不是设计变更 —— 设计文档仍是 SSOT。
+
+```text
+做设计文档 §6 批 C 的 OpenClawRuntimeAdapter 部分 + §7「全案的单点风险」
+剩下未验的三项。先读 §7 全文——三条硬约束（groupId / grant 生命周期 /
+token 用量）是 spike 实测出来的 API 约束，不是设计选择，不要重新论证
+要不要遵守。
+
+## 第一步：把 spike 留下的三个未知数测掉
+
+spike 只验证了 1 次 spawn。这里要验的是"批 C 会依赖的那几种用法"，
+不是再跑一次一样的东西：
+
+1. **五路并行 fan-out 真的并行** —— 五个 sessions_spawn 共用同一个
+   groupId（硬约束：collect=true 没有 requesting run id 时必须带
+   groupId），断言五个运行的起止区间在时间上**相交**，不是排队执行完
+   一个再执行下一个。判据是区间重叠，不是"五个都成功了"——成功但排队
+   执行，看起来完全正常，那正是本仓库在别处已经踩过的「延迟其实是
+   正确性 bug 的症状」形状。
+2. **grant 在长跑里不会中途失效** —— TTL 设成 ≥
+   `BIGA_CARD_DEADLINE_SEC`（当前 780s），实际跑够这个时长（真实
+   specialist 调用，不是 sleep 模拟），断言 grant 全程可用。设计文档
+   §7 记的"grant 不会被 attach 自己回收，只会到期"这句话本身没被验证
+   过，跑一次真实场景来验它。
+3. **spawn 失败时的错误面是结构化的，不是裸异常** —— 目前只见过一种
+   失败形状（缺 groupId）。故意造一个真实失败（塞一个不存在的 agent
+   名，或让某个 specialist 本身超时），确认能把它翻译成一个可判断的
+   状态，不是让原始异常直接从 Adapter 里往外抛，调用方接不住。
+
+三项不过，就不要往下写 Orchestrator —— C-II 的地基还没有。
+
+## 做什么
+
+`OpenClawRuntimeAdapter`：
+
+    start(agent, task_id, *, group_id) -> handle
+    wait(handles, timeout) -> list[Result]
+    cancel(handle) -> None
+    status(handle) -> 归一化后的状态（不是运行时原始字符串）
+
+🔴 **状态归一化**：`sessions_spawn`/`agents_wait` 返回的原始状态是运行时
+自己的措辞，会随运行时版本变。Adapter 对外只暴露自己定义的一小组状态
+（比如 running/succeeded/failed/timeout），内部做翻译 —— 上层（C-II 的
+Orchestrator）不该知道运行时原始状态长什么样，否则运行时改一个措辞，
+整条编排链都要跟着改。
+
+grant 生命周期（spike §7-2 定死，缺一不可）：
+  · `biga attach --print-config --session
+     agent:main:orchestrator-<run_id> --ttl <TTL>`，TTL 取
+     `BIGA_CARD_DEADLINE_SEC` 或更长
+  · run 进终态后**主动删掉**那个临时 `.mcp.json` —— grant 不会自己
+    回收，只会到期，不删就是每次运行都在攒的小泄漏
+  · Stage 1 五路 fan-out **共用一个 groupId** —— API 硬约束，不是
+    "要不要"的设计选择
+
+token 用量：`agents_wait` 返回带 `usage: {inputTokens, outputTokens}`。
+写进 **`run_events` 的 `detail`**，不要写进 `agent_runs` —— v2 已经删掉
+`tokens_in`/`tokens_out` 两列，理由是"唯一真相源是运行时 trajectory，
+这里再存一份就是滞后的第二套口径"，那条理由现在仍然成立（L-1）。
+
+## 不要做
+
+- 不要碰 `bin/biga-card` —— 它一个字都不改，这一批不接生产入口
+- 不要写 `DecisionOrchestrator` —— 那是 C-II，要等这一批的探针全部
+  见过红才开
+- 不要动 `ORCHESTRATION.md` —— 那也是 C-II 的事
+
+## 必须做的探针（G-1）
+
+P1  五个真实 specialist 用同一个 groupId 并行 fan-out，断言运行区间
+    在时间上相交（不是先后排队）
+P2  grant 设 TTL=780s+，真实跑够这个时长（不是 sleep），断言全程可用；
+    run 结束后确认对应的 `.mcp.json` 已被删除
+P3  故意让一次 spawn 失败（不存在的 agent 名 / 制造超时），断言 Adapter
+    返回的是一个结构化的失败状态，不是未捕获异常
+P4  `status()` 对外只暴露归一化状态 —— 找一处直接把运行时原始状态字符串
+    传出去的代码，临时改回原始状态，断言依赖归一化状态的测试报红
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 C-II · DecisionOrchestrator + 生产入口切换 ★
+
+⚠️ **C-I 合并之后才开这一批。** 它是这次升级里第一次改动生产入口
+（`bin/biga-card`）—— C-I 的 Adapter 探针全部见过红，才有地基做这一步。
+
+```text
+做设计文档 §6 批 C 剩下的部分：DecisionOrchestrator、bin/biga-card 收缩、
+ORCHESTRATION.md 收缩、main 失去启动管线的能力。
+
+## 为什么这是全案的中心，也是风险最集中的一批
+
+这一批做完之后，「谁能启动出卡流程」这句话的答案从"守卫拦住了不该启动
+的人"变成"除了这条 Python 路径，没有别的路能启动"。前者是运行时挡，
+后者是根本不存在 —— L-14 出卡递归事故就是在"谁能启动"这条边界上出的事，
+这一批恰好是把那条边界从提示词约定改成程序结构。改错的代价不是一个
+测试报红，是生产入口的行为改变。
+
+## 做什么
+
+### 状态机改用细粒度链
+
+批 B 建的 LEGAL_TRANSITIONS 里有两条编排主干：一条细粒度（8 步，
+RECEIVED → PREFLIGHTED → SNAPSHOT_FROZEN → STAGE1_RUNNING →
+STAGE1_COMPLETED → RISK_RUNNING → SYNTHESIZING → CARD_PERSISTED →
+COMPLETED），一条 legacy 粗边（PREFLIGHTED → CARD_PERSISTED，专门留给
+"编排整个交给一个被 spawn 的 LLM、中间态对 CLI 不透明"这种情况）。
+DecisionOrchestrator 走前者 —— 它自己驱动每一步，理应知道走到哪了。
+
+⚠️ SNAPSHOT_FROZEN 这一步现在还没有真东西 —— SnapshotCoordinator 是
+批 D。转移到这个状态是合法的（状态机不关心背后有没有真的冻结逻辑），
+但转移的 detail 里不要写"已冻结"这类只有批 D 做完才成立的断言；
+Specialist 在这一批仍然各自联网取数（老行为，批 D 才改）。
+
+### 占号时机
+
+Orchestrator.run(ctx) 在 open_run() **之前**用 reserve_decision_id()
+占好号 —— RunContext.decision_id 从一开始就非空。批 B 留的"legacy 路径
+开 run 时还没号，可以是 None"这个口子是给老路径用的，DecisionOrchestrator
+不该继续留它。
+
+### bin/biga-card 收缩
+
+🔴 **五道守卫的顺序原样保留**（熔断→ownership→单实例锁→预算闸门→
+第一次付费调用），这是 L-14 防护顺序，继续由现有测试钉住 —— 收缩时
+最容易犯的错是"重构的时候手滑挪了顺序"，收缩前后跑一次守卫顺序的测试
+逐字节对比。
+
+收缩之后它只做：解析参数 → 校验 → 调 DecisionOrchestrator.run(ctx) →
+渲染结果 → 退出码。等待 / 传号 / 合成这些"怎么执行"的逻辑全部挪进
+Python，bash 里不再有。
+
+做完这一步，批 B 那条 PREFLIGHTED → CARD_PERSISTED legacy 粗边**没有
+调用方了** —— 按 TODO.md 已经记的提醒，从 LEGAL_TRANSITIONS 里删掉它，
+不要留着变成一条恒不被走的死边（L-7）。
+
+### ORCHESTRATION.md 收缩
+
+只留给 Specialist 的指令文本（第几步该判断什么、契约要求什么）。
+顺序 / 等待 / 传号 / 合成这类"怎么执行"的内容全部删 —— 那些现在是
+代码，不需要再用提示词说一遍给 LLM 看。「为什么这么设计」的理由留在
+设计文档，不要复制过来（复制过来的后果就是又一处会漂的第二套口径）。
+
+🔴 收缩之前先修正它现在的三处自相矛盾（设计文档 §2 追加 3 记的
+`--decision-id` 到底要不要填的三种互相矛盾的说法）—— 收缩时把矛盾一并
+搬进代码，代价是把一个提示词层面的漂移变成一个代码层面的 bug，改起来
+更贵。
+
+### main 失去启动管线的能力
+
+不是"多一道守卫拦住它"—— 是 DecisionOrchestrator 是一个 Python 对象，
+不是可以被 spawn 的 agent，main 没有一条工具调用能到达它。
+entry_guard.py **不删除**（人仍然可能手工照抄命令贴给 main），但它的
+性质变了：从"唯一防线"退成"纵深防御的一层"。
+
+## 不要做
+
+- 不要建 SnapshotCoordinator —— 那是批 D，SNAPSHOT_FROZEN 这一步只需要
+  状态存在，不需要真实现
+- 不要拆 RiskPolicy 两层 —— 那是批 F，risk_check.py 原样保留，只是被
+  Orchestrator 在什么时机调用可能提前
+- 不要碰 Outbox / 飞书 —— 那是批 G
+- 不要在这一批"顺手"给 main 加回任何形式的启动能力当"过渡期兼容"——
+  三段式（有守卫拦 / 纵深防御 / 没有路可走）里，这一批要落到最后一种，
+  留个开关走回第一种就是这批唯一的目的没达成
+
+## 必须做的探针（G-1）
+
+P1  真跑一次端到端出卡，断言 run_events 序列走的是 8 步细粒度链，不是
+    legacy 粗边
+P2  尝试让 main 直接触发出卡（复述 L-14 事故当天的那句提示词/贴那条
+    命令），断言它**没有工具能到达** DecisionOrchestrator —— 不是"被
+    拒绝"，是"够不到"，这是两种不同的失败模式，探针要能分清
+P3  收缩前后各跑一次 bin/biga-card 的守卫顺序测试，逐字节对比通过/
+    拒绝的判据没有变
+P4  删掉 legacy 粗边之后，确认没有任何测试/代码还在引用
+    PREFLIGHTED → CARD_PERSISTED 这条转移 —— 如果有，说明还有调用方
+    没迁完，不能删
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 D–H · 现在不写分发提示词
 
 | 批 | 为什么现在不写 |
 |---|---|
-| C（Orchestrator + RuntimeAdapter） | ✅ spike 已于 2026-09-22 通过（设计文档 §7），不再是阻塞项。提示词等批 B 落地后再写 —— 它要引用 B 实际登记的状态与 `RunContext` 字段 |
-| D–G | 依赖 A / B 的实际落地形状（新类型长什么样、状态机实际登记了哪些状态） |
+| D–G | 依赖 C 的实际落地形状（Orchestrator 的接口、状态机细粒度链的实际调用方式） |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
 🔴 **现在把它们写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
