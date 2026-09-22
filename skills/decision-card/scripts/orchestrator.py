@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import os
@@ -44,7 +45,7 @@ from _contract import (  # noqa: E402
     RunState,
     new_run_context,
 )
-from _runtime import OpenClawRuntimeAdapter, SpawnStatus  # noqa: E402
+from _runtime import OpenClawRuntimeAdapter, SpawnHandle, SpawnStatus  # noqa: E402
 from _snapshot import SnapshotCoordinator  # noqa: E402
 from _store import (  # noqa: E402
     latest_verdict_ids,
@@ -132,6 +133,10 @@ class DecisionOrchestrator:
 
         state = RunState.RECEIVED
         run_timeout = max(30, self.stage1_sec)
+        # 🔴 批 C-III（§2 追加 5 §35）：全案总预算的墙钟起点。各阶段的 ad.wait()
+        #    从此都按「总 deadline 还剩多少」收窄（见 _stage_timeout），三段之和
+        #    不再可能超过 deadline_sec —— 外层 bash timeout 退回纵深防御的最后一层。
+        deadline = time.monotonic() + self.deadline_sec
         try:
             state = self._to(ctx.run_id, state, RunState.PREFLIGHTED)
             ttl_ms = (self.deadline_sec + 60) * 1000
@@ -155,10 +160,23 @@ class DecisionOrchestrator:
                 # ── Stage 1：并行 fan-out ──
                 state = self._to(ctx.run_id, state, RunState.STAGE1_RUNNING)
                 gid = f"g-{ctx.run_id[:8]}-s1"
-                handles = [ad.start(a, did, self._specialist_task(a, did, esid),
-                                    group_id=gid, run_timeout_sec=run_timeout)
-                           for a in STAGE1_AGENTS]
-                r1 = ad.wait(handles, self.stage1_sec)
+                # 🔴 批 C-III（§2 追加 5.2）：显式循环 + 已启动 handle 列表。中途某个
+                #    start() 抛错时，把已经起来的兄弟挨个 cancel() 掉再把原始异常抛出去 ——
+                #    否则它们会空跑到各自 runTimeoutSeconds 才停，白烧钱。这正是
+                #    OpenClawRuntimeAdapter.cancel() 一直缺的那个真调用方（N 可达 5、
+                #    天然有 drain 的真实取消场景）。cancel 本身失败不该盖住原始异常。
+                handles: list[SpawnHandle] = []
+                try:
+                    for a in STAGE1_AGENTS:
+                        handles.append(
+                            ad.start(a, did, self._specialist_task(a, did, esid),
+                                     group_id=gid, run_timeout_sec=run_timeout))
+                except Exception:
+                    for h in handles:
+                        with contextlib.suppress(Exception):
+                            ad.cancel(h)
+                    raise
+                r1 = ad.wait(handles, self._stage_timeout(deadline, self.stage1_sec))
                 state = self._to(ctx.run_id, state, RunState.STAGE1_COMPLETED,
                                  detail=self._stage_detail(r1))
 
@@ -169,7 +187,7 @@ class DecisionOrchestrator:
                 gid_r = f"g-{ctx.run_id[:8]}-risk"
                 rh = ad.start(RISK_AGENT, did, self._risk_task(did, s1_refs),
                               group_id=gid_r, run_timeout_sec=max(30, self.risk_sec))
-                r2 = ad.wait([rh], self.risk_sec)
+                r2 = ad.wait([rh], self._stage_timeout(deadline, self.risk_sec))
 
                 # ── Stage 3：判官给综合判断，程序组装 Card ──
                 state = self._to(ctx.run_id, state, RunState.SYNTHESIZING,
@@ -180,14 +198,19 @@ class DecisionOrchestrator:
                     raise OrchestratorError(
                         "零证据：Stage 1/2 没有任何 agent 落下判定原件，无从合成。")
                 verdicts, refs = card_ops.load_verdicts_and_refs(ordered)
-                judgment = self._judge(ad, did, verdicts, present=set(all_ids))
+                judgment = self._judge(ad, did, verdicts, present=set(all_ids),
+                                       deadline=deadline)
 
                 card = card_ops.synthesize(
                     decision_id=did, verdicts=verdicts, judgment=judgment,
                     model_ref=self._model_ref, verdict_refs=refs)
+                # 🔴 批 C-III（§2 追加 5 §17-18）：先 persist()、成功拿到 record_id，
+                #    再转移到 CARD_PERSISTED。反过来写的话，persist() 抛错会在
+                #    run_events 里留一条「已落库」的假记录，而库里其实没有这张卡 ——
+                #    一个可修复的失败被记成不可修复的谎。detail 带真实 record_id。
+                record_id = card_ops.persist(card)
                 state = self._to(ctx.run_id, state, RunState.CARD_PERSISTED,
-                                 detail={"record": "persisting"})
-                card_ops.persist(card)
+                                 detail={"record_id": record_id})
                 self._to(ctx.run_id, state, RunState.COMPLETED)
                 return card
         except OrchestratorError:
@@ -198,18 +221,21 @@ class DecisionOrchestrator:
             raise OrchestratorError(f"编排在 {state} 失败：{e}") from e
 
     # ── 判官（Stage 3 的 judgment）────────────────────────────────────────
-    def _judge(self, ad, did: str, verdicts, *, present: set[str]) -> "card_ops.Judgment":
+    def _judge(self, ad, did: str, verdicts, *, present: set[str],
+               deadline: float) -> "card_ops.Judgment":
         """spawn synthesizer 判官，拿回 status/headline/synthesis，程序组装成 Judgment。
 
         🔴 数据不经判官搬运：Card 的证据来自 verdict_refs（程序从库里读），判官只
         产出**判断**。缺席 agent 的 missing 由程序算（缺席是完整性事实，不是判断）。
+
+        `deadline` 是全案总预算的墙钟终点 —— 判官这一等也按剩余收窄（C3-4）。
         """
         gid = f"g-{did[-3:]}-synth"
         task = self._synth_task(did, verdicts)
         sh = ad.start(SYNTHESIZER_AGENT, did, task, group_id=gid,
                       run_timeout_sec=max(30, self.synth_sec),
                       output_schema=JUDGMENT_SCHEMA)
-        [sres] = ad.wait([sh], self.synth_sec)
+        [sres] = ad.wait([sh], self._stage_timeout(deadline, self.synth_sec))
         j = sres.structured if isinstance(sres.structured, dict) else None
         if sres.status != SpawnStatus.SUCCEEDED or not j \
                 or not all(k in j for k in ("status", "headline", "synthesis")):
@@ -223,6 +249,23 @@ class DecisionOrchestrator:
                  for a in absent]
         return card_ops.Judgment(status=j["status"], headline=j["headline"],
                                  synthesis=j["synthesis"], extra_missing=extra)
+
+    # ── 预算收窄（C3-4）────────────────────────────────────────────────────
+    def _stage_timeout(self, deadline: float, stage_budget: int) -> float:
+        """这一段 `ad.wait()` 实际能等多久：`min(该阶段固定预算, 总 deadline 剩余)`。
+
+        🔴 批 C-III（§2 追加 5 §35）：各阶段原本各用各的固定预算、互不感知总
+        deadline，三段之和可以超过 `deadline_sec`，只靠外层 bash `timeout` 硬顶
+        （纵深防御的最后一层，不该是唯一一层）。这里把「还剩多少」纳进来：
+        剩余 <= 0 就不再等，抛 `OrchestratorError` → `run()` 的 except 据此进
+        FAILED（与零证据/判官失败同一条失败路径）。
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise OrchestratorError(
+                f"总预算 {self.deadline_sec}s 已耗尽（remaining={remaining:.0f}s）——"
+                f"不再等待后续阶段，提前收（避免三段之和超过总 deadline）。")
+        return min(float(stage_budget), remaining)
 
     # ── 转移的薄封装（把 state 往前推并返回新 state）──────────────────────
     def _to(self, run_id: str, frm: str, to: str, *, detail: dict | None = None) -> str:

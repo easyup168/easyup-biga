@@ -788,7 +788,11 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
           Agent 事后经 amend 补 AgentAssessment。迁其余五个时对齐这个形状；注意
           market/technical 还牵动 `CROSS_CHECK_PAIRS`（emotion 不进那条，所以试点
           没碰到，E-II 会第一次碰到「拆开的 skill + CROSS_CHECK」的组合）。
-- [ ] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— 分发提示词已就绪，
+- [ ] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— **实现完成（分支 `c-iii`，
+      基于 `2e5e8ea`）：离线全绿 1005→1016、四道探针 P1–P4 全见过红并已还原、
+      `biga-card --check` 回放一致、`audit --worktree` 十一项全绿；评审复核通过，
+      已合并。** 在独立 git worktree 上做，因为批 E-I 的未提交 WIP 同时在主工作区
+      （当时红 25 条）——本项目第一次两批真正并行。
       不依赖 D/E，可与 E-I 并行开工
       来源：2026-09-22 外部架构复审，复核记在设计文档 §2 追加 5。四件独立
       小修复：① `CARD_PERSISTED` 转移挪到 `persist()` 成功之后（现在顺序
@@ -821,13 +825,18 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 ### 🔶 批 C-II 残留风险（评审时一并看）
 
 **P5 · `cancel()` 的 active[]/tasks[] 同序映射仍只在 N=2、无 drain 下实测过。**
-这一批的 `DecisionOrchestrator` **没有调用 `adapter.cancel()`**：部分失败/超时的处理是
-「缺席的 agent 记 `missing`、照常出卡」，还在跑的兄弟 spawn 由各自的
+C-II 那一批的 `DecisionOrchestrator` **没有调用 `adapter.cancel()`**：部分失败/超时
+处理是「缺席的 agent 记 `missing`、照常出卡」，还在跑的兄弟 spawn 由各自的
 `runTimeoutSeconds`（C-I 定死的硬约束，运行时到点收）兜住，不主动取消。所以 C-I 评审
 留下的那条 —— 「N≥3、且至少一个 spawn 已离场（active→recent）时，取消是否仍命中对的
-那一个」—— **没有被这一批消费**，原样带下去：谁第一个真的让 Orchestrator 调 `cancel()`
-（批 F RiskPolicy 前移可能会），谁先补这个 live 场景。不调 cancel 是**保守选择**——
-`cancel` 的同位对应风险，大于它能省下的那点并行成本。
+那一个」—— 在 C-II 时**没有消费方**，原样带了下去。
+
+⇒ **批 C-III 的 C3-2 是那个第一个真实调用方**（Stage 1 部分启动失败 → 对已启动的
+兄弟逐个 `cancel()`）。这条残留风险因此**拆成两半**：① 「`cancel()` 缺真实调用方」
+——**已解决**；② 「真实运行时 N=5/drain 下同序映射是否仍命中对的那一个」——**仍未
+补**：C3-2 的离线探针用桩 adapter，只证明 Orchestrator 会对已启动的 handle 调
+`cancel()`、且身份对，没跑活运行时。这条 live 补验随第一次真实 Stage 1 部分失败
+（或专门造一次）补上，见 CHANGELOG「已知问题（批 C-III）」。
 
 **stall_watchdog 现在零消费方。** 老 `bin/biga-card` 的 bash 轮询循环（看门狗挂在那里防
 非交互 `ask_user` 死锁）被收缩掉了。新路径里每个 spawn 带 `runTimeoutSeconds`，一个卡在

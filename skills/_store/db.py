@@ -555,6 +555,13 @@ def verify_verdict_refs(
     这里只是原样取回来比对，不重新计算，所以天然不会踩中
     `tests/test_write_boundary.py::TestVerdictContentShaIsHashOfStoredText`
     钉住的那个坑。
+
+    🔴 批 C-III（设计文档 §2 追加 5 §8-16）：还要核对 `ref.agent == 存量.agent`。
+    `verdict_id` 是**跨 agent 的全局自增**，不按 agent 分号段 —— 一条手工拼出来
+    的 ref 可以声称「这是 market 的原件」，`verdict_id`/`content_sha256` 却全指向
+    news 那一行，此时「能找到 + hash 对」两道检查都通过，只有 agent 核对能拦下它。
+    `VerdictRef.agent` 的 docstring 早就写明它「必须与被引用那条 `AgentVerdict.agent`
+    一致」，这里补上真正强制那句话的检查。
     """
     problems: list[str] = []
     for ref in card.input_verdict_refs:
@@ -564,6 +571,12 @@ def verify_verdict_refs(
                 f"[{ref.agent}] verdict_id={ref.verdict_id} 在 agent_verdicts "
                 f"里已经找不到了 —— 这张卡引用的原件消失了")
             continue
+        if meta["agent"] != ref.agent:
+            problems.append(
+                f"[{ref.agent}] verdict_id={ref.verdict_id} 声称是 {ref.agent} 的原件，"
+                f"但 agent_verdicts 里这一行其实是 {meta['agent']} 的 —— "
+                f"verdict_id 是跨 agent 的全局自增，光靠「能找到 + hash 对」"
+                f"核不出这种张冠李戴")
         if meta["content_sha256"] != ref.content_sha256:
             problems.append(
                 f"[{ref.agent}] verdict_id={ref.verdict_id} 的哈希对不上："
