@@ -635,11 +635,113 @@ P5  🔴 **仅当这一批的 Orchestrator 会在硬超时/部分失败时调用
 
 ---
 
-## 批 D–H · 现在不写分发提示词
+## 批 D-I · SnapshotCoordinator 基础设施
+
+⚠️ **批 C-II 合并之后才开这一批。** C-II 已于 `d35d286` 合并并通过两轮评审复核。
+它不依赖 C-II 收尾的 P1/P2 live（那是操作层面的补验，不改代码），可以并行。
+
+🔴 **批 D 在分发时拆成 D-I / D-II 两个会话** —— 与批 A、批 C 是同一个理由：
+D-I 是"建 SnapshotCoordinator、在一个已经实测过三次重复抓取的地方（`fetch_index_daily`）
+证明它工作"，**不改任何 Specialist 的行为** —— market/sector/technical 仍各自调
+`fetch_index_daily`，跟今天一样。D-II 才是真正让 Specialist 改口去读冻结快照，
+那一步会改变现有六个 skill 的实际行为，需要 D-I 先把地基验实。
+⚠️ 这是分发口径，不是设计变更 —— 设计文档仍是 SSOT，不要去改它的编号。
+
+🔴 **设计文档 §6 批 D 的五段管线名字（`Provider → RawArtifact →
+NormalizedSnapshot → FactBundle → EvidenceSet`）目前只是名字，没有字段级定义。**
+`evidence_sets` 表的 `manifest_json` 注释写得很清楚：「结构批 D 定，批 B 只建表」。
+D-I 的任务之一就是把其中一段变成具体、能跑的形状——但不需要五段都变成独立的
+Python 类。你可以合并中间几段，只要 `evidence_sets.manifest_json` 的形状足够
+回答「这个决策的冻结数据，是从哪一行/哪几行 `raw_market_snapshot` 来的」，
+因为这是批 E 会复用的唯一硬约束（批 E 迁移表写着
+`旧 AgentVerdict → LegacyAdapter → FactBundle + AgentAssessment + AgentOutcome`，
+`FactBundle` 是共享概念，其余中间态是你的实现细节）。
+
+```text
+做设计文档 §6 批 D 的第一段：SnapshotCoordinator，只针对 `fetch_index_daily`
+证明「冻结一次、多个消费者读同一份」这件事成立。先读 §6 批 D 全文（很短，
+只有一段管线图 + 三句话）——它不完整，这一批要把其中一部分定下来，读的时候
+不要以为漏读了什么。
+
+## 要解决的问题（已实测复现，不是假想）
+
+`skills/_sources/sina.py::fetch_index_daily` 被三个 skill 各自独立调用：
+
+    skills/market-calc/scripts/market_calc.py:181     fetch_index_daily(symbol, bars=BAR_COUNT)   # 默认 25
+    skills/sector-calc/scripts/sector_calc.py:176      fetch_index_daily(_DATE_SYMBOL, bars=2)
+    skills/technical-calc/scripts/technical_calc.py:153 fetch_index_daily(SYMBOL, bars=BAR_COUNT)   # 默认 25
+
+三次独立网络调用，各自落一行 `raw_market_snapshot`。§2 表格已经把这条断言
+复核成立（"§15 各 Specialist 各自抓同一份数据"）。三次调用理论上应该拿到
+同一份数据，但没有任何机制保证——"所有 Specialist 看的是同一份数据"这句话
+目前无法验证（设计文档 §4 的身份模型表格里，`evidence_set_id` 这一行写的
+正是这个）。
+
+## 做什么
+
+`skills/_snapshot/`（新目录，参照 `_contract/` `_store/` `_runtime/` 的既有
+命名习惯）：
+
+1. `SnapshotCoordinator`：一个方法，形如
+   `freeze_index_daily(decision_id, symbols, *, bars) -> evidence_set_id`。
+   每个 `(source, symbol)` 组合在一次决策里**最多真实抓取一次**——
+   第一个来源用请求里最大的 `bars`（今天是 25，覆盖 sector 的 2），
+   之后同一决策的重复调用直接从已冻结的数据切片。
+2. 冻结结果写一行 `evidence_sets`（`manifest_json` 至少要能回答上面那个
+   "从哪几行 raw_market_snapshot 来"的问题——具体字段你定，但**必须能被
+   反向查询**，不能是一段只用于展示的自由文本）。
+3. 读接口，形如 `read_index_daily(evidence_set_id, symbol, *, bars) -> IndexDaily`：
+   从已冻结的数据切出调用方要的根数（sector 要 2 根、market/technical 要 25 根，
+   都从同一份底层数据切，不是三份独立结果）。
+4. `raw_market_snapshot` 的落盘次数：一次决策、两个指数代码（sh/sz）
+   ⇒ 最多 2 行，不是今天的最多 6 行（3 个 skill × 2 个代码）。
+
+## 不要做
+
+- 不要改 `market_calc.py` / `sector_calc.py` / `technical_calc.py` 的调用点——
+  它们仍然调 `fetch_index_daily`，跟今天一模一样。**这一批不改变任何 Specialist
+  的实际行为**，只是在旁边把"冻结一次、多处读"这件事建好、验实。切实际调用点
+  是 D-II，需要先有这一批的地基。
+- 不要迁移 breadth / pool / news / emotion 的抓取——设计文档 §6 自己写的顺序
+  是"先迁共用最多的，再迁 breadth/pool，最后 news/emotion"，这一批只做第一段。
+- 不要动 `orchestrator.py` 的 `SNAPSHOT_FROZEN` 转移——它现在的 detail 诚实地
+  写着"批 D 之前还没有真东西"；这一批做完之后也还没有真正的消费方（Specialist
+  没改口读它），所以那句话仍然诚实，不要提前改成"已冻结"。这是 D-II 的事。
+- 不要动 `CROSS_CHECK_PAIRS`（`market.sh_close` ↔ `technical.close`）——
+  设计文档 §6 说得很清楚，它会在 Specialist **真的**共享快照之后变成恒真，
+  但这一批 Specialist 还各自抓取，这条检查现在仍然是有意义的，删早了是
+  自己造一个假阴性窗口。
+
+## 必须做的探针（G-1）
+
+P1  同一个 decision_id，模拟三个消费者按 sector(bars=2)/market(bars=25)/
+    technical(bars=25) 各调一次 `SnapshotCoordinator` 的读接口，断言底层
+    `fetch_index_daily`（或它下面那层网络调用）只真实发生 **1 次**，不是 3 次
+P2  三个消费者拿到的结果必须是**同一份数据切出来的**，不是三份独立结果偶然
+    相等——断言 sector 拿到的 2 根，与 market/technical 拿到的 25 根里最后
+    2 根，逐字段相同（不只是数值相等，是同一次抓取）
+P3  同一个决策的 `raw_market_snapshot` 落盘行数：两个指数代码 ⇒ 至多 2 行，
+    不是 6 行
+P4  `evidence_sets` 表已经有只追加触发器（`test_store.py::test_每张表都有
+    只追加触发器` 动态发现，理论上自动覆盖）——这一批第一次真的往这张表写行，
+    补一条探针确认覆盖仍然成立：造一行、尝试 UPDATE/DELETE，断言被拒
+P5  给定一个 `evidence_set_id`，能反查出它到底冻结了哪几行 `raw_market_snapshot`
+    ——这是 manifest_json 形状的判据，不是"字段存在就算过"
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 D-II–H · 现在不写分发提示词
 
 | 批 | 为什么现在不写 |
 |---|---|
-| D–G | 依赖 C 的实际落地形状（Orchestrator 的接口、状态机细粒度链的实际调用方式） |
+| D-II | 依赖 D-I 的实际落地形状（`manifest_json` 的真实字段、读接口的真实签名） |
+| E–G | 依赖 C-II 的实际落地形状（已具备）与 D 的完整落地形状（尚不具备） |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
 🔴 **现在把它们写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
