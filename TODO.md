@@ -623,7 +623,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       能说「死在哪一步」；`bin/biga-card` best-effort 记 run（不改行为）。
       四道探针全见过红（P1 并发仲裁 / P2 只追加触发器 / P3 拆 CAS→P1 红 /
       P4 无消费方状态被抓）。899 条测试全绿（837 → 899）。
-- [x] 批 C-I · Runtime Adapter + spike 补验 —— ✅ 待评审
+- [x] 批 C-I · Runtime Adapter + spike 补验 —— ✅ 评审复核通过（`d8e7ea6`）
       建了 `skills/_runtime/`（`mcp.py` 传输层 + `adapter.py`
       `OpenClawRuntimeAdapter.start/wait/cancel/status` + 状态归一化）与
       `tools/verify/adapter_spike.py`（驱动真实 adapter 的 live 补验，可重跑复验）。
@@ -631,7 +631,12 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       **P2 grant 撑过 780s 且 .mcp.json 已清**、**P3 失败翻成结构化 SpawnStartError**；
       外加 cancel 对应实证（active 顺序≠spawn 顺序，靠 active[i]↔tasks[i] 同序映射）。
       P4 状态归一化探针见过红。938 条测试全绿（899 → 938）。**bin/biga-card 一字未改。**
-- [ ] 批 C-II · DecisionOrchestrator + 生产入口切换 ★ —— ⚠️ C-I 合并之后才开
+      评审复核：P4 独立复现红（且多抓到一处开工会话没自报的断言一起报红）；
+      cancel() 的 active[]/tasks[] 同序映射离线复核 N=5 与 drain 场景，算法本身
+      无 N=2 专属 bug——残留风险收窄为「运行时在这些场景下是否真的保持同位
+      对应」，线下无法验证，已作为条件性探针 P5 带进批 C-II（只在 Orchestrator
+      真的调用 cancel() 时才适用，否则要求原样记进已知问题，见分发提示词）
+- [ ] 批 C-II · DecisionOrchestrator + 生产入口切换 ★ —— 分发提示词已就绪，可开工
       这次升级第一次改动生产入口（`bin/biga-card`）。
       🔴 批 B 欠的一笔要在这里还：`LEGAL_TRANSITIONS` 里 `PREFLIGHTED →
       CARD_PERSISTED` 是 legacy 粗边（`bin/biga-card` 观测不到中间五个编排态
