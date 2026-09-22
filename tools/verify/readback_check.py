@@ -4,7 +4,7 @@
 覆盖什么 / 不覆盖什么
 ---------------------
 - 覆盖：遍历两张判定/卡片表，对每一行走**正规读取路径**
-  （`db.load_verdict` / `db.load_card`，即 `from_dict()`），
+  （`db.load_verdict` / `db.load_card_by_record_id`，即 `from_dict()`），
   统计有多少行会在读取时炸出 `__post_init__` 校验错误
 - **不覆盖**：为什么会出现这种行（那是 `_store.db` 的写边界重校验，
   设计文档 §6 A3）—— 本工具只负责发现，不负责修（raw 层永不改写，L-8）
@@ -16,7 +16,7 @@
 存在写入时未被拦下、只有读取时才会炸的行。而两张表都是只追加表，
 这种行**删不掉也改不掉**，只能巡检出来、记下来。
 
-🔴 判据必须走 `db.load_verdict()` / `db.load_card()`，不能自己
+🔴 判据必须走 `db.load_verdict()` / `db.load_card_by_record_id()`，不能自己
 `json.loads(verdict_json)` —— 那样会绕开 `from_dict()` 的读取时校验，
 本工具自己就会变成 `tests/test_contract_single_impl.py` 钉住的那个反例
 （`missing_ledger.py` 当年就是这么被抓到的）。
@@ -58,7 +58,7 @@ def scan_cards(path: pathlib.Path | str | None = None) -> list[tuple[int, str, s
     bad = []
     for rid, did in rows:
         try:
-            db.load_card(did, record_id=rid, path=path)
+            db.load_card_by_record_id(rid, path=path)
         except Exception as e:  # noqa: BLE001
             bad.append((rid, did, f"{type(e).__name__}: {e}"))
     return bad

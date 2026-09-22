@@ -175,7 +175,7 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             # 🔴 `confidence` 不能沿用 `len(result)/_EXPECTED_FIELDS` ——
             #    那个公式衡量的是「算出来多少字段」，在这里会把
             #    「我拒绝判断」算成一个不低的置信度。
-            confidence=0.0,
+            data_completeness=0.0,
             evidence=[Evidence(
                 field=k, source="derived:risk-check", value=val,
                 as_of=retrieved, retrieved_at=retrieved,
@@ -194,7 +194,7 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             "risk.upstream.none"))
         return AgentVerdict(
             task_id=task_id, agent=AGENT, status="failed", verdict="UNKNOWN",
-            result={}, confidence=0.0, evidence=[], warnings=warnings,
+            result={}, data_completeness=0.0, evidence=[], warnings=warnings,
             missing=missing, elapsed_ms=int((time.monotonic() - t_start) * 1000))
 
     # 🔴 risk 的结论不可能比它最旧的输入更新鲜。
@@ -313,7 +313,7 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
 
     v = AgentVerdict(
         task_id=task_id, agent=AGENT, status=status, verdict=level,
-        result=result, confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        result=result, data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence, warnings=warnings, missing=missing,
         elapsed_ms=int((time.monotonic() - t_start) * 1000))
     return v

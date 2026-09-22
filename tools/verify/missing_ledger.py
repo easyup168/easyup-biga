@@ -74,7 +74,7 @@ def _weak(code: str) -> bool:
 
 
 def collect(path: pathlib.Path | str | None = None) -> list[dict]:
-    """🔴 走 `load_card()`，**不自己 `json.loads(card_json)`**。
+    """🔴 走 `load_online_card()`，**不自己 `json.loads(card_json)`**。
 
     外部评审 F11 的结论是：静态扫描能被绕过，但 `from_dict()` 在每次
     反序列化时重跑一遍 `__post_init__`，构成运行时的第二道防线 ——
@@ -90,7 +90,7 @@ def collect(path: pathlib.Path | str | None = None) -> list[dict]:
             "SELECT decision_id FROM decision_records ORDER BY decision_id")]
     out = []
     for did in ids:
-        obj = db.load_card(did, path=path)
+        obj = db.load_online_card(did, path=path)
         if obj is None:
             continue
         card = obj.to_dict()

@@ -29,17 +29,18 @@ _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _contract import AgentVerdict, MissingItem  # noqa: E402
+from _contract import CONTRACT_VERSION, AgentVerdict, MissingItem, VerdictRef  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
     load_verdict,
+    load_verdict_meta,
     next_decision_id,
     record_verdict_run,
 )
 from card_ops import Judgment, persist, synthesize  # noqa: E402
 
 
-def _read_by_ids(spec: str) -> list[AgentVerdict]:
+def _read_by_ids(spec: str) -> tuple[list[AgentVerdict], list[VerdictRef]]:
     """按 `verdict_id` 取回判定原件 —— **推荐路径**。
 
     🔴 为什么优先用 id 而不是贴 JSON
@@ -47,20 +48,30 @@ def _read_by_ids(spec: str) -> list[AgentVerdict]:
        Specialist 转述后 15 条 evidence 的 `retrieved_at` 一条不剩，
        落库 Card 上的 `retrieved_at` 变成了「敲命令的时刻」而非采集时刻。
        走 id，数据根本不经过 LLM。
+
+    🔴 A6：这条路能拿到 `verdict_id`，因此也是唯一能建出 `VerdictRef`
+       的路径——`_read_verdicts()` 那条退路读的是裸 JSON，从没落过库，
+       没有 verdict_id 可引用。
     """
-    out: list[AgentVerdict] = []
+    verdicts: list[AgentVerdict] = []
+    refs: list[VerdictRef] = []
     for raw in spec.replace(",", " ").split():
         if not raw.isdigit():
             raise SystemExit(f"--verdict-ids 只接受数字 id，收到 {raw!r}。"
                              f"这个 id 由 skill 在 stderr 上打印：verdict_ref=NN")
-        v = load_verdict(int(raw))
+        vid = int(raw)
+        v = load_verdict(vid)
         if v is None:
             raise SystemExit(
                 f"verdict_id={raw} 在 agent_verdicts 里不存在。"
                 f"确认 Specialist 跑 skill 时没有加 --no-store —— "
                 f"加了就不会落原件，也就没有 id 可引用。")
-        out.append(v)
-    return out
+        verdicts.append(v)
+        meta = load_verdict_meta(vid)
+        refs.append(VerdictRef(agent=v.agent, verdict_id=vid,
+                               content_sha256=meta["content_sha256"],
+                               contract_version=CONTRACT_VERSION))
+    return verdicts, refs
 
 
 def _read_verdicts(src: str) -> list[AgentVerdict]:
@@ -94,8 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="输出 Card 的 JSON 而非文本卡")
     args = ap.parse_args(argv)
 
-    verdicts = (_read_by_ids(args.verdict_ids) if args.verdict_ids
-                else _read_verdicts(args.verdicts))
+    verdict_refs: list[VerdictRef] = []
+    if args.verdict_ids:
+        verdicts, verdict_refs = _read_by_ids(args.verdict_ids)
+    else:
+        verdicts = _read_verdicts(args.verdicts)
     if not verdicts:
         print("没有任何 Verdict —— 不出卡。", file=sys.stderr)
         return 1
@@ -169,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
                                          for c, t in args.extra_missing]),
         model_ref=args.model_ref,
         elapsed_ms=args.elapsed_ms,
+        verdict_refs=verdict_refs,
     )
 
     if not args.no_store:

@@ -290,6 +290,27 @@ for _ in $(seq "$SETTLE_TRIES"); do
     $PY tools/verify/spawn_check.py "$NOW"
     SPAWN_RC=$?
     echo
+    # 🔴 F-4（设计文档 §6，A-I 评审欠的账）：毒行巡检（批 A-I 建的）
+    #    只有测试和文档，没有任何自动路径会跑它 —— 一条不会红的守卫，
+    #    比没有守卫更糟：它占着「这件事已经有人管」的位置。
+    #
+    #    接在这里而不是自己另起一个定时任务：这里是**唯一每次出卡都会
+    #    跑到的地方**（同一条 L-1 判据），而且它只读、零成本，紧挨着
+    #    spawn_check 天然合理。
+    #
+    #    ⚠️ 退出码必须被用上 —— spawn_check 当年就是栽在「调用在、
+    #    退出码被丢，守卫照样绿」上（本脚本用 `set -uo pipefail`，
+    #    没有 `-e`）。这里同样接住 $?，不能只打印。
+    #
+    #    但毒行是**历史遗留**，不是这次运行造成的——如果落库前的 A3
+    #    写边界重校验起作用，新写入的行不可能再变成毒行；巡检报红说明
+    #    库里有一条更早的、写边界建成之前就存在的坏行。所以它不该
+    #    跟 spawn 核验用同一个信号（rc=4）：那会让人以为是**这次**出卡
+    #    的证据链断了，去查错了方向。用一个独立的退出码（6），
+    #    摘要里也用不同的措辞。
+    $PY tools/verify/readback_check.py
+    READBACK_RC=$?
+    echo
     echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
     if [ "$SPAWN_RC" -ne 0 ]; then
       echo >&2
@@ -302,6 +323,14 @@ for _ in $(seq "$SETTLE_TRIES"); do
       #    出卡这件事已经发生、钱已经花了，藏起来没有意义。
       #    要变的是**这条命令的成败**，而不是要不要给人看。
       exit 4
+    fi
+    if [ "$READBACK_RC" -ne 0 ]; then
+      echo >&2
+      echo "🔶 毒行巡检发现历史遗留问题（rc=$READBACK_RC）——与这次出卡无关。" >&2
+      echo "   这次的卡（$NOW）本身没事：spawn 核验已经通过。" >&2
+      echo "   库里存在**更早**落的、读不回来的行（写边界建成之前的产物）。" >&2
+      echo "   细节：python3 tools/verify/readback_check.py" >&2
+      exit 6
     fi
     exit 0
   fi

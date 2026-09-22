@@ -46,7 +46,7 @@ def _legal_verdict(**kw) -> AgentVerdict:
     # contract-exempt: 构造真 dataclass 的 kwargs
     base = dict(
         task_id=TID, agent="market", status="completed", verdict="PASS",
-        result={}, confidence=0.9, evidence=[], stance="放量上涨",
+        result={}, data_completeness=0.9, evidence=[], stance="放量上涨",
     )
     base.update(kw)
     return AgentVerdict(**base)

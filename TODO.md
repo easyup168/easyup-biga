@@ -604,9 +604,15 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       实测（2026-09-22）：`biga attach --print-config` 铸 grant → MCP-over-HTTP
       `sessions_spawn` → `subagent_runs` 五项证据全齐、零 `main` LLM 轮次；
       `agents_wait` 3.3s 同步返回，带 usage。结论与三条硬约束见设计文档 §7
-- [x] 批 A-I · 写边界重校验 + 严格 JSON（A3 / A4）—— 待评审会话复核
-- [ ] 批 A-II · 值对象与不变量（A1 / A2 / A5 / A6 / A7 / A8）
-- [ ] 批 B · 运行身份 + 状态机（schema v6）
+- [x] 批 A-I · 写边界重校验 + 严格 JSON（A3 / A4）—— ✅ 评审复核通过（`33fc55a`）
+      评审四条：F-1/F-1b（审查判据两次方向反了）· F-2（档位改由调用参数推导）·
+      F-3（`content_sha256` 锚存量文本）已修；F-4（`readback_check` 无自动调用方）带进 A-II
+- [x] 批 A-II · 值对象与不变量（A1 / A2 / A5 / A6 / A7 / A8 + F-4）—— 评审三条已修，待复核
+      F-5（阻塞，`MissingItem.code` 冻结后仍可写）· F-6（中等，Card roster
+      「缺席该不该硬拒」与设计表格不一致，裁决为折中方案）· F-8（第二轮复核，
+      「非空即放行」太松，收紧为「missing 条数 ≥ 缺席数」）均已修完；837 条测试全绿；
+      schema 落到 v6（`ux_verdict_amends_linear`）
+- [ ] 批 B · 运行身份 + 状态机（schema v7 —— 批 A-II 的 A8 先占了 v6）
 - [ ] 批 C · Runtime Adapter + DecisionOrchestrator ★（spike 已通过，可开工）
       ⚠️ 开工第一件事：补验 spike 未覆盖的三项（五个并行 fan-out / grant 长跑稳定性 /
       spawn 失败的结构化错误面）—— 见设计文档 §7 末尾
@@ -623,6 +629,15 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 闸门文件写的条件是「在触发源确认停止、且闸门真的接进路径之前，不要 rm」。
 `3d9ce90` 已经把预算闸门接进 `bin/biga-card`（在第一个花钱的动作之前）。
 ⇒ 条件形式上满足，**但解除是人的决定，不自动做**。
+
+### 🔶 `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback
+
+批 A-II 测试 F-4 时在沙盒里发现：`BEFORE=$(_sql "SELECT MAX(decision_id)...")`
+那一行用 `readonly=True` 打开一个还不存在的 `data/biga.db`，
+`connect()` 按设计会抛 `StoreNotInitialised`——但这里没接住，
+异常信息进了 stderr，`BEFORE` 拿到空字符串（恰好是语义正确的兜底值），
+**不影响功能**。真实机器上 `data/biga.db` 建库之后就不会再触发。
+不在这一批修（与 A1/A2/A5/A6/A7/A8/F-4 都无关）——留着当下一次顺手活。
 
 ---
 

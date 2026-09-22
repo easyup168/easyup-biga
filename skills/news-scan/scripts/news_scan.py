@@ -276,7 +276,7 @@ def build_verdict(
     return AgentVerdict(
         task_id=task_id, agent=AGENT, status=status, verdict=level,
         result=result,
-        confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence, warnings=warnings, missing=missing,
         elapsed_ms=int((time.monotonic() - t_start) * 1000))
 

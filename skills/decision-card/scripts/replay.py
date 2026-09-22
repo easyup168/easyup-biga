@@ -30,7 +30,7 @@ _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _store import connect  # noqa: E402
+from _store import connect, verify_verdict_refs  # noqa: E402
 from card_ops import Judgment, comparable, load_original, persist, synthesize  # noqa: E402
 
 
@@ -91,9 +91,25 @@ def main(argv: list[str] | None = None) -> int:
         judgment=judgment,
         model_ref=args.model_ref or base_model,
         elapsed_ms=0,
+        # 🔴 A6：原样带过去，否则 --check 会把「回放没有重新记 VerdictRef」
+        #    误判成「组装不一致」——input_verdict_refs 是 comparable() 会
+        #    比对的字段之一，不带就是从有变成没有。
+        verdict_refs=list(original.input_verdict_refs),
     )
 
     if args.check:
+        # 🔴 A6：这一步与下面「组装一致」是两件不同的事——
+        #    组装一致验的是 synthesize() 这个纯函数本身没有隐藏的非确定性；
+        #    这里验的是「卡上记的判定原件，现在的 agent_verdicts 还认不认」。
+        #    两者都过，「这张卡当时确实基于这些原件」才站得住。
+        ref_problems = verify_verdict_refs(original)
+        if ref_problems:
+            print("❌ VerdictRef 核对不一致 —— 卡上引用的判定原件已经变了："
+                  , file=sys.stderr)
+            for p in ref_problems:
+                print(f"  {p}", file=sys.stderr)
+            return 2
+
         a, b = comparable(original), comparable(replayed)
         if a == b:
             print(f"✅ 组装一致：{args.decision_id} 用冻结证据重跑，"

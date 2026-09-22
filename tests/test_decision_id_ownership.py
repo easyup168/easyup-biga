@@ -168,7 +168,8 @@ class TestReservationIsAtomic:
         card = DecisionCard(
             decision_id=new_task_id(9), status="WAIT", headline="h",
             verdicts=[_verdict("market", new_task_id(9))],
-            synthesis="s", model_ref="m")
+            synthesis="s", model_ref="m",
+            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
         db.save_card(card, path=p)
         nxt = db.reserve_decision_id(by="t", path=p)
         assert nxt not in (first, new_task_id(9))
@@ -207,10 +208,18 @@ class TestSynthesizeReusesUpstreamId:
         ids = [db.save_verdict(_verdict(a, "BIGA-20260921-013",
                                         stance=STANCE_VOCAB[a][0]), path=p)
                for a in ("market", "emotion")]
+        # 🔴 F-8：2 个 agent 到场，另外 4 个天然缺席——roster 判据按计数
+        #    比较，4 条 --extra-missing 才够。
+        extra_missing_args = []
+        for i in range(4):
+            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
+                                   f"占位{i}——本文件不测 roster"]
         r = subprocess.run(
             [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
              "--verdict-ids", ",".join(map(str, ids)), "--status", "WAIT",
-             "--headline", "h", "--synthesis", "s", "--model-ref", "m", "--json"],
+             "--headline", "h", "--synthesis", "s", "--model-ref", "m",
+             *extra_missing_args,
+             "--json"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "BIGA_DB_PATH": str(p)})
         assert r.returncode == 0, r.stderr[-600:]

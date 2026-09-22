@@ -32,8 +32,9 @@ from _contract import (  # noqa: E402
     CardStatus,
     DecisionCard,
     MissingItem,
+    VerdictRef,
 )
-from _store import load_card, save_card  # noqa: E402
+from _store import load_online_card, save_card  # noqa: E402
 
 __all__ = ["Judgment", "synthesize", "persist", "SYNTHESIS_VERSION"]
 
@@ -63,6 +64,7 @@ def synthesize(
     elapsed_ms: int = 0,
     generated_at: str = "",
     historical: bool = False,
+    verdict_refs: list[VerdictRef] | None = None,
 ) -> DecisionCard:
     """把 Verdict 组装成 Card。**纯函数，不碰 IO。**
 
@@ -83,6 +85,12 @@ def synthesize(
             传 True 让契约层降级为「记下来并显示在卡面上」。
             ⚠️ 它只影响**能不能构造**；`save_card()` 仍然无条件拒绝，
             所以「读一张旧卡再存回去」洗不白它。
+        verdict_refs: 🔴 A6：这批 verdicts 各自落库时的 `VerdictRef`
+            （agent / verdict_id / content_sha256 / contract_version）。
+            与 `verdicts` 是平行的两份数据，不强制一一对应——
+            旧调用方（例如 `_read_verdicts()` 读 JSON 文件的退路）
+            没有 verdict_id 可用时留空即可，Card 只是少一份可核对的证据，
+            不影响其余字段。核对走 `_store.verify_verdict_refs()`。
     """
     seen: set[str] = set()
     missing: list[MissingItem] = []
@@ -107,6 +115,7 @@ def synthesize(
         missing=missing,
         generated_at=generated_at,
         elapsed_ms=elapsed_ms,
+        input_verdict_refs=list(verdict_refs or []),
     )
 
 
@@ -130,4 +139,4 @@ def comparable(card: DecisionCard) -> dict:
 
 def load_original(decision_id: str) -> DecisionCard | None:
     """取回在线路径存下的那张 Card。"""
-    return load_card(decision_id)
+    return load_online_card(decision_id)

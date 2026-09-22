@@ -21,6 +21,11 @@
 ⇒ 这一版改成造一个**真的 sqlite**，让被测代码走完整的查询路径。
 
 > 假的东西造得太靠上，测的就是自己写的假货，不是产品代码。
+
+`TestReadbackWiredIntoRealPath` 是后来加的（F-4，设计文档 §6）：
+同一个 `bin/biga-card` 沙盒，验的是另一个检查（`readback_check.py`，
+毒行巡检）有没有被同样的方式接住退出码——两者是同一个形状的教训，
+放在同一个文件里复用沙盒机制，比另起一份更省。
 """
 
 from __future__ import annotations
@@ -165,12 +170,15 @@ class TestWiredIntoRealPath:
             "  一个不会被跑到的检查，和没有这个检查是一回事。")
 
     @staticmethod
-    def _seeded_repo(tmp_path, did: str, spawn_stub: str):
+    def _seeded_repo(tmp_path, did: str, spawn_stub: str, readback_stub: str | None = None):
         """造一个能走完出卡路径的沙盒。**不联网、不花钱。**
 
-        两个桩：
+        三个桩（`readback_stub` 缺省时不桩 —— 让真的 `readback_check.py`
+        跑在刚种下的干净库上，它本该报 0 条毒行，用于验证 F-4 的接入
+        不影响「一切正常」时的行为）：
           · `BIGA` → 直接往库里落一张真卡（替掉 agent 调用）
           · `spawn_check.py` → 由调用方决定退出码
+          · `readback_check.py` → 同上（F-4：设计文档 §6，A-I 评审欠的账）
         """
         import shutil
         work = tmp_path / "repo"
@@ -191,13 +199,18 @@ class TestWiredIntoRealPath:
             "t = now_cn()\n"
             f"TID = {did!r}\n"
             "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
-            "                 verdict='PASS', result={'x': 1}, confidence=1.0,\n"
+            "                 verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
             "                 stance='分化', elapsed_ms=1,\n"
             "                 evidence=[Evidence(field='x', source='s', value=1,\n"
             "                                    as_of=t, retrieved_at=t)])\n"
             f"init_schema({str(db)!r})\n"
+            # 🔴 只桩了 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据
+            #    按计数比较（missing 条数 >= 缺席 agent 数），给 5 条占位
+            #    missing 才够，免得抢在这批探针要验证的事情前面报错。
             "save_card(DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
-            "                       verdicts=[v], synthesis='', model_ref='m'),\n"
+            "                       verdicts=[v], synthesis='', model_ref='m',\n"
+            "                       missing=['占位1 —— 本文件不测 roster',\n"
+            "                                '占位2', '占位3', '占位4', '占位5']),\n"
             f"          path={str(db)!r})\n", encoding="utf-8")
 
         stub = tmp_path / "fake-biga"
@@ -206,6 +219,9 @@ class TestWiredIntoRealPath:
         stub.chmod(0o755)
         (work / "tools" / "verify" / "spawn_check.py").write_text(
             spawn_stub, encoding="utf-8")
+        if readback_stub is not None:
+            (work / "tools" / "verify" / "readback_check.py").write_text(
+                readback_stub, encoding="utf-8")
         return work, db, stub
 
     @staticmethod
@@ -267,6 +283,65 @@ class TestWiredIntoRealPath:
             "  而机器上本来就会反复跑别的决策，这个条件几乎总成立。")
         assert not any("LIMIT" in q for q in sqls), (
             "按决策号取不该有条数上限 —— 一天跑得多了，早先的决策会悄悄查不到。")
+
+
+class TestReadbackWiredIntoRealPath:
+    """F-4（设计文档 §6，A-I 评审欠的账）：毒行巡检必须接一个真实调用方。
+
+    `readback_check.py` 批 A-I 就建好了，但只有测试和文档——没有任何
+    自动路径会跑它。对照 `spawn_check.py` 当年的教训（调用在、退出码
+    被丢，守卫照样绿），这里同样要证明**退出码被用上**，不只是打印。
+    """
+
+    def test_出卡流程真的会调它(self):
+        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
+        run = text.split("# ── 出新卡")[1]
+        assert "tools/verify/readback_check.py" in run, (
+            "readback_check.py 没有被出卡流程调用 —— \n"
+            "  一个不会被跑到的检查，和没有这个检查是一回事。")
+
+    def test_干净库时不影响出卡命令成功(self, tmp_path):
+        """反面：readback_check 不桩，让它跑在刚种下的干净库上。"""
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-001", "print('桩：全齐')\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert r.returncode == 0, (
+            f"干净库却失败了：rc={r.returncode}\n{r.stderr[-260:]}")
+
+    def test_巡检报红时出卡命令的退出码跟着变(self, tmp_path):
+        """🔴 这条才是闸门的判据 —— 同 spawn_check 那次教训一样，
+        「字符串在不在」测不出退出码有没有被接住。
+
+        把巡检改成必然失败，断言 `bin/biga-card` 的退出码跟着变
+        （而不是像 spawn_check 当年那样被 `set -uo pipefail`
+        （没有 `-e`）吞掉，仍然 exit 0）。
+        """
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-002", "print('桩：全齐')\n",
+            readback_stub="import sys\nprint('桩：巡检报红', file=sys.stderr)\nsys.exit(1)\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert r.returncode == 6, (
+            f"巡检报红，但 biga-card 的退出码没有跟着变（rc={r.returncode}）—— \n"
+            f"  那它就只是一句打印，不是闸门。\n  stderr 尾部：{r.stderr[-300:]}")
+        assert "毒行巡检发现历史遗留问题" in r.stderr
+
+    def test_巡检报红不与spawn核验共用同一个信号(self, tmp_path):
+        """🔴 毒行是历史遗留，不是这次运行的错——它不该让人以为是
+        **这次**出卡的 spawn 证据链断了（那是 rc=4 该管的事）。
+        两者必须是不同的退出码，否则读者会查错方向。"""
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-003", "print('桩：全齐')\n",
+            readback_stub="import sys\nsys.exit(1)\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert r.returncode != 4, "毒行巡检不该冒充 spawn 核验失败的退出码"
+
+    def test_出卡命令仍然会渲染卡片(self, tmp_path):
+        """毒行是历史遗留，不该让「这次出的卡」被藏起来——钱已经花了。"""
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-004", "print('桩：全齐')\n",
+            readback_stub="import sys\nsys.exit(1)\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert "BIGA-20260922-004" in r.stdout
 
 
 # ─────────────────────────── 2026-09-21 21:03 事故：出卡递归

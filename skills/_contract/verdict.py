@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field as dc_field
-from typing import Any, Literal, get_args
+from types import MappingProxyType
+from typing import Any, Literal, Mapping, get_args
 
 from .evidence import Evidence
 from .missing import MissingItem
@@ -143,7 +144,7 @@ def new_task_id(seq: int, *, day: str | None = None) -> str:
     return f"BIGA-{day}-{seq:03d}"
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentVerdict:
     """Specialist → Supervisor 的唯一返回结构。
 
@@ -153,7 +154,11 @@ class AgentVerdict:
         status: 这次执行本身是否完成。``partial`` = 跑完了但有字段没算出来。
         verdict: 业务判断。``UNKNOWN`` 表示**判断不出来**，与 ``PASS`` 严格区分。
         result: 结构化结论。每个键必须有对应的 Evidence（铁律 3）。
-        confidence: 0..1。
+        data_completeness: 0..1。🔴 **字段覆盖率**（`len(result) / 应有字段数`），
+            不是模型对自己判断的信心。六个 skill 算的从来都是前者，
+            叫 `confidence` 这个名字本身就在暗示一件从没发生过的事——
+            改名不改语义，只是把名字改得诚实。
+            `from_dict` 双键兼容：历史卡只有 `confidence`，仍然读得进来。
         evidence: 支撑 `result` 的证据。
         warnings: 不阻断但需要人看到的问题。
         missing: 🔴 **必填项里没算出来的那些**。非空即代表结论不完整。
@@ -181,17 +186,30 @@ class AgentVerdict:
     agent: str
     status: VerdictStatus
     verdict: VerdictLevel
-    result: dict[str, Any] = dc_field(default_factory=dict)
-    confidence: float = 0.0
-    evidence: list[Evidence] = dc_field(default_factory=list)
-    warnings: list[str] = dc_field(default_factory=list)
-    missing: list[MissingItem] = dc_field(default_factory=list)
+    result: Mapping[str, Any] = dc_field(default_factory=dict)
+    data_completeness: float = 0.0
+    evidence: tuple[Evidence, ...] = dc_field(default_factory=tuple)
+    warnings: tuple[str, ...] = dc_field(default_factory=tuple)
+    missing: tuple[MissingItem, ...] = dc_field(default_factory=tuple)
     elapsed_ms: int = 0
     stance: str | None = None
 
     def __post_init__(self) -> None:
-        # 缺失项统一收成 MissingItem（裸字符串是 Phase 1 遗留，按 legacy 收编）
-        self.missing = [MissingItem.coerce(m) for m in self.missing]
+        # 🔴 A2：frozen 之后不能再 `self.x = ...`，改用 object.__setattr__。
+        #    list/dict → tuple/MappingProxyType：这是在关一扇真实存在过的门 ——
+        #    `v.missing.append(...)` 曾经能在不重跑 __post_init__ 的情况下
+        #    悄悄改变一个「已经校验过」的对象（tests/test_write_boundary.py 的
+        #    P1 探针）。frozen 只挡得住重新赋值 `v.missing = [...]`，挡不住
+        #    "对同一个可变对象原地 mutate"——必须两者都做。
+        #
+        #    ⚠️ 复制一份再包：`MappingProxyType(self.result)` 不复制，
+        #    调用方手上那个原始 dict 之后被改了，`self.result` 会跟着变——
+        #    那就是另一条同形状的漏洞，只是入口换了个名字。
+        object.__setattr__(
+            self, "missing", tuple(MissingItem.coerce(m) for m in self.missing))
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(self, "warnings", tuple(self.warnings))
+        object.__setattr__(self, "result", MappingProxyType(dict(self.result)))
 
         if not TASK_ID_RE.match(self.task_id):
             raise ValueError(
@@ -203,8 +221,10 @@ class AgentVerdict:
             raise ValueError(f"status 必须是 {sorted(_STATUSES)} 之一，收到 {self.status!r}")
         if self.verdict not in _LEVELS:
             raise ValueError(f"verdict 必须是 {sorted(_LEVELS)} 之一，收到 {self.verdict!r}")
-        if not isinstance(self.confidence, (int, float)) or not 0.0 <= self.confidence <= 1.0:
-            raise ValueError(f"confidence 必须在 0..1，收到 {self.confidence!r}")
+        if not isinstance(self.data_completeness, (int, float)) \
+                or not 0.0 <= self.data_completeness <= 1.0:
+            raise ValueError(
+                f"data_completeness 必须在 0..1，收到 {self.data_completeness!r}")
         if self.elapsed_ms < 0:
             raise ValueError(f"elapsed_ms 不能为负，收到 {self.elapsed_ms}")
         for e in self.evidence:
@@ -301,8 +321,11 @@ class AgentVerdict:
             "agent": self.agent,
             "status": self.status,
             "verdict": self.verdict,
-            "result": self.result,
-            "confidence": self.confidence,
+            # 🔴 显式转回 dict：`self.result` 是 MappingProxyType（A2），
+            #    json.dumps 只认 dict 的子类，直接塞一个 mappingproxy 进去
+            #    会在落库那一刻才炸 TypeError —— 这里转好，问题在源头暴露。
+            "result": dict(self.result),
+            "data_completeness": self.data_completeness,
             "evidence": [e.to_dict() for e in self.evidence],
             "warnings": list(self.warnings),
             "missing": [m.to_dict() for m in self.missing],
@@ -318,7 +341,9 @@ class AgentVerdict:
             status=d["status"],
             verdict=d["verdict"],
             result=d.get("result", {}),
-            confidence=d.get("confidence", 0.0),
+            # 🔴 A7：双键兼容。历史卡只有 `confidence`（同一个字段覆盖率数字，
+            #    改名前的旧名）；`data_completeness` 优先，两个都没有才是 0.0。
+            data_completeness=d.get("data_completeness", d.get("confidence", 0.0)),
             evidence=[Evidence.from_dict(x) for x in d.get("evidence", [])],
             warnings=list(d.get("warnings", [])),
             missing=[MissingItem.coerce(m) for m in d.get("missing", [])],

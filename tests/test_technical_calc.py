@@ -151,9 +151,9 @@ class TestGuards:
         v = build()
         assert v.verdict == "UNKNOWN" and v.result == {}
 
-    def test_字段数与confidence分母一致(self, wired):
+    def test_字段数与data_completeness分母一致(self, wired):
         v = build()
-        assert len(v.result) == tc._EXPECTED_FIELDS and v.confidence == 1.0
+        assert len(v.result) == tc._EXPECTED_FIELDS and v.data_completeness == 1.0
 
     def test_只做上证不做深证(self):
         """范围外 ≠ 数据缺失：不做深证是设计选择，不该出现在 missing 里。"""

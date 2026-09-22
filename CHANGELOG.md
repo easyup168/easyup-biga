@@ -15,6 +15,319 @@
 
 ## [未发布]
 
+### 🔴 新增 · 批 A-II：契约值对象与不变量（A1/A2/A5/A6/A7/A8 + F-4）
+
+设计文档 §6 批 A 的后半段。A-I 已经把**写边界**堵上（写入前重新构造一遍），
+这一批把**类型本身**收紧——很多绕过路径不需要碰写边界，直接改一个已构造
+对象的字段就够了；类型层不收紧，写边界重校验就是唯一一道防线，防线破了
+就什么都不剩。837 条测试全绿（774 → 837，+63）。
+
+🔴 本批经过两轮独立评审才落地，评审挑出三条：F-5（`MissingItem`
+「冻结」之后仍能被 `.code = ...` 改掉，见 A1 小节）、F-6（Card roster
+「缺席」该不该硬拒，设计表格与实现口径不一致，见 A5 小节）、F-8
+（F-6 修完后的第二意见：「非空即放行」本身还太松，见 A5 之后单独一节）。
+三条都已修完才落地成下面这份记录——下方 A1/A5 两节写的已经是**修完
+之后**的最终口径，不是最初提交评审时的样子；F-5/F-6/F-8 各自的探针
+单独成节，不与原 8 个探针混在一起，因为它们验证的是评审**修出来**的
+行为，时间线上确实更晚。
+
+#### A1 · `MissingItem` 的身份从「文本」改成「code」
+
+**为什么**：`replay.py` 反推 `extra_missing` 时用 `m not in from_verdicts`，
+而 `MissingItem` 原来是纯 `str` 子类，`==`/`hash` 走的是文本。两条 verdict
+各自报「数据源不可用」——一条 code 是 `market.turnover.unavailable`，
+另一条是 `supervisor.agent_no_response`，文本相同但不是同一件事——旧身份
+语义会把它们塌成一条，回放时**少还原一条缺失项**，「回放悄悄让卡变好看」。
+
+`__eq__`/`__hash__` 改成只认 `.code`，且对非 `MissingItem` 一律返回
+`False`（不回退到 `str` 内容比较，否则 `==` 与 `hash()` 依据不同信号，
+是另一种静默 bug）。`sorted()`/`in`（子串）/`f"{m}"` 不受影响——它们走的是
+`str` 继承来的 `__lt__`/`__contains__`/`__str__`，从不经过 `__eq__`。
+
+⚠️ 副作用：`MissingItem("x") == "纯字符串"` 不再成立。仓库里靠这个成立的
+只有 5 处（全在测试里，拿 `.missing` 跟一份纯文本列表比较），已改成显式
+取 `.detail` 再比较。
+
+**探针**：造两条同文本异代码的 `MissingItem`，构造「追加 2」描述的真实场景
+（`tests/test_decision_card.py::test_同文本异代码的extra_missing不会被反推丢掉`），
+临时删掉 `__eq__`/`__hash__` 覆写，确认它精确复现旧 bug 的症状——
+`replay --check` 报「不一致」，回放出的 Card 少一条缺失项；恢复代码后转绿。
+
+#### F-5（评审阻塞项）· `MissingItem.code` 在「冻结」之后仍然可写
+
+**为什么**：`MissingItem` 不是 `@dataclass`（它是 `str` 子类，靠手写
+`__new__` 构造），A2 那次「把所有契约对象都冻结」的批量整改是按类扫的，
+根本没扫到它——`m.code = "supervisor.agent_offline"` 事后照样成功，
+不报任何错。这条洞比听起来更致命：A1 刚把 `MissingItem` 的身份从「文本」
+改成「code」，就近有一个字段能被绕过冻结原地改掉，等于 A1 立起来的身份
+保证当场被同一批次的另一个洞卸掉——`missing_ledger.py` 与
+`_check_restated_missing` 都拿 `.code` 当身份在用，事后能改就是「身份可以
+被人悄悄换掉而不留痕迹」。`TestVerdictFrozen` 当时测的是"容器"（`missing`
+是不是 tuple、`.append()` 是不是被挡住），没有测"容器里那个元素自己"能不能
+被改字段——同一个批次里两类不同的「冻结」，只验证了一类。
+
+修法：给 `MissingItem` 补 `__setattr__`/`__delattr__`，统一抛
+`dataclasses.FrozenInstanceError`（不用自造异常类型——`AgentVerdict`/
+`DecisionCard` 冻结失败时抛的就是这个，保持「所有契约对象冻结失败长一个
+样子」）。构造阶段的自我赋值走的是 `__new__` 里的 `object.__setattr__`，
+不经过这道覆写，不受影响。
+
+**探针**：`tests/test_contract_behavior.py::TestMissingItemFrozen`
+（新增类，4 条）。临时删掉 `__setattr__`/`__delattr__` 覆写，
+`test_code不能被重新赋值` 与 `test_code不能被删除` 精确转红
+（`Failed: DID NOT RAISE`）；`test_装在tuple里的元素同样不可变`
+（造一条真实 `AgentVerdict.missing` 里的元素，确认冻结跟着对象走，
+不是只在裸构造时生效）同样转红；`test_构造阶段不受影响`保持绿，
+证明修法没有连带堵死合法的构造路径。恢复后全绿。
+
+#### A2 · `AgentVerdict` / `DecisionCard` 冻结，`list`/`dict` → `tuple`/`Mapping`
+
+**为什么**：`tests/test_write_boundary.py` 的 P1/P2 探针（批 A-I）能成功，
+靠的正是这个洞——`v.missing.append(...)` 不重跑 `__post_init__`，
+一个已经通过校验的对象可以在**不触发任何校验**的情况下被改成非法状态。
+`frozen=True` 挡的是重新赋值（`v.verdict = "WARNING"`）；但光 frozen 挡不住
+「对同一个可变对象原地 mutate」——`missing`/`evidence`/`warnings`/`verdicts`
+换成 `tuple`（没有 `.append()`），`result` 换成 `MappingProxyType`（`[key]=`
+直接 `TypeError`）,两者缺一不可。
+
+`__post_init__` 里几处自我赋值（收敛 missing、补 `generated_at`、写
+`identity_warning`/`restate_warning`）全部改用 `object.__setattr__`——
+这是 Python 自己在 `dataclass(frozen=True).__init__` 里用的同一个后门，
+构造阶段用它不违反「冻结」的语义。
+
+⚠️ `to_dict()` 里 `result` 要显式 `dict(self.result)`——`json.dumps`
+不认 `MappingProxyType`，不转会在落库那一刻才炸 `TypeError`。
+
+**探针**：`tests/test_contract_behavior.py` 的 `TestVerdictFrozen`/
+`TestCardFrozen`。临时把两个类的 `@dataclass(frozen=True)` 改回
+`@dataclass`，`test_赋值被拒`（两处）与追加 4 点名的
+`test_篡改from_store被拒` 精确转红（`Failed: DID NOT RAISE`）；
+`.append()` 系列测试保持绿——证明它们测的是 tuple 类型本身，不依赖
+frozen，两道防线各自独立被验证。恢复后全绿。
+
+同时把 `card.py::from_dict` 一处过时的文档注释改了回来——它还在断言
+「`save_card` 会传 `from_store=card.from_store`」，那正是追加 4 描述、
+A-I 已经修掉的洞；代码早改了，注释没跟着改，是又一次 L-6 文档漂移。
+
+#### A5 · Card roster：拒绝重复 agent；缺席须有缺失项解释才放行
+
+**为什么**：`verdicts=[market的判定, market的判定]` 能直接构造——没有任何
+字段说得清「该信哪一条」。但「缺席」不能用同一把尺子量：Phase 1 单 agent
+skeleton、agent 掉线时 Supervisor 用 `supervisor.agent_offline` 显式登记，
+都是**合法的**缺席场景（`ORCHESTRATION.md` 已有文档化的处理方式）。
+
+⇒ 拆成两条判据，宽严不同：
+
+- **重复**没有合法场景，新卡硬拒（`_check_roster`，与 `_check_identity`
+  同一套新严旧宽三段式）。
+- **缺席**分两种情况：已建成的 roster（`STANCE_VOCAB` 的 key 集合，
+  已有测试 `TestStanceVocabMatchesContracts` 钉死它与 `agents/` 目录
+  一致）不全，且 `missing[]` 完全为空 ⇒ 拒绝——缺席必须显式登记
+  （如 `supervisor.agent_offline`），不许静默；roster 不全但 `missing[]`
+  非空（哪怕只有一条，不要求精确对应哪个缺席的 agent）⇒ 放行。不要求
+  精确对应是刻意的：`missing` 项的代码前缀是**发起方**的命名空间
+  （`market.*`/`supervisor.*`……），不是缺席 agent 的名字，按文本猜「这条
+  missing 说的是不是那个缺席的 agent」是本仓库反复踩过的「按字符串形状
+  分类」陷阱（L-13）——这里只问「有没有解释」，不问「解释得准不准」。
+
+只读属性 `DecisionCard.absent_agents` 报告缺席事实，`render()` 里接一行
+`已建成 roster 缺席：...`，人看卡面就能看到。
+
+**探针**：临时注释掉 `_check_roster()` 的调用，
+`TestCardRoster::test_重复agent被拒`、`test_旧卡里的重复agent只警告不拒`、
+`test_缺席且无解释被拒`、`test_旧卡里缺席无解释只警告不拒` 精确转红；
+`test_缺席但有解释就放行` 保持绿，证明"重复/缺席无解释/缺席有解释"三条
+判据真的互相独立，不是共用一套判断偶然都通过了。恢复后全绿。
+
+#### F-6（评审中等）· 「缺席该不该硬拒」与设计表格字面探针不一致
+
+上面 A5 描述的已经是**最终**口径。第一版实现是「缺席永不硬拒，只由
+`absent_agents` 报告事实，不阻断构造」——理由是不分青红皂白一律硬拒
+会牵连现有测试里几十处最小化单 verdict fixture，代价与收益不成比例。
+评审指出两个问题：① 这与设计文档表格里「缺席也应报红」的字面探针不
+一致，是「该不该硬拒」这件事本身没有定论，需要往上交，不是能靠读代码
+单方面裁定对错的事；② `absent_agents` 算出来了，但当时**没有任何代码
+读它**——零消费方（L-1），「缺席」这个事实只活在对象里，从不出现在
+人会看到的任何地方。
+
+裁决：折中方案——上面 A5 写的「roster 不全 + missing 全空 ⇒ 拒绝」。
+新判据复用 `_check_roster` 已有的 `from_store` 三段式（新卡严格拒绝、
+历史卡/回放只警告），不另起一套宽严规则。
+
+修法牵连的测试比预想的更宽——凡是构造 `DecisionCard` 时只给单个 agent
+判定、又不关心 roster 完整性的测试（`test_contract_behavior.py` /
+`test_decision_card.py` / `test_verdict_provenance.py` /
+`test_verdict_refs.py` / `test_write_boundary.py`，共约 30 处）全部要
+补上「满 roster」或「占位 missing」其中之一，是本次 F-6 修复里改动面最大
+的部分——但这是机械的测试维护，不是设计问题，设计问题已经在上面裁决完。
+
+**探针**（两处独立信号）：
+1. `render()` 接线：临时删掉 `render()` 里 `已建成 roster 缺席` 那一行，
+   `test_缺席出现在卡面上` 精确转红（断言在渲染文本里找不到那行）；
+   `test_全员到齐时卡面不显示缺席行` 保持绿。恢复后全绿。
+2. 硬拒判据本身：临时把 `if self.absent_agents and not self.missing`
+   短路成恒假，`test_缺席且无解释被拒` 精确转红
+   （`Failed: DID NOT RAISE`）；同一测试类的其余用例保持绿。恢复后全绿。
+
+#### F-8（第二轮独立复核）· 「非空」这条判据本身还留了一个口子
+
+F-6 落地后，把结果再交出去要第二意见——这次挑出的是 F-6 自己的判据
+不够严：「roster 不全 + missing 非空 ⇒ 放行」只问「有没有解释」，
+不问「解释够不够」。攻击场景可以直接构造出来：5 个 agent 静默缺席，
+只挂 1 条跟它们毫无关系的 `market.turnover.stale`，照样能通过——
+一条解释就能给任意多个缺席背书。
+
+评审给的修法没有推翻「不比较文本」这一半（那一半是对的，`_check_
+restated_missing` 已经因为类似的字符串形状分类吃过亏，见 L-13），
+而是指出还有一个不需要比较任何文本、只靠计数就能拿到的信号：
+
+    roster 不全 且 len(missing) <  len(absent_agents) ⇒ 拒绝
+    roster 不全 且 len(missing) >= len(absent_agents) ⇒ 放行
+
+对按 `ORCHESTRATION.md` 约定正确操作的路径（每个掉线 agent 各自登记
+一条）这条恒真，只在漏报时命中——成本是一行判据，不引入新的失败模式。
+
+🔴 这条不是"堵你们"：**"缺席要不要登记"这件事今天完全由 Supervisor
+LLM 的提示词自觉执行**——批 C 的 `DecisionOrchestrator` 会把它从
+"LLM 自己判断要不要说"改成程序强制，但那是以后的事。在那之前，
+任何依赖"LLM 会如实登记每一处缺席"的假设都值得一道结构性兜底，
+这道计数判据就是那道兜底，不是替代批 C。
+
+改动牵连面比预想的更宽——凡是"1 个 agent 到场 + 1 条占位 missing"
+这个 F-6 留下的修复模式，在 F-8 之后全部要么补够计数（占位 missing
+条数 ≥ 缺席数），要么换成"满 roster，把需要控制的那个 agent 换成
+自定义 verdict"（`_roster_with_verdict()`，新增的测试助手）——后一种
+更适合那些同时在断言 `len(card.missing)` 精确值、或者要测**后面**
+那条铁律 2/否决权检查的用例：给它们硬凑够计数只会让计数本身失去意义，
+真正该做的是让 roster 判据不介入，把舞台让给它们真正要测的那条检查。
+
+**探针**：临时把判据退回 F-6 版本（`not self.missing`），
+`test_缺席多于missing条数仍被拒`（造 1 个 agent、1 条 missing、5 个
+缺席——F-6 版本会放行）精确转红（`Failed: DID NOT RAISE`）；
+`test_缺席数与missing条数相等就放行`（5 条 missing 对 5 个缺席）与
+`test_missing条数多于缺席数也放行` 保持绿，证明"计数不足才拒绝"
+这条边界确实是新加的这一行在守，不是碰巧。恢复后全绿。
+
+#### A6 · `VerdictRef` 上卡：证明「这张卡用的是哪一条判定原件」
+
+**为什么**：Card 只装着 `AgentVerdict` 对象的一份拷贝，不记录它是从
+`agent_verdicts` 哪一行读出来的。回放想证明"当初用的原件"和"库里现在
+这一行"还是同一份，无从查起。
+
+新增 `VerdictRef(agent, verdict_id, content_sha256, contract_version)`，
+`DecisionCard.input_verdict_refs`（历史卡缺省空 tuple，可追加不强制）。
+核对函数 `_store.verify_verdict_refs()` **必须**比对
+`agent_verdicts.content_sha256` 这一列存量值，不能把 `AgentVerdict`
+对象重新序列化再算一遍——这是追加 4（A-I 评审复核）钉死的约束：
+`_canonical_dumps` 的格式不是冻结的（A-I 就加过一次 `separators`），
+走「重算」会让 A-I 之前落库的 239 条原件集体核对不上且静默失效。
+直接复用 `tests/test_write_boundary.py::TestVerdictContentShaIsHashOfStoredText`
+钉住的判据，没有另写一套。
+
+`synthesize.py --verdict-ids` 是唯一能建出 `VerdictRef` 的路径（`--verdicts`
+读裸 JSON 那条退路没有 verdict_id）；`replay.py` 把 `original.input_verdict_refs`
+原样带进重新合成的 Card，否则 `--check` 会把「回放没有重新记 VerdictRef」
+误判成组装不一致。
+
+**探针**：造一条哈希故意对不上的 `VerdictRef`
+（`tests/test_verdict_provenance.py::test_哈希对不上时报红`），
+临时把 `verify_verdict_refs()` 改成恒返回 `[]`，该测试与
+`test_verdict_id不存在时报红` 精确转红；「哈希对得上」与「没有 ref」
+两条保持绿，证明假阳性/假阴性两个方向都被独立验证。恢复后全绿。
+
+#### A7 · `confidence` 改名 `data_completeness`
+
+**为什么**：六个 skill 算的从来是 `len(result) / 应有字段数`——**字段
+覆盖率**，不是模型对自己判断的信心。叫 `confidence` 是在暗示一件
+从没发生过的事。`from_dict` 双键兼容（`data_completeness` 优先，
+没有则退回 `confidence`），历史卡不需要迁移就能继续读。
+
+**探针**：造一份「只有旧字段名 `confidence`」的字典模拟历史落库格式
+（`tests/test_contract_behavior.py::test_历史卡只有confidence字段仍能还原`），
+临时删掉 `from_dict` 里的 `confidence` 回退分支，该测试精确转红
+（读出 `0.0` 而不是期望值）。恢复后全绿。
+
+#### A8 · 修订血缘约束 + `load_card` 拆成两个 API
+
+**为什么**：实测无约束——修订可以指向另一个 agent、另一次决策的原件；
+一条原件可以有多条分叉修订；`load_card(decision_id=乱写, record_id=真)`
+会静默忽略 `decision_id` 正常返回。
+
+`save_verdict(amends=...)` 新增代码校验：`amends` 指向的原件必须存在，
+且 `task_id`/`agent` 都与新行一致——不同意图（跨 agent、跨决策）的修订
+在写入前就被拒，报错直接说清原件是谁、这次是谁。
+
+线性修订（一条原件最多一次修订，不许分叉）**不能只靠应用层"先查再插"**
+——`reserve_decision_id()` 当年的教训是这类竞态窗口必须靠数据库唯一约束
+仲裁。schema **v6**：`ux_verdict_amends_linear`，`agent_verdicts(amends)`
+上的局部唯一索引（`WHERE amends IS NOT NULL`）。设计文档与分发提示词里
+「批 B 落成 schema v6」的表述同步改成 v7——迁移列表只许在末尾追加，
+不许改动已发布的条目，这里是把设计文档的编号往后挪一位，不是重新设计。
+
+`_store.load_card(decision_id, *, record_id=None)` 拆成
+`load_online_card(decision_id)` 与 `load_card_by_record_id(record_id)`
+两个 API，不再存在「两个 id 都能传、其中一个被悄悄忽略」这条路；
+全仓 9 处调用点（`card_ops.py` / `missing_ledger.py` / `readback_check.py`
+/ `phase1_acceptance.py` 等）与 `_store/__init__.py` 的导出同步改名。
+
+**探针**（两处独立信号，各自验证）：
+1. 临时删掉 `save_verdict` 里的 agent/task_id 校验，
+   `TestAmendLineage::test_跨agent的修订被拒` /
+   `test_跨决策的修订被拒` 精确转红（`DID NOT RAISE`）；
+   `test_amends指向不存在的原件被拒` 转成裸
+   `sqlite3.IntegrityError: FOREIGN KEY constraint failed`
+   （证明代码校验原来在做真实的翻译工作，不只是装饰）。
+2. 临时删掉 schema v6 的 `CREATE UNIQUE INDEX`，
+   `test_同一条原件不许被修订两次` 精确转红（`DID NOT RAISE`）——
+   证明"不许分叉"这条真的靠数据库约束兜底，不是应用层的一厢情愿。
+
+均恢复后全绿。
+
+#### F-4 · `readback_check.py` 接入真实调用方（A-I 评审欠的账）
+
+**为什么**：A-I 建的毒行巡检只有测试和文档，没有任何自动路径会跑它——
+一条不会红的守卫，比没有守卫更糟：它占着"这件事已经有人管"的位置。
+
+接进 `bin/biga-card` 出卡之后、紧挨 `spawn_check`（同样只读、零成本，
+同样是"唯一每次都会跑到的地方"）。退出码必须被接住——不能重蹈
+`spawn_check` 当年"调用在、退出码被丢，守卫照样绿"的覆辙。但毒行是
+**历史遗留**，不是这次运行的错：新写入的行不可能再变成毒行（A3 的写
+边界重校验已经堵死那条路），巡检报红说明库里有一条**更早**的坏行，
+不该跟"这次出卡的 spawn 证据链断了"共用同一个信号——那会让人查错方向。
+⇒ 用独立退出码 `6`（`spawn_check` 是 `4`），摘要措辞也分开。
+
+**探针**：`tests/test_spawn_proof.py::TestReadbackWiredIntoRealPath`，
+复用同一套"造沙盒跑真实 `bin/biga-card`"的机制。把 `readback_check.py`
+换成"必然 `exit 1`"的桩，临时删掉 `bin/biga-card` 里对应的
+`if [ "$READBACK_RC" -ne 0 ]` 分支，`test_巡检报红时出卡命令的退出码跟着变`
+精确转红（`rc=0` 而不是期望的 `6`）。恢复后全绿；顺带确认了退出码
+不与 `spawn_check` 的 `4` 撞车、且卡片仍然照常渲染（钱已经花了）。
+
+#### 已知代价（不在这一批修，记进 TODO.md）
+
+`bin/biga-card` 的 `_sql()` 在 `data/biga.db` 尚不存在时会打一屏无害的
+`StoreNotInitialised` traceback 到 stderr（`BEFORE=` 那一行用 `readonly=True`
+打开一个还不存在的库）。功能不受影响（`BEFORE` 拿到空字符串，语义上
+恰好正确），真实机器建库之后不会再触发；是 F-4 测试沙盒时顺带发现的
+**既有**问题，与本批任何一项都无关，不顺手改。
+
+### 变更 · 设计文档补「追加 4」，把批 A-I 的评审教训喂给批 A-II
+
+`docs/design/deterministic-orchestration.md` §2 新增「追加 4」，
+`docs/guide/orchestration-kickoff-prompt.md` 的批 A-II 开工段同步指向它。
+
+为什么要补这一条：批 A-I 的评审复核（`33fc55a`）挑出两处「收窄类修法方向
+反了」，其中两条对**批 A-II 的具体做法**有直接约束——A2（`frozen=True`）
+的探针清单必须显式覆盖 `from_store`（实测里唯一被利用过的具体攻击面），
+A6（`VerdictRef.content_sha256`）的核对必须走「存量文本哈希」而不是
+「对象重算」，否则 A-I 之前落库的 239 条原件会集体核对不上且不报错。
+
+这两条结论已经写进了 A-II 的分发提示词（正文与探针清单都有），但设计
+SSOT 本身还没有对应内容——TODO.md 早就写明「为什么这么设计写在设计
+文档里，两处都写必然漂」，分发提示词与设计文档各自维护同一件事的解释，
+本身就是这条纪律要防的第二套口径。补齐之后分发提示词那句「先读 §2 的
+追加 2」也改成了「追加 2 与追加 4」，指向不再缺一半。
+
 ### 🔴 新增 · 确定性编排升级的设计方案（第四份外部评审的落地计划）
 
 `docs/design/deterministic-orchestration.md` —— 七批迁移（A–G）的范围、顺序、

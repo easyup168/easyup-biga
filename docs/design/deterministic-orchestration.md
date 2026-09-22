@@ -154,6 +154,44 @@ load_verdict(同一行)     →  ❌ ValueError（from_dict 复校验，铁律 1
 **L-3 长在了「合并成唯一一份」之后的那一份里** —— 合并消灭了跨文件的第二套口径，
 没有消灭同一文件内的第二套口径。
 
+### 追加 4 · 批 A-I 实测：收窄类修法的判据不能建在被校验对象自身状态上
+
+批 A-I 做完 A3/A4（`33fc55a`）之后，评审复核挑出两处独立的收窄式修法，
+方向都反了——细节见 `CHANGELOG.md` 与教程第 20 章，这里只留对 A-II
+有直接约束力的结论。
+
+**其一（约束 A2）**：写边界重校验最初判断「这是不是历史/回放数据」时，
+直接信任 `card.from_store`——`DecisionCard` 一个尚未 `frozen` 的属性。
+合法构造对象后 `card.from_store = True` 不会报错，能把刚加的重校验一起
+绕开。改法是从 `save_card` 的调用参数 `replay_of` 推导（`replay_of is not
+None`），不从对象状态推导——`card_ops.persist()` 是唯一调用点，在线路径
+永远不传、`replay.py --store` 永远传原始 `record_id`，调用方的这个决定
+不受 `card` 对象本身状态影响。
+
+⇒ A2 把 `DecisionCard` 加 `frozen=True` 之后，`card.from_store = True`
+会直接抛 `FrozenInstanceError`——这条路径被 A2 顺带堵死，但**探针清单里
+要显式加这一条**（"篡改 `from_store` 抛错"），不能只测 `missing`/`verdicts`
+这类列表字段：`from_store` 是这次实测里唯一真被利用过的具体攻击面，
+其余字段目前还没有对应的实测攻击路径。
+
+**其二（约束 A6）**：`agent_verdicts.content_sha256` 现在锚定的是
+「这次写入时的那段文本」，不是「这个对象的规范形式」——A3 把 `verdict_json`
+换成了 `_canonical_dumps`（含 `separators`），同一份 verdict 的存储字节
+因此从 206 变成 185，也就是说这个序列化格式**不是冻结的**。如果 A6 的
+核对逻辑是「把 `AgentVerdict.from_dict()` 读回的对象重新序列化再比对」，
+A-I 之前落库的 239 条原件会集体核对不上，而且是静默的（两串 sha256 都
+「看起来正常」）。
+
+⇒ A6 的 `VerdictRef.content_sha256` 核对必须走
+`hashlib.sha256(存量 verdict_json 文本)`，不能走「对象重新序列化」。
+`tests/test_write_boundary.py::TestVerdictContentShaIsHashOfStoredText`
+已经把这条钉住，A6 直接复用这条测试的判据，不要另写一套。
+
+> 两处的共同教训：收窄一条已有判据（无论是安全审查脚本还是契约层校验）时，
+> 先确认判据依赖的信号来自**调用方参数/存量数据**还是来自**被校验对象
+> 自身**——后者在对象冻结之前永远可以被绕过，冻结之后也只是「更难绕过」，
+> 不是「不需要想清楚判据该建在哪」。
+
 ### 评审的 drop-in 里有一处会出事
 
 §23 建议统一用 `separators=(",", ":")`。但 `_store/db.py::payload_sha256` 目前**不带**它，
@@ -276,7 +314,11 @@ schema v4 建 `decision_ids` 时漏过一次，代价是整套决策身份机制
 
 ### 批 B · 运行身份 + 状态机
 
-* schema v6：`decision_runs` / `run_events` / `evidence_sets`（+ 全部只追加触发器）
+* schema v7（🔴 原写 v6——批 A-II 的 A8 在 `agent_verdicts` 上加线性修订的
+  唯一索引，先落了 v6。迁移列表只许在末尾追加、不许改动已发布的条目
+  （`schema.py` 自己的规则），所以这里是把设计文档的编号跟着改一位，
+  不是去改 v6 那次迁移本身）：
+  `decision_runs` / `run_events` / `evidence_sets`（+ 全部只追加触发器）
 * `RunContext` 进契约层
 * `transition()` 的 CAS 语义 + 非法转移一律抛错
 * `bin/biga-card` 暂时仍走老路径，但**开始写 run 记录** —— 先让新旧并存，不改行为

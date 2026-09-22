@@ -11,6 +11,7 @@
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, Evidence, now_cn
 from .missing import LEGACY_CODE, MissingItem
+from .verdict_ref import CONTRACT_VERSION, VerdictRef
 from .verdict import (
     ADHOC_TASK_SEQ,
     CROSS_CHECK_PAIRS,
@@ -28,8 +29,10 @@ from .verdict import (
 
 __all__ = [
     "CN_TZ",
+    "CONTRACT_VERSION",
     "LEGACY_CODE",
     "MissingItem",
+    "VerdictRef",
     "ADHOC_TASK_SEQ",
     "CROSS_CHECK_PAIRS",
     "STAGE1_AGENTS",

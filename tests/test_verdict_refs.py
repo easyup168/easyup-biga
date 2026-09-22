@@ -59,7 +59,7 @@ def _verdict(agent="market", missing=None, verdict="PASS", status="completed",
                    label="上证指数点位")]
     return AgentVerdict(
         task_id="BIGA-20260918-001", agent=agent, status=status, verdict=verdict,
-        result={"sh_close": 3911.87}, confidence=1.0, evidence=ev,
+        result={"sh_close": 3911.87}, data_completeness=1.0, evidence=ev,
         warnings=[], missing=list(missing or []), elapsed_ms=1234, stance=stance)
 
 
@@ -109,6 +109,48 @@ class TestAppendOnly:
                                   status="partial"), amends=vid, path=db)
 
 
+class TestAmendLineage:
+    """A8：修订不许跨 agent、跨决策；一条原件最多被修订一次（不许分叉）。"""
+
+    def test_amends指向不存在的原件被拒(self, db):
+        with pytest.raises(ValueError, match="不存在"):
+            save_verdict(_verdict(), amends=99999, amend_reason="x", path=db)
+
+    def test_跨agent的修订被拒(self, db):
+        vid = save_verdict(_verdict(agent="market"), path=db)
+        with pytest.raises(ValueError, match="跨 agent 或跨决策"):
+            save_verdict(_verdict(agent="emotion"), amends=vid,
+                        amend_reason="不该被接受", path=db)
+
+    def test_跨决策的修订被拒(self, db):
+        vid = save_verdict(_verdict(), path=db)
+        base = _verdict()
+        # contract-exempt: 复制一份原件的字段，只改 task_id，模拟「另一次决策」
+        other_decision = AgentVerdict(
+            task_id="BIGA-20260919-001", agent=base.agent, status=base.status,
+            verdict=base.verdict, result=base.result,
+            data_completeness=base.data_completeness, evidence=base.evidence,
+            stance=base.stance)
+        with pytest.raises(ValueError, match="跨 agent 或跨决策"):
+            save_verdict(other_decision, amends=vid, amend_reason="不该被接受", path=db)
+
+    def test_同agent同决策的修订被接受(self, db):
+        vid = save_verdict(_verdict(), path=db)
+        new = save_verdict(_verdict(missing=["x"], verdict="WARNING",
+                                    status="partial"),
+                           amends=vid, amend_reason="合法修订", path=db)
+        assert load_verdict_meta(new, path=db)["amends"] == vid
+
+    def test_同一条原件不许被修订两次(self, db):
+        """探针：先合法修订一次，再对同一个 verdict_id 修订第二次，必须被拒。"""
+        vid = save_verdict(_verdict(), path=db)
+        save_verdict(_verdict(missing=["x"], verdict="WARNING", status="partial"),
+                    amends=vid, amend_reason="第一次修订", path=db)
+        with pytest.raises(ValueError, match="只能线性，不许分叉"):
+            save_verdict(_verdict(missing=["y"], verdict="WARNING", status="partial"),
+                        amends=vid, amend_reason="第二次修订，应该被拒", path=db)
+
+
 class TestAmendCLI:
     def _run(self, *args, db=None):
         env = {**dict(__import__("os").environ), "BIGA_DB_PATH": str(db)}
@@ -124,8 +166,8 @@ class TestAmendCLI:
         new = int(r.stderr.split("verdict_ref=")[1].split()[0])
 
         original, amended = load_verdict(vid, path=db), load_verdict(new, path=db)
-        assert original.missing == [] and original.verdict == "PASS"
-        assert amended.missing == ["趋势判不了"] and amended.verdict == "WARNING"
+        assert list(original.missing) == [] and original.verdict == "PASS"
+        assert [m.detail for m in amended.missing] == ["趋势判不了"] and amended.verdict == "WARNING"
         assert amended.missing[0].code == "market.trend.no_history"
         assert amended.status == "partial"
         # 证据一条不少，且仍是采集时刻
@@ -160,8 +202,16 @@ class TestSynthesizeByIds:
     def test_按id合成(self, db):
         a = save_verdict(_verdict("market", stance="放量上涨"), path=db)
         b = save_verdict(_verdict("emotion", stance="修复"), path=db)
+        # 🔴 F-8：2 个 agent 到场，另外 4 个天然缺席——roster 判据按计数
+        #    比较，4 条 --extra-missing 才够（本文件不测 roster）。
+        extra_missing_args = []
+        for i in range(4):
+            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
+                                   f"占位{i}——本文件不测 roster"]
         r = self._run("--verdict-ids", f"{a},{b}", "--status", "WAIT",
-                      "--headline", "h", "--model-ref", "m", "--no-store", db=db)
+                      "--headline", "h", "--model-ref", "m",
+                      *extra_missing_args,
+                      "--no-store", db=db)
         assert r.returncode == 0, r.stderr
         assert "market" in r.stdout and "emotion" in r.stdout
 

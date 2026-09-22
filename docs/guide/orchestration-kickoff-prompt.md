@@ -228,10 +228,15 @@ P6  巡检：新增一个只读检查，遍历 agent_verdicts / decision_records
 
 ## 批 A-II · 值对象与不变量
 
-⚠️ **A-I 合并之后才开这一批。**
+⚠️ **A-I 合并之后才开这一批。** A-I 已于 `33fc55a` 合并并通过评审复核。
+
+🔴 **A-I 的评审留下两条硬账，必须在这一批还掉** —— 见正文 F-4 与 A6 两处。
 
 ```text
-做设计文档 §6 批 A 的 A1 / A2 / A5 / A6 / A7 / A8。先读 §2 的追加 2。
+做设计文档 §6 批 A 的 A1 / A2 / A5 / A6 / A7 / A8。先读 §2 的追加 2 与追加 4——
+追加 4 是 A-I 评审复核留下的两条硬约束（A2 的探针清单要加什么、A6 的核对
+必须走哪条路径），下面 A2/A6 两节只是它的复述，读追加 4 能看到完整的
+「为什么」。
 
 ## A1 · MissingItem 脱离 str，成为 (code, detail) 值对象
 
@@ -284,6 +289,16 @@ VerdictRef(agent, verdict_id, content_sha256, contract_version)，
 Card 记录 input_verdict_refs。这样回放能证明「这张卡用的是哪一条判定原件」。
 探针：改掉库里某条原件的 sha，断言回放核对报红。
 
+🔴 **核对必须哈希「库里存的那段 verdict_json 文本」，绝不能从对象重新序列化。**
+
+这是 A-I 评审的 F-3。A-I 给 `verdict_json` 加了 `separators`，同一份 verdict
+的存储字节从 206 变成 185 —— 也就是说 `_canonical_dumps` 的格式**不是冻结的**。
+如果核对写成「把对象重新序列化再比哈希」，A-I 之前落库的 **239 条原件**
+会集体对不上，而且是静默的：两串 sha256 都「看起来正常」。
+
+⚠️ `tests/test_write_boundary.py::TestVerdictContentShaIsHashOfStoredText`
+已经把这条钉住了 —— **先去读它**，不要再自己推一遍。
+
 ## A7 · confidence → data_completeness
 
 六个 skill 里它全是 len(result) / _EXPECTED_FIELDS —— 那是**字段覆盖率**，
@@ -303,6 +318,26 @@ Card 记录 input_verdict_refs。这样回放能证明「这张卡用的是哪�
   load_card 拆成 load_online_card(decision_id) 与 load_card_by_record_id(record_id)
   两个 API，**不要再同时接受两个 id 并悄悄忽略其中一个**。
 
+## F-4 · 给 `readback_check.py` 接一个真实调用方（A-I 评审欠的账）
+
+A-I 建了毒行巡检，但它**只有测试和文档，没有任何自动路径会跑它**。
+对照 `spawn_check.py`：它在 `bin/biga-card`、`budget_report.py`、三个测试里都有调用点。
+
+两者是同一个形状：需要一个**真实的库**才有东西可查，而 `data/biga.db`
+只在出过卡之后才存在 ⇒ pytest 覆盖不到生产库。
+
+> 一条不会红的守卫，比没有守卫更糟：它占着「这件事已经有人管」的位置。
+
+⇒ 接进 `bin/biga-card` 出卡之后那一段，紧挨 `spawn_check`（只读、零成本）。
+
+🔴 **退出码必须被用上。** `spawn_check` 当年就栽在这里 ——
+调用在、退出码被丢，守卫照样绿（`bin/biga-card` 用的是 `set -uo pipefail`，没有 `-e`）。
+探针：把巡检改成必然失败，断言 `bin/biga-card` 的退出码跟着变。
+
+⚠️ 毒行是**历史遗留**，不是本次运行的错 ⇒ 它不该让出卡这条命令失败。
+   用与 `spawn_check`（`exit 4`）不同的信号，或只在摘要里显著提示 ——
+   **先想清楚「什么时候它不该红」再写**，否则又是一个每次都亮、很快没人看的告警。
+
 ## 必须做的探针（G-1）
 
 每一项至少一条：把守的东西弄坏 → 报红 → 还原。特别是：
@@ -310,6 +345,14 @@ Card 记录 input_verdict_refs。这样回放能证明「这张卡用的是哪�
   · A5：造一个重复 agent、造一个缺席 agent，各自报红
   · A6：改掉 sha，回放核对报红
   · A8：跨 agent / 跨决策的修订被拒；两条分叉修订被 DB 拒
+  · A6：把核对改成「对象重算」，断言 A-I 那条测试报红（证明你没写成重算式）
+  · F-4：把巡检改成必然失败，断言 `bin/biga-card` 的退出码跟着变（不只是打印）
+
+🔴 **探针本身也要先证明它会红。** A-I 的评审自己栽过一次：
+用 `数据源不可用。` 对 `数据源不可用` 做探针，而契约层的 `_PUNCT`
+把句号归一化了 —— 两条正文根本没碰撞，**探针从头到尾没触发它声称要触发的检查**，
+差点把一个有效的修法误判成无效。
+⇒ 写完探针先加一步「前置断言」：确认不改代码时它**确实**命中了目标条件。
 
 ## 不要做
 
@@ -324,7 +367,9 @@ Card 记录 input_verdict_refs。这样回放能证明「这张卡用的是哪�
 ⚠️ **A-II 合并之后才开这一批。** 它不依赖 spike，可以与 spike 并行。
 
 ```text
-做设计文档 §4「身份模型」与 §5「显式状态机」，落成 schema v6。
+做设计文档 §4「身份模型」与 §5「显式状态机」，落成 schema v7
+（🔴 原设计写的是 v6——批 A-II 的 A8 先落了 v6，schema.py 的迁移列表
+只许在末尾追加，这里顺号往后挪一位，不是重新设计）。
 
 ## 要解决的问题
 
@@ -337,7 +382,7 @@ Card 记录 input_verdict_refs。这样回放能证明「这张卡用的是哪�
 
 1. RunContext(trigger_id, decision_id, run_id, evidence_set_id, origin,
    non_interactive, created_at) 进契约层
-2. schema v6：decision_runs / run_events / evidence_sets
+2. schema v7：decision_runs / run_events / evidence_sets
    🔴 建表时就要带只追加触发器 —— v4 建 decision_ids 时漏过一次（F1），
       代价是整套决策身份机制建在一个可撤销的地基上。
       tests/test_store.py::test_每张表都有只追加触发器 会兜底，别让它红

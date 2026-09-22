@@ -5,7 +5,11 @@
 - 覆盖：`save_verdict` / `save_card` / `save_raw_snapshot` 在 INSERT 之前的
   重校验（构造合法 → 事后改字段 → 写入必须拒绝）、NaN/Infinity 一律拒绝、
   `payload_sha256` 的历史哈希向量不变
-- 不覆盖：`MissingItem` 值对象化、契约对象 `frozen=True`（那是批 A-II）
+- 不覆盖：`MissingItem` 值对象化本身、`frozen=True` 挡赋值这件事——
+  那两条的探针在 `tests/test_contract_behavior.py`（批 A-II 的 A1/A2）。
+  这里两处篡改改用 `object.__setattr__`只是因为 A2 之后 `.append()`
+  已经不再可用（tuple 没有这个方法），手法换了，但本文件要证明的事
+  没变：写边界重校验挡得住「绕过对象自身保护改字段」这整类篡改
 
 背景
 ----
@@ -28,7 +32,15 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
 
-from _contract import AgentVerdict, DecisionCard, Evidence, MissingItem, new_task_id, now_cn  # noqa: E402
+from _contract import (  # noqa: E402
+    STANCE_VOCAB,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    MissingItem,
+    new_task_id,
+    now_cn,
+)
 from _store import connect, init_schema, load_verdict, save_card, save_raw_snapshot, save_verdict  # noqa: E402
 from _store.db import payload_sha256  # noqa: E402
 
@@ -47,7 +59,7 @@ def _legal_verdict(**kw) -> AgentVerdict:
     # contract-exempt: 构造真 dataclass 的 kwargs
     base = dict(
         task_id=TID, agent="market", status="completed", verdict="PASS",
-        result={}, confidence=0.9, evidence=[], stance="放量上涨",
+        result={}, data_completeness=0.9, evidence=[], stance="放量上涨",
     )
     base.update(kw)
     return AgentVerdict(**base)
@@ -55,11 +67,15 @@ def _legal_verdict(**kw) -> AgentVerdict:
 
 def _legal_buy_card(**kw) -> DecisionCard:
     did = kw.pop("decision_id", TID)
-    v = _legal_verdict(task_id=did)
+    # 🔴 满 roster：BUY 卡要求 missing == ()，而 F-6 之后「roster 不全
+    #    且 missing 为空」会被 _check_roster 拒绝——两条约束只有「roster
+    #    本身齐全」能同时满足，不能靠塞 missing 绕过（那会先撞上铁律 2）。
+    verdicts = [_legal_verdict(task_id=did, agent=a, stance="无法判定")
+                for a in sorted(STANCE_VOCAB)]
     # contract-exempt: 同上
     base = dict(
         decision_id=did, status="BUY", headline="核心矛盾一句话",
-        verdicts=[v], synthesis="", model_ref="anthropic/claude-sonnet-5",
+        verdicts=verdicts, synthesis="", model_ref="anthropic/claude-sonnet-5",
     )
     base.update(kw)
     return DecisionCard(**base)
@@ -68,14 +84,23 @@ def _legal_buy_card(**kw) -> DecisionCard:
 class TestP1WriteBoundaryRejectsTamperedVerdict:
     """P1：合法构造 → 事后直接改字段（绕过 `__post_init__`）→ 写入必须拒绝。
 
-    `v.missing.append(...)` 不会重跑 `__post_init__`——那是 Python 的
-    正常语义，不是 bug。挡住这种篡改的唯一办法是**写入前重新构造一遍**。
+    ⚠️ 这条探针写于批 A-I，那时 `missing` 还是 `list`，`v.missing.append(...)`
+    不重跑 `__post_init__` 就能悄悄塞入非法状态。批 A-II 的 A2 把 `missing`
+    换成了 `tuple` 并把 `AgentVerdict` 冻结 —— `.append()` 现在直接
+    `AttributeError`（见 `test_contract_behavior.py::TestVerdictFrozen`），
+    那条路已经从语法上被堵死了。
+
+    但 frozen 挡得住的只是「正常途径」。`object.__setattr__` 能绕开任何
+    frozen dataclass（Python 自己实现 `__init__` 时用的就是它），
+    这里改用它模拟「有人绕过对象自己的保护，硬改了字段」——
+    写边界重校验挡的正是**这种**篡改，不是某一种具体的 Python 语法。
     """
 
     def test_事后追加缺失项却仍是PASS会被拒(self, db):
         v = _legal_verdict()
-        assert v.verdict == "PASS" and v.missing == []
-        v.missing.append(MissingItem("事后塞的", "market.turnover.unavailable"))
+        assert v.verdict == "PASS" and v.missing == ()
+        object.__setattr__(
+            v, "missing", (MissingItem("事后塞的", "market.turnover.unavailable"),))
         with pytest.raises(ValueError, match="铁律 1"):
             save_verdict(v, path=db)
 
@@ -87,12 +112,17 @@ class TestP2WriteBoundaryRejectsTamperedCard:
     `foreign` 检查已经管得到身份，用它做探针测不出**新加的**这一层。
     这里选的是 `foreign` 检查完全不查的维度（missing 与 status 的一致性），
     红了才能证明是这一批新加的重校验在起作用，不是蹭了旧检查的光。
+
+    ⚠️ 篡改手法同 P1：A2 之后 `missing` 是 `tuple` 且 `DecisionCard` 已冻结，
+    `.append()` 不再是一条可用的路（见 `TestCardFrozen`），改用
+    `object.__setattr__` 绕过对象自身的保护。
     """
 
     def test_BUY卡事后被塞入缺失项会被拒(self, db):
         card = _legal_buy_card()
-        assert card.status == "BUY" and card.missing == []
-        card.missing.append(MissingItem("事后塞的", "market.turnover.unavailable"))
+        assert card.status == "BUY" and card.missing == ()
+        object.__setattr__(
+            card, "missing", (MissingItem("事后塞的", "market.turnover.unavailable"),))
         with pytest.raises(ValueError, match="铁律 2"):
             save_card(card, path=db)
 
@@ -108,7 +138,7 @@ class TestP4StrictJSON:
         t = now_cn()
         v = AgentVerdict(
             task_id=TID, agent="market", status="completed", verdict="PASS",
-            result={"weird": bad}, confidence=0.9,
+            result={"weird": bad}, data_completeness=0.9,
             evidence=[Evidence(field="weird", source="test", value=1.0,
                                as_of=t - timedelta(seconds=5), retrieved_at=t)],
             stance="放量上涨",
@@ -127,13 +157,16 @@ class TestP4StrictJSON:
         t = now_cn()
         v = AgentVerdict(
             task_id=TID, agent="market", status="completed", verdict="PASS",
-            result={"weird": bad}, confidence=0.9,
+            result={"weird": bad}, data_completeness=0.9,
             evidence=[Evidence(field="weird", source="test", value=1.0,
                                as_of=t - timedelta(seconds=5), retrieved_at=t)],
             stance="放量上涨",
         )
+        # 🔴 只有 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按
+        #    计数比较，给 5 条占位 missing 才够（本测试不测 roster）。
         card = DecisionCard(decision_id=TID, status="WAIT", headline="h",
-                            verdicts=[v], synthesis="", model_ref="m")
+                            verdicts=[v], synthesis="", model_ref="m",
+                            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
         with pytest.raises(ValueError):
             save_card(card, path=db)
 

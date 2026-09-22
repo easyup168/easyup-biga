@@ -46,10 +46,20 @@ def _v(agent="market", **kw):
     # 拼的是构造 AgentVerdict 的 kwargs，下一步就交给真正的 dataclass。
     # contract-exempt: 不是第二套契约，是同一个契约的入参
     base = dict(task_id="BIGA-20260918-001", agent=agent, status="completed",
-                verdict="PASS", result={"sh_close": 1.0}, confidence=1.0,
+                verdict="PASS", result={"sh_close": 1.0}, data_completeness=1.0,
                 evidence=[_ev()], warnings=[], missing=[], elapsed_ms=1)
     base.update(kw)
     return AgentVerdict(**base)
+
+
+def _fill_roster(*present: str) -> list:
+    """给定的 agent 已经出场，凑出 STANCE_VOCAB 里其余 agent 的空白判定。
+
+    F-8 之后 roster 判据按计数比较——这个文件大多数测试只关心 1、2 个
+    agent 的 MissingItem 行为，不关心 roster 完不完整，补满省得每条都要
+    单独算「缺席几个、该给几条占位 missing」。
+    """
+    return [_v(agent=a) for a in sorted(STANCE_VOCAB) if a not in present]
 
 
 class TestStance:
@@ -199,8 +209,8 @@ class TestMissingCodes:
         """Phase 1/2 早期落库的卡里 missing 是裸字符串 —— 必须还读得进来。"""
         v = _v(verdict="WARNING", status="partial", missing=["老缺失"])
         card = DecisionCard(decision_id="BIGA-20260918-001", status="WAIT",
-                            headline="h", verdicts=[v], missing=["老缺失"],
-                            synthesis="", model_ref="m")
+                            headline="h", verdicts=[v, *_fill_roster("market")],
+                            missing=["老缺失"], synthesis="", model_ref="m")
         again = DecisionCard.from_dict(card.to_dict())
         assert again.missing[0].code == LEGACY_CODE
         assert str(again.missing[0]) == "老缺失"
@@ -209,8 +219,8 @@ class TestMissingCodes:
         m = MissingItem("成交额取不到", "market.turnover.unavailable")
         v = _v(verdict="WARNING", status="partial", missing=[m])
         card = DecisionCard(decision_id="BIGA-20260918-001", status="WAIT",
-                            headline="h", verdicts=[v], missing=[m],
-                            synthesis="", model_ref="m")
+                            headline="h", verdicts=[v, *_fill_roster("market")],
+                            missing=[m], synthesis="", model_ref="m")
         assert DecisionCard.from_dict(card.to_dict()).missing[0].code == \
             "market.turnover.unavailable"
 
@@ -229,7 +239,8 @@ class TestMissingCodes:
                missing=[MissingItem("数据源不可用", "emotion.pool.unavailable")],
                evidence=[_ev(field="limit_up_count")],
                result={"limit_up_count": 1.0})
-        card = co.synthesize(decision_id="BIGA-20260918-001", verdicts=[a, b],
+        card = co.synthesize(decision_id="BIGA-20260918-001",
+                             verdicts=[a, b, *_fill_roster("market", "emotion")],
                              judgment=co.Judgment(status="WAIT", headline="h"),
                              model_ref="m")
         assert len(card.missing) == 2, "代码不同就是不同的缺失，不能按文本去重"
@@ -238,8 +249,8 @@ class TestMissingCodes:
         m = MissingItem("成交额取不到", "market.turnover.unavailable")
         v = _v(verdict="WARNING", status="partial", missing=[m])
         card = DecisionCard(decision_id="BIGA-20260918-001", status="WAIT",
-                            headline="h", verdicts=[v], missing=[m],
-                            synthesis="", model_ref="m")
+                            headline="h", verdicts=[v, *_fill_roster("market")],
+                            missing=[m], synthesis="", model_ref="m")
         text = card.render()
         assert "成交额取不到" in text and "market.turnover.unavailable" in text
 
@@ -292,7 +303,8 @@ class TestRestatedMissing:
                missing=[MissingItem("数据源不可用", "emotion.pool.unavailable")],
                evidence=[_ev(field="limit_up_count")], result={"limit_up_count": 1.0})
         DecisionCard(decision_id="BIGA-20260918-001", status="WAIT", headline="h",
-                     verdicts=[a, b], synthesis="", model_ref="m",
+                     verdicts=[a, b, *_fill_roster("market", "emotion")],
+                     synthesis="", model_ref="m",
                      missing=[*a.missing, *b.missing])
 
     def test_旧卡只警告不拒(self):
