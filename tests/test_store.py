@@ -382,7 +382,7 @@ class TestF23MissingDatabase:
         with connect(db, readonly=True) as c:
             assert c.execute("SELECT count(*) FROM decision_records").fetchone()[0] == 0
 
-    @pytest.mark.parametrize("tool", ["missing_ledger", "latency_report"])
+    @pytest.mark.parametrize("tool", ["missing_ledger", "latency_report", "readback_check"])
     def test_巡检工具不吐traceback(self, tmp_path, tool):
         """判据是**有没有 traceback**，不是退出码 —— 退出码本来就非零。"""
         import os

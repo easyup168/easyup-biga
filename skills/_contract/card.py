@@ -363,7 +363,13 @@ class DecisionCard:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "DecisionCard":
+    def from_dict(cls, d: dict[str, Any], *, from_store: bool = True) -> "DecisionCard":
+        """反序列化。默认 `from_store=True`（库里读回来的历史卡，三段式从宽）。
+
+        ⚠️ `_store.save_card()` 的写边界重校验会传 `from_store=card.from_store`——
+        不能让这里悄悄把新卡也变成「历史卡」对待，否则身份/重述这两条检查
+        会被写路径的重建步骤自己降级成警告，判据就落空了。
+        """
         return cls(
             decision_id=d["decision_id"],
             status=d["status"],
@@ -374,5 +380,5 @@ class DecisionCard:
             missing=[MissingItem.coerce(m) for m in d.get("missing", [])],
             generated_at=d.get("generated_at", ""),
             elapsed_ms=d.get("elapsed_ms", 0),
-            from_store=True,
+            from_store=from_store,
         )

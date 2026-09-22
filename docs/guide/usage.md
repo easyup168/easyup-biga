@@ -259,6 +259,7 @@ news  partial/UNKNOWN
 ```bash
 python3 tools/verify/budget_report.py        # 今天出了几张卡、花了多少、现在能不能跑
 python3 tools/verify/missing_ledger.py       # 哪些源在真实地缺数据
+python3 tools/verify/readback_check.py       # agent_verdicts/decision_records 有没有「存在但读不回来」的行
 tools/verify/audit_public.sh --worktree      # 提交前：有没有不该公开的内容
 python3 -m pytest -q                         # 全部测试
 ```
