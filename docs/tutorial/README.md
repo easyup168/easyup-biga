@@ -64,6 +64,7 @@ A 股短线**决策辅助**系统。
 | 19 | [不会红的守卫](19-guards-that-cannot-fail.md) | 第二轮深度评审六条发现**全是同一个形状**；判据该落在哪里的对照表；「不许联网」原来只是一句注释；探针没红也是结论 | ✅ |
 | 20 | [写边界重校验](20-write-boundary-revalidation.md) | 确定性编排批 A-I：写的时候不校验、读的时候才炸；`from_dict()` 默认值坑；严格 JSON 为什么拆成两个函数 | ✅ |
 | 21 | [值对象与不变量](21-value-objects-and-invariants.md) | 确定性编排批 A-II：`MissingItem` 身份改基于 code；冻结对象为什么要两步；重复 vs 缺席该用不同的严格度；schema 版本号被提前占用 | ✅ |
+| 22 | [运行身份与状态机](22-run-identity-and-state-machine.md) | 确定性编排批 B：一个 id 扛五件事的代价；状态为什么事件溯源而不是一个 `state` 列；CAS 靠唯一约束不靠「先查再写」；13 个状态凭什么是 13 个；每个状态都要能指出谁写谁读 | ✅ |
 
 ---
 

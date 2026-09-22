@@ -150,8 +150,8 @@ BigA 哪天不小心装错位置，生产侧当场报红。
     │   ├── risk/        AGENTS.md
     │   └── discipline/  AGENTS.md
     ├── skills/
-    │   ├── _contract/   evidence.py  verdict.py  card.py    ← 契约唯一实现
-    │   ├── _store/      db.py  migrations/                  ← 唯一 DB 入口
+    │   ├── _contract/   evidence.py verdict.py card.py run.py ← 契约唯一实现
+    │   ├── _store/      db.py  runs.py  schema.py            ← 唯一 DB 入口
     │   ├── emotion-calc/  SKILL.md  scripts/                ← Phase 1 唯一业务技能
     │   ├── market-data/   sector-data/   news-fetch/
     │   ├── technical-calc/  risk-check/  discipline-check/
@@ -452,6 +452,9 @@ Agent（通过 skill 只读查询）
 | ★ `raw_market_snapshot` | 采集原样落盘 |
 | ★ `agent_verdicts`（v3） | **判定原件** —— skill 写、synthesize 按 id 读 |
 | ★ `decision_ids`（v4） | **编号分配器** —— Stage 0 原子占号，见 §5.3.2 |
+| `decision_runs`（v7） | **运行身份头** —— 一次执行尝试的不可变身份，见 §5.3.4 |
+| `run_events`（v7） | **状态转移日志** —— 当前状态 = 最新一行；CAS 靠它，见 §5.3.4 |
+| `evidence_sets`（v7） | **冻结数据切片登记**（批 D 起有生产方，批 B 只建表带触发器） |
 | `fact_stock_daily` / `fact_index_daily` | 归一化日线 |
 | `d_emotion_daily` | 情绪分 |
 | `d_sector_strength` | 板块强度 |
@@ -494,7 +497,10 @@ skill 算完直接把原件落这张表并返回一个 id，Agent 只传 id。
 Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 与 `decision_records.replay_of` 同一套做法：**原件永不改写**。
 
-**五张表全部只追加不修改，由 SQLite 触发器强制**（schema **v5**）。
+**所有表全部只追加不修改，由 SQLite 触发器强制**（schema **v7**）。
+判据不数表的张数（数字会漂），而是
+`tests/test_store.py::test_每张表都有只追加触发器` 扫 `sqlite_master`
+实际有哪些表。
 
 ⚠️ 这句话在 v4 时期是**假的**：原文写「四张表」，而当时已经有五张，
 且新加的 `decision_ids` 恰恰是唯一没有触发器的那张（外部评审 F1）。
@@ -528,6 +534,39 @@ Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 配套巡检：`tools/verify/readback_check.py` 只读遍历两张表，
 统计「存在但读不回来」的行数——写边界只能挡住**新写入**，
 巡检负责发现历史上是否已经存在这类行（当前生产库：0 条）。
+
+#### 5.3.4 运行身份 + 显式状态机（确定性编排批 B 加的，schema v7）
+
+设计 SSOT 在 `deterministic-orchestration.md` §4 / §5，这里只记它在现状里的落点。
+
+**为什么**：此前只有 `decision_id` 一个身份，它被迫同时承担五件事，实测踩过三次
+（飞书重投无幂等键、硬超时重试的两次尝试分不开、「所有 Specialist 看同一份数据」
+无法验证）。⇒ 拆成 `trigger_id`（一次外部请求）/ `decision_id`（一次业务决策）/
+`run_id`（一次执行尝试）/ `evidence_set_id`（一片冻结数据）。
+
+**落点**：
+
+* `skills/_contract/run.py` —— `RunContext` 值对象（运行身份的唯一定义）+ 13 个状态
+  `RunState` + 合法转移图 `LEGAL_TRANSITIONS`。状态清单从类属性派生，不手抄第二份。
+* `skills/_store/runs.py` —— `open_run()` 写身份头 + 初始事件；`transition(run_id,
+  expected, next)` 做 **compare-and-set**：读到最新 `seq`、断言当前状态 == expected、
+  `INSERT seq+1`；`UNIQUE(run_id, seq)` 是真正的并发仲裁（与 `decision_ids`
+  用主键冲突占号同一招）。**状态不在 `decision_runs` 上原地 UPDATE** —— 那张表
+  只追加，当前状态由 `run_events` 最新一行给出。
+* `skills/decision-card/scripts/run_ledger.py` —— bash 与状态机之间的桥
+  （`bin/biga-card` 调它开 run / 推状态 / `--status` 复述），并持有
+  `STATE_MEANING`：`--status` 的读取知识，也是「每个状态都有消费方」判据的落点。
+
+**13 个状态，一个不多**：评审原文 15 个，去掉 `IDENTITY_RESERVED` /
+`SNAPSHOT_COLLECTING`（本系统里没有代码能进入、没有消费方会读 —— 多一个就是
+L-1 死配置），`NOTIFICATION_PENDING` 推到批 G（outbox 存在之前它没有消费方）。
+每个状态都要能指出「谁写它」（能从 `RECEIVED` 经合法转移到达）与「谁读它」
+（`--status` 说得清），两条都有结构性测试钉死。
+
+🔴 **批 B 只是「新旧并存」**：`bin/biga-card` 仍走老路径（spawn `main`，LLM 内部
+编排），只是**顺带**把能诚实观测到的状态（`RECEIVED` → `PREFLIGHTED` →
+`CARD_PERSISTED` → `COMPLETED`，及各失败终态）best-effort 地记进 run 表 ——
+记账失败绝不改变出卡行为。真正由程序驱动流程是批 C 的 Orchestrator。
 
 ---
 

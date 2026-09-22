@@ -36,8 +36,9 @@ EXEMPT_MARKER = "contract-exempt:"
 
 #: A —— 契约类名，全仓只许 `_contract/` 定义
 #: 🔴 A-II 补上 `MissingItem`（早就是契约对象，之前漏登记）与 `VerdictRef`
-#:    （A6 新增）—— 都在这里，不新开一份判据。
-CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard", "MissingItem", "VerdictRef"}
+#:    （A6 新增）；批 B 补上 `RunContext`（运行身份）—— 都在这里，不新开一份判据。
+CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard", "MissingItem",
+                  "VerdictRef", "RunContext"}
 
 #: B —— 近名类：名字里带这些词根的类定义，都算另起炉灶
 NAME_ROOTS = ("Evidence", "Verdict", "DecisionCard")
