@@ -1145,11 +1145,128 @@ P4  回放（`replay_of` 不为 None）一张历史 Card，断言不会给它凭
 
 ---
 
-## 批 E-II–H · 现在不写分发提示词
+## 批 E-II · 迁四个 Specialist（market/sector/technical/news）
+
+⚠️ **批 E-I（`b970182`）与批 C-III（`b0155b4`，已通过 `7b3cdf8` 合并）都已落地才能开工**——
+现在满足。E-I 试点只迁了 `emotion`（不参与 `CROSS_CHECK_PAIRS`、不读冻结快照的那个），
+这一批第一次让**读冻结快照**（market/sector/technical）与**参与 CROSS_CHECK**
+（market/technical）的 Specialist 走新形状——这两件事在 E-I 都没被真正测过。
+
+🔴 **`risk` 不在这一批。** 它同样有 `stance`（`STANCE_VOCAB["risk"]` 里的
+`"否决"` 就是 `VETO_STANCE`——制衡层最安全关键的那一位），但它还消费**其余五个**
+的 verdict（`load_verdict` 逐个取）。等这一批把 market/sector/technical/news 都迁完、
+形状稳定之后，`risk` 自己的迁移 + 退役 `amend_verdict.py`（前提是**全部**六个都迁完）
+放在批 E-III——不要在这一批顺手带上，否则「最后一个迁移」与「退役」两件事的验收
+标准会混在一起，出问题时分不清是迁移错了还是退役错了。
+
+```text
+把 market/sector/technical/news 四个 skill 从产 AgentVerdict 改成产 FactBundle，
+形状与批 E-I 迁 emotion 时完全一样（build_verdict→build_fact_bundle，
+save_verdict→save_fact_bundle）。先读 `docs/tutorial/27-facts-and-assessment.md`
+——那是这个机械模式唯一的参照，不要重新发明。
+
+## 要解决的两个悬而未决的设计问题（E-I 交下来的输入①②，本批必须给出答案）
+
+### ①「Agent 追加的限制」缺失项归哪
+
+老 `amend_verdict.py --add-missing` 唯一反复出现的真实用例（`amend_verdict.py`
+自己的 help 示例、`SKILL.md`、教程第 12/27 章都引用同一个）是：
+
+    --add-missing emotion.cycle.no_history "情绪周期趋势 —— 只有单日快照，无法判断方向"
+
+🔴 **这不是判断，是 skill 自己就知道的事实**：「这次抓到几天的数据」是抓取过程
+本身的输出，不需要等 Agent 事后指出。把它留给 Agent 用 `--add-missing` 补，
+是在用一次额外的命令、一次额外的往返，去补一个 skill 一开始就该报的
+`missing`——这正是批 E 想消灭的那类"事实靠人搬运"。
+
+⇒ **裁定**：**四个 skill 里任何一处历史上靠 `--add-missing` 补过限制的地方，
+改成 skill 自己在 `build_fact_bundle` 里检测并写进 `FactBundle.missing`**
+（比如"实际抓到的 bars 数 < 判断趋势/周期所需的最小 bars 数"这类阈值判断，
+具体阈值按每个 skill 自己的既有逃生阈值定，不要发明新概念）。
+做法：`grep -n "amend_reason" data/biga.db`（或直接查
+`SELECT amend_reason FROM agent_verdicts WHERE amend_reason LIKE '%add-missing%'`
+风格的历史行——**先看真实数据库里到底出现过哪些**，不要只照抄上面这一个例子）
+找出全部历史实例，每一条都要能对应到一个"skill 明知道、可以直接判断"的阈值。
+
+⚠️ **如果找到一条真的不是"skill 明知道的阈值"、而是需要 Agent 主观判断的限制**
+（目前没有实测证据表明存在，但如果这一批实际迁移时撞见了）——停下来，
+不要强行塞进 skill，也不要自己在 `AgentAssessment` 加字段，回来找评审会话
+重新确认设计（那是给 `AgentAssessment` 加新字段的事，影响面比这一批大）。
+
+### ② 消费方要不要改成直接读 `AgentOutcome`
+
+**裁定：不改，继续吃 `load_verdict` 的 `to_agent_verdict()` 兼容垫。**
+`card_ops`/`risk_check`/`DecisionCard` 现在零改动就能同时消费新旧两种形状，
+且已经被 E-I 的 P3（新旧并存）探针证明过。让消费方直接读 `AgentOutcome`
+不会让任何**现在存在**的功能变得可能——没有消费方需要"事实与判断分开看"
+这件事本身，提前做是 L-1。这一批**不要**顺手"顺便"把这层也收敛掉。
+
+## 做什么
+
+1. **四个 skill 改产 FactBundle**：`market_calc.py`/`sector_calc.py`/
+   `technical_calc.py`/`news_scan.py` 各自的 `build_verdict`→`build_fact_bundle`，
+   `save_verdict`→`save_fact_bundle`，返回类型 `AgentVerdict`→`FactBundle`。
+   market/sector/technical 已经在读冻结快照、已经在填 `evidence_set_id`
+   （批 D-II/E-I 留下的），这一批**不改**那部分逻辑，只改"产出的是哪个类型"。
+2. **①的裁定落地**：按上面裁定，把历史上靠 `--add-missing` 补的限制改成这四个
+   skill 里对应的机械判断，写进各自 `FactBundle.missing`。
+3. **`amend_verdict.py` 认得这四个 skill 的 fact 行**：复用 E-I 已经写好的
+   `_assess_fact()` 分支——**不需要新代码**，`kind == "fact"` 判据是通用的，
+   E-I 迁 emotion 时就已经把这条路铺给所有未来试点用了。如果发现这一步
+   还要改 `amend_verdict.py` 才能工作，说明 E-I 那条路没铺对，退回去看，
+   不要在这一批重新发明一套。
+4. **对应的四份 skill 测试**改成断言 `FactBundle`（参照 E-I 改
+   `tests/test_emotion_calc.py` 的方式）。
+5. **`--add-missing` 明确拒绝的分支**（E-I 在 `_assess_fact` 里写的那句
+   「E-I 只支持给它加 --stance...留给批 E-II」提示语）——四个 skill 都迁完后，
+   这句提示语对它们已经不成立（E-II 已经把限制挪进 skill 了），但**依然成立**
+   的是"fact 行不接受 --add-missing/--add-warning"这条硬约束本身，只是不再
+   有人会撞上它（因为该加的限制 skill 已经加了）。提示语的具体措辞要不要因此
+   调整，你决定，但硬约束不能松。
+
+## 不要做
+
+- 不要迁 `risk`——批 E-III 的事（它还要消费这四个 + market 的产出，等这四个
+  形状稳定、经过评审复核之后才安全动）
+- 不要退役 `amend_verdict.py`——前提是全部六个都迁完，这一批只迁了五个（含
+  E-I 的 emotion）
+- 不要让消费方直接读 `AgentOutcome`——见上面②的裁定
+- 不要碰 `risk_check.py` 的 `CROSS_CHECK_PAIRS` 判据逻辑本身——它已经在 E-I
+  升级成优先比 `evidence_set_id`，这一批只是让 market/technical 产出的
+  `Evidence` 从"AgentVerdict 里的"变成"FactBundle 里的"，`evidence_set_id`
+  字段的填法不变，`CROSS_CHECK` 不应该感知到任何差异——这正是 P 探针要证明的
+
+## 必须做的探针（G-1）
+
+P1  四个 skill 各自跑一次，断言输出是合法的 `FactBundle`（不是 `AgentVerdict`），
+    落库之后 `kind='fact'`
+P2  🔴 CROSS_CHECK 穿透新形状：market 与 technical 都迁移之后，用同一个
+    `evidence_set_id` 跑一次，断言 `cross_check_conflict == []`；再用不同的
+    `evidence_set_id` 跑一次，断言报冲突且冲突信息里带着"冻结集"与两个
+    es-id 值（复用 E-I 评审复核时锚死的那条判据，不要退化成只断言"报了冲突"）
+P3  ①的裁定：对每一个历史上靠 `--add-missing` 补过限制的 skill，构造触发那个
+    阈值的输入，断言 skill 自己（不经过 amend）就把对应的 `MissingItem` 放进了
+    `FactBundle.missing`
+P4  回归：`risk`（还没迁）与 `emotion`（E-I 已迁）在这四个迁移**之后**仍然正常
+    工作——`risk` 读这四个新形状 + 自己走老路径产 `AgentVerdict`，`card_ops`
+    照常聚合六个，一个都不丢（比照 E-I 的 P3，但换成这一批实际迁移的组合）
+P5  `amend_verdict.py` 对这四个 skill 的 fact 行正确路由到 `_assess_fact()`，
+    加 `--stance` 成功、加 `--add-missing` 被拒绝（复用 E-I 已有的判据，
+    只是换四个新 agent 名字，证明它是通用的，不是 emotion 专属）
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 E-III–H · 现在不写分发提示词
 
 | 批 | 为什么现在不写 |
 |---|---|
-| E-II | 迁剩下五个 Specialist + 退役 `amend_verdict.py`；依赖 E-I 落地的真实类型形状（尚不具备） |
+| E-III | 迁 `risk` + 退役 `amend_verdict.py`；依赖 E-II 落地的真实结果（尚不具备） |
 | F–G | 依赖 E 系列完整落地（尚不具备） |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 

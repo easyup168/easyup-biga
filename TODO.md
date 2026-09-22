@@ -771,23 +771,19 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `Evidence` 加 `evidence_set_id`（还 D-II 的账，CROSS_CHECK 升级为优先
         比它）；试点迁 `emotion`（`build_fact_bundle`）。市场/板块/技术/新闻/
         风险五个未动，`amend_verdict.py` 未退役。教程 ch 27。
-  - [ ] 批 E-II 起 · 迁剩下五个 Specialist + 退役 amend_verdict.py（等 E-I
-        评审通过、类型形状定死之后再写分发提示词）
-        **E-I 交下来的三条输入（写分发提示词前必读）**：
-        - **① Agent 追加的「限制」缺失项没有落点**：老 amend 一条命令同时改
-          事实（`--add-missing`）和判断（`--stance`）。拆开后 stance 有家
-          （AgentAssessment），但 Agent 观察到的缺失项既不是 skill 事实、也不是
-          stance。E-I 对 fact 行的 `--add-missing` 明确拒绝并指路这里。E-II 要
-          决定它归哪：skill 自产，还是给 AgentAssessment 增一类字段。
-        - **② 消费方目前仍字面读 `AgentVerdict`**（不是 AgentOutcome）：E-I 用
-          `load_verdict` 多态把新行 `to_agent_verdict()` 压回，card_ops/risk_check/
-          DecisionCard 零改动。刻意的试点取舍（血缘面最小）。若要让消费方直接读
-          AgentOutcome（分发提示词的原意），是 E-II/后续的收敛，会涟漪到卡的
-          序列化/回放，单独评估。
-        - **③ emotion 的行为已变**：它现在产 `FactBundle`（无 stance），stance 由
-          Agent 事后经 amend 补 AgentAssessment。迁其余五个时对齐这个形状；注意
-          market/technical 还牵动 `CROSS_CHECK_PAIRS`（emotion 不进那条，所以试点
-          没碰到，E-II 会第一次碰到「拆开的 skill + CROSS_CHECK」的组合）。
+  - [ ] 批 E-II · 迁 market/sector/technical/news 四个 —— 分发提示词已就绪
+        E-I 交下来的①②两个设计问题已裁定（见设计文档 §6 批 E 附注，2026-09-23）：
+        ① Agent 追加的「限制」缺失项改成 skill 自己检测写进 `FactBundle.missing`，
+        不给 `AgentAssessment` 加字段；② 消费方不改读 `AgentOutcome`，继续吃
+        `load_verdict` 的兼容垫（没有消费方，提前收敛是 L-1）。
+        这一批也是第一次让**读冻结快照**（market/sector/technical）与**参与
+        `CROSS_CHECK_PAIRS`**（market/technical）的 Specialist 走新形状——
+        E-I 的试点 `emotion` 两者都不碰，没被真正测过。
+  - [ ] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py`（等 E-II 评审通过、
+        四个新形状稳定之后再写分发提示词）
+        `risk` 单独一批：它也有 `stance`（`VETO_STANCE` = 制衡层最安全关键的
+        判断），且消费其余五个的产出，等它们形状稳定更安全；退役
+        `amend_verdict.py` 的前提是全部六个都迁完，天然只能跟最后一个绑一起。
 - [ ] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— **实现完成（分支 `c-iii`，
       基于 `2e5e8ea`）：离线全绿 1005→1016、四道探针 P1–P4 全见过红并已还原、
       `biga-card --check` 回放一致、`audit --worktree` 十一项全绿；评审复核通过，
