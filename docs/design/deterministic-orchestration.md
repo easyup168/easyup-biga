@@ -1,7 +1,8 @@
 # 确定性编排升级
 
 > 📄 **阶段** · 进行中，完成后冻结
-> **覆盖**：为什么把工作流从 LLM 里拿出来、七批迁移（A–G）的范围/顺序/判据/出口条件
+> **覆盖**：为什么把工作流从 LLM 里拿出来、各批迁移（A–H 原案 ＋ 2026-09-23
+> 从数据架构材料并入的 I / J / K / L）的范围/顺序/判据/出口条件
 > **不覆盖**：各 Specialist 的判断口径（见 `phase-2-specialists.md`）；
 > 已建成架构的现状描述（见 `architecture.md` —— 本文只写**要变成什么样**）
 
@@ -28,13 +29,77 @@ Phase 2 剩下的两条出口条件（等一个够极端的交易日、跨天累
 
 ⇒ 规约里补第三种形状：**跨阶段迁移按主题命名，生命周期仍是「阶段」（完成后冻结）。**
 
-### 与三份外部材料的关系
+### 与五份外部材料的关系
 
 | 材料 | 状态 |
 |---|---|
 | `docs/external/easyup-biga-architecture-upgrade.zip` | 本文的输入。**只读，不改** |
 | `docs/external/easyup-biga-openclaw-feishu-best-practices.zip` | 尚未处理。与本文 §20/§27 高度重叠 ⇒ **并入批 G**，不单开一份台账 |
 | 递归事故 / `ask_user` hardening 两份 | ✅ 已落地（commit `fb1856c` / `3d9ce90`），本文的起点包含它们 |
+| `easyup-biga-multi-agent-data-architecture.zip` + `…-data-platform-development-plan.zip` | 2026-09-23 复核完毕 ⇒ **部分采纳，并入本文 §6**（批 J / I / K / L），不单开一份数据架构文档。采纳与不采纳的分界见下 |
+| `baga-full-system-architecture.zip` | 🔴 **总体设计，位阶在以上四份之上。** 2026-09-23 到手。本文是它 §41 Stage 1 的施工文档，不与它平级 —— 冲突时以它为准 |
+
+#### 🔴 总体设计（`baga-full-system-architecture`）对本文的三处影响
+
+**① 本文正在做的事 = 它的 Stage 1，且是它列的第一优先。**
+它 §41 的 Stage 1 是「Run Provenance / DecisionOrchestrator / OpenClaw Runtime
+Adapter / Frozen EvidenceSet」—— 正是本文的批 B / C / D / J。
+它 §43「当前开发短期重点」的前三条：
+
+```
+1. Run Provenance Closure
+2. EvidenceSet 绑定 Run
+3. Verdict / Card 绑定 Run
+```
+
+**三条全部落在批 J 里**（① = J 整批，②③ = J-I）。⇒ 批 J 的排序不再只是
+本文内部的判断，是总体设计点名的下一步。
+
+**② 当前的 DecisionCard 闭环不是终点，是 Kernel。**
+它 §42 写明：多 Agent DecisionCard 闭环是未来整个平台的
+**Decision / Agent Kernel**，后续的选股 / 计划 / 盘中 / 风控 / OMS / 组合 /
+复盘 / 回测 / Web **不另建系统，而是围着这个 Kernel 长出来**。
+
+⚠️ 这改变了本文很多「有没有消费方」判断的**时间尺度**，但**不改变判据本身**：
+L-1 说的仍然是「建的那一刻要有被证明的消费方」，不是「永远别建」。
+区别只在于——以前拿不准的东西现在知道它终将有消费方，
+⇒ 该问的从「要不要建」变成「跟着哪一批建」。
+
+**③ 推翻了本文此前关于 Parquet 的一条裁定。** 见下表。
+
+#### 数据架构那份：采纳什么、不采纳什么（2026-09-23 裁定）
+
+它与本文是**互补的两半** —— 本文管控制流（程序拥有工作流），它管数据流
+（事实世界共享），两者在 `EvidenceSet` 交汇。所以它不另起一份文档，按批次并进 §6。
+
+**已经成立的（它建议的，仓库已经做到）**：一次采集多 Agent 共享（批 D）、
+一个 Run 一个 EvidenceSet（批 D-II）、不要每个 agent 一个库（`_store` 单一入口）、
+Emotion 迁成标准消费者（批 E-I）。它 §28 建议的「第一个 Vertical Slice 从
+`index_daily` 开始」**正是批 D-I/D-II 已经做完的那件事**。
+
+**采纳，已排期**：§35.0 Run Provenance Closure ⇒ **批 J**（本文 §6，下一批）；
+§9 RawArtifact ⇒ **批 I**；§17 Pipeline Registry + §16 Agent Registry ⇒ **批 K**；
+§29 P0 里的 `cn.trading_calendar` ⇒ **批 L**。
+
+🔴 **RawArtifact 按它 §9 的形状做，不按架构升级指南 §17 的形状做** ——
+SQLite 只存 URI + Hash + Metadata，body 落 `.json.gz` 文件。理由不是文件更优雅：
+raw 是唯一只增不减、且体积随时间线性膨胀的东西，塞进 control plane 的同一个
+SQLite 会让备份 / WAL checkpoint / 将来切 PG 的迁移全部变贵，
+而 control plane 恰恰是「数据量有限、需要事务和外键」的那一层。
+
+**明确不采纳 / 推迟**：
+
+| 它的主张 | 裁定 | 理由 |
+|---|---|---|
+| §5.2 / §22 Parquet + DuckDB 数据面 | 🔴 **2026-09-23 改判：方向已定，但不在本阶段建** | 原判是「推迟，且现在不要写进任何设计文档」，理由是会与 `architecture.md` §5.1 写死的切 PostgreSQL 触发条件并存成第二套口径（L-3）。**总体设计 §33 把这件事定了**：SQLite→Control Plane、Parquet→历史数据面、DuckDB→分析查询、Raw 文件→Provider 归档。⇒ 原判里「不要写下来」那半**作废**（方向由总体设计拥有，不是本文的自由度）；「现在不建」那半**保留**（没有消费方之前建了就是空仓库）。<br>⚠️ 但 L-3 那个担心**没有消失，只是换了修法**：`architecture.md` §5.1 现在只描述了一个存储决策，而总体设计是**按平面分开**的四个。⇒ **批 I 开工前必须先把 §5.1 改成按平面分**（控制面 / 历史数据面 / 分析 / 归档各自的选型与触发条件），否则「切 PostgreSQL 的触发条件」会被读成管着 Parquet 那一面，而它从来不管 |
+| §29 P0 六个 dataset 一次铺开 | **现在只做 `cn.trading_calendar`（批 L），其余等各自的消费方那一批** | ⚠️ **不是「它们不需要」** —— BigA 的终局是一个全覆盖的个人交易平台，`cn.security_master` / `cn.adjustment_factors` / `cn.equity.daily_bars` 都在那条路上，迟早都要建。这里判的是**时机**：L-1 说的是「建的那一刻要有被证明的消费方」，不是「永远别建」。它们今天还没有消费方（Phase 2 只出 Decision Card），⇒ 跟着各自第一个真实消费方的批次一起建，那时形状也才定得准。`cn.trading_calendar` 是今天**唯一**的例外：[`skills/_sources/tradetime.py`](../../skills/_sources/tradetime.py) 白纸黑字写着「**已知边界：不认节假日。本系统还没有交易日历**」—— 消费方已经在将就着用了 |
+| §14 / §15 Dataset + Provider Registry | **推迟到批 K 之后** | 现在只有一个 dataset（`index_daily`）真的走完了全链。注册表会比被注册的东西还大。批 K 只做 Pipeline + Agent Registry，因为那两个有**已发生的事故**在等（见 §6 批 K） |
+| 配套计划文档放 `docs/plan/` | **放 `docs/external/`** | `tests/test_docs_convention.py` 的 `PATTERNS` 只认 `design / tutorial / guide / external`，`docs/plan/` 会当场 `assert pat is not None` 报红。这两份是外部输入、只读、文件名已经是 `YYYY-MM-DD-` 前缀 —— 正好符合 external 的命名规则 |
+
+⚠️ 它 §27 的 Primary / Fallback / Validator 三角色**不与裁定 15 冲突**：
+裁定 15 约束的是 **agent**，§27 约束的是 **provider**，而且 §27 要求冲突时
+`QUARANTINED` 而非静默选一方 —— 那恰恰是裁定 15 想防的「某天悄悄给出两个数」的正解。
+⇒ 已在 `CLAUDE.md` 裁定 15 补半句写明，免得将来被读成矛盾。
 
 ---
 
@@ -249,9 +314,10 @@ P1/P2 live 补验（`71789b5`）**都已经落地**——不照单接收既包�
 「填了但没人查」的时间不是浪费，是在为将来的消费方攒数据。`run_id` 现在要做的
 是同一件事，不是提前建枚举。
 
-⇒ **capture 部分排期为独立小批「批 E-I 收尾 · run_id 贯穿全链」**，
-等批 C-III 与批 E-I **都**合并之后开工（两者都会碰 `orchestrator.py`/
-schema 层，等两边落定再动一次，不是三批人马同时抢同一批文件）——
+⇒ **capture 部分排期为独立小批「批 J-I · run_id 贯穿全链」**
+（2026-09-23 之前叫「批 E-I 收尾」，扩容并改名的理由见 §6 批 J），
+等批 E-II 与 E-III **都**合并之后开工（三批都会碰同一批 skill 脚本与
+schema 层，等前面落定再动一次，不是三批人马同时抢同一批文件）——
 详见 `orchestration-kickoff-prompt.md`。**enforce 部分维持原判**：
 任何引入「同一 decision_id 可以被多次尝试」的批次开工前，
 `latest_verdict_ids()` 按 run_id 过滤 + 拒绝跨 run 混読的校验必须先补上，
@@ -336,6 +402,28 @@ Trigger
        ├─ Run B（重试）
        └─ Run C（回放）
 ```
+
+### 🔴 `run_id` 这个名字现在指三个互不相同的东西（2026-09-23 实测）
+
+上面那张表是**目标**。实际落地到今天，`run_id` 这个字面量在仓库里有三个含义，
+而且它们同住一个数据库、同住一份代码：
+
+| 出现处 | 实际是什么 | 实测值 |
+|---|---|---|
+| `decision_runs.run_id` / `run_events.run_id` | ✅ 表格里那个：一次执行尝试 | `'cd5af37977fa4db9a5c2f1424cfc8001'` |
+| `agent_runs.run_id` | ❌ **`INTEGER PRIMARY KEY AUTOINCREMENT` 账本行号** | `130, 129, 128…` |
+| `SpawnHandle.run_id`（`skills/_runtime/adapter.py`） | ❌ 其实是表格里的 **`runtime_run_id`**（OpenClaw `subagent_runs.run_id`），且**从不落库** | 运行时给的 id |
+
+危害不是「某处算错了」，而是**任何一条 join、任何一份报表，都会拿到一个语义正确
+但指向错误的数字，且不会报错**。这与 §4 开头说的「`decision_id` 被迫承担五件事」
+是同一个病的另一种形态：那次是一个名字扛了五个含义，这次是三个东西共用一个名字。
+
+⚠️ 两者都不是「写得草率」。`agent_runs` 建于 Phase 1（那时只有一种 run），
+`SpawnHandle.run_id` 忠实照抄了运行时自己的列名（在 adapter 内部它是对的）。
+**是身份模型拆开之后，旧名字没跟着搬家。**
+
+⇒ 批 J 一次清掉，见 §6。三处必须在同一批做完 —— 改一半留下的半新半旧命名空间
+比现在更难读（读者无法判断某个 `run_id` 属于已改还是未改的那半）。
 
 ---
 
@@ -494,6 +582,125 @@ bars 数 < 判断趋势/周期所需的最小值），写进 `FactBundle.missing
 `risk_check`/`DecisionCard` 现在靠 `load_verdict` 的兼容垫零改动消费新旧两种形状，
 且已被 E-I 的 P3 探针证明过新旧并存不丢数据。没有消费方需要"事实与判断分开看"
 这件事本身——提前把这层也收敛掉是 L-1（没有消费方的结构）。
+
+### 批 J · 身份闭环（原「批 E-I 收尾 · run_id 贯穿全链」，2026-09-23 扩容）
+
+> 🔴 **改名的理由**：原名描述的是 E-I 欠的那一笔账（把 `run_id` 存下来）。
+> 2026-09-23 复核数据架构那份材料时实测发现，同一个命名空间里还有另外两处
+> （见 §4 的三同名表），而它们**必须和第一处一起改** —— 改一半留下的
+> 半新半旧命名空间比现在更难读。名字再叫「E-I 收尾」会让开工会话把它
+> 当成扫尾活，按那个体量安排验证。**追加 5.1 里的旧名同步改了。**
+
+数据架构那份材料 §35.0 把这件事列为**整个数据平台的第 0 步**，理由与本文一致：
+后面每一个 dataset / snapshot / outcome 都要挂在某个 id 上，
+id 本身有歧义的时候，挂得越多越贵。
+
+🔴 **总体设计（2026-09-23）把它点成了下一步。** `baga-full-system-architecture`
+§43「当前开发短期重点」的前三条是「1. Run Provenance Closure / 2. EvidenceSet
+绑定 Run / 3. Verdict / Card 绑定 Run」—— ①是批 J 整批，②③是 J-I。
+它 §12 列的七个身份（`trigger_id` / `decision_id` / `run_id` / `runtime_run_id` /
+`evidence_set_id` / `verdict_id` / `decision_record_id`）与本文 §4 一致，
+而实测闭环度只有 2/7（见 §4 的三同名表）。
+
+拆成两批，理由是**耦合面不同**（同批 A / C / D / E）：
+
+| 会话 | 内容 | 耦合面 |
+|---|---|---|
+| **J-I** | `run_id` capture 贯穿全链（= 原 E-I 收尾，范围不变） | 六个 skill 脚本 + 契约层 + schema |
+| **J-II** | `agent_runs.run_id` → `ledger_id` 改名 ＋ `runtime_run_id` 落库 | `_store` + `_runtime` + `orchestrator` + `tools/verify` |
+
+J-II 的两半合在一起做，是因为它们**动的是同一张表**（`agent_runs`）——
+拆开就是对一张只追加表连开两次刀。
+
+**J-I · capture，不 enforce。** 范围与判据见追加 5.1，一字未改：
+只让 `run_id` 能被存下来、传下去，**不改任何现有的判定 / 过滤逻辑**。
+`latest_verdict_ids()` 按 `run_id` 过滤这件事仍然等真正的重试路径出现。
+
+**J-II · 清掉另外两个同名。**
+
+* `agent_runs.run_id` → `ledger_id`：它是 `INTEGER PRIMARY KEY AUTOINCREMENT`，
+  从 Phase 1 起就是账本行号，与编排的 `run_id` 毫无关系。
+  🔴 **实测全仓没有任何代码读这一列** ⇒ 现在改是免费的，以后不是。
+* `SpawnHandle.run_id` → `runtime_run_id`，**并落库**（`agent_runs` 加一列）。
+
+  落库这一步有一个**现成的、已经在生产路径上的消费方**，不是提前量：
+  `tools/verify/spawn_check.py`（`bin/biga-card` 每次出卡都调它，判据是调度命令
+  的字面量）现在靠 `payload_json LIKE '%<决策号>%'` **文本匹配**认 spawn ——
+  §4 的身份模型表格早就把这条记成「F3 残留」。有了落库的 `runtime_run_id`，
+  它就从文本匹配变成结构化 join。
+
+  ⚠️ 改判据的形状**照抄 E-I 已经验证过的那一套**：有 `runtime_run_id` 时优先用它，
+  历史行是 NULL 时退回现有的 LIKE ——与 `CROSS_CHECK_PAIRS`「优先比
+  `evidence_set_id`，退回 `raw_hash`」逐字同形。不要发明第二种兼容写法。
+
+**开工前提**：批 E-II **与** E-III 都合并之后。J-I 要给六个 skill 脚本各加一个
+CLI 参数，而 E-II/E-III 正在改这六个脚本的产出形状 —— 三批人马抢同一批文件是
+本文反复避免的事。J-II 不碰 skill，理论上可以先开，但它与 J-I 共用 schema 版本号，
+分开做会占掉两个版本号来改同一层，得不偿失。
+
+---
+
+### 批 I · RawArtifact（数据架构 §9 / 架构升级指南 §17）
+
+raw 层现在存的**不是 raw**：链路是 `get_json()` → `json.loads` →
+`json.dumps(sort_keys=True)` 落盘，而 `schema.py` 的建表注释写着
+「这里存的是当时从数据源拿到的字节，**不做任何归一化**」—— `sort_keys=True`
+就是归一化，这句注释是假的（L-3 的标准形状：注释断言了一件没发生的事）。
+
+后果不是哈希算错（它自洽），而是 `content_sha256` 是**我们自己重排后**的指纹，
+不能用来向数据源证明任何事；键序 / 空白 / 浮点表示 / 原始编码全部丢失；
+上游改序列化而不改数据，看不见。对一个卖点是「证据可追溯、可回放」的系统，
+这是证据链**最底层**的问题。
+
+排在批 J 之后、批 F 之前：它给每条 raw 记录加溯源字段，
+那些字段要指向哪个 `run_id` —— 得先有一个不含歧义的 `run_id`。
+
+### 批 K · Pipeline Registry + Agent Registry（数据架构 §16 / §17）
+
+它要解决的事故**已经发生过一次**：2026-09-21，`news` 进了契约的 Stage 1 名单、
+agent 也建好了，但 `agents.entries.main.subagents.allowAgents` 白名单里没有它
+⇒ 只 spawn 了四个，**没有任何报错**，Card 照常产出，只是少了一个领域；
+而 `risk` 如实报「Stage 1 缺席：news」，让排查方向天生指向 news agent 本身。
+
+现在的应对是 `tests/test_roster_matches_config.py` 做数据驱动**对账**。
+那是对的，但它是对账，不是单一源。Pipeline Registry 才是结构性解法：
+名单只有一处，配置由它派生。
+
+Registry 还带来一个对账测试给不了的能力：**Pipeline 版本化**。
+现在 `decision_records` 无法回答「这张历史卡当时用了哪几个 agent」——
+加一个 `macro` 之后，旧卡和新卡在库里长得一模一样。
+
+🔴 **只做 Pipeline + Agent 两个 Registry，不做 Dataset / Provider Registry** ——
+见 §0 的裁定表。
+
+### 批 L · `cn.trading_calendar`（数据架构 §29 P0 唯一有消费方的那个）
+
+`skills/_sources/tradetime.py` 自己写着「已知边界：不认节假日」，
+后果是节假日会被当成交易日（朝安全方向，但要靠调用方在缺失项文案里
+把「也可能是休市日」一并说出来）。这是 P0 六个 dataset 里**今天**唯一通过
+L-1 判据的一个 —— 消费方已经在将就着用了。其余五个不是不建，是等各自的
+消费方那一批（见 §0 的裁定表）。
+
+🔴 **总体设计已到（2026-09-23），这条排期据此收紧。** 它 §45「第一版完整市场
+数据」把这六个列成**一个批次**：Security Master / Trading Calendar / Tradability /
+Adjustment Factors / EOD Daily Bars / Emotion Close；§41 把它们放在 **Stage 2**，
+第一个真实消费方是 §46 的选股闭环（`EOD Snapshot → FeatureSet → Screening →
+CandidateSet`）。
+
+⇒ 批 L **只做 `cn.trading_calendar` 一个**，理由不变（它今天就有一个正在将就的
+消费方），但定位变了：它不是「P0 里挑一个先做」，而是**给 §45 那一批打样**——
+用一个非行情、体量小、判据清楚的数据集，把「Provider → Raw → Normalize →
+Quality → Snapshot」这条链在**第二次**走通（第一次是已完成的 `index_daily`）。
+
+🔴 **其余五个仍然不要按今天的猜测定 schema。** 它们的形状由 §46 的选股闭环
+决定（FeatureSet 要什么、Screening 按什么过滤），而那一批还没开工。
+raw 层只追加，改形状的代价全在后面。
+
+同时它是数据架构那份材料的**第二个 vertical slice**（第一个是已完成的
+`index_daily`），用来验证「Provider → Raw → Normalize → Quality → Snapshot」
+这条链在一个**非行情**数据集上是否同样成立。
+
+---
 
 ### 批 F · Risk 拆两层
 

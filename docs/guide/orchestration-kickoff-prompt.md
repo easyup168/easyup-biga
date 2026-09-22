@@ -1,7 +1,8 @@
 # 确定性编排升级 · 任务分发提示词
 
 > 📄 **操作** · 自包含，可直接粘贴
-> **覆盖**：批 A-I / A-II / B 的开工提示词、每批通用的纪律与验收 ｜
+> **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
+> D-I / D-II / E-I / E-II / **J-I / J-II**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -89,7 +90,9 @@ G-3  仓库 Public，push 即发布。commit 前跑 tools/verify/audit_public.sh
 
 ## 完成判据（五条闸门，全过才算这一批做完）
 
-1. python3 -m pytest 全绿（当前基线 748；加了测试就跑 tools/verify/sync_test_count.sh）
+1. python3 -m pytest 全绿。🔴 **基线数字开工时自己跑一次记下来，不要照抄本文里的数** ——
+   本文不在 test_docs_convention 的「活数字」白名单里，写死在这儿的数必然漂
+   （实测：这行曾长期写着 748，而那时真实基线已经过千）。加了测试跑 tools/verify/sync_test_count.sh
 2. 新增的契约/不变量测试全绿
 3. 🔴 每道新守卫的探针都见过红
 4. bin/biga-card --check <一个已有决策号> 回放一致
@@ -709,7 +712,7 @@ TIMEOUT 处理进入 FAILED。
   `tools/verify/` 或新开 `tools/maintenance/`），但**不要**接 cron 或
   systemd timer——那是批 G 的地盘（"配置进仓库"本来就包含这类调度配置）
 - 不要动 `run_id` 贯穿 `agent_verdicts`/`evidence_sets`/`VerdictRef`/
-  `DecisionCard` 这条链——这件事有专门的一批（「批 E-I 收尾 · run_id
+  `DecisionCard` 这条链——这件事有专门的一批（「批 J-I · run_id
   贯穿全链」），且明确等**这一批也合并之后**才开工，因为它要改
   `orchestrator.py::_specialist_task()` 的调用参数，跟 C-III 改的
   `run()` 内部逻辑是同一个文件。这里不是"没有消费方"（设计文档 §2
@@ -1074,13 +1077,16 @@ P6  回归：对**还没迁移**的某个 Specialist（比如 `market`），走�
 
 ---
 
-## 批 E-I 收尾 · run_id 贯穿全链
+## 批 J-I · run_id capture 贯穿全链
 
-⚠️ **批 C-III 与批 E-I 都合并之后才开这一批。** 两者都会碰
-`orchestrator.py`（C-III 改 `run()` 内部逻辑，这一批改
-`_specialist_task()` 的调用参数）和 schema/契约层（E-I 迁移
-`agent_verdicts` 存储形状，这一批只是在那之上多加一列）——等两边都落定，
-在同一层上只开一次刀，不是三批人马抢同一批文件。
+⚠️ **批 E-II 与 E-III 都合并之后才开这一批。** 这一批要给六个 skill 脚本各加一个
+CLI 参数，而 E-II/E-III 正在改这六个脚本的**产出形状**（AgentVerdict→FactBundle）——
+三批人马抢同一批文件是本文反复避免的事。J-I 与 J-II 谁先开都行，但两批共用
+schema 版本号，**先开的那一批占 v9，后开的占 v10**，不要两批都写 v9。
+
+🔴 **改名说明**：这一批 2026-09-23 之前叫「批 E-I 收尾 · run_id 贯穿全链」。
+**范围一字未改**，只是连同新增的 J-II 一起并进「批 J · 身份闭环」。
+改名理由见设计文档 §6 批 J。
 
 🔴 **来源**：`docs/design/deterministic-orchestration.md` §2 追加 5.1
 2026-09-22 的复盘。原判断把「把 run_id 字段补上存下来」和「靠 run_id
@@ -1102,16 +1108,17 @@ P6  回归：对**还没迁移**的某个 Specialist（比如 `market`），走�
    是否已经有等价字段——如果批 D 系列已经顺手加过，这里就不用重复加。
 2. 六个 skill 脚本（market/sector/technical/emotion/news/risk）各加一个
    可选的 `--run-id`（参照 `--evidence-set-id` 已经用的那套 CLI 参数
-   模式：可选、默认 None、直接传进 `save_verdict()`），不是新发明一套
-   传参方式。
+   模式：可选、默认 None、直接传进落库函数，不是新发明一套传参方式）。
+   ⚠️ E-II/E-III 之后这六个里有五个已经产 FactBundle、走 `save_fact_bundle`，
+   `risk` 走 `save_verdict`——两条落库路径都要能接住 run_id，不要只改一条。
 3. `orchestrator.py::_specialist_task()`：给**每一个** agent 的任务文本
    都带上 `--run-id {ctx.run_id}`——不是只给读冻结快照的那三个，六个
-   都要有，因为六个都在产生 verdict。
+   都要有，因为六个都在产生落库记录。
 4. `orchestrator.py` 里调 `SnapshotCoordinator.freeze_index_daily()` /
    `save_evidence_set()` 的地方，直接把 `ctx.run_id` 传进去——这是
    Python 内部调用，不经过 CLI，不要多绕一层。
-5. `skills/_contract/verdict.py::VerdictRef` 加 `run_id: str | None = None`，
-   从存量 verdict 行的 `run_id` 列直接搬过来。
+5. `skills/_contract/verdict_ref.py::VerdictRef` 加
+   `run_id: str | None = None`，从存量行的 `run_id` 列直接搬过来。
 6. `DecisionCard` 加 `run_id: str | None = None`，`card_ops.synthesize()`
    从 `ctx.run_id` 填入。
 
@@ -1123,13 +1130,14 @@ P6  回归：对**还没迁移**的某个 Specialist（比如 `market`），走�
 - 不要加任何「run_id 不一致就拒绝」的校验——同上，没有消费方
 - 不要把 `run_id` 做成必填/NOT NULL——历史行没有这个值，做成必填等于
   强迫历史数据造假
-- 不要碰批 E-II 起的五个 Specialist 迁移——那是另一批的事，这一批六个
-  脚本只加一个可选 CLI 参数，不改它们的契约形状
+- 不要碰 `agent_runs` 那张表——它的 `run_id` 是**另一个东西**（账本行号），
+  改名是批 J-II 的事。这一批**一个字都不要动它**，否则两批的 diff 会缠在
+  一起，出问题时分不清是 capture 错了还是改名错了
 
 ## 必须做的探针（G-1）
 
-P1  跑一次完整的在线 verdict 落库，断言存量行的 `run_id` 列等于
-    `ctx.run_id`（不是「没报错」，是取出来比对字符串）
+P1  跑一次完整的在线落库，断言存量行的 `run_id` 列等于 `ctx.run_id`
+    （不是「没报错」，是取出来比对字符串）
 P2  拿一条**没有** `run_id` 的历史行（模拟迁移前数据）走现有的读取/校验
     路径，断言不因为 `run_id` 是 None 就报错或被拒
 P3  合成一张不经过 replay 的 Card，断言 `DecisionCard.run_id` 与
@@ -1141,6 +1149,161 @@ P4  回放（`replay_of` 不为 None）一张历史 Card，断言不会给它凭
 
 不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
 最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 J-II · `agent_runs.run_id` 改名 ＋ `runtime_run_id` 落库
+
+⚠️ **与 J-I 谁先开都行**（两批文件不重叠：J-I 动 skill + 契约，J-II 动
+`_store`/`_runtime`/`orchestrator`/`tools/verify`），但**两批共用 schema 版本号**：
+先开的那一批占 v9，后开的占 v10。开工第一件事是 `git log --oneline -5` 看另一批
+有没有已经落地，别两批都写 v9。
+
+🔴 **来源**：设计文档 §4 的「`run_id` 这个名字现在指三个互不相同的东西」。
+2026-09-23 实测出来的，不是读文档推的。三处必须一起改 —— 改一半留下的
+半新半旧命名空间比现在更难读（读者无法判断手上这个 `run_id` 属于已改还是未改的那半）。
+
+```text
+把 `run_id` 这个名字在仓库里的三个含义收敛成一个。做完之后，
+`run_id` 在 BigA 自己的代码与数据库里**只有一个意思**：编排的一次执行尝试。
+
+## 先读这两处，它们是这一批的全部依据
+
+- 设计文档 §4 「`run_id` 这个名字现在指三个互不相同的东西」——三同名对照表
+- `tools/verify/phase1_acceptance.py::_runtime_spawn_records()` 的 docstring
+  ——它自己写着「决策号本来就明文写在 payload_json 里，只是没被拿来做绑定」，
+  这一批给它一个比文本匹配更硬的绑定
+
+## 做什么
+
+### J2-1 · `agent_runs.run_id` → `ledger_id`
+
+它是 `INTEGER PRIMARY KEY AUTOINCREMENT`，从 Phase 1 起就是**账本行号**，
+与编排的 `run_id`（32 位 hex）毫无关系。
+
+🔴 **实测：全仓没有任何代码读这一列**（`grep` 过 skills/tools/bin/tests）。
+⇒ 现在改是免费的。等 `agent_runs` 有了第一个真实读取方再改就不是了。
+
+- 新迁移条目 `_V9`（或 v10，见上面的版本号约定）：
+  `ALTER TABLE agent_runs RENAME COLUMN run_id TO ledger_id;`
+  本机 SQLite 3.45.1，`RENAME COLUMN` 自 3.25 起支持。
+- 🔴 **不要改 `_V1` 的建表语句。** `MIGRATIONS` 的规则是「只许在末尾追加，
+  不许改动已发布的条目」——全新库会先按 v1 建出 `run_id`，再由这条迁移改名，
+  这是对的，不是绕远路。
+- ⚠️ `agent_runs` 上挂着 `agent_runs_no_update` / `agent_runs_no_delete`
+  两个只追加触发器。SQLite 的 `RENAME COLUMN` 会自动改写触发器体，**但要验**
+  （见探针 P2）——触发器被迁移悄悄改坏，是只追加这道地基被抽走，而它不会报错。
+
+### J2-2 · `SpawnHandle.run_id` → `runtime_run_id`，并落库
+
+`SpawnHandle.run_id` 取自 `sessions_spawn` 响应的 `runId`，也就是运行时
+`subagent_runs.run_id` 那个 UUID ——在 adapter 内部它叫 `run_id` 是对的
+（忠实照抄运行时的列名），但一出 adapter 就和编排的 `run_id` 撞名。
+
+- `_runtime/adapter.py`：`SpawnHandle.run_id` → `runtime_run_id`，
+  连带 `wait()` 里的 `by_id = {h.run_id: h ...}` 等内部使用一并改。
+  `tools/verify/adapter_spike.py` 里那三处打印也要跟着改。
+- schema 同一条迁移里给 `agent_runs` 加 `runtime_run_id TEXT`（nullable）。
+- `_store` 的 `record_verdict_run()` 加一个可选参数接住它。
+- `card_ops.persist()` 加 **keyword-only、默认 None** 的
+  `runtime_run_ids: Mapping[str, str] | None`（agent → runtime_run_id）。
+  🔴 必须有默认值：`synthesize.py` 与几条测试也在调 `persist()`，
+  签名不兼容会把不相干的东西一起弄红。
+- `orchestrator.py`：`r1`（Stage 1）与 `r2`（risk）里每个 `SpawnResult` 都带
+  `.handle.agent` 与 `.handle.runtime_run_id` ⇒ 在调 `card_ops.persist()` 的地方
+  把这个映射传进去。**Stage 3 的 synthesizer 不进这个映射**（它不产 verdict）。
+- 回放路径（`replay_of is not None`）**照旧不记账本**，因此也不写
+  `runtime_run_id`。回放不重新执行任何 agent，给它记一个真实 spawn id 是假账。
+
+### J2-3 · 让 `spawn_check` 用上它（这才是 J2-2 的消费方）
+
+`phase1_acceptance.spawn_proof()` 现在认 spawn 靠
+`SELECT … FROM subagent_runs WHERE payload_json LIKE '%<决策号>%'` —— 文本匹配。
+
+改成：`agent_runs.runtime_run_id` 非空时，直接拿它与 `subagent_runs.run_id`
+做**结构化 join**；为 NULL（所有历史行）时**退回现有的 LIKE 判据**。
+
+🔴 **形状照抄 E-I 已经验证过的那一套**：`risk_check.py` 的 `CROSS_CHECK_PAIRS`
+就是「两边都有 `evidence_set_id` 就用它，任一缺失就退回比 `raw_hash`」。
+逐字同形，**不要发明第二种兼容写法**。
+
+⚠️ 退回分支不许因此变松：现有的三态（`readable=False` ⇒ UNKNOWN /
+`rows==0` 且 `agent_runs` 有行 ⇒ 伪造 / `forged` ⇒ 伪造）一条都不能塌成
+「查不了就放过」。R-3。
+
+### J2-4 · 一道新守卫，防止第四个同名再长出来
+
+加一条测试，判据要**可派生**，不是清单（`test_roster_matches_config.py`
+的教训：清单式检查只加固了当时想到的那几个字段）：
+
+> BigA 自己的 schema 里，任何名为 `run_id` 的列必须是 `TEXT`，
+> 且其非 NULL 值必须能在 `decision_runs.run_id` 里找到。
+
+这条能自动抓到「有人又加了一个语义不同的 `run_id`」——因为语义不同的那个
+几乎必然过不了「值能在 decision_runs 里找到」这一关（`agent_runs.run_id`
+当年就是 INTEGER，第一关就红）。
+
+## 不要做
+
+- **不要碰 `subagent_runs`**（OpenClaw 运行时自己的表）。它的 `run_id`
+  是第四个同名，但那是运行时的命名空间，**不归我们管，也不许改**。
+  我们这边叫 `runtime_run_id`，正是为了在边界上把它认出来
+- 不要给 `runtime_run_id` 加 NOT NULL / 外键——历史行没有它，
+  而 `subagent_runs` 在另一个库里，外键根本建不了
+- 不要改 `_V1` 的建表 SQL（见 J2-1）
+- 不要顺手把 `run_events.detail` 里的 usage/agents 结构也改了——
+  那是 C-II 定的形状，这一批不碰
+- 不要做 J-I 的事（给 `agent_verdicts` 加 `run_id` 列、六个 skill 加
+  `--run-id`）。两批的 diff 缠在一起，出问题时分不清是改名错了还是 capture 错了
+
+## 必须做的探针（G-1）
+
+P1  🔴 **改名后没有任何东西还在读旧名**：全仓 grep `agent_runs` 相关代码
+    与 `\.run_id`，确认 `SpawnHandle` 的使用点全部改到 `runtime_run_id`；
+    把 `ledger_id` 改回 `run_id` 之外的第三个名字跑一遍测试，确认会红
+    （证明确实有测试在盯这个列名，不是「反正没人读所以改什么都绿」）
+P2  🔴 **迁移之后只追加触发器仍然有效**：对迁移后的 `agent_runs` 真的执行
+    一次 `UPDATE` 和一次 `DELETE`，断言两者都被拒（`AppendOnlyViolation`）。
+    这条必须真跑 SQL，不是读 `sqlite_master` 看触发器名字还在——
+    名字还在但触发器体被改坏，正是 `RENAME COLUMN` 可能的失败形状
+P3  🔴 **结构化 join 真的比文本匹配硬**：构造一条 `agent_runs` 行，它的
+    `runtime_run_id` 在 `subagent_runs` 里**不存在**，但决策号出现在某条
+    `payload_json` 里（= 蹭上别人记录的那个旧洞）。断言新判据报伪造，
+    而旧的 LIKE 判据会放过它。这条是 J2-3 的全部理由，不能只断言「新判据也能过」
+P4  **退回分支不塌**：历史行（`runtime_run_id IS NULL`）走 LIKE 判据，
+    断言现有的三态判定逐条不变（复用 `tests/test_spawn_proof.py` 已有的用例，
+    不要新写一套）
+P5  **J2-4 的守卫见红**：临时给某张表加一个 `run_id INTEGER` 列，
+    断言新测试报红；还原
+
+## 🔴 一处**必须 live 验**，且线下无法替代
+
+`SpawnHandle.runtime_run_id`（来自 `sessions_spawn` 的 `runId`）与
+`subagent_runs.run_id` **是不是同一个命名空间** —— 这是 J2-3 整个结构化 join
+的前提，而它在线下只能靠「两边都长得像 UUID」来猜。猜错的后果是
+spawn 核验**静默退化**（join 永远匹配不上 ⇒ 每次都走退回分支 ⇒ 看起来一切正常）。
+
+判据：起**一个**最小 spawn（参照 `tools/verify/adapter_spike.py` 的用法，
+但任务文本给最短的那种，别照抄它那句「采集今日A股情绪数据」），
+记下返回的 `runtime_run_id`，然后直接查运行时库：
+
+    SELECT run_id, child_session_key FROM subagent_runs
+    WHERE run_id = '<刚拿到的 runtime_run_id>'
+
+查得到 ⇒ 同一命名空间，J2-3 成立。查不到 ⇒ **停下来**，不要把 J2-3 当成做完了，
+把实测结果写进已知问题，改名（J2-1/J2-2）仍然可以合并。
+
+⚠️ 这一条是通用前置「不出新卡、不调用任何付费模型」那条默认值的**明确例外**
+（通用前置自己写了「正文明确写出理由和预算上限时以正文为准」）：
+**一个最小 spawn，预算上限 $0.05，不出卡、不走 bin/biga-card。**
+批 C-I 撞过反过来的坑——正文要求 live 补验，执行者拿通用前置那条默认值
+把正文废掉了，见教程第 23 章「坑」一节。
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / live 那一条的
+真实查询输出 / 你自己认为最可能被攻破的一处交出来，由另一个会话评审。
 ```
 
 ---
@@ -1262,12 +1425,15 @@ P5  `amend_verdict.py` 对这四个 skill 的 fact 行正确路由到 `_assess_f
 
 ---
 
-## 批 E-III–H · 现在不写分发提示词
+## 批 E-III / I / F / G / K / L / H · 现在不写分发提示词
 
 | 批 | 为什么现在不写 |
 |---|---|
 | E-III | 迁 `risk` + 退役 `amend_verdict.py`；依赖 E-II 落地的真实结果（尚不具备） |
+| I（RawArtifact） | 要给 raw 加溯源字段，那些字段指向的 `run_id` 得先由批 J 变成没有歧义的（尚不具备） |
 | F–G | 依赖 E 系列完整落地（尚不具备） |
+| K（Pipeline / Agent Registry） | 它要固化的 agent 名单，在 E 系列迁移期间正在变形状 |
+| L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
 🔴 **现在把它们写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
