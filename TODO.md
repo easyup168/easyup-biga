@@ -693,7 +693,7 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         per-run 约束的手段都没有，留给 D-II 按 run_id 认。顺带发现分发提示词把
         technical 的 `bars` 写错成 25（实测 120）——已在 `orchestration-kickoff-prompt.md`
         改正。
-  - [ ] 批 D-II · Specialist 改口读冻结快照 —— **实现完成、离线全绿（1003）、四道探针见过红，待独立评审**（不自宣通过）
+  - [x] 批 D-II · Specialist 改口读冻结快照 —— ✅ 评审复核通过（`e81f94b`）
         `orchestrator.py` Stage 1 前冻结一次（sh/sz@**120**，取消费者里最大的 technical），
         evidence_set_id 进转移 detail + `RunContext`（第一次真填这个字段）；只给日线三个
         agent 的任务文本加 `--evidence-set-id`。market/sector/technical 各加可选
@@ -705,6 +705,13 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         探针见红并还原：P5（冻结分支改成退回 fetch→`calls==1`≠0）/ P4（sector 对 2 根重算 hash→
         与冻结集 H 不符）/ P2（CROSS_CHECK 退回比值→值相等漏掉 hash 不一致，双红）/
         freeze 跳过→`test_一次决策只冻2行raw` 报 `0≠2`。详见 CHANGELOG。
+        评审复核：P5、P2 两条独立复现过红（P5 的还原方式很说明问题——用异常类型判断
+        会漏报，靠的是断言 `fetch` 调用次数）。自报的盲区（technical 回退且刚好抓到
+        与冻结逐字节相同的数据、raw_hash 碰巧相同）复核后**认为不该在这一批堵**：
+        能漏报的场景恰好是漏报了也无害的场景，真正验证「是否走了共享机制」需要把
+        `evidence_set_id` 挂上 `Evidence`，是批 E 的契约改动。D 系列（D-I + D-II）到此
+        完成——「所有 Specialist 看同一份数据」从批 B 的「无法验证」变成日线部分
+        「机制存在 + 真的在用 + 有检查兜底」。
         🔴 **D-I 自报的「freeze 跨 decision_id 不幂等」在这一批自然消解**：orchestrator 每次
         `run()` 只调一次 freeze ⇒ **一个 run 只冻一次**（正是评审复核要的 per-run 语义）。
         一个 decision 被重试 ⇒ 两个 run ⇒ 两次 freeze ⇒ 各自一份新数据（retry 本就该拿新数据），
