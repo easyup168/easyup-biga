@@ -37,6 +37,9 @@ __all__ = [
     "VerdictLevel",
     "TASK_ID_RE",
     "new_task_id",
+    "check_fact_invariants",
+    "check_stance_vocab",
+    "check_stance_vs_verdict",
 ]
 
 VerdictStatus = Literal["completed", "partial", "failed"]
@@ -156,6 +159,122 @@ def new_task_id(seq: int, *, day: str | None = None) -> str:
     return f"BIGA-{day}-{seq:03d}"
 
 
+# ── 契约铁律的**唯一实现** —— 批 E-I 抽出来，FactBundle 与 AgentVerdict 共用 ──
+#
+# 🔴 为什么抽：批 E-I 把「事实」（FactBundle）与「判断」（AgentAssessment）从
+#    AgentVerdict 里拆开。拆开之后 FactBundle 还得守住同样的铁律 —— 如果各写
+#    一遍，就是 L-3（同一判据多份实现，某天漂开、且漂开时不报错）。F8 就是
+#    `amend_verdict.py` 抄了一遍 stance 校验、连盲区一起抄的实测事故。
+#    ⇒ 事实层的铁律只有 `check_fact_invariants` 一份；stance 的只有
+#      `check_stance_vocab` + `check_stance_vs_verdict` 两份。谁要校验都调它们。
+
+def check_fact_invariants(
+    *,
+    agent: str,
+    task_id: str,
+    status: str,
+    verdict: str,
+    result: Mapping[str, Any],
+    data_completeness: float,
+    evidence: tuple[Evidence, ...],
+    missing: tuple[MissingItem, ...],
+    elapsed_ms: int,
+) -> None:
+    """事实层的三条铁律 + 字段合法性。**只校验 skill 能独立算出来的东西**，
+    不含任何 stance 判断（那在 `check_stance_*`）。入参是**已归一化**的值。
+    """
+    if not TASK_ID_RE.match(task_id):
+        raise ValueError(f"task_id 必须形如 BIGA-YYYYMMDD-NNN，收到 {task_id!r}")
+    if not isinstance(agent, str) or not agent.strip():
+        raise ValueError(f"agent 必须是非空字符串，收到 {agent!r}")
+    if status not in _STATUSES:
+        raise ValueError(f"status 必须是 {sorted(_STATUSES)} 之一，收到 {status!r}")
+    if verdict not in _LEVELS:
+        raise ValueError(f"verdict 必须是 {sorted(_LEVELS)} 之一，收到 {verdict!r}")
+    if not isinstance(data_completeness, (int, float)) \
+            or not 0.0 <= data_completeness <= 1.0:
+        raise ValueError(
+            f"data_completeness 必须在 0..1，收到 {data_completeness!r}")
+    if elapsed_ms < 0:
+        raise ValueError(f"elapsed_ms 不能为负，收到 {elapsed_ms}")
+    for e in evidence:
+        if not isinstance(e, Evidence):
+            raise TypeError(
+                f"evidence 必须全部是 _contract.Evidence，收到 {type(e).__name__} —— "
+                "不许自建第二套证据结构（铁律 4）"
+            )
+
+    # --- 铁律 3：result 的每个键都要有证据 ---
+    covered = {e.field for e in evidence}
+    orphan = sorted(set(result) - covered)
+    if orphan:
+        raise ValueError(
+            f"[{agent}] result 字段无证据支撑: {orphan} —— "
+            f"已有证据覆盖 {sorted(covered)}。无据之言不入 Card（铁律 3）"
+        )
+
+    # --- 铁律 1：算不出来不许说 PASS ---
+    if missing:
+        if verdict == "PASS":
+            raise ValueError(
+                f"[{agent}] missing={missing} 非空却给出 verdict='PASS' —— "
+                "UNKNOWN ≠ PASS，算不出来必须说算不出来（铁律 1）"
+            )
+        if status == "completed":
+            raise ValueError(
+                f"[{agent}] missing={missing} 非空却声称 status='completed' —— "
+                "应为 'partial' 或 'failed'"
+            )
+
+    # --- 反向：声称 UNKNOWN 就必须说清楚缺什么 ---
+    if verdict == "UNKNOWN" and not missing:
+        raise ValueError(
+            f"[{agent}] verdict='UNKNOWN' 但 missing 为空 —— "
+            "判断不出来必须列出缺了什么，否则 Card 上的「缺失项」是空的，"
+            "读者看到的就是一个没有理由的 UNKNOWN"
+        )
+
+    # --- failed 不该带结论 ---
+    if status == "failed" and verdict != "UNKNOWN":
+        raise ValueError(
+            f"[{agent}] status='failed' 时 verdict 只能是 'UNKNOWN'，"
+            f"收到 {verdict!r}"
+        )
+
+
+def check_stance_vocab(agent: str, stance: str) -> None:
+    """stance 必须取自该 agent 的词表 —— AgentVerdict / AgentAssessment 共用。
+
+    🔴 外部评审 F8：未登记 agent 就是错误，**不是「暂时放宽」**。原来
+    `STANCE_VOCAB.get(agent)` 命中才校验、命不中静默放行，`agent="Market"`
+    大小写打错也能过。沉默的放宽正是这条要防的东西。
+    """
+    vocab = STANCE_VOCAB.get(agent)
+    if vocab is None:
+        raise ValueError(
+            f"[{agent}] 这个 agent 没有登记 stance 词表 —— "
+            f"在 `_contract/verdict.py` 的 STANCE_VOCAB 里加一行。\n"
+            f"  已登记：{sorted(STANCE_VOCAB)}\n"
+            f"  （拼写也算：agent 名大小写要与登记的完全一致）")
+    if stance not in vocab:
+        raise ValueError(
+            f"[{agent}] stance={stance!r} 不在该 agent 的词表里 "
+            f"{list(vocab)} —— 方向判断必须可聚合，自由发挥的措辞没法做统计")
+
+
+def check_stance_vs_verdict(agent: str, stance: str | None, verdict: str) -> None:
+    """🔴 跨「事实」与「判断」的铁律：UNKNOWN 的事实上不许挂一个方向判断。
+
+    这是批 E-I 拆开 FactBundle / AgentAssessment 之后，唯一一条**跨两型**的约束
+    —— 它需要同时知道 `verdict`（来自 FactBundle）和 `stance`（来自 AgentAssessment），
+    所以由**组合视图 AgentOutcome**（以及仍然合体的 AgentVerdict）在拼起来那一刻校验。
+    """
+    if verdict == "UNKNOWN" and stance not in (None, "无法判定"):
+        raise ValueError(
+            f"[{agent}] verdict='UNKNOWN' 却给出 stance={stance!r} —— "
+            "数据都不够，方向是从哪来的？（UNKNOWN ≠ 有判断）")
+
+
 @dataclass(frozen=True)
 class AgentVerdict:
     """Specialist → Supervisor 的唯一返回结构。
@@ -223,96 +342,18 @@ class AgentVerdict:
         object.__setattr__(self, "warnings", tuple(self.warnings))
         object.__setattr__(self, "result", MappingProxyType(dict(self.result)))
 
-        if not TASK_ID_RE.match(self.task_id):
-            raise ValueError(
-                f"task_id 必须形如 BIGA-YYYYMMDD-NNN，收到 {self.task_id!r}"
-            )
-        if not isinstance(self.agent, str) or not self.agent.strip():
-            raise ValueError(f"agent 必须是非空字符串，收到 {self.agent!r}")
-        if self.status not in _STATUSES:
-            raise ValueError(f"status 必须是 {sorted(_STATUSES)} 之一，收到 {self.status!r}")
-        if self.verdict not in _LEVELS:
-            raise ValueError(f"verdict 必须是 {sorted(_LEVELS)} 之一，收到 {self.verdict!r}")
-        if not isinstance(self.data_completeness, (int, float)) \
-                or not 0.0 <= self.data_completeness <= 1.0:
-            raise ValueError(
-                f"data_completeness 必须在 0..1，收到 {self.data_completeness!r}")
-        if self.elapsed_ms < 0:
-            raise ValueError(f"elapsed_ms 不能为负，收到 {self.elapsed_ms}")
-        for e in self.evidence:
-            if not isinstance(e, Evidence):
-                raise TypeError(
-                    f"evidence 必须全部是 _contract.Evidence，收到 {type(e).__name__} —— "
-                    "不许自建第二套证据结构（铁律 4）"
-                )
-
-        # --- 铁律 3：result 的每个键都要有证据 ---
-        covered = {e.field for e in self.evidence}
-        orphan = sorted(set(self.result) - covered)
-        if orphan:
-            raise ValueError(
-                f"[{self.agent}] result 字段无证据支撑: {orphan} —— "
-                f"已有证据覆盖 {sorted(covered)}。无据之言不入 Card（铁律 3）"
-            )
-
-        # --- 铁律 1：算不出来不许说 PASS ---
-        if self.missing:
-            if self.verdict == "PASS":
-                raise ValueError(
-                    f"[{self.agent}] missing={self.missing} 非空却给出 verdict='PASS' —— "
-                    "UNKNOWN ≠ PASS，算不出来必须说算不出来（铁律 1）"
-                )
-            if self.status == "completed":
-                raise ValueError(
-                    f"[{self.agent}] missing={self.missing} 非空却声称 status='completed' —— "
-                    "应为 'partial' 或 'failed'"
-                )
-
-        # --- 反向：声称 UNKNOWN 就必须说清楚缺什么 ---
-        if self.verdict == "UNKNOWN" and not self.missing:
-            raise ValueError(
-                f"[{self.agent}] verdict='UNKNOWN' 但 missing 为空 —— "
-                "判断不出来必须列出缺了什么，否则 Card 上的「缺失项」是空的，"
-                "读者看到的就是一个没有理由的 UNKNOWN"
-            )
+        # 🔴 事实层铁律走**唯一实现**（批 E-I），不在这里重抄一遍 —— FactBundle
+        #    用的是同一份 `check_fact_invariants`，改了自动两边一致（防 L-3）。
+        check_fact_invariants(
+            agent=self.agent, task_id=self.task_id, status=self.status,
+            verdict=self.verdict, result=self.result,
+            data_completeness=self.data_completeness, evidence=self.evidence,
+            missing=self.missing, elapsed_ms=self.elapsed_ms)
 
         # --- stance：方向判断，与数据完整度分开 ---
         if self.stance is not None:
-            # 🔴 外部评审 F8：原来是 `STANCE_VOCAB.get(self.agent)`，
-            #    **命中才校验，命不中就静默退化成「1~16 字任意词都收」**。
-            #
-            #        agent="market",  stance="超级看多"  → 正确拒绝
-            #        agent="Market",  stance="随便乱写"  → 通过（大小写 typo）
-            #        agent="discipline", stance="瞎编的" → 通过（还没登记）
-            #
-            #    Phase 3 建 discipline 时忘了加一行（纯手工步骤，没有清单强制），
-            #    它的 stance 从那天起完全不受约束 —— 而 `AGENTS.md` 里
-            #    「契约层会直接拒绝表外词」这句话，读者会以为对全系统成立。
-            #
-            #    ⇒ 未登记就是错误，**不是「暂时放宽」**。
-            #      沉默的放宽正是这条红线要防的东西。
-            vocab = STANCE_VOCAB.get(self.agent)
-            if vocab is None:
-                raise ValueError(
-                    f"[{self.agent}] 这个 agent 没有登记 stance 词表 —— "
-                    f"在 `_contract/verdict.py` 的 STANCE_VOCAB 里加一行。\n"
-                    f"  已登记：{sorted(STANCE_VOCAB)}\n"
-                    f"  （拼写也算：agent 名大小写要与登记的完全一致）")
-            if self.stance not in vocab:
-                raise ValueError(
-                    f"[{self.agent}] stance={self.stance!r} 不在该 agent 的词表里 "
-                    f"{list(vocab)} —— 方向判断必须可聚合，自由发挥的措辞没法做统计")
-            if self.verdict == "UNKNOWN" and self.stance not in (None, "无法判定"):
-                raise ValueError(
-                    f"[{self.agent}] verdict='UNKNOWN' 却给出 stance={self.stance!r} —— "
-                    "数据都不够，方向是从哪来的？（UNKNOWN ≠ 有判断）")
-
-        # --- failed 不该带结论 ---
-        if self.status == "failed" and self.verdict != "UNKNOWN":
-            raise ValueError(
-                f"[{self.agent}] status='failed' 时 verdict 只能是 'UNKNOWN'，"
-                f"收到 {self.verdict!r}"
-            )
+            check_stance_vocab(self.agent, self.stance)
+            check_stance_vs_verdict(self.agent, self.stance, self.verdict)
 
     # --- 便捷查询 ---
 

@@ -121,6 +121,8 @@ class Collector:
         self.warnings: list[str] = []
         self.raw: list[tuple[str, Any]] = []
         self.hashes: dict[str, str] = {}
+        #: source → 冻结集 id（只有读冻结的 source 有）。Evidence.evidence_set_id 用它（批 E-I）。
+        self.es_ids: dict[str, str] = {}
 
     def _note(self, *, missing: MissingItem | None = None,
               warning: str | None = None) -> None:
@@ -186,6 +188,8 @@ class Collector:
                 # raw 已由 freeze 落库，不重复落盘；hash 用冻结集登记的那份（整份 raw）。
                 self.hashes[f"sina:kline/{_DATE_SYMBOL}"] = \
                     self._coord.frozen_content_sha256(self.evidence_set_id, _DATE_SYMBOL)
+                # 批 E-I：Evidence 直接声明冻结集 id。
+                self.es_ids[f"sina:kline/{_DATE_SYMBOL}"] = self.evidence_set_id
             return
         try:
             self.daily = fetch_index_daily(_DATE_SYMBOL, bars=2)
@@ -218,13 +222,17 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str,
     def raw_hash_for(source: str) -> str | None:
         return None if source.startswith("derived:") else c.hashes.get(source)
 
+    def es_id_for(source: str) -> str | None:
+        return None if source.startswith("derived:") else c.es_ids.get(source)
+
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=raw_hash_for(source)))
+            raw_hash=raw_hash_for(source),
+            evidence_set_id=es_id_for(source)))
 
 
     # 🔴 无日期端点的 as_of 不能沿用日线的收盘时刻。
@@ -249,7 +257,8 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str,
             field=field, source=source, value=value,
             as_of=retrieved, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=raw_hash_for(source)))
+            raw_hash=raw_hash_for(source),
+            evidence_set_id=es_id_for(source)))
 
     if c.daily is None:
         c.missing.append(MissingItem(

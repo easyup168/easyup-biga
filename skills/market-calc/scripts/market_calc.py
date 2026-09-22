@@ -143,6 +143,8 @@ class Collector:
         self.raw: list[tuple[str, Any]] = []
         #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
         self.hashes: dict[str, str] = {}
+        #: source → 冻结集 id（只有读冻结快照的 source 有）。Evidence.evidence_set_id 用它。
+        self.es_ids: dict[str, str] = {}
 
     def _note(self, *, missing: MissingItem | None = None,
               warning: str | None = None) -> None:
@@ -210,6 +212,8 @@ class Collector:
             with self._lock:
                 self.hashes[f"sina:kline/{symbol}"] = \
                     self._coord.frozen_content_sha256(self.evidence_set_id, symbol)
+                # 批 E-I：Evidence 直接声明冻结集 id —— 比 raw_hash 更硬的结构核对。
+                self.es_ids[f"sina:kline/{symbol}"] = self.evidence_set_id
         else:
             self._keep_raw(f"sina:kline/{symbol}", d.raw, d.server_as_of or now_cn())
 
@@ -308,18 +312,25 @@ def build_verdict(
     retrieved = now_cn()
     as_of: datetime | None = None
 
-    def _raw_hash_for(source: str) -> str | None:
-        """这条证据出自哪份原始响应。
+    def _lookup(source: str, table: dict[str, str]) -> str | None:
+        """在 source→X 的表里查这条证据的 X（raw_hash / evidence_set_id 共用一套匹配）。
 
         派生字段（`derived:` 开头）没有单一来源，返回 None ——
-        **不硬凑一个哈希**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。
+        **不硬凑**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。
         """
         if source.startswith("derived:"):
             return None
-        if source in c.hashes:
-            return c.hashes[source]
-        cand = [k for k in c.hashes if source.startswith(k)]
-        return c.hashes[max(cand, key=len)] if cand else None
+        if source in table:
+            return table[source]
+        cand = [k for k in table if source.startswith(k)]
+        return table[max(cand, key=len)] if cand else None
+
+    def _raw_hash_for(source: str) -> str | None:
+        return _lookup(source, c.hashes)
+
+    def _es_id_for(source: str) -> str | None:
+        # 批 E-I：只有读冻结的 source 在 c.es_ids 里；其余（腾讯/涨跌家数）返回 None。
+        return _lookup(source, c.es_ids)
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
@@ -328,6 +339,7 @@ def build_verdict(
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
+            evidence_set_id=_es_id_for(source),
         ))
 
 
@@ -353,7 +365,8 @@ def build_verdict(
             field=field, source=source, value=value,
             as_of=retrieved, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=_raw_hash_for(source)))
+            raw_hash=_raw_hash_for(source),
+            evidence_set_id=_es_id_for(source)))
 
     if trade_date:
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)

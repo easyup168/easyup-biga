@@ -363,6 +363,30 @@ CREATE INDEX IF NOT EXISTS ix_events_run ON run_events(run_id, seq);
     + _append_only("evidence_sets", "冻结切片一旦改写，「所有 Specialist 看同一份数据」就成了空话")
 
 
+_V8 = """
+-- ───────────────────────────────────────────────────────────────
+-- v8：agent_verdicts 加 kind，区分「旧 AgentVerdict / 新 FactBundle / 新 AgentAssessment」
+--
+-- 🔴 批 E-I 把「事实」与「判断」拆开（FactBundle + AgentAssessment）。这两种新形状
+--    和旧的合体 AgentVerdict 同住 agent_verdicts 一张表 —— 复用它已有的只追加触发器
+--    与线性修订唯一索引（`ux_verdict_amends_linear`），不另起一张表再维护一套同样的
+--    约束（那就是第二套要跟着演进的口径，L-3）。
+--
+-- kind 取值：
+--    NULL / 'verdict'  —— 旧合体 AgentVerdict（历史行全是 NULL，读路径靠 LegacyAdapter 拆）
+--    'fact'            —— FactBundle（skill 产，无 stance）
+--    'assessment'      —— AgentAssessment（Agent 产，只 stance + fact_ref，amends 指回 fact 行）
+--
+-- 🔴 **判据用列，不用「猜 json 形状」**：按「有没有 stance 键」推断 kind 是 L-13 的形状
+--    （判据落在字符串存在性上）。显式一列，读的时候不含糊。
+--
+-- 为什么不设 NOT NULL DEFAULT：历史行就是没有 kind 的旧 AgentVerdict，NULL 正好如实
+--    表达「它是拆分之前的合体形状」，读路径据此走 LegacyAdapter。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE agent_verdicts ADD COLUMN kind TEXT;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -372,6 +396,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (5, _V5),
     (6, _V6),
     (7, _V7),
+    (8, _V8),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

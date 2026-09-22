@@ -10,6 +10,7 @@
 
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, Evidence, now_cn
+from .facts import AgentAssessment, AgentOutcome, FactBundle, LegacyAdapter
 from .missing import LEGACY_CODE, MissingItem
 from .run import (
     INITIAL_STATE,
@@ -37,6 +38,9 @@ from .verdict import (
     AgentVerdict,
     VerdictLevel,
     VerdictStatus,
+    check_fact_invariants,
+    check_stance_vocab,
+    check_stance_vs_verdict,
     is_adhoc_task_id,
     new_task_id,
 )
@@ -47,6 +51,13 @@ __all__ = [
     "LEGACY_CODE",
     "MissingItem",
     "VerdictRef",
+    "FactBundle",
+    "AgentAssessment",
+    "AgentOutcome",
+    "LegacyAdapter",
+    "check_fact_invariants",
+    "check_stance_vocab",
+    "check_stance_vs_verdict",
     "INITIAL_STATE",
     "LEGAL_TRANSITIONS",
     "RUN_ORIGINS",

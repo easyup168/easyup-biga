@@ -37,8 +37,52 @@ import sys
 _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _contract import STANCE_VOCAB, AgentVerdict, MissingItem  # noqa: E402
-from _store import load_verdict, load_verdict_meta, save_verdict  # noqa: E402
+from _contract import (  # noqa: E402
+    STANCE_VOCAB,
+    AgentAssessment,
+    AgentVerdict,
+    MissingItem,
+)
+from _store import (  # noqa: E402
+    load_verdict,
+    load_verdict_meta,
+    save_assessment,
+    save_verdict,
+)
+
+
+def _assess_fact(args, meta: dict) -> int:
+    """新形状（批 E-I）：给一份 `FactBundle` 追加一个 `AgentAssessment`（stance）。
+
+    🔴 这才是补丁路径本该有的样子：Agent 只加一个判断，**一行 stance**，事实一个字
+    不重打（对比老路径要 `dataclasses.replace` 整份原件）。校验全走契约/存储层
+    （`AgentAssessment` 查词表、`save_assessment` 查跨型铁律 UNKNOWN⇒无法判定），
+    这里只把报错翻译成命令行口吻，不自己判（F8：判据只留一处）。
+    """
+    if args.add_missing or args.add_warning:
+        print(
+            f"verdict_id={args.ref} 是一条 FactBundle（新形状）。E-I 只支持给它加 "
+            "--stance（一个判断）。\n"
+            "  追加缺失项 / warning 属于「修订事实」，新形状里还没有落点 —— 留给批 E-II。\n"
+            "  （若这条限制本该由 skill 自己产出，改 skill，不要在这里补）", file=sys.stderr)
+        return 2
+    if args.stance is None:
+        print("给 FactBundle 追加判断必须带 --stance —— 它就是这一步唯一要加的东西。",
+              file=sys.stderr)
+        return 2
+    try:
+        assessment = AgentAssessment(
+            task_id=meta["task_id"], agent=meta["agent"], stance=args.stance)
+        new_ref = save_assessment(assessment, fact_id=args.ref)
+    except (ValueError, TypeError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"verdict_ref={new_ref}", file=sys.stderr)
+    print(f"  {meta['agent']}  fact #{args.ref}  +  判断 stance={args.stance}"
+          f"   （新形状：判断单独落一行 #{new_ref}，事实没有被重打）", file=sys.stderr)
+    if args.json:
+        print(json.dumps(assessment.to_dict(), ensure_ascii=False, indent=2))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,12 +105,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="把修订后的 verdict 打到 stdout")
     args = ap.parse_args(argv)
 
-    original = load_verdict(args.ref)
-    if original is None:
+    meta = load_verdict_meta(args.ref)
+    if meta is None:
         print(f"verdict_id={args.ref} 不存在。确认 skill 跑的时候没有加 --no-store "
               f"—— 加了就不会落原件，也就没有 id 可引用。", file=sys.stderr)
         return 2
 
+    # 🔴 批 E-I：新形状（FactBundle）走「加一个 AgentAssessment（判断）」这条路 ——
+    #    **不重打事实**（补丁路径当年就是为了防这个）。旧合体 AgentVerdict 仍走下面
+    #    的「复制原件 + 改字段」老路（P6 钉住它一字不变）。判据是 kind 列，不是猜 json。
+    if meta["kind"] == "fact":
+        return _assess_fact(args, meta)
+    if meta["kind"] == "assessment":
+        print(f"verdict_id={args.ref} 是一条**判断**（assessment），不是事实行。\n"
+              f"  给一份判定加判断，请指向 skill 打印的那条 fact 的 verdict_ref。",
+              file=sys.stderr)
+        return 2
+
+    original = load_verdict(args.ref)
     if args.stance is not None:
         # 🔴 外部评审 F8：这里原来抄了一遍契约层的逻辑，
         #    连同那个盲区一起抄（`if vocab and ...` —— 没登记就放行）。

@@ -48,6 +48,11 @@ class Evidence:
         raw_hash: 🔴 **这条证据出自哪一份原始响应**（`raw_market_snapshot.content_sha256`）。
             没有它，「这个结论基于哪份数据」只能靠时间戳猜。
             派生字段（`source` 以 ``derived:`` 开头）没有单一来源，允许为空。
+        evidence_set_id: 🔴 **这条证据出自哪一次冻结**（`evidence_sets.evidence_set_id`）。
+            批 E-I 新增（可选，参照 `raw_hash` 的先例）。读冻结快照的 Specialist
+            填它，于是 risk 的 CROSS_CHECK 能**直接比它**判断两个 Agent 是否真的
+            共享了同一份数据 —— 比 `raw_hash` 碰巧相同更硬（批 D-II 留的账）。
+            没接冻结快照的 Specialist（news/emotion 不读日线）没有这个值，留空。
     """
 
     field: str
@@ -58,6 +63,7 @@ class Evidence:
     calc_version: str | None = None
     label: str | None = None
     raw_hash: str | None = None
+    evidence_set_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("field", "source"):
@@ -134,6 +140,7 @@ class Evidence:
             "calc_version": self.calc_version,
             "label": self.label,
             "raw_hash": self.raw_hash,
+            "evidence_set_id": self.evidence_set_id,
         }
 
     @classmethod
@@ -147,4 +154,5 @@ class Evidence:
             calc_version=d.get("calc_version"),
             label=d.get("label"),
             raw_hash=d.get("raw_hash"),
+            evidence_set_id=d.get("evidence_set_id"),
         )

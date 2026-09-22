@@ -385,6 +385,8 @@ class Evidence:
     label: str|None = None          # 渲染 Card 用的中文名
     raw_hash: str|None = None       # 🔴 指回 raw_market_snapshot.content_sha256
                                     #    派生字段没有单一来源，允许为空
+    evidence_set_id: str|None = None  # 🔴 批 E-I：指回 evidence_sets.evidence_set_id
+                                      #    （读冻结快照的 Specialist 填；risk CROSS_CHECK 直接比它）
 
     @property
     def staleness_sec(self) -> int: ...
@@ -429,6 +431,31 @@ class DecisionCard:
 ⚠️ `stance` 必须取自 `STANCE_VOCAB[agent]` 这个固定词表。
 今天写「偏强」、明天写「震荡偏强」，三个月后它就是一列自由文本，
 Phase 4 拿它做不了任何相关性检验。**它存在的唯一理由就是能被聚合。**
+
+#### 4.1.2 事实与判断拆开（`skills/_contract/facts.py`，批 E-I 起）
+
+`status`/`verdict`/`stance` 是「三个不能混的问题」，但它们还焊在**一个** frozen
+`AgentVerdict` 里 —— 事实（skill 跑完就有）与判断（Agent 事后补的 `stance`）产生方
+不同、时机不同。焊在一起的代价是实测事故：Agent 想只加一个判断，就得把整份事实重打
+一遍（`BIGA-20260920-002` 那次丢了 15 条 evidence 的 `retrieved_at`，L-10）。
+
+批 E-I 起把它拆成三个类型（`skills/_contract/facts.py`）：
+
+| 类型 | 装什么 | 谁产 |
+|---|---|---|
+| `FactBundle` | 事实：`result`/`evidence`/`missing`/`status`/`verdict`/… —— **AgentVerdict 减去 stance** | skill |
+| `AgentAssessment` | 判断：`stance` + 指回哪一份 FactBundle（`fact_ref`，**不抄事实**） | Agent |
+| `AgentOutcome` | 组合视图：FactBundle + AgentAssessment，跨型铁律（UNKNOWN⇒无法判定）在此校验 | 程序 |
+
+🔴 **铁律不因为拆了就松**：事实层三条铁律走 `verdict.check_fact_invariants` **唯一实现**
+（FactBundle 与 AgentVerdict 共用，防 L-3）；stance 走 `check_stance_vocab` +
+`check_stance_vs_verdict`。`LegacyAdapter` 把任何历史 `AgentVerdict` 拆回新三型
+（**读路径宽**）；新落库只收新形状（**写路径严**，§9），旧格式随时间自然清零。
+
+⚠️ **迁移是渐进的**：E-I 只迁 `emotion` 一个试点（其余五个 skill 仍产 `AgentVerdict`，
+E-II 起再迁）。过渡期新旧同住 `agent_verdicts`（`kind` 列区分），`_store.load_verdict`
+把两种形状都压回旧消费者认识的 `AgentVerdict` —— `card_ops`/`risk_check`/`DecisionCard`
+因此零改动。`amend_verdict.py` 未退役（退役前提是**全部** Specialist 迁完）。
 
 ### 4.2 🔴 四条契约铁律
 
