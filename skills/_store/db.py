@@ -48,6 +48,8 @@ __all__ = [
     "list_agent_runs",
     "save_raw_snapshot",
     "load_raw_snapshot",
+    "save_evidence_set",
+    "load_evidence_set",
     "AppendOnlyViolation",
 ]
 
@@ -714,4 +716,70 @@ def load_raw_snapshot(
         return None
     d = dict(row)
     d["payload"] = json.loads(d.pop("payload_json"))
+    return d
+
+
+# ──────────────────────────────────────────────────────────────── evidence_sets
+
+
+def save_evidence_set(
+    *,
+    evidence_set_id: str,
+    decision_id: str | None,
+    manifest: dict[str, Any],
+    path: pathlib.Path | str | None = None,
+) -> str:
+    """登记一次数据冻结（`SnapshotCoordinator` 冻结完调它），返回 `evidence_set_id`。
+
+    🔴 存储层对 `manifest` 的结构**不做假设** —— 它只负责严格 JSON 落库。
+    manifest 长什么样、怎么反查回 `raw_market_snapshot`，是冻结方
+    （`_snapshot.SnapshotCoordinator`，批 D）的事：那一层才知道自己冻的是
+    日线还是别的。存储层若也内嵌一份「manifest 该有哪些键」，就成了第二处
+    要跟着 manifest 演进的地方（L-3）。
+
+    ⚠️ 用 `_canonical_dumps`（含 `allow_nan=False`，A4 严格 JSON）。这里的
+    `separators` 无所谓：manifest 不是 `raw_hash`，不参与「Evidence.raw_hash ↔
+    raw 层」那条历史哈希对应，改格式不会静默打穿任何东西。
+    """
+    if not isinstance(evidence_set_id, str) or not evidence_set_id.strip():
+        raise ValueError(
+            f"evidence_set_id 必须是非空字符串（它是主键），收到 {evidence_set_id!r}。"
+            "  用 _contract.new_evidence_set_id() 铸一个，不要自己拼。")
+    if not isinstance(manifest, dict):
+        raise TypeError(
+            f"manifest 必须是 dict，收到 {type(manifest).__name__} —— "
+            "冻结登记要能被反查，一段自由文本不行。")
+    blob = _canonical_dumps(manifest)
+    now = now_cn().isoformat()
+    try:
+        with connect(path) as conn:
+            conn.execute(
+                "INSERT INTO evidence_sets "
+                "(evidence_set_id, decision_id, frozen_at, manifest_json, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (evidence_set_id, decision_id, now, blob, now),
+            )
+    except sqlite3.IntegrityError as e:
+        if "evidence_sets.evidence_set_id" not in str(e) and "evidence_set_id" not in str(e):
+            raise
+        raise ValueError(
+            f"evidence_set_id {evidence_set_id!r} 已存在 —— 冻结登记只追加，"
+            "不复用旧号。每次冻结 new_evidence_set_id() 铸一个新的。") from e
+    return evidence_set_id
+
+
+def load_evidence_set(
+    evidence_set_id: str, *, path: pathlib.Path | str | None = None
+) -> dict[str, Any] | None:
+    """取回一次冻结登记，`manifest` 已从 JSON 解析回 dict。找不到返回 None。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT evidence_set_id, decision_id, frozen_at, manifest_json, created_at "
+            "FROM evidence_sets WHERE evidence_set_id=?",
+            (evidence_set_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["manifest"] = json.loads(d.pop("manifest_json"))
     return d

@@ -41,6 +41,7 @@ __all__ = [
     "RUN_ORIGINS",
     "RunContext",
     "new_run_id",
+    "new_evidence_set_id",
     "new_trigger_id",
     "new_run_context",
 ]
@@ -174,6 +175,17 @@ def new_run_id() -> str:
     run 的身份必须独立于它属于哪个决策。
     """
     return uuid.uuid4().hex
+
+
+def new_evidence_set_id() -> str:
+    """一次数据冻结的唯一 id（`SnapshotCoordinator` 铸，批 D）。
+
+    与 `new_run_id` 一样用 uuid4，但带 ``es-`` 前缀 —— 它会和 `run_id`、
+    `decision_id` 一起出现在日志/detail 里，前缀让人一眼看出这是「哪一份被
+    冻结的数据切片」，不必去猜某个 32 位十六进制到底是 run 还是 evidence set。
+    身份铸造只此一处，不让 `_snapshot` 自己另发明一套 id 规则（那就是第二套口径）。
+    """
+    return f"es-{uuid.uuid4().hex}"
 
 
 def new_trigger_id(origin: str) -> str:

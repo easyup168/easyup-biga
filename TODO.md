@@ -674,7 +674,19 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       重启 gateway 让 `synthesizer` 进 roster → 真跑一次端到端出卡，断言 run_events
       走 8 步细粒度链、`subagent_runs` 有 synthesizer；再复述 L-14 那句提示词给 main，
       断言它**没有工具能到达** DecisionOrchestrator（够不到，不是被拒）。
-- [ ] 批 D · SnapshotCoordinator
+- [ ] 批 D · SnapshotCoordinator —— **拆成 D-I / D-II 两个会话**（同 A、C 的理由：耦合面不同）
+  - [ ] 批 D-I · SnapshotCoordinator 基础设施 —— **实现完成、离线全绿（985）、五道探针全见过红，待独立评审**（不自宣通过）
+        建 `skills/_snapshot/`（`SnapshotCoordinator.freeze_index_daily` / `read_index_daily` /
+        `frozen_snapshot_ids`）：一次决策里每个 `(source, symbol)` **只真实抓一次**，多个消费者
+        从同一份冻结数据切各自要的根数（sector 2 / market 25 / technical 120）。`evidence_sets`
+        第一次真的被写行，`manifest_json` 记 `snapshot_id` ⇒ 能反查回 `raw_market_snapshot`。
+        `fetch_index_daily` 拆出纯 `parse_index_daily`（读端重建 `IndexDaily` 不复制解析，L-3）；
+        `_contract.new_evidence_set_id()` 铸号；`_store.save_evidence_set` / `load_evidence_set`。
+        🔴 **不改任何 Specialist**（market/sector/technical 仍各自调 `fetch_index_daily`，同今天）。
+        探针见红并还原：P1（read 不重抓，改成重抓→实测 4 次≠1）/ fail-closed 越界（拆掉检查→
+        DID NOT RAISE）/ P4（拆掉 evidence_sets 触发器→UPDATE/DELETE 通过，且 `test_每张表都有
+        只追加触发器` 一并抓到）/ P5（manifest 去掉 snapshot_id→反查红）—— 详见 CHANGELOG。
+  - [ ] 批 D-II · Specialist 改口读冻结快照（切 market/sector/technical 的实际调用点，改现有 skill 行为，高风险，等 D-I 评审通过）
 - [ ] 批 E · Facts / Assessment 拆分
 - [ ] 批 F · RiskPolicy 前移
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
@@ -701,6 +713,33 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
 下一批二选一：① 验证运行时会收掉阻塞会话 → 正式退役看门狗；② 把 `find_blocked` 接到
 orchestrator 的超时诊断路径（超时时判一下是不是 `ask_user` 死锁、记进 detail/missing），
 给它一个真实消费方。这条同 P5 一样，是「这一批用不到但不让它悄悄消失」。
+
+### 🔶 批 D-I 施工空档 + 批 D-II 输入（评审时一并看）
+
+**施工空档：`freeze_index_daily` 现在没有编排层调用方。** D-I 只建这层并用探针证明
+它工作，Specialist 一个没改（那是 D-II）。所以现在没有任何调度命令会跑 `freeze` ——
+它的读取方是 `read_index_daily` + 探针。这是分批施工里一段**显式登记**的中间态
+（同批 B「只建 `evidence_sets` 表、无生产方」），不是零消费方死配置（L-1）。误删这层
+不会有测试变红，但会变成「谁建的、干嘛的」都答不上来的孤儿 —— 记在这里免得下次疑惑。
+
+**D-II 输入 1 · 冻结的 `bars` 要取所有消费者里最大的那个 —— 是 120，不是 25。**
+分发提示词把 technical 的调用写成 `bars=BAR_COUNT # 默认 25`，但实测
+`technical_calc.py::BAR_COUNT = 120`（market 才是 25，sector 是 2）。谁把这层接进
+编排器，`freeze_index_daily(..., bars=?)` 就得取 **120**，否则 technical 读 120 会撞
+`read_index_daily` 的 fail-closed（「只冻了 25 根，读不出 120 根」）。这不是设计变更，
+是分发提示词里一个过期的数字，D-I 的读端已经按「越界即报错」处理，接线时照 120 传即可。
+
+**D-II 输入 2 · `raw_hash` 语义要在 D-II 一并想清楚。** 今天 technical 用
+`payload_sha256(daily.raw)` 给 `Evidence.raw_hash`（整份 raw 的指纹）。改读冻结快照后，
+若消费者对**切片后**的 raw 重新取 sha，会与冻结集登记的**整份** raw 的 sha 对不上
+（切片 ≠ 整份），而且不报错。⇒ D-II 让 Specialist 改口时，`raw_hash` 应指向冻结集
+（`evidence_sets` 里那份 `content_sha256` / `snapshot_id`），不是各自对自己看到的那截
+重算。D-I 已经把整份 raw 的 `content_sha256` 记进 manifest，就是给这一步用的。
+
+**CROSS_CHECK_PAIRS 现在仍有意义，别在 D-I 删。** 设计文档 §6 说 `market.sh_close ↔
+technical.close` 会在 Specialist **真的**共享快照后变成恒真 —— 那是 D-II 之后的事。
+D-I 的 Specialist 还各自抓取，这条交叉校验现在仍能抓到两市日线对不上，删早了是自己
+造一个假阴性窗口（L-7 的反面）。D-I 没碰它。
 
 ### ⚠️ `.biga-card-stop` 的解除条件看起来已经满足，但没解除
 

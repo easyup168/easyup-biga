@@ -34,7 +34,7 @@ from .eastmoney import (
     fetch_pool,
 )
 from .http import SourceError, get_json, get_text
-from .sina import SINA_SYMBOLS, DailyBar, IndexDaily, fetch_index_daily
+from .sina import SINA_SYMBOLS, DailyBar, IndexDaily, fetch_index_daily, parse_index_daily
 from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import (
     MARKET_CLOSE,
@@ -74,6 +74,7 @@ __all__ = [
     "fetch_boards",
     "fetch_breadth",
     "fetch_index_daily",
+    "parse_index_daily",
     "fetch_index_quote",
     "fetch_pool",
     "market_is_open",
