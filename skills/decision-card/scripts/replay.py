@@ -95,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         #    误判成「组装不一致」——input_verdict_refs 是 comparable() 会
         #    比对的字段之一，不带就是从有变成没有。
         verdict_refs=list(original.input_verdict_refs),
+        # 🔴 批 K：冻结名单同 input_verdict_refs —— 回放**原样带过原卡冻结的那份**，
+        #    绝不用今天的 Registry 重算。老卡是 None ⇒ 回放也 None，两边一致；
+        #    新卡带着它生成时冻结的 roster ⇒ 回放带同一份。这样 comparable() 里
+        #    这个字段两边恒等，--check 不会因它误报「组装不一致」（gate 4）。
+        expected_roster=original.expected_roster,
     )
 
     if args.check:

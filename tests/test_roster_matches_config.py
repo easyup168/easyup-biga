@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import warnings
 from typing import Callable
 
 import pytest
@@ -81,16 +82,48 @@ _MUST_COVER_BUILT: dict[str, Callable[[dict], set[str] | None]] = {
 }
 
 
-@pytest.mark.skipif(not CONFIG.exists(), reason="本机没有 BigA 运行时配置")
-class TestRosterConsistency:
-    @staticmethod
-    def _cfg() -> dict:
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
+class RuntimeConfigUnavailable(UserWarning):
+    """本机没有 BigA 运行时配置 ⇒「配置白名单 vs 已建 agent」这半边无法在此核对。
 
+    🔴 批 K：这是 R-3「算不出来要显式说」的一个 test 形态。它是一个**可见**的
+    信号（`-q` 的 warnings summary 也会列出来），不是静默 skip。
+    """
+
+
+def _require_runtime_config() -> dict:
+    """读运行时配置；没有就发一条**可见**的 UNKNOWN 警告再 skip。
+
+    🔴 批 K —— 修 `test_roster_matches_config.py` 的 `skipif` 缺口。
+
+    原来整个 `TestRosterConsistency` 挂 `@pytest.mark.skipif(not CONFIG.exists())`：
+    fresh clone / CI 上**静默跳过整组**——连**根本不需要配置**的
+    `test_契约里的stage名单都建好了`（契约名单 vs 已建 agent）都被一起跳过了。
+    这正是 R-3 想防的形状：算不出来（配置不在）不该悄悄变成「没查出问题」。
+
+    改法（范围有意收窄，见 CHANGELOG）：
+      · 不需要配置的那半边检查**照常跑**——CI 上也拦得住「契约里声明了但没建」的漂移；
+      · 需要配置的那半边（配置白名单 vs 已建 agent）在配置缺席时发一条
+        `RuntimeConfigUnavailable` 警告再 skip。skip 是诚实的「这台机器上没有那个
+        **外部**产物」（配置在仓库外、人工维护，CI 上本就不该有），警告让它不再静默。
+    """
+    if not CONFIG.exists():
+        warnings.warn(
+            RuntimeConfigUnavailable(
+                f"没有 {CONFIG} —— 「运行时配置白名单 vs 已建 agent」核对不了，跳过这半边。"
+                f"（契约名单 vs 已建 agent 那半边不需要它、照常跑。）"),
+            stacklevel=2)
+        pytest.skip(f"本机没有 BigA 运行时配置（{CONFIG}）——已发 RuntimeConfigUnavailable 警告")
+    return json.loads(CONFIG.read_text(encoding="utf-8"))
+
+
+class TestRosterConsistency:
     @pytest.mark.parametrize("field", sorted(_MUST_COVER_BUILT))
     def test_每个字段都覆盖已建好的agent(self, field):
-        """🔴 本文件存在的理由，现在对**全部**登记字段都成立，不只是某一个。"""
-        claimed = _MUST_COVER_BUILT[field](self._cfg())
+        """🔴 本文件存在的理由，现在对**全部**登记字段都成立，不只是某一个。
+
+        需要运行时配置；缺席时 `_require_runtime_config()` 发可见警告再 skip（批 K）。
+        """
+        claimed = _MUST_COVER_BUILT[field](_require_runtime_config())
         if claimed is None:
             pytest.skip(f"{field} 没设 = 不限制，也行")
         assert_subset_of_source(

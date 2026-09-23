@@ -16,7 +16,8 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
 from .missing import LEGACY_CODE, MissingItem
-from .verdict import STANCE_VOCAB, VETO_STANCE, AgentVerdict
+from .registry import EXPECTED_ROSTER
+from .verdict import VETO_STANCE, AgentVerdict
 from .verdict_ref import VerdictRef
 
 __all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
@@ -108,6 +109,20 @@ class DecisionCard:
     #: 合成出来的。在线路径由 `card_ops.synthesize(run_id=ctx.run_id)` 填；历史卡与手工
     #: 合成没有 ctx，为 None（capture 不 enforce）。回放**不**给历史卡凭空捏一个 run_id。
     run_id: str | None = None
+    #: 🔴 批 K（可选、默认 None）：**生成时冻结的期望 roster** —— 这张卡合成那一刻，
+    #: `AGENT_REGISTRY` 算出的「理应作答的 agent」名单（`EXPECTED_ROSTER`，即会被
+    #: spawn 的那几个）。`absent_agents` 优先读它，而不是现算现取**今天**的 Registry。
+    #:
+    #: 为什么要冻结：`absent_agents` 曾是 `@property`，每次读都用**当下**的名册去减。
+    #: 一张三个月前的卡今天重新加载，若这期间 roster 变过（加了 agent、或某个一度
+    #: 下线），同一张历史卡的这个字段会在不同时间点给出不同答案，而 `card_json`
+    #: 本身没变 —— 一处静默漂移。冻结进 `card_json` 把「当时期望谁」钉死在卡里。
+    #:
+    #: 在线路径由 `card_ops.synthesize(expected_roster=EXPECTED_ROSTER)` 填；老卡
+    #: （`card_json` 里没有这个字段）为 None ⇒ `absent_agents` 回退到读今天的
+    #: Registry（「有就用、缺就退回」，同 J-I run_id / E-I LegacyAdapter 的形状）。
+    #: 🔴 **不给老卡回填**（raw/历史永不改写，L-8）—— 缺就靠回退兜底，不事后补写。
+    expected_roster: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         # 🔴 A2：frozen 之后不能再 `self.x = ...`，改用 object.__setattr__。
@@ -119,6 +134,10 @@ class DecisionCard:
             self, "missing", tuple(MissingItem.coerce(m) for m in self.missing))
         object.__setattr__(
             self, "input_verdict_refs", tuple(self.input_verdict_refs))
+        # 🔴 批 K：冻结名单可空；给了就 tuple 化 —— 光 frozen 挡不住调用方原地
+        #    `card.expected_roster.append(...)`（同 verdicts/missing 的处理）。
+        if self.expected_roster is not None:
+            object.__setattr__(self, "expected_roster", tuple(self.expected_roster))
 
         if not DECISION_ID_RE.match(self.decision_id):
             raise ValueError(
@@ -150,6 +169,12 @@ class DecisionCard:
         if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id.strip()):
             raise ValueError(
                 f"run_id 要么是 None，要么是非空字符串，收到 {self.run_id!r}")
+        # 批 K：expected_roster 可空；给了就必须是一串非空字符串（agentId）。
+        if self.expected_roster is not None and not all(
+                isinstance(a, str) and a.strip() for a in self.expected_roster):
+            raise ValueError(
+                f"expected_roster 要么是 None，要么是一串非空 agentId 字符串，"
+                f"收到 {self.expected_roster!r}")
 
         if not self.generated_at:
             from .evidence import now_cn
@@ -360,12 +385,19 @@ class DecisionCard:
 
     @property
     def absent_agents(self) -> tuple[str, ...]:
-        """已建成的 roster（`STANCE_VOCAB` 的 key 集合）里，这张卡没有判定的那些 agent。
+        """期望作答的 roster 里，这张卡没有判定的那些 agent。
 
-        `STANCE_VOCAB` 的 key 集合与 `agents/` 目录下已建好的 agent
-        由 `tests/test_stance_and_traceability.py::TestStanceVocabMatchesContracts`
-        钉死一致（复用它而不是另开一份 roster 常量，是 dev-workflow 第五问
-        要防的「同一份清单多处手抄」）。
+        🔴 批 K：权威从「现算现取今天的 `STANCE_VOCAB` key 集」改成**优先读卡上
+        生成时冻结的 `expected_roster`**。老卡（`card_json` 里没有这个字段 ⇒
+        `expected_roster is None`）才回退到读今天的 `EXPECTED_ROSTER`（Registry
+        派生）——「有就用、缺就退回」，同 J-I 的 run_id、E-I 的 LegacyAdapter。
+
+        为什么要冻结：作为 `@property` 现算，一张历史卡的这个字段会随**当下**
+        roster 变化而变，而 `card_json` 没变 —— 同一张卡在不同时间给出不同答案。
+        冻结把「当时期望谁」钉进卡里。今天 `EXPECTED_ROSTER` 与 `STANCE_VOCAB`
+        的 key 集相等（`tests/test_agent_registry.py` 钉住），所以对**今天**生成
+        的卡，这次改动是空操作（探针 P1/P3）；`discipline` 不 spawn ⇒ 不在
+        `EXPECTED_ROSTER` ⇒ 永不被判「缺席」（裁定 13，探针 P5）。
 
         🔴 评审 F-6/F-8 之后：非空**不代表**允许构造——`_check_roster()`
         按计数比较 `self.missing` 的条数与这里返回的缺席数，条数不够
@@ -375,7 +407,8 @@ class DecisionCard:
         反复踩过的「按字符串形状分类」陷阱（L-13）。判据只比数量，
         不比内容。
         """
-        return tuple(sorted(set(STANCE_VOCAB) - {v.agent for v in self.verdicts}))
+        roster = self.expected_roster if self.expected_roster is not None else EXPECTED_ROSTER
+        return tuple(sorted(set(roster) - {v.agent for v in self.verdicts}))
 
     @property
     def is_complete(self) -> bool:
@@ -484,6 +517,9 @@ class DecisionCard:
             "elapsed_ms": self.elapsed_ms,
             "input_verdict_refs": [r.to_dict() for r in self.input_verdict_refs],
             "run_id": self.run_id,
+            # 🔴 批 K：冻结名单序列化成 list（老卡 None ⇒ 缺这个键，from_dict 用 .get 兜）。
+            "expected_roster": list(self.expected_roster)
+            if self.expected_roster is not None else None,
         }
 
     @classmethod
@@ -517,4 +553,7 @@ class DecisionCard:
             # 🔴 批 J-I：历史卡的 JSON 里没有这个键 —— `.get` 缺省 None，
             #    回放据此**不给历史卡凭空捏一个 run_id**（P4）。
             run_id=d.get("run_id"),
+            # 🔴 批 K：老卡的 JSON 里没有这个键 —— `.get` 缺省 None，
+            #    `absent_agents` 据此回退到读今天的 Registry（不给老卡回填，L-8）。
+            expected_roster=d.get("expected_roster"),
         )

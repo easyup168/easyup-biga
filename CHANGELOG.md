@@ -85,11 +85,95 @@
 
 ### 新增（批 I）· `tests/test_raw_artifact.py` —— raw 原始性的七道探针（+10 条）
 
-对应上面 P1–P7，10 条测试。加上新教程章节（第 35 章）带来的 4 条 `test_docs_convention`
-参数化用例，全量条数 **1170 → 1184**（`sync_test_count.sh` 已同步 README / CLAUDE.md /
-review-prompt.md）。
+对应上面 P1–P7，10 条测试。加上新教程章节带来的 4 条 `test_docs_convention`
+参数化用例，批 I 自身的全量条数 **1170 → 1184**。
 
+⚠️ **合回 orchestration 时的两处台账笔误，复核时改正**：CHANGELOG/教程原写测试
+数 **1194**，worktree 干净跑出来的实际是 **1198**；三张验证用真卡引用的日期前缀
+写错了两个（应为 `BIGA-20260921-025`/`-024`，不是 `-0922-`）。都已在复核合并时改正。
 
+⚠️ **教程章节号与批 I 撞车**：批 I 与批 K 各自独立选中「第 35 章」，按落地先后
+顺序处理——K 先落地保住 35（`35-agent-registry.md`），批 I 改记 **第 36 章**
+（`36-raw-artifact.md`）。
+
+⚠️ **schema 版本号与批 G-II 撞车（待 G-II 合回时处理）**：批 I 与批 G-II 都在各自
+独立 worktree 里把新迁移记成 `_V13`——批 I 先合回 orchestration，保住 v13；
+G-II 合回时需要把自己的迁移重编号为 v14（迁移 SQL 本体不动，只改版本标签），
+按 J-I/J-II、F/G-I 已验证过的既定协议处理，这里先记一笔。
+
+### 🔴 新增 · 批 K：Agent Registry —— roster 从五处收成一处（确定性编排设计文档 §6 批 K）
+
+**为什么**：有一次真实的静默事故（2026-09-21）——`news` 进了契约的 Stage 1 名单、agent
+也建好了，但运行时白名单漏了它 ⇒ 只 spawn 四个、**无任何报错**、Card 照常出只是少一个
+领域；而 `risk` 如实报「Stage 1 缺席：news」，让排查方向天生指向 news 本身。当时的应对
+是 `test_roster_matches_config.py` 做数据驱动**对账**——对，但那是对账、不是单一源。开工前
+的设计探活普查发现 roster 实际散在**五处**，其中 `tools/verify/adapter_spike.py` 那处**零
+测试覆盖**（不 import `_contract`、不在 pytest 下跑，对账根本看不到它）。这一批把它们
+**结构性**收成一处：名册只手写一次，其余全部派生。
+
+**做了什么**：
+
+- **新增 `skills/_contract/registry.py`**：`AGENT_REGISTRY`（一个 agent 一条
+  `AgentDefinition`：`stage`/`spawned`/`reads_snapshot`）。派生照抄 `run.py::RUN_STATES` 已
+  验证过的 `vars()` 内省形状——`STAGE1_AGENTS`/`STAGE2_AGENTS`/`RISK_AGENT`/
+  `SNAPSHOT_INDEX_AGENTS`/`EXPECTED_ROSTER` 全部从它派生，不再手写平行清单。字段**只装有
+  消费方的**：没装外部示意稿里的 `required_datasets`（绑定被裁定表推迟的 Dataset Registry，
+  装了就是 L-1 死配置）。`RISK_AGENT` 写成会 fail-closed 的纯函数 `_sole_spawned_stage2()`：
+  「Stage 2 且 spawned」不是恰好一个就在 import 时 `RuntimeError`（今天恰好只有 risk；哪天
+  `discipline` 上线成 spawned，这里当场炸，逼人想清楚谁是制衡层入口，而不是静默取第一个＝R-3）。
+- **`verdict.py` 不再手写 `STAGE1_AGENTS`/`STAGE2_AGENTS`**，`_contract/__init__` 改从 registry
+  re-export；`orchestrator.py` 删掉自己的 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 两个独立字面量，
+  改 import；`adapter_spike.py` 的 `STAGE1` 迁到 `STAGE1_AGENTS`（收编前的第五处、零覆盖那处）。
+- **`DecisionCard.expected_roster`（卡级冻结名单）**：合成那一刻把当时 `EXPECTED_ROSTER`
+  冻进 `card_json`，`absent_agents` 优先读它、只有老卡（字段不存在）才回退到读**今天**的
+  Registry。堵的是一处静默漂移：`absent_agents` 原是 `@property`，现算现取**当下**名册，
+  于是一张历史卡今天 `--show` 会用今天的 roster——若这期间 roster 变过，同一张卡的这个字段
+  在不同时间给不同答案而 `card_json` 没变。**老卡不回填**（L-8）；**回放原样透传、不重算**
+  （`replay.py` 把 `expected_roster=original.expected_roster` 传给 `synthesize()`，和
+  `input_verdict_refs` 一样 ⇒ `comparable()` 两边恒等，`--check` 不误报组装不一致）。
+- **`STANCE_VOCAB` 保持独立**（它是 stance 词表、不是 roster），只对 Registry 断言**子集**
+  关系；`discipline` 在册（`STAGE2_AGENTS` 含它）但 `spawned=False` ⇒ 不进 `EXPECTED_ROSTER`
+  ⇒ 永不被判「缺席」（裁定 13：没有输入源、从不 spawn）。
+- **`architecture.md` §6.3** 加了 registry.py 一行（它是 `skills/_*/*.py` 入口，
+  `test_每个入口都在设计文档里被提过` 要求点名并说清解决什么问题）。
+
+**范围判断 · `test_roster_matches_config.py` 的 `skipif` 缺口（分发提示词留给建造会话定）**：
+原来整个 `TestRosterConsistency` 挂 `@skipif(not CONFIG.exists())`，fresh clone / CI 上
+**静默跳过整组**——连**不需要配置**的「契约名单 vs 已建 agent」都被一起跳过。R-3：算不出来
+不该悄悄变成「没查出问题」。**收窄修**：① 不需配置的半边**照常跑**（CI 上也拦得住漂移）；
+② 需配置的半边（读仓库外、人工维护的 `openclaw.json`）在配置缺席时发一条可见的
+`RuntimeConfigUnavailable` 警告再 skip。**没**改成「配置不在就 fail」——CI 上本就不该有那份
+机器专属配置，fail 是把环境差异误报成代码错误。
+
+**探针记录（G-1：每道新守卫先弄坏、见红、还原）**——七道，全部见红且逐字节还原：
+
+| 探针 | 怎么弄坏的 | 报红 |
+|---|---|---|
+| P1 派生一致性 | `technical.reads_snapshot` 关掉 | `FAILED …test_SNAPSHOT_INDEX_AGENTS等于旧frozenset` |
+| P2 冻结名单 | 让 `absent_agents` 无视冻结字段、永远用今天的 Registry | `FAILED …TestP2FrozenRoster`（冻结卡跟着回退源变了） |
+| P3 老卡兼容 | 去掉 `absent_agents` 的 `None` 兜底 | `FAILED …TestP3OldCardCompat`（老卡 `set(None)` 崩） |
+| P4 adapter_spike 迁移 | `STAGE1` 改回独立字面量 `("market","sector")` | `FAILED …test_adapter_spike的STAGE1派生自contract` |
+| P5 discipline 不进权威 | `EXPECTED_ROSTER` 改成收全部 agent（含 discipline） | `FAILED …TestP5DisciplineNeverAbsent` |
+| P6 skipif 可见信号 | 配置缺席时静默 skip（删掉那条警告） | `FAILED …test_config缺席时发…警告而非静默skip` |
+| RISK_AGENT fail-closed | `discipline` 改 `spawned=True`（两个 spawn 的 Stage 2） | `import _contract` 当场 `RuntimeError` |
+
+两个探针**自身**的坑一并记下（探针也会有 bug，`dev-workflow` §3）：判据一开始写成小写
+`"failed"` 而 pytest 打大写 `FAILED`，六道明明红的被误报「没红」；P1 第一版是「把 news 挪到
+Stage 2」，结果先触发了 `RISK_AGENT` 的 fail-closed（import 炸），没验到 P1 自己声称验的东西
+（L-13 形状）——改成「关 `technical.reads_snapshot`」才干净地报红。
+
+**验收**：schema **不变**（批 K 是纯契约/派生，无迁移）；测试 **1198** 条全绿（在 worktree
+干净 checkout 里跑，不含共享树里那批 gitignore 的外部材料）；`bin/biga-card --check` 拿三张
+**批 K 之前**落库、`card_json` 里没有 `expected_roster` 的真卡（BIGA-20260922-001、
+BIGA-20260921-025、BIGA-20260921-024）回放逐字段相同；`audit_public.sh --worktree` 十一项全绿。
+
+⚠️ **过程记一笔（不是新问题，是复现的老形状）**：开工不久发现共享工作树里冒出不属于本批的
+改动（另一会话在做批 G-II，动了 `_store/*` 与 `orchestrator.py`）。按第 28 章（批 C-III）
+的先例，把本批挪进独立 `git worktree` 做，并先把已落在共享树上的自己那部分**逐个干净还原**
+——尤其 `orchestrator.py` 那处 import 耦合着还没进共享树的 `registry.py`，不一起还原会让
+共享树 `ImportError`、卡住对方会话。
+
+### ✅ 复核 · 批 G-I 独立复核 + 合回 orchestration，schema v11 撞车按先例解决
 
 批 G-I（外发通知 outbox）在独立 worktree（`.claude/worktrees/g-i`）里做完后，
 独立复核了一遍，然后按既定顺序合回主线：**先把 orchestration（含已落地的
