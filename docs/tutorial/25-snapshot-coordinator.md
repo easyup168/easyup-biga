@@ -218,3 +218,10 @@ PY
 > `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
 > 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
 > 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。
+
+> ⏩ **后续变动（2026-09-24，批 H-II）**：本章的 `skills/_snapshot`（`SnapshotCoordinator`），
+> 其**真实实现**已迁至 `src/easyup_biga/application/`（它跨层协调 domain/providers/persistence，
+> 属 §29 骨架里 `application/` 的角色）。旧路径原地保留 re-export 薄壳 ⇒ 本章正文里的
+> `from _snapshot import ...` 照旧成立。⚠️ coordinator 内部 `from _contract`/`from _sources`/
+> `from _store` 三行跨包导入**未改**（内容改动，留给跨包引用清理批次）。见 `CHANGELOG.md`
+> 批 H-II 与教程第 39 章。

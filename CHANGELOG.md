@@ -15,6 +15,90 @@
 
 ## [未发布]
 
+### 🔧 变更 · 批 H-II —— `_runtime`/`_snapshot` 迁进 `src/easyup_biga/{runtime,application}/`，旧路径留薄壳
+
+接批 H-I，把两个**已经是共享包、已有多消费方**的基础设施包搬进 `src/`：
+`skills/_runtime`（`OpenClawRuntimeAdapter`+`MCPClient`，被 market/sector/technical
+三个 Specialist 与 `orchestrator.py`、`adapter_spike.py` 消费）→ `easyup_biga.runtime`；
+`skills/_snapshot`（`SnapshotCoordinator`，跨层协调 domain/providers/persistence）→
+`easyup_biga.application`。`git mv` 5 个真实文件（2 `__init__` + `adapter`/`mcp`/
+`coordinator`）保留 history、内容逐字节不变；旧包原地留 5 个 re-export 薄壳，写法
+**直接照抄 H-I** 定的两种形状（包级壳自挂 `src/` 到 `sys.path`、子模块壳
+`sys.modules[__name__] = 真实模块` 做身份等同）⇒ 全仓 13 处 `from _runtime`/
+`from _snapshot import ...` 一个字符不改。`pyproject.toml` 无需改（H-I 已挂 `src/`）。
+
+**为什么比 H-I 简单得多**（§8.1 探活已预判，实测逐条坐实）：H-I 撞过的三个坑这里
+都不存在 —— ① 两个包**零 `__file__` 用法**（重跑 `grep __file__` 确认；唯一一处
+`self.config_path.parent` 是运行时对象属性、不是自定位），所以没有 `db.py`/
+`tradetime.py` 那种「深一层 → `DEFAULT_DB_PATH` 算成 `src/data/biga.db`」的深度陷阱，
+P3 的 `--check` 迁移前后逐字段相同、无需任何补救；② 只有 1 处按子模块路径直接导入
+（`test_runtime_adapter.py:29`），H-I 是 10+ 处；③ **零 AST 守卫硬编码
+`skills/_runtime`/`skills/_snapshot` 路径**（重跑 `git grep` 确认），所以这一批
+**不改任何测试的路径常量** —— H-I 那 4 处 `CONTRACT_DIR`/`STORE_DIR` 是因为「唯一
+实现」类守卫本就只盯 `_contract`/`_store`，与这两个包无关。
+
+**一个把「子模块壳为什么必须用身份等同（idiom B）」从理论变成实证的细节**：
+H-I 里「`import *` 会漏掉下划线私有名」还只是预防性论证；这一批
+`test_runtime_adapter.py:29` 真的写着
+`from _runtime.mcp import Grant, MCPError, _extract_first_json_object,
+_parse_rpc_response, _text_of` —— **三个下划线开头的名字**。若子模块壳用
+`from easyup_biga.runtime.mcp import *`，这三个名字不会被 re-export，该语句当场
+`ImportError`。`sys.modules[__name__] = 真实模块` 让 `_runtime.mcp` **就是**
+`easyup_biga.runtime.mcp`，私有名一并可见。这条 import 正好也是 P1 sabotage 的红灯
+落点，双重坐实了 idiom B 的必要性。
+
+**明确不做（H-III 范围，§8.1 已裁定）**：不挖 `orchestrator.py`/`feishu_deliverer.py`/
+`notify_worker.py`（只被 `decision-card` 一个 skill 消费，抽出来是造只有一个消费方的
+共享包，L-1 的反面）；不建 `integrations/`/`cli/` 空目录；**不改** `coordinator.py`
+内部 `from _contract`/`from _sources`/`from _store` 三行跨包导入（内容改动，属于
+「H-II/H-III 都落地后的跨包引用清理批次」）。⇒ 承接 H-I 记下的那笔账：
+`easyup_biga.application`（coordinator）与 `persistence`/`providers` 一样，暂时仍需
+`skills/` 同时在 `sys.path` 上才自足（`runtime` 的 adapter/mcp 无跨包导入、更接近自足）
+—— 这是 Strangler 中间态，接受、记下，不在这一批顺手改。
+
+**探针记录（G-1，均见过红或前后对照）**：
+- P1 导入兼容：AST 扫全仓收集 8 条去重 `_runtime`/`_snapshot` import（13 处出现），
+  在**全新子进程**（只挂 `skills`，逼壳自挂 `src`）逐条真执行 → 零 ImportError。
+  sabotage：删 `skills/_runtime/mcp.py` 壳 → 红，精确点名 `test_runtime_adapter.py:29`
+  那条（含三个下划线名）→ 还原绿。
+- P2 非 pytest 路径：`python3 -c "sys.path.insert(0,'skills'); import _runtime,_snapshot"`
+  成功，解析到 `easyup_biga.runtime.adapter` / `easyup_biga.application.coordinator`。
+- P3 一致性：`bin/biga-card --check BIGA-20260923-004` 迁移前后逐字段相同（无深度 bug）。
+- P4 测试条数：`--collect-only` 迁移前后都是 **1362**（不减）。
+- P5 隔离自检：`tools/verify/isolation.py` 判词前后一致（5✅+1🔶）。
+- P6 身份等同：`_runtime.adapter`/`_runtime.mcp`/`_snapshot.coordinator` 三者
+  `assert shim is real` 全过 —— 壳与本体是同一个模块对象，不是拷贝。
+
+**独立复核（2026-09-24）**：六道探针逐一亲手重跑，含两处 sabotage-revert（P1
+删 `mcp.py` 壳复现精确报错；额外验证了「idiom B 必要性」本身——把 `mcp.py` 的壳
+临时换成 `import *` 写法，真的在 `_extract_first_json_object` 这个私有名上炸
+`ImportError: cannot import name`，逐字对应报告的论证，不是空口断言）。
+`pyproject.toml` 确认未改、AST 守卫路径确认零硬编码，均与报告一致。
+
+对报告自己提出的两处请裁定：
+1. `application/` 目前只有 `SnapshotCoordinator` 一个成员，算不算过早建层——
+   **批准，不算**。L-1/「不预建空目录」防的是「造一个没有真实消费方的占位」，
+   判据是"这个具体东西是否真实存在且有消费方"，不是"这个目录下文件数量够不够
+   多"。`SnapshotCoordinator` 本身真实存在、有多消费方、扮演的正是 application
+   层该扮演的跨层协调角色——文件数量是实现细节，不是该不该建这一层的判据。
+2. 命名为 `application`（而非先用更保守的名字占位）——**批准，合理**。这不是单纯
+   追随 §29 骨架的外部建议，是外部建议与 `SnapshotCoordinator` 自身角色（不产生
+   域类型、不打外部接口、不建表，只协调另外三层）的双重吻合；即使未来 H-III
+   落地后发现命名需要调整，改一个目录名的成本远小于这次迁移本身，不构成"先保守
+   占位"的理由。
+
+**独立复核额外发现一处报告没覆盖到的真实问题**：`.gitignore` 第 25 行有一条
+`runtime/`——本仓库初始化骨架那次（`872f891`）跟 `.env`/`*.key`/`*.pem` 一起加的，
+从那以后仓库内**从未存在**过任何叫 `runtime` 的目录（`git log -S"runtime/" --
+.gitignore` 确认只有那一次改动），是一条从写下来那天就没有真实生效对象的死规则
+——直到这一批把 `_runtime` 改名成 `runtime`，第一次撞上了它（`git check-ignore
+-v src/easyup_biga/runtime` 命中这一行）。这次没有造成数据丢失（H-II 会话自己
+已经 `git add` 过这些文件，已追踪路径不受 gitignore 影响），但隐患是真实的：
+`git add .`/`git add -A` 这类命令今后遇到这个目录会静默跳过，不报任何错——如果
+哪天这些文件从 index 里掉出去过（比如一次 `git rm --cached` 或分支操作失误），
+重新添加时会悄悄漏掉整个目录。删掉这条规则（`audit_public.sh` 的"运行时产物不
+进仓库"一项复查过，删除后仍然全绿，没有别的东西因此意外泄露）。
+
 ### 📐 设计 · 批 H-II 设计探活 + 分发提示词 —— H 又拆一层，收窄成两个有把握的包
 
 批 H-I 落地时明确留白了四件事：`_runtime`/`_snapshot` 往哪迁、

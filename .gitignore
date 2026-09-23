@@ -22,7 +22,6 @@ USER.md
 .env
 *.key
 *.pem
-runtime/
 node_modules/
 
 # === Python ===
