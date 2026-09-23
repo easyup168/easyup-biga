@@ -35,7 +35,7 @@ from typing import Any
 
 from _contract import now_cn
 
-from .http import SourceError, get_json
+from .http import SourceError, get_json_and_text
 from .tradetime import as_of_for_trade_date
 
 __all__ = ["DailyBar", "IndexDaily", "fetch_index_daily", "parse_index_daily", "SINA_SYMBOLS"]
@@ -68,6 +68,11 @@ class IndexDaily:
     symbol: str
     bars: list[DailyBar]
     raw: list[dict[str, Any]]
+    #: 🔴 数据源发来的**原始响应文本**（`get_json_and_text` 交出的那段），一路带到
+    #: `save_raw_snapshot(raw_text=...)`；`content_sha256` 基于它算（批 I）。
+    #: `None` = 这份 IndexDaily 不是从网络响应来的（`parse_index_daily` 对**切片后
+    #: 的冻结 raw** 重建时就没有原文可言）——那条路径不落 raw，所以留空无害。
+    raw_text: str | None = None
 
     @property
     def last(self) -> DailyBar:
@@ -104,11 +109,13 @@ def fetch_index_daily(symbol: str, *, bars: int = 25) -> IndexDaily:
         raise ValueError(f"symbol 形如 sh000001 / sz399106，收到 {symbol!r}")
 
     url = f"{_BASE}?symbol={symbol}&scale=240&ma=no&datalen={int(bars)}"
-    payload = get_json(url, referer=_REFERER)
-    return parse_index_daily(symbol, payload)
+    payload, raw_text = get_json_and_text(url, referer=_REFERER)
+    return parse_index_daily(symbol, payload, raw_text=raw_text)
 
 
-def parse_index_daily(symbol: str, payload: Any) -> IndexDaily:
+def parse_index_daily(
+    symbol: str, payload: Any, *, raw_text: str | None = None
+) -> IndexDaily:
     """把新浪 K 线端点的原始响应（一个 dict 数组）解析成 `IndexDaily`。
 
     🔴 **纯函数，不联网。** 抽出来是为了让 `SnapshotCoordinator` 能从**已冻结的
@@ -117,6 +124,10 @@ def parse_index_daily(symbol: str, payload: Any) -> IndexDaily:
     同一套形状校验与升序/去重断言：`fetch_index_daily` 拿网络响应后调它，
     读冻结快照的路径对**切片后的** raw 调它，因此两边对「什么样的日线算合法」
     永远给出同一个答案。
+
+    `raw_text`：只有 `fetch_index_daily`（网络路径）能给出原始响应文本；读冻结快照
+    的路径拿的是**切片后的解析对象**，没有对应的原文，`raw_text` 留 `None`（那条路径
+    本来就不落 raw，见 `IndexDaily.raw_text`）。
 
     ⚠️ raw 本身就是升序、无重复日期（否则 `fetch_index_daily` 当初落库前
     就抛错了）；对它取末尾 N 行（切片）仍然升序、无重复，所以切片后重解析
@@ -156,4 +167,4 @@ def parse_index_daily(symbol: str, payload: Any) -> IndexDaily:
     if len(set(days)) != len(days):
         raise SourceError(f"sina:kline/{symbol}: 返回含重复日期，均量会被污染")
 
-    return IndexDaily(symbol=symbol, bars=out, raw=payload)
+    return IndexDaily(symbol=symbol, bars=out, raw=payload, raw_text=raw_text)

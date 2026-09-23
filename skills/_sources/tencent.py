@@ -90,8 +90,13 @@ class IndexQuote:
         return datetime.strptime(self.quoted_at, "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
 
 
-def fetch_index_quote(codes: Sequence[str]) -> dict[str, IndexQuote]:
-    """取一批指数行情。返回 ``{code: IndexQuote}``。
+def fetch_index_quote(codes: Sequence[str]) -> tuple[dict[str, IndexQuote], str]:
+    """取一批指数行情。返回 ``({code: IndexQuote}, 原始响应文本)``。
+
+    🔴 第二个返回值是**整段原始响应文本**：这个源一次请求就拿回所有代码，`body`
+    只此一份。调用方把它带到 `save_raw_snapshot(raw_text=...)` —— raw 层里那份
+    ``{code: 片段}`` 是我们从 `body` 抠出各段再重新组装的**派生物**，不是数据源发来
+    的字节；要让 `content_sha256` 证明源字节，只能用这段 `body`（批 I）。
 
     Raises:
         SourceError: 不可用、少返回了某个代码、段数不足或时间戳非法。
@@ -131,4 +136,4 @@ def fetch_index_quote(codes: Sequence[str]) -> dict[str, IndexQuote]:
         except (TypeError, ValueError) as e:
             raise SourceError(f"tencent:quote/{code}: 数值解析失败 —— {e}") from e
 
-    return out
+    return out, body

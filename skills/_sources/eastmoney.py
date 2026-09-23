@@ -45,13 +45,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
 from _contract import now_cn
 
-from .http import SourceError, get_json
+from .http import SourceError, get_json_and_text
 from .tradetime import as_of_for_trade_date
 
 __all__ = [
@@ -96,7 +97,9 @@ class PoolResult:
         qdate: 🔴 **数据自己声明的日期**。与 `requested_date` 不符即为陈旧数据。
         total: 接口给出的总数 ``tc``。
         rows: 池内个股原始记录。
-        raw: 完整原始响应，原样落 raw 层。
+        raw: 解析后的完整响应对象（落 raw 层的 `payload_json`）。
+        raw_text: 🔴 数据源发来的**原始响应文本**（`get_json_and_text` 交出的那段），
+            带到 `save_raw_snapshot(raw_text=...)`；`content_sha256` 基于它算（批 I）。
     """
 
     pool: str
@@ -105,6 +108,7 @@ class PoolResult:
     total: int
     rows: list[dict[str, Any]]
     raw: dict[str, Any]
+    raw_text: str | None = None
 
     @property
     def server_as_of(self) -> datetime | None:
@@ -131,6 +135,8 @@ class BreadthResult:
     flat: int
     per_market: list[dict[str, Any]]
     raw: dict[str, Any]
+    #: 🔴 数据源发来的**原始响应文本**（批 I）；`content_sha256` 基于它算。
+    raw_text: str | None = None
 
     #: 🔴 **这个端点不带任何日期** —— 涨跌家数说的就是「此刻」。
     #: 显式写出 `None`，而不是不实现：不实现会让人以为是漏了。
@@ -159,7 +165,8 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
         "sort": "fbt:asc",
         "date": date,
     })
-    payload = get_json(f"{_POOL_BASE}{POOL_ENDPOINTS[pool]}?{qs}", referer=_REFERER)
+    payload, raw_text = get_json_and_text(
+        f"{_POOL_BASE}{POOL_ENDPOINTS[pool]}?{qs}", referer=_REFERER)
 
     if payload.get("rc") != 0:
         raise SourceError(f"{pool}: 接口返回 rc={payload.get('rc')}")
@@ -180,7 +187,7 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
         )
 
     return PoolResult(pool=pool, requested_date=date, qdate=qdate,
-                      total=total, rows=rows, raw=payload)
+                      total=total, rows=rows, raw=payload, raw_text=raw_text)
 
 
 def fetch_breadth() -> BreadthResult:
@@ -198,9 +205,11 @@ def fetch_breadth() -> BreadthResult:
     })
     errors: list[str] = []
     payload: dict[str, Any] | None = None
+    raw_text: str | None = None
     for host in _BREADTH_HOSTS:
         try:
-            payload = get_json(f"https://{host}{_BREADTH_PATH}?{qs}", referer=_REFERER)
+            payload, raw_text = get_json_and_text(
+                f"https://{host}{_BREADTH_PATH}?{qs}", referer=_REFERER)
             break
         except SourceError as e:
             errors.append(f"{host}: {e}")
@@ -224,7 +233,7 @@ def fetch_breadth() -> BreadthResult:
                            "advance": int(a), "decline": int(dn), "flat": int(f)})
 
     return BreadthResult(advance=adv, decline=dec, flat=flat,
-                         per_market=per_market, raw=payload)
+                         per_market=per_market, raw=payload, raw_text=raw_text)
 
 
 # ────────────────────────────────────────────────────────── 板块榜
@@ -296,6 +305,9 @@ class BoardResult:
     total: int
     boards: list[Board]
     raw: dict[str, Any]
+    #: 🔴 板块榜**分页**，`raw_text` 是各页原始响应文本的 JSON 数组（每个元素逐字节
+    #: 等于对应那次请求的响应体）；`content_sha256` 基于它算（批 I）。
+    raw_text: str | None = None
 
     @property
     def inflow_known(self) -> int:
@@ -356,8 +368,8 @@ def fetch_boards(kind: str) -> BoardResult:
     if kind not in BOARD_KINDS:
         raise ValueError(f"未知的板块榜 {kind!r}，可选 {sorted(BOARD_KINDS)}")
 
-    def _one_page(pn: int) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
-        """取第 pn 页。返回 (原始报文, 行, total)。"""
+    def _one_page(pn: int) -> tuple[dict[str, Any], str, list[dict[str, Any]], int]:
+        """取第 pn 页。返回 (原始报文, 原始响应文本, 行, total)。"""
         qs = urllib.parse.urlencode({
             "pn": pn, "pz": _BOARD_PAGE, "po": 1, "fltt": 2, "fid": "f3",
             "fs": BOARD_KINDS[kind],
@@ -365,9 +377,11 @@ def fetch_boards(kind: str) -> BoardResult:
         }, safe="+:")
         errors: list[str] = []
         payload: dict[str, Any] | None = None
+        raw_text: str | None = None
         for host in _BREADTH_HOSTS:
             try:
-                payload = get_json(f"https://{host}{_CLIST_PATH}?{qs}", referer=_REFERER)
+                payload, raw_text = get_json_and_text(
+                    f"https://{host}{_CLIST_PATH}?{qs}", referer=_REFERER)
                 break
             except SourceError as e:
                 errors.append(f"{host}: {e}")
@@ -380,12 +394,15 @@ def fetch_boards(kind: str) -> BoardResult:
         diff = data.get("diff")
         # ⚠️ 形状陷阱见 docstring：这里是 dict，ulist 那边是 list
         page = list(diff.values()) if isinstance(diff, dict) else (diff or [])
-        return payload, page, int(data.get("total") or 0)
+        return payload, raw_text, page, int(data.get("total") or 0)
 
     # 🔴 第 1 页要单独取 —— 它告诉我们一共有多少行，也就是要翻几页。
     #    在那之前无法并发：不知道页数就只能一页一页试。
-    first_payload, first_rows, total = _one_page(1)
+    first_payload, first_text, first_rows, total = _one_page(1)
     pages: list[dict[str, Any]] = [first_payload]
+    # 与 `pages` 平行累积各页**原始响应文本**（批 I）。逐字节保真，
+    # `content_sha256` 才能证明源字节而不是我们重排后的字节。
+    raw_text_pages: list[str] = [first_text]
     rows: list[dict[str, Any]] = list(first_rows)
 
     # 🔴 其余页并发取。
@@ -405,8 +422,9 @@ def fetch_boards(kind: str) -> BoardResult:
             #    否则同样的输入会因为网络抖动产生不同的 raw，回放就对不上。
             got = dict(zip(rest, pool.map(_one_page, rest)))
         for pn in rest:
-            payload, page, t = got[pn]
+            payload, text, page, t = got[pn]
             pages.append(payload)
+            raw_text_pages.append(text)
             rows.extend(page)
             total = t or total
             if not page:
@@ -419,6 +437,11 @@ def fetch_boards(kind: str) -> BoardResult:
             f"boards/{kind}: 接口声称 total={total} 但翻完 {len(pages)} 页只拿到 "
             f"{len(rows)} 行 —— 分页没取全，涨跌分布会算错")
     payload = {"pages": pages}
+    # raw_text = 各页原始响应文本的 JSON 数组；每个元素逐字节等于对应那次请求的
+    # 响应体（`json.loads(raw_text)[i]` 可原样取回第 i 页）。这一层的 `json.dumps`
+    # 只是把多页装进一个数组，不触碰各页内部的字节 —— 与旧口径把整个 payload
+    # `sort_keys` 重排是两回事（批 I）。
+    raw_text = json.dumps(raw_text_pages, ensure_ascii=False)
 
     out: list[Board] = []
     for r in rows:
@@ -435,4 +458,5 @@ def fetch_boards(kind: str) -> BoardResult:
         except (TypeError, ValueError) as e:
             raise SourceError(f"boards/{kind}: 数值解析失败 {r} —— {e}") from e
 
-    return BoardResult(kind=kind, total=total or len(out), boards=out, raw=payload)
+    return BoardResult(kind=kind, total=total or len(out), boards=out,
+                       raw=payload, raw_text=raw_text)

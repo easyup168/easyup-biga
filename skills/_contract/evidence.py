@@ -48,6 +48,11 @@ class Evidence:
         raw_hash: 🔴 **这条证据出自哪一份原始响应**（`raw_market_snapshot.content_sha256`）。
             没有它，「这个结论基于哪份数据」只能靠时间戳猜。
             派生字段（`source` 以 ``derived:`` 开头）没有单一来源，允许为空。
+            ⚠️ 这一列的**计算依据在 schema v13（批 I）之后变了**：新行的
+            `content_sha256` 基于数据源**原始响应文本**算（`_store.raw_text_sha256`），
+            v13 之前的行基于解析后重排的对象算（`payload_sha256`）。raw 层只追加、旧行
+            不回填，所以两种口径并存 —— **别拿跨 v13 的两个 `content_sha256` 直接比**
+            （都「看起来正常」，却来自不同口径）。
         evidence_set_id: 🔴 **这条证据出自哪一次冻结**（`evidence_sets.evidence_set_id`）。
             批 E-I 新增（可选，参照 `raw_hash` 的先例）。读冻结快照的 Specialist
             填它，于是 risk 的 CROSS_CHECK 能**直接比它**判断两个 Agent 是否真的

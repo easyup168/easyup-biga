@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import datetime
@@ -40,7 +41,8 @@ def series(closes, highs=None, lows=None):
     bars[-1] = sources.DailyBar(day=TRADE_DATE, open=bars[-1].open,
                                 high=bars[-1].high, low=bars[-1].low,
                                 close=bars[-1].close, volume=bars[-1].volume)
-    return sources.IndexDaily(symbol="sh000001", bars=bars, raw=[{}] * n)
+    return sources.IndexDaily(symbol="sh000001", bars=bars, raw=[{}] * n,
+                              raw_text=json.dumps([{}] * n))
 
 
 @pytest.fixture()

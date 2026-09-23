@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import timedelta
@@ -132,14 +133,14 @@ class TestAppendOnly:
         record_agent_run(task_id=TID, agent="emotion", status="completed",
                          started_at="t0", finished_at="t1", elapsed_ms=1, path=db)
         save_raw_snapshot(source="em:api", as_of="a", retrieved_at="b",
-                          payload={"k": 1}, path=db)
+                          payload={"k": 1}, raw_text=json.dumps({"k": 1}), path=db)
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute(sql)
 
     def test_DELETE被数据库拒绝(self, db):
         save_raw_snapshot(source="em:api", as_of="a", retrieved_at="b",
-                          payload={"k": 1}, path=db)
+                          payload={"k": 1}, raw_text=json.dumps({"k": 1}), path=db)
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute("DELETE FROM raw_market_snapshot")
@@ -433,7 +434,7 @@ class TestRawSnapshot:
         payload = {"limit_up": 42, "rows": [{"code": "600000", "pct": 10.0}]}
         sid = save_raw_snapshot(source="em:api/clist", as_of="2026-09-19T15:00:00+08:00",
                                 retrieved_at="2026-09-19T15:00:03+08:00",
-                                payload=payload, path=db)
+                                payload=payload, raw_text=json.dumps(payload), path=db)
         got = load_raw_snapshot(sid, path=db)
         assert got["payload"] == payload
         assert got["source"] == "em:api/clist"
@@ -441,7 +442,8 @@ class TestRawSnapshot:
 
     def test_相同内容不去重(self, db):
         """采了两次就是两个事实，都留着 —— 去重会丢掉「这一刻也采到了」这条信息。"""
-        kw = dict(source="em:api", as_of="a", retrieved_at="b", payload={"k": 1})
+        kw = dict(source="em:api", as_of="a", retrieved_at="b", payload={"k": 1},
+                  raw_text=json.dumps({"k": 1}))
         a = save_raw_snapshot(**kw, path=db)
         b = save_raw_snapshot(**kw, path=db)
         assert a != b

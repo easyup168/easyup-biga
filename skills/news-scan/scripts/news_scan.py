@@ -73,7 +73,7 @@ from _sources import (  # noqa: E402
 from _sources.sina_news import STALE_SEC, fetch_feed  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
     save_fact_bundle,
     save_raw_snapshot,
 )
@@ -197,11 +197,13 @@ def build_fact_bundle(
         newest_day = as_of.strftime("%Y%m%d")
         # 🔴 哈希**无条件算**，不只在 store 时算 —— 否则 `--no-store` 跑出来的
         #    证据没有 raw_hash，而那正是人工核对时最常用的一条路径。
-        raw_hashes[src] = payload_sha256(feed.raw)
+        #    批 I：基于原始响应文本算，与 save_raw_snapshot 的 content_sha256 同口径。
+        raw_hashes[src] = raw_text_sha256(feed.raw_text)
         # 落 raw 放在 as_of 算出来之后 —— 原样落盘的那份也要标对时刻。
         if store:
             save_raw_snapshot(source=src, as_of=as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(), payload=feed.raw)
+                              retrieved_at=retrieved.isoformat(),
+                              payload=feed.raw, raw_text=feed.raw_text)
         add("trade_date", newest_day, "最新一条所属日期", "derived:sina:7x24")
 
         cutoff = retrieved - timedelta(minutes=window_min)
