@@ -43,6 +43,22 @@ import subprocess
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
+#: `docs/external/` 是只读参考材料（CLAUDE.md「文档纪律」）——外部评审/上游
+#: 文档常常自带示意代码（比如一份 `domain_models.py` 示范契约该长什么样），
+#: 名字撞上本仓库的契约类、或示范代码里直接 `import sqlite3`，都是**在描述
+#: 同一个域**，不代表本仓库长出了第二份实现。AST 纯度类守卫（契约唯一实现 /
+#: DB 唯一入口）应该排除这整个目录，不分是否被 git 跟踪——
+#: 2026-09-23 实测撞到：这类参考材料大多刻意 gitignore（新文件不提交），
+#: 正常 git 路径下天然不可见，只有 `test_scan_fallback.py` 模拟「没有 git」
+#: 退化成纯文件系统遍历时才会扫到，而那正是这道判据本该在两条路径上一致的
+#: 地方——一致，不代表都要报红，是都要用同一个排除规则。
+EXTERNAL_DIR = REPO / "docs" / "external"
+
+
+def is_external_reference(p: pathlib.Path) -> bool:
+    """`p` 是否落在只读参考材料目录下 —— 见上方 EXTERNAL_DIR 的注释。"""
+    return EXTERNAL_DIR in p.parents
+
 #: 降级遍历时跳过的目录。
 #: ⚠️ 这份黑名单**只在没有 git 的时候**才生效 —— 正常路径仍然用
 #:    `git ls-files`，所以它不会重新变成「只挡得住想到过的目录」那个坑。

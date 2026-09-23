@@ -30,7 +30,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 STORE_DIR = REPO / "skills" / "_store"
 CONTRACT_DIR = REPO / "skills" / "_contract"
 
-from _scan import repo_files  # noqa: E402
+from _scan import is_external_reference, repo_files  # noqa: E402
 
 EXEMPT_MARKER = "contract-exempt:"
 
@@ -82,10 +82,25 @@ def _is_exempt(lines: list[str], lineno: int) -> bool:
 
 
 def _in_contract(p: pathlib.Path) -> bool:
-    return CONTRACT_DIR in p.parents
+    """`p` 不受「契约只有一份实现」约束——本体所在目录，或只读参考材料。
+
+    后者会真的出现：`docs/external/` 底下的外部评审/上游文档常带示意代码
+    （比如一份示范 `Evidence`/`DecisionCard` 该长什么样的 `domain_models.py`），
+    名字撞上契约类是因为描述的是同一个域，不是本仓库长出了第二份实现。
+    """
+    return CONTRACT_DIR in p.parents or is_external_reference(p)
 
 
 ALL_FILES = _py_files()
+
+
+def test_docs_external下的示意代码不算第二份实现():
+    """2026-09-23 实测撞到：`test_scan_fallback.py` 模拟"没有 git"退化成纯
+    文件系统遍历时，会扫到 `docs/external/` 下外部评审自带的示意代码
+    （一份示范 `Evidence`/`DecisionCard` 该长什么样的 `domain_models.py`，
+    平时被 gitignore、正常 git 路径天然看不到），误判成契约的第二份实现。"""
+    fake = REPO / "docs" / "external" / "some-review" / "reference" / "domain_models.py"
+    assert _in_contract(fake), "docs/external/ 下的文件应该被当作只读参考材料排除"
 
 
 def test_扫描范围非空():
