@@ -268,3 +268,9 @@ $ tools/verify/audit_public.sh --worktree
 | 7 | `skipif` 缺口按 R-3 收窄：不需配置的半边照常跑，需配置的半边发**可见**警告再 skip；没改成「配置不在就 fail」（那是把环境差异误报成代码错误） |
 | 8 | 探针自己会有 bug —— 判据看错大小写、或打在别的守卫上；先怀疑探针的判据，再怀疑被测代码 |
 | 9 | 并行批次撞同一棵树 ⇒ 挪进独立 worktree，先干净还原自己在共享树的足迹（尤其耦合着新文件的那处 import），别让对方会话 `ImportError` |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

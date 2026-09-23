@@ -15,6 +15,82 @@
 
 ## [未发布]
 
+### 🔧 变更 · 批 H-I —— 三个共享基础设施包迁进 `src/easyup_biga/`，旧路径留薄壳
+
+外部评审 §29 建议把代码长期迁到 `src/easyup_biga/{domain,application,providers,
+runtime,persistence,integrations,cli}`。设计文档 §8 已裁定采纳、并把代价写在明处
+（作废 19 章教程路径、`sys.path.insert(0,"skills")` 是承重墙、结构改动无行为判据）。
+这一批（H-I）只搬 §8 自己讨论过、给了具体缓解方案的三个包：
+`skills/_contract` → `easyup_biga.domain`、`skills/_store` → `easyup_biga.persistence`、
+`skills/_sources` → `easyup_biga.providers`。**纯目录搬迁**（`git mv` 保 history，
+21 个子模块文件内容逐字节不变），旧包原地留 re-export 薄壳 ⇒ 全仓 199 处
+`from _contract import ...` 之类的导入**一个字符都不用改**。
+
+**为什么拆出 H-II 留白**：`_runtime`/`_snapshot` 往哪迁、`application`/`integrations`/
+`cli` 三个命名空间装什么 —— §8 的缓解表**没讨论过**，说明当时也没想清楚。现在硬做
+只能得到没有设计依据的猜测性目录，还违反「按需创建，不预建空目录」（`agents/` 已吃
+过这个教训）。⇒ 留白，等真有内容要放时再建。也没有引入真打包层
+（`[project]`/`pip install -e .`）：`src/` 仍是靠 `sys.path` 手动挂载的普通目录树。
+
+**裁定：`persistence`/`providers` 暂时不自足，接受**。这两个包内部仍是
+`from _contract import ...`（旧写法，没改），只挂 `src/`、不挂 `skills/` 会
+`ModuleNotFoundError: _contract`（独立复核实测确认；`domain` 因为是叶子包、
+不依赖别的两个包，反而自足）。真实运行时 `skills/` 与 `src/` **恒同时在
+path 上**（薄壳自挂 + `pyproject.toml` 都挂了两条），这条限制从不在真实
+路径上发作，是纯结构性的观察，不是活 bug。改法是把这两个包内部的跨包
+`from _contract import` 换成 `from easyup_biga.domain import`——但那是
+**内容改动**，会让「结构改动无行为判据、行为不变即通过」这条验收方式
+失效，且 §29 与 §8 都没有把这一步纳入讨论范围。⇒ 留给 H-II（或专门的
+「跨包引用清理」批次），H-I 里明确记录、不当成意外发现，也不假装它不
+存在——这正是 Strangler Pattern 的中间态（新代码暂时还依赖旧壳的一角），
+不是遗漏。
+
+**薄壳怎么写的**（两个不显然的裁定）：
+- 包级壳（3 个）用自身 `__file__` 相对路径把 `src/` 挂上 `sys.path` —— **不依赖
+  pytest 的 `pythonpath`**，因此 `bin/biga-card` 拉起的子进程、`systemd-run` 脱树跑的
+  （都不经过 pytest 配置）也能 import 到 `easyup_biga`。`pyproject.toml` 里**另外**把
+  `src/` 列进 `pythonpath` 只为 pytest 内**直接** `import easyup_biga.*` 稳定可达 ——
+  两条路径分别覆盖、分别验证（见 P5）。
+- 子模块壳（21 个）用 `sys.modules[__name__] = 真实模块` 别名，让 `_store.db` 与
+  `easyup_biga.persistence.db` 成为**同一个模块对象** —— 连下划线私有名都一致，杜绝
+  「壳与本体漂移」。`import *` 会漏掉下划线名、且污染 stdlib 名，故不用它。
+
+**🔴 一个「纯目录搬迁」本不该有、却真的有的行为变化**：`db.py` 与 `tradetime.py`
+用 `__file__` 相对路径**自定位**（`DEFAULT_DB_PATH` = 仓库根/`data/biga.db`；tradetime
+把 `skills/` 挂上 path）。这两个文件从 `skills/_X/` 迁到 `src/easyup_biga/Y/` 深了一层，
+`parent.parent.parent` 于是从「仓库根」变成了「`src/`」—— `DEFAULT_DB_PATH` 悄悄算成
+`src/data/biga.db`，指向一个不存在的库。**全套 1358 条测试没抓到它**（测试都用
+`tmp_path`/`BIGA_DB_PATH`，不走默认路径），是 P3 的 `bin/biga-card --check` 当场撞红
+（迁移前「组装一致」→ 迁移后 `StoreNotInitialised: src/data/biga.db`）。⇒ 给这两处
+`__file__` 深度各补一级 `.parent`，注释写清「这不是改行为，是**保住**行为」。
+教训：**对自定位文件，纯移动不是行为中立的** —— 这正是 §8 说「结构改动唯一可信的
+验收是行为不变」的实例，也是 P3 存在的全部理由。
+
+**🔴 守卫常量（L-13）**：契约/DB「唯一实现」两道 AST 守卫认的是**真实类定义在哪个
+目录**（`CONTRACT_DIR`/`STORE_DIR`）。迁移后真实定义搬走、旧路径只剩薄壳（无类定义），
+常量不改这道守卫会在新目录上**静默失效**。开工提示词点名两处
+（`test_contract_single_impl.py`、`test_no_raw_sqlite.py`），重跑清单又扫出**另外两处**
+同形状、提示词没列的：`test_decision_id_ownership.py` 读 `skills/_store/db.py` 源码找
+`save_verdict`、`test_store.py` 读 `schema.py`/`db.py` 源码找 `subagent_runs` 注释并按
+`skills/_store/` 前缀排除 store 自调 —— 四处全部改指新位置。**只改提示词点名的两处
+就会漏掉后两处**，那正是「重跑 grep 确认清单没变」这条纪律要防的。
+
+**探针记录（G-1，每道都见过红）**：
+- P1 导入兼容：AST 扫全仓收集 136 条去重 import，在**全新子进程**（只挂 `skills`，逼壳
+  自挂 `src`）逐条真执行 → 零 ImportError。sabotage：删 `skills/_sources/sina_news.py`
+  壳 → 探针红，精确点名 4 条失败语句及出处（`news_scan.py:73` 等）→ 还原绿。
+- P2 「唯一实现」守卫在新位置生效：在 `src/easyup_biga/domain/` 放第二个 `Evidence`
+  → `test_contract_目录里每个契约恰好定义一次` 红；移除 → 绿。再把 `CONTRACT_DIR`
+  临时改回旧路径 → 守卫在干净树上就红（test_A 把真实域类当成「第二份实现」、exactly-once
+  在薄壳里数出 0 个契约类）⇒ 证明改常量是**承重**的、不是装饰。`STORE_DIR` 同构验证。
+  ⚠️ 与提示词设想的「改回旧路径→悄悄漏过」不同：因为真实代码**已经搬走**，旧常量是
+  **大声报错**而非静默放过 —— 更好，同样证明必要性。
+- P3 一致性：`bin/biga-card --check BIGA-20260923-004` 迁移前后逐字段相同（修完深度 bug 后）。
+- P4 测试条数：`pytest --collect-only` 迁移前后都是 **1358**（不减）。
+- P5 非 pytest 路径：`python3 -c "sys.path.insert(0,'skills'); import _contract,_store,_sources"`
+  （不经 pytest 配置）成功，模块解析到 `easyup_biga.*`、`DEFAULT_DB_PATH` 指向仓库根。
+- P6 隔离自检：`tools/verify/isolation.py` 迁移前后判词一致（5✅+1🔶，本批不碰端口/单元/nvm）。
+
 ### 🔧 变更 · `THIRD_PARTY_NOTICES.md` 补上真实依赖审计，不再是占位模板
 
 上一批开源合规材料（`901556f`）落地时，`THIRD_PARTY_NOTICES.md` 如实写着

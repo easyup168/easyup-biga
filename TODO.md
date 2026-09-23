@@ -1073,16 +1073,38 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       教程第 38 章、`CHANGELOG.md`、`architecture.md` §5.3.6。
       🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
       Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
-- [ ] 批 H-I · 三个基础设施包迁移（`_contract`/`_store`/`_sources` →
-      `src/easyup_biga/{domain,persistence,providers}/`）——**A 到 L 全部
-      落地，轮到它了，分发提示词已写好**（`docs/guide/
-      orchestration-kickoff-prompt.md` 同名小节）。拆成 H-I/H-II（同
-      A/C/D/E/J 的理由）：H-I 只搬设计文档 §8 讨论过、给了具体缓解方案的
-      三个包，纯目录搬迁，行为不变靠 `replay --check` + 测试条数不减验证；
-      H-II（`_runtime`/`_snapshot` 往哪迁 + `application`/`integrations`/
-      `cli` 三个命名空间装什么）留白——§8 没讨论过这两件事，现在硬做是
-      没有设计依据的猜测，且违反本仓库「不预建空目录」的一贯做法
-  - [ ] 批 H-II · 留白，不建占位目录（见上）
+- [x] 批 H-I · 三个基础设施包迁移 —— **独立复核通过（2026-09-24）**。
+      `git mv` 24 个真实文件（3 `__init__` + 21 子模块）到
+      `src/easyup_biga/{domain,persistence,providers}/`，21 个子模块内容逐字节不变、
+      history 保留（`git diff --cached -M` 全部 rename 100%）；旧包原地留 24 个
+      re-export 薄壳 ⇒ 全仓 199 处导入一字不改。可达性两条路径都覆盖：包级壳用
+      `__file__` 相对路径自挂 `src/`（真实运行时），`pyproject.toml` 另列 `src/`（pytest）。
+      行为不变靠 `bin/biga-card --check` 逐字段相同 + 测试条数 1358 不减验证。
+      🔴 两件提示词没预料、但必须处理的事：① `db.py`/`tradetime.py` 用 `__file__`
+      **自定位**，深了一层后 `DEFAULT_DB_PATH` 算成 `src/data/biga.db`——全套测试没抓到、
+      是 `--check` 撞红，给深度各补一级 `.parent`（保住行为，不是改行为）；② 守卫常量
+      除提示词点名的两处，重跑 grep 又扫出 `test_decision_id_ownership.py`/`test_store.py`
+      两处同形状路径字面量，四处全改指新位置（L-13：只改点名的两处会漏后两处）。
+      六道探针（P1 导入/P2 守卫/P3 一致/P4 条数/P5 非 pytest/P6 隔离）各见过红，
+      记录在 `CHANGELOG.md`。教程 15 章文末各追加「⏩ 批 H-I」指针，不回改正文。
+      独立复核：六道探针逐一亲手重跑（含 sabotage-revert P1/P2）、`replay --check`
+      对真实生产卡再跑一次、非 pytest 路径与隔离自检各自亲手确认，均与报告一致。
+      复核额外补了两处报告本身标注为「显式不做」的缺口：`architecture.md` 十七处
+      代码指针改指新位置（原提示词范围只列了教程指针，未列它，属于范围外的
+      补充硬化）；新写教程第 39 章（原提示词范围同样未列，按裁定 10 补齐）。
+      复核确认并记录的裁定：`easyup_biga.persistence`/`providers` 内部暂时仍是
+      `from _contract import ...`（旧写法）、只挂 `src/` 不自足——接受为 Strangler
+      Pattern 的中间态，改法留给 H-II（见下）。
+  - [ ] 批 H-II · 留白，不建占位目录（`_runtime`/`_snapshot` 往哪迁 +
+        `application`/`integrations`/`cli` 三个命名空间装什么）——§8 没讨论过这两件事，
+        现在硬做是没有设计依据的猜测，且违反本仓库「不预建空目录」的一贯做法。
+        等真有内容要放时再建。也未引入真打包层（`[project]`/`pip install -e .`）。
+        顺带清理 H-I 独立复核记下的一笔账：`easyup_biga.persistence`/`providers`
+        内部仍是 `from _contract import ...`（旧写法），只挂 `src/` 不挂 `skills/`
+        会 `ModuleNotFoundError`（`domain` 因为不依赖另外两包，反而自足）——真实
+        路径上 `skills/`/`src/` 恒同时在 path 上，不是活 bug，但改成
+        `from easyup_biga.domain import ...` 才算这三个包真正互相独立，是内容
+        改动、不属于 H-I「纯目录搬迁」的范围
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

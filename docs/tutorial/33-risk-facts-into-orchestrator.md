@@ -255,3 +255,9 @@ tools/verify/audit_public.sh --worktree      # ✅ 十一项
 | 6 | 不留兜底自跑：编排器永远先算好，risk 是纯解读方；真手滑撞索引得到指路报错 |
 | 7 | 全员缺席不再「零证据 FAILED」，改出满缺失的卡（出标不知道的卡 > 不出卡） |
 | 8 | VETO 不改实质：P5 验证否决从 amend 一路穿到 DecisionCard 拦 BUY，一个环节没断 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

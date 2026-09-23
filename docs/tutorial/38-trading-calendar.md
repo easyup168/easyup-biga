@@ -272,3 +272,9 @@ $ python3 -m pytest -q
 | 8 | 第一张真实 `fact_*` 表：**不接 `SnapshotCoordinator`**——那解决「同一次运行内多消费方看同一份易变数据」，日历是低频只读查表 |
 | 9 | 文件按源名（`szse.py`）不按功能名（`calendar.py`）——合惯例，且躲开标准库撞名 |
 | 10 | 加新组件 = 向一批没写的守卫报到（只追加触发器 / `server_as_of` 声明 / 入口进设计文档 / 测试计数）——每条红都在逼你补一件真该补的 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

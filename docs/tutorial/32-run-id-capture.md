@@ -175,3 +175,9 @@ bin/biga-card --check <某个已落库决策号>
 | 5 | 给会被回放/比对的对象加字段，先问「属于结论还是这次执行」；属于执行的必须同进 `comparable()` 剥离清单（剥顶层 run_id、留 ref 自带的血缘）|
 | 6 | 本批最软的一环是**捕获率取决于 Agent 是否照提示词加 `--run-id`** —— capture 不 enforce 的固有性质，堵死它要等 enforce 那一批 |
 | 7 | 可派生的守卫会替新数据自动把关：J-II 的 `run_id` 列守卫无需改动就覆盖了本批新加的两列 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

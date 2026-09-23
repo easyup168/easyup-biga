@@ -1,6 +1,10 @@
 [tool.pytest.ini_options]
-# skills/ 是包根 —— 业务代码一律 `from _contract import ...`
-pythonpath = ["skills", "."]
+# skills/ 是薄壳包根 —— 业务代码一律 `from _contract import ...`（壳会 re-export）。
+# src/ 是真实实现根 —— 契约/存储/采集三层已迁至 easyup_biga.{domain,persistence,
+# providers}（批 H-I）。壳自身也会用 __file__ 相对路径把 src/ 挂上，供非 pytest 的
+# 真实运行路径（bin/biga-card 子进程、systemd-run）使用；这里显式列出 src/ 是让
+# pytest 内**直接** `import easyup_biga.*` 也稳定可达，不依赖"先 import 过某个壳"。
+pythonpath = ["skills", "src", "."]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 # `--strict-markers` 在上面 ⇒ 标记必须先在这里注册，否则用了就报错。

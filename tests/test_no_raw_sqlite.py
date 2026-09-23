@@ -1,6 +1,7 @@
 """常驻守卫：业务代码里不许出现裸 sqlite3。
 
-全仓 AST 扫描，`skills/_store/` 之外的任何 .py 都不许：
+全仓 AST 扫描，`src/easyup_biga/persistence/`（批 H-I 前是 `skills/_store/`）
+之外的任何 .py 都不许：
 
   * `import sqlite3` / `from sqlite3 import ...`
   * 调用 `sqlite3.connect(...)`
@@ -22,7 +23,11 @@ import ast
 import pathlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-STORE_DIR = REPO / "skills" / "_store"
+# 🔴 批 H-I：DB 唯一入口的**真实实现**已迁至 src/easyup_biga/persistence/（旧路径
+#    skills/_store/ 迁移后只剩 re-export 薄壳，壳里没有 sqlite3）。这个常量若仍指
+#    旧路径，「裸 sqlite3」守卫会在新目录上静默失效——db.py 里的 `import sqlite3`
+#    本该被豁免，却因守卫在看错的目录而无从谈起。
+STORE_DIR = REPO / "src" / "easyup_biga" / "persistence"
 
 from _scan import is_external_reference, repo_files  # noqa: E402
 

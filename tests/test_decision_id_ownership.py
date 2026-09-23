@@ -75,7 +75,11 @@ class TestAdhocNotStorable:
         原来的 bug 之所以能同时存在于五个 specialist，就是因为每个调用点
         各写一遍默认值。守卫必须放在 `save_verdict` 里 —— 调用点会越来越多。
         """
-        src = (REPO / "skills/_store/db.py").read_text(encoding="utf-8")
+        # 🔴 批 H-I：db.py 的真实实现已迁至 src/easyup_biga/persistence/；旧路径
+        #    skills/_store/db.py 现在只是薄壳（无 save_verdict 定义）。这里读的是
+        #    「守卫写在唯一写入口里」，必须读真实定义所在的文件，读到薄壳会
+        #    StopIteration（找不到 save_verdict）——那是守卫在看错的地方。
+        src = (REPO / "src/easyup_biga/persistence/db.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "save_verdict")

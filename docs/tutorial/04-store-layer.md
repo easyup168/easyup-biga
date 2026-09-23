@@ -391,3 +391,9 @@ rm -rf skills/_scan_probe    # 恢复全绿
 ---
 
 上一章：[03 · 契约层](03-contract-layer.md)　|　下一章：05 · 第一个技能（编写中）
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。
