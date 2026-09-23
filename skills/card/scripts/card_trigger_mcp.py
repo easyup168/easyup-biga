@@ -75,6 +75,26 @@ def resolve_trigger_id(arguments: dict) -> str:
         "  live 核实真实 event 的字段名后，补进 _EVENT_ID_KEYS（见 P6）。")
 
 
+def _debug_log_args(args: dict) -> None:
+    """把入参的键 + 脱敏预览追加到 data/inbound-trigger-debug.log（best-effort）。
+
+    只记**键名**和一个短预览（前 24 字符），不落完整值 —— 键名就够对齐
+    `_EVENT_ID_KEYS`，而完整值可能是飞书消息正文，不该落盘。
+    """
+    try:
+        import json
+        from datetime import datetime, timezone, timedelta
+        cn = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
+        preview = {k: (str(v)[:24] + "…" if len(str(v)) > 24 else str(v))
+                   for k, v in args.items()}
+        log = _HERE.parent.parent.parent.parent / "data" / "inbound-trigger-debug.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"{cn}  keys={sorted(args)}  preview={json.dumps(preview, ensure_ascii=False)}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def handle_card_trigger(arguments: dict) -> str:
     """受理一次飞书 `/card`，返回投回飞书的 ACK 文本。**纯函数，离线可测。**
 
@@ -102,6 +122,11 @@ def build_server():
         # 其余调用上下文（含 event id）落在 **context。全部并起来给解析器认幂等键。
         args = {"command": command, "commandName": commandName,
                 "skillName": skillName, **context}
+        # 🔴 诊断：把入参的**键 + 脱敏预览**（不是完整值，避免落飞书消息正文）追加到
+        #    调试日志。这是 resolve_trigger_id 从哪个键取 event id 的**唯一现场证据** ——
+        #    首次真实 /card 用它对齐 _EVENT_ID_KEYS（自评最薄的一处）。best-effort，
+        #    记日志失败绝不影响受理。
+        _debug_log_args(args)
         try:
             return handle_card_trigger(args)
         except TriggerIdUnavailable as e:
