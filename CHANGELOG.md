@@ -15,6 +15,24 @@
 
 ## [未发布]
 
+### 🔧 变更 · `THIRD_PARTY_NOTICES.md` 补上真实依赖审计，不再是占位模板
+
+上一批开源合规材料（`901556f`）落地时，`THIRD_PARTY_NOTICES.md` 如实写着
+"this compliance pack does not attempt to infer the current BigA
+repository's actual dependency inventory. Before the next public release,
+replace this section"——诚实，但那次审计一直没人做。这次做了：AST 扫全仓
+`.py` 收集三方 import（`pyproject.toml` 没有 `[project.dependencies]`、
+没有锁文件，扫源码是唯一办法），核对到只有两个真三方包
+（PyYAML 6.0.3、pytest 9.0.3，都是 MIT，装的版本号与许可证都从
+`importlib.metadata` 直接读的，不是抄记忆）；确认没有任何改写/搬运的
+三方源码（扫了 `skills/`/`bin/`/`tools/`/`deploy/` 找"adapted
+from"/"vendored"等标记，零命中）；补上 OpenClaw 本身是独立装的 MIT
+运行时、不是本仓库打包分发的一部分。同时把「Data-provider notice」的
+通用清单换成真实的五个数据源（深交所官方 + 新浪日线/快讯、腾讯行情、
+东财股池——四个非官方接口），但**没有**编造 ToS/限流条款——那几列
+如实写"Not reviewed"，因为确实没做过那份法律审查，属于 R-3 同一个
+道理：不知道就说不知道，不能因为在写文档就放松这条。
+
 ### 🐛 修复 · AST 纯度守卫在无 git 退化模式下误判 `docs/external` 参考代码为第二份实现
 
 写批 H 分发提示词时跑 `test_scan_fallback.py`（模拟"没有 `.git`"场景，
