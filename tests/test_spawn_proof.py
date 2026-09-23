@@ -94,6 +94,59 @@ def wire(tmp_path, monkeypatch):
     return _w
 
 
+@pytest.fixture()
+def wire_rr(tmp_path, monkeypatch):
+    """像 `wire`，但 agent_runs 行带 `runtime_run_id`（批 J-II 结构化 join 用）。
+
+    `ours = [(agent, runtime_run_id 或 None), …]`；`runtime = [(agent, did), …]`
+    （复用 `fake_runtime_db`：第 i 条运行时记录的 `run_id` 是 `"run-{i}"`）。
+    """
+    def _w(ours: list[tuple[str, str | None]], runtime: list[tuple[str, str]]):
+        rows = [{"agent": a, "runtime_run_id": rr} for a, rr in ours]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: rows, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: rows)
+        monkeypatch.setenv(
+            "BIGA_RUNTIME_DB", str(fake_runtime_db(tmp_path / "rt.db", runtime)))
+    return _w
+
+
+class TestStructuredJoin:
+    """🔴 批 J-II · J2-3：有 `runtime_run_id` 时，spawn 核验用它与运行时
+    `subagent_runs.run_id` 做**结构化 join**，比按 `child_session_key` 段名的文本
+    匹配硬。这一组的全部理由是证明「新判据真的比旧的硬」，不是「新判据也能过」。
+    """
+
+    def test_伪造的runtime_run_id蹭不上别人的记录(self, wire_rr):
+        """market 那行 `runtime_run_id` 在运行时里根本不存在，但决策号出现在某条
+        `payload_json` 里（= 蹭上别人记录那个旧洞）。结构化 join 报伪造。"""
+        # 运行时只有一条属于本决策的记录，run_id="run-0"；agent_runs 记的却是 rt-fake。
+        wire_rr([("market", "rt-fake-never-spawned")], [("market", MINE)])
+        assert spawn_check.main([MINE]) == 1, "假 runtime_run_id 蹭上了别人的记录"
+
+    def test_同一场景下旧的LIKE判据会放过它(self, wire_rr):
+        """把 `runtime_run_id` 抹成 None（模拟历史行）——退回段名判据，
+        而 `child_session_key` 段名恰好是 `market`，于是**被放过**。
+        这正是 J2-3 要堵的洞：证明新旧判据在同一份数据上给出相反结论。"""
+        wire_rr([("market", None)], [("market", MINE)])
+        assert spawn_check.main([MINE]) == 0, (
+            "退回分支本应按段名放过 —— 若这里也报伪造，说明退回分支被写坏了")
+
+    def test_真实匹配的runtime_run_id通过(self, wire_rr):
+        """反方向：agent_runs 记的 `runtime_run_id` 与运行时那条的 `run_id` 一致
+        （`fake_runtime_db` 第 0 条是 `run-0`）⇒ join 命中 ⇒ 通过。
+        否则上面两条可以靠「join 永远不命中」平凡成立。"""
+        wire_rr([("market", "run-0")], [("market", MINE)])
+        assert spawn_check.main([MINE]) == 0
+
+    def test_历史行与新行混在同一决策里各走各的(self, wire_rr):
+        """market 有真 runtime_run_id（走 join、命中），news 是历史行（None，走段名、
+        命中）—— 任一 agent 缺 runtime_run_id 不让整条检查失效，也不互相污染。"""
+        wire_rr([("market", "run-0"), ("news", None)],
+                [("market", MINE), ("news", MINE)])  # news 是第 1 条 → run-1
+        assert spawn_check.main([MINE]) == 0
+
+
 class TestBoundToDecisionId:
     """🔴 复查那条洞的正面回归。"""
 

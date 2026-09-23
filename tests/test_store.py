@@ -144,6 +144,25 @@ class TestAppendOnly:
             with connect(db) as c:
                 c.execute("DELETE FROM raw_market_snapshot")
 
+    def test_迁移后agent_runs仍拒绝UPDATE和DELETE(self, db):
+        """🔴 批 J-II：v9 的 `RENAME COLUMN run_id TO ledger_id` 之后，只追加触发器
+        必须仍然真的拦得住写。
+
+        SQLite 的 `RENAME COLUMN` 会自动改写引用该列的触发器体 —— 名字还挂在
+        `sqlite_master` 里，但触发器体可能被改坏，而这**不会报错**。所以判据必须是
+        「真跑一次 UPDATE 和一次 DELETE 看拒不拒」，不是「触发器名字还在不在」。
+        （`db` fixture 走完整迁移到 v9，所以这里的 agent_runs 是改名之后的。）
+        """
+        record_agent_run(task_id=TID, agent="market", status="completed",
+                         started_at="a", finished_at="b", elapsed_ms=1,
+                         runtime_run_id="rt-x", path=db)
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("UPDATE agent_runs SET verdict='PASS'")
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("DELETE FROM agent_runs")
+
     def test_每张表都有只追加触发器(self, db):
         """🔴 判据取自**数据库里实际有哪些表**，不是手写清单。
 
@@ -185,6 +204,81 @@ class TestAppendOnly:
                 c.execute("INSERT INTO agent_runs "
                           "(task_id,agent,status,elapsed_ms,started_at,finished_at) "
                           "VALUES ('x','y','z',0,'a','b')")
+
+
+def _run_id_namespace_violations(conn):
+    """批 J-II 的守卫本体，抽成函数以便自证它两条子句都会红。
+
+    返回 `(type_bad, value_bad, checked)`：
+      · `type_bad`  名为 `run_id` 却不是 TEXT 的列
+      · `value_bad` 名为 `run_id`、有非 NULL 值却追不到 `decision_runs.run_id` 的
+      · `checked`   实际扫到、带 `run_id` 列的表（证明不是一张都没扫到的平凡通过）
+
+    🔴 判据**可派生**：从 `sqlite_master` 现有的表推出来，不是手写清单
+    （`test_roster_matches_config` 的教训：清单只加固当时想到的那几列）。
+    语义不同的第四个同名几乎必然过不了这两关 —— `agent_runs.run_id` 当年是
+    INTEGER，第一关就红。
+    """
+    canonical = {r[0] for r in conn.execute("SELECT run_id FROM decision_runs")}
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")]
+    type_bad, value_bad, checked = [], [], set()
+    for t in tables:
+        cols = [c for c in conn.execute(f"PRAGMA table_info({t})") if c[1] == "run_id"]
+        if not cols:
+            continue
+        checked.add(t)
+        for c in cols:
+            if (c[2] or "").upper() != "TEXT":
+                type_bad.append(f"{t}.run_id 声明为 {c[2]!r}，应为 TEXT")
+        for (val,) in conn.execute(
+                f"SELECT run_id FROM {t} WHERE run_id IS NOT NULL"):
+            if val not in canonical:
+                value_bad.append(f"{t}.run_id={val!r} 追不到 decision_runs")
+    return type_bad, value_bad, checked
+
+
+class TestRunIdNamespace:
+    """🔴 批 J-II：防止「第四个语义不同的 `run_id`」再长出来。
+
+    §4 实测过三个互不相同的东西共用 `run_id` 这个名字（编排执行尝试 / 账本行号 /
+    运行时 spawn id）。这一批收敛成一个：在 BigA 自己的库里，`run_id` 只指编排的
+    一次执行尝试（`decision_runs.run_id`）。守卫见 `_run_id_namespace_violations`。
+    """
+
+    def test_当前schema里run_id列全部合规(self, db):
+        with connect(db, readonly=True) as c:
+            type_bad, value_bad, checked = _run_id_namespace_violations(c)
+        assert type_bad == [], type_bad
+        assert value_bad == [], value_bad
+        # 🔴 非平凡：必须真的扫到了已知的两处 run_id 列，否则「全绿」可能是没扫到。
+        assert {"decision_runs", "run_events"} <= checked, (
+            f"守卫没扫到已知的 run_id 列，覆盖坏了：checked={sorted(checked)}")
+
+    def test_类型子句会红_加一个run_id_INTEGER列(self, db):
+        """P5 的常驻版：造一张带 `run_id INTEGER` 的表，断言类型子句抓到它。
+
+        （另有一次对**真实 schema** 的手工探针，见 CHANGELOG —— 这里用临时表证明
+        守卫函数本身不是平凡通过，不改动已发布的迁移。）
+        """
+        with connect(db) as c:
+            c.execute("CREATE TABLE _probe_int (run_id INTEGER, x TEXT)")
+            type_bad, _, checked = _run_id_namespace_violations(c)
+        assert "_probe_int" in checked
+        assert any("_probe_int" in m for m in type_bad), (
+            f"新加的 run_id INTEGER 列没被守卫抓到：{type_bad}")
+
+    def test_值子句会红_run_id追不到decision_runs(self, db):
+        """TEXT 但语义不对（值不是任何真实执行尝试）也要被抓到 —— 这一关正是
+        「类型对了但换了个含义」的兜底，`agent_runs.run_id` 当年靠第一关就红，
+        将来若有人用 TEXT 装第四个同名，靠的是这一关。"""
+        with connect(db) as c:
+            c.execute("CREATE TABLE _probe_txt (run_id TEXT)")
+            c.execute("INSERT INTO _probe_txt VALUES ('not-a-real-run-id')")
+            type_bad, value_bad, _ = _run_id_namespace_violations(c)
+        assert type_bad == []                      # 类型没问题
+        assert any("_probe_txt" in m for m in value_bad), (
+            f"追不到 decision_runs 的 run_id 值没被抓到：{value_bad}")
 
 
 class TestDecisionRecords:
@@ -307,6 +401,31 @@ class TestAgentRuns:
                              started_at="a", finished_at="b", elapsed_ms=1, path=db)
         assert len(list_agent_runs(agent="emotion", path=db)) == 2
         assert len(list_agent_runs(path=db)) == 3
+
+    def test_runtime_run_id落库并读回(self, db):
+        """🔴 批 J-II：spawn id 落进 agent_runs.runtime_run_id，能原样取回。
+
+        这是 J2-3 结构化 join 的全部原料 —— 落不进去，spawn 核验就没有硬绑定
+        可用，只能永远走文本匹配的退回分支（静默退化，看起来一切正常）。
+        """
+        record_agent_run(task_id=TID, agent="market", status="completed",
+                         started_at="a", finished_at="b", elapsed_ms=1,
+                         runtime_run_id="rt-abc123", path=db)
+        row = list_agent_runs(agent="market", path=db)[0]
+        assert row["runtime_run_id"] == "rt-abc123"
+
+    def test_runtime_run_id默认为空(self, db):
+        """不传就是 NULL —— 历史行与回放路径都靠它如实表达「不知道 spawn id」。"""
+        record_agent_run(task_id=TID, agent="market", status="completed",
+                         started_at="a", finished_at="b", elapsed_ms=1, path=db)
+        assert list_agent_runs(agent="market", path=db)[0]["runtime_run_id"] is None
+
+    def test_从verdict记账也能带runtime_run_id(self, db):
+        v = make_verdict()
+        record_verdict_run(v, started_at="a", finished_at="b", decision_id=TID,
+                           runtime_run_id="rt-fromverdict", path=db)
+        assert list_agent_runs(agent="emotion", path=db)[0]["runtime_run_id"] \
+            == "rt-fromverdict"
 
 
 class TestRawSnapshot:

@@ -387,6 +387,43 @@ ALTER TABLE agent_verdicts ADD COLUMN kind TEXT;
 """
 
 
+_V9 = """
+-- ───────────────────────────────────────────────────────────────
+-- v9：收敛 `run_id` 三同名（批 J-II）
+--
+-- 🔴 §4 实测：`run_id` 这个字面量在仓库里同时指三个互不相同的东西 ——
+--    编排的执行尝试（decision_runs.run_id，32 位 hex）、这张表的账本行号
+--    （INTEGER 自增）、以及运行时返回的 spawn id（SpawnHandle）。三个共用一个
+--    名字，任何一条 join / 报表都会拿到「语义正确但指向错误」的数字且不报错。
+--    这与 v4「decision_id 被迫承担五件事」是同一个病的反面。
+--
+-- 这一批把后两个从 `run_id` 里搬走。分两半、同一条迁移，因为都动 agent_runs 这
+-- 一张只追加表 —— 拆开就是对同一张表连开两刀。
+--
+-- ① agent_runs.run_id → ledger_id
+--    它从 Phase 1 起就是 INTEGER 自增账本行号，与编排的 run_id 毫无关系。
+--    实测全仓没有任何代码读这一列的**值**（唯一的引用是 list_agent_runs 的
+--    ORDER BY，随迁移一并改名）⇒ 现在改是免费的，等它有了第一个真实读取方就不是。
+--    🔴 不改 _V1 的建表语句：全新库先按 v1 建出 run_id，再由这条改名，是对的。
+--    ⚠️ RENAME COLUMN 会自动改写引用该列的触发器体；agent_runs 上的两个只追加
+--       触发器**不引用**任何列（RAISE 常量串），因此不受影响 —— 但要真跑 SQL 验
+--       （见 tests/test_store.py 的 J-II 探针），名字还在而触发器体被改坏正是
+--       RENAME COLUMN 可能的静默失败形状。
+--
+-- ② 加 runtime_run_id TEXT（nullable）
+--    落 SpawnHandle 里那个「运行时返回的真实 spawn id」（OpenClaw
+--    subagent_runs.run_id 的 UUID）。它有一个现成的、已在生产路径上的消费方：
+--    tools/verify/spawn_check.py 原先靠 payload_json LIKE '%<决策号>%' 文本匹配
+--    认 spawn（F3 残留），有了这一列就能升级成结构化 join。
+--    · nullable：历史行没有它，NULL 如实表达「迁移前落的账，不知道 spawn id」。
+--    · 不设 NOT NULL / 外键：subagent_runs 在**另一个库**（运行时的），外键建不了；
+--      回放路径不重新执行 agent，也不该有真实 spawn id。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE agent_runs RENAME COLUMN run_id TO ledger_id;
+ALTER TABLE agent_runs ADD COLUMN runtime_run_id TEXT;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -397,6 +434,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (6, _V6),
     (7, _V7),
     (8, _V8),
+    (9, _V9),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]
