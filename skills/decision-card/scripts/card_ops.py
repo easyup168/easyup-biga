@@ -69,7 +69,9 @@ def load_verdicts_and_refs(
         verdicts.append(v)
         refs.append(VerdictRef(agent=v.agent, verdict_id=vid,
                                content_sha256=meta["content_sha256"],
-                               contract_version=CONTRACT_VERSION))
+                               contract_version=CONTRACT_VERSION,
+                               # 🔴 批 J-I：从存量行的 run_id 列直接搬（历史行是 None）。
+                               run_id=meta.get("run_id")))
     return verdicts, refs
 
 #: 组装逻辑的版本。改了组装方式就要 +1，
@@ -99,6 +101,7 @@ def synthesize(
     generated_at: str = "",
     historical: bool = False,
     verdict_refs: list[VerdictRef] | None = None,
+    run_id: str | None = None,
 ) -> DecisionCard:
     """把 Verdict 组装成 Card。**纯函数，不碰 IO。**
 
@@ -150,6 +153,7 @@ def synthesize(
         generated_at=generated_at,
         elapsed_ms=elapsed_ms,
         input_verdict_refs=list(verdict_refs or []),
+        run_id=run_id,
     )
 
 
@@ -190,13 +194,22 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
 def comparable(card: DecisionCard) -> dict:
     """剥掉「每次必然不同」的字段，用于比较两张 Card 是否等价。
 
-    去掉 `generated_at` / `elapsed_ms` —— 它们描述的是**这次执行**，
+    去掉 `generated_at` / `elapsed_ms` / `run_id` —— 它们描述的是**这次执行**，
     不是**这个结论**。拿它们比较会让任何两次回放都「不一致」，
     于是一致性检查就退化成永远报警，很快没人看（又一个被忽略的守卫）。
+
+    🔴 批 J-I：`run_id` 属于同一类。回放**不是**原来那次执行尝试，它诚实地把
+    `card.run_id` 记成 None（不捏造，见 `replay.py`）——而原卡带着它真实的 run_id。
+    若不剥掉，一旦在线路径开始产出带 run_id 的卡，回放这些卡的 `--check` 就会因为
+    「这次执行 ≠ 上次执行」而误报「组装不一致」，把一个正确的无损回放判成坏的。
+    ⚠️ `input_verdict_refs` 里各 ref 自带的 `run_id` **不剥** —— 那是判定原件的血缘，
+       回放照原样带过去（`verdict_refs=list(original.input_verdict_refs)`），两边相同，
+       是要被核对的证据的一部分。
     """
     d = card.to_dict()
     d.pop("generated_at", None)
     d.pop("elapsed_ms", None)
+    d.pop("run_id", None)
     return d
 
 

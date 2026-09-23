@@ -15,6 +15,79 @@
 
 ## [未发布]
 
+### 🔴 新增 · 批 J-I：`run_id` capture 贯穿全链（EvidenceSet / Verdict / Card 绑定 Run）
+
+设计文档 §2 追加 5.1；总体设计 §43 短期重点第 2、3 条。**实现完成、离线全绿
+（1101→1112 条），四道探针 P1–P4 各自弄坏见红并已还原，但未交独立评审 —— 不自宣
+通过**（开工与评审分不同会话）。schema v9→**v10**。
+
+**只做 capture，不做 enforce**：让 `run_id` 能被存下来、传下去，**不改任何现有的判定/
+过滤逻辑**。`latest_verdict_ids()` 仍按 `decision_id` 聚合 —— 按 `run_id` 过滤（拒绝跨
+run 串读）要等真正的重试路径出现才做。**为什么现在只做一半**：追加 5.1 复盘发现，
+「把 run_id 存下来」一直有消费方（它从批 B 就存在，这里只是让 `agent_verdicts` /
+`evidence_sets` 等**已经在写别的字段**的表顺手多存一列），而「按 run_id 强制校验」没有
+消费方（没有重试路径就无意义）。现在是最便宜的时机：批 E 系列刚在这一层做完迁移，
+晚一步就要在同一层再开一次刀。
+
+**做了什么**（v10 迁移给 `agent_verdicts` / `evidence_sets` 各加一列 `run_id TEXT`，都
+nullable、不回填）：
+
+- **六个 skill 各加可选 `--run-id`**（照抄 `--evidence-set-id` 的 CLI 模式），落进
+  `save_fact_bundle(fb, run_id=…)` → `agent_verdicts.run_id`。⚠️ E-III 之后六个**全部**
+  走 `save_fact_bundle` 一条路径（不是旧提示词说的「risk 走 save_verdict，两条路」）。
+- **🔴 2b：`save_assessment` 从被 amends 的 fact 行「继承」run_id，不加 CLI 参数。**
+  事实行由 skill 写，判断行由 Agent 经 `amend_verdict.py --ref <fact_id> --stance …` 写 ——
+  它天然带着 `amends`→fact 行的指针。⇒ `save_assessment` 从 `load_verdict_meta(fact_id)`
+  取回那行的 `run_id` 直接用。理由不是省事：Agent 手传就可能传错，而「继承」在结构上
+  不可能与事实行不一致 —— **判据别建在可篡改的输入上**。
+- **`orchestrator._specialist_task` / `_risk_task` 给每一个 agent 的任务文本带
+  `--run-id {ctx.run_id}`**（六个都产落库记录，不只读冻结快照那三个）。与 `--task-id`
+  同机制：提示词说要加，跑完靠探针核实（capture 不 enforce）。
+- **`freeze_index_daily` / `save_evidence_set` 加 run_id**，编排器把 `ctx.run_id` 直接传进去
+  （Python 内部调用，不经 CLI）。`decision_runs` 早有 `evidence_set_id` 反向指针（run→set），
+  这一列是 set→run，直接、不用 join。
+- **`VerdictRef` / `DecisionCard` 各加 `run_id: str | None = None`**：`VerdictRef` 从存量行
+  的 `run_id` 列**直接搬**（`load_verdicts_and_refs` / `synthesize.py` 两处构造点都改），
+  `DecisionCard` 由 `card_ops.synthesize(run_id=ctx.run_id)` 填。两处 `from_dict` 都用
+  `.get("run_id")` —— 历史卡 JSON 没这个键，缺省 None，不是 `KeyError`。
+- **🔴 `comparable()` 把 `run_id` 与 `generated_at`/`elapsed_ms` 一同剥掉**：回放**不是**
+  原来那次执行尝试，它诚实地把 `card.run_id` 记成 None（不捏造），而原卡带着真实 run_id。
+  不剥的话，一旦在线路径开始产出带 run_id 的卡，回放它们的 `--check` 就会因「这次执行 ≠
+  上次执行」误报「组装不一致」。⚠️ `input_verdict_refs` 里各 ref 自带的 run_id **不剥** ——
+  那是判定原件的血缘，回放照原样带过去，两边相同，是要被核对的证据。
+
+**「继承」为什么在结构上不可能与事实行不一致（交接问题 4）**：两条独立证据 ——
+① `inspect.signature(save_assessment)` 里**没有** `run_id` 参数，`amend_verdict.py` 的
+argparse 里也没有 `--run-id`（实测 grep 过）⇒ Agent 在命令行上根本够不到这个值；
+② run_id 的唯一来源是 `meta`（按 `fact_id` 取回、且已校验 `kind=='fact'` 且同
+`(task_id, agent)` 的那一行）⇒ 存进去的 `assessment.run_id` 永远逐字节等于 `fact.run_id`
+（fact 有值继承有值、fact 是 None 继承 None）。两条都固化成测试（`TestInheritRunId`）。
+
+**探针记录（G-1：每道探针先弄坏、见红、还原）**：
+
+- **P1 · 在线落库真的存进去了**：把 `save_fact_bundle` 的 INSERT 里 run_id 硬改成 None ⇒
+  `assert None == 'cd5af379…'` 报红。另 `evidence_sets.run_id` 同样落库并取回比对。
+- **P2 · 没有 run_id 的历史行读得回、不被拒**：把 `DecisionCard.from_dict` 的 `.get("run_id")`
+  改成必填 `d["run_id"]` ⇒ 历史卡 JSON（无此键）当场 `KeyError: 'run_id'` 报红。还原后
+  `load_verdict`/`load_outcome`/`load_verdict_meta`/`verify_verdict_refs` 对 NULL 行全部不报错。
+- **P3 · 合成卡与 ref 追到同一个 ctx.run_id**：把 `synthesize` 里传给 `DecisionCard` 的
+  `run_id=run_id` 改成 `None` ⇒ `card.run_id` 断链为 None、报红（而 VerdictRef 仍带 run_id，
+  破坏点精确）。
+- **P4 · 回放不捏造 run_id**：把 `comparable()` 的 `d.pop("run_id")` 注释掉 ⇒ 回放带 run_id
+  的卡 `{'run_id': 'cd5af379…'} != {'run_id': None}` 误判不一致、报红（而「回放历史卡 run_id
+  保持 None」那条仍绿，破坏点精确）。
+
+**最可能被攻破的一处（交评审重点看）**：run_id 落进 `agent_verdicts` 的那一步，依赖
+**Agent 真的在跑 skill 时带上了 `--run-id`**。离线探针只证明了管线通（skill 接得住、存得进、
+传得出），没证明**live 的 Agent 确实照提示词加了这个参数** —— 与 `--task-id`/`--evidence-set-id`
+是同一种「提示词说要加、靠探针核实真加了」的机制，而核实那一步需要一次 live 端到端
+（本批未做，属 capture 的固有性质：不 enforce，漏了就是 None，不报错）。相比之下
+`evidence_sets.run_id`（编排器 Python 内部传 `ctx.run_id`，已由
+`test_JI_evidence_set落库带本次run_id` 端到端钉住）与 `save_assessment` 的继承（结构强制）
+不依赖 LLM 顺从，是可靠的；唯独 **fact 行这一列的捕获率取决于 Agent 是否照提示词加
+`--run-id`** —— 这是本批最软的一环，也是「capture 不 enforce」的固有性质（漏了是 None，
+不报错、不阻断出卡）。真正堵死它要等 enforce 那一批（重试路径出现后按 run_id 强制校验）。
+
 ### 🔴 变更 · 批 J-II：收敛 `run_id` 三同名（`agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库）
 
 设计文档 §4「`run_id` 这个名字现在指三个互不相同的东西」。**✅ 评审复核通过**

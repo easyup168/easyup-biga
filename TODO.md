@@ -837,16 +837,10 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       🔴 2026-09-22 复盘：把 run_id **字段补上存下来**这部分不该也一起排期——
       现在就有消费方（batch B 起 run_id 就存在），且批 E 正在同一层做迁移，
       晚做要再开一次刀。已拆成独立小批，见下方「批 J」。
-- [ ] 批 J · 身份闭环 —— **原「批 E-I 收尾 · run_id 贯穿全链」，2026-09-23 扩容并改名**
+- [x] 批 J · 身份闭环（J-I + J-II 均已评审复核通过）—— **原「批 E-I 收尾 · run_id 贯穿全链」，2026-09-23 扩容并改名**
       （设计见 SSOT §6 批 J；改名理由：实测发现 `run_id` 在库里指**三个**
       互不相同的东西，另外两处必须与第一处一起改，名字再叫「E-I 收尾」
       会让开工会话按扫尾活的体量安排验证）
-  - [ ] 批 J-I · `run_id` capture 贯穿全链 —— 分发提示词已就绪
-        范围与原「E-I 收尾」**一字未改**：`agent_verdicts` 加列，六个 skill
-        脚本各加可选 `--run-id`，`VerdictRef`/`DecisionCard` 各加字段。
-        不做 enforce（`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等
-        真正的重试批次。
-        ⚠️ 等批 E-II **与** E-III 都合并之后开工（三批都要碰同一批 skill 脚本）
   - [x] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
         —— ✅ 评审复核通过（2026-09-23）。schema v9；live 实测
         `SpawnHandle.runtime_run_id` 与运行时 `subagent_runs.run_id` **确为同一
@@ -859,7 +853,47 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         注意到这个转变** —— review-prompt §3「静默 fail-open」的形状。
         修法便宜：加一条 **per-decision 一致性检查**（同一个 decision 里只要有
         一行带 `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理，
-        R-3，不是退回弱判据）。⇒ 留给批 J-I 之后第一个「六个都带上了」的批次。
+        R-3，不是退回弱判据）。⇒ 见下方「两条 enforce 欠账」。
+  - [x] 批 J-I · `run_id` capture 贯穿全链 —— ✅ 评审复核通过（2026-09-23）
+        schema v10（`agent_verdicts` / `evidence_sets` 各加 `run_id`）；六个 skill
+        各加 `--run-id`；`VerdictRef`/`DecisionCard` 各加字段；`comparable()` 把
+        **卡级** `run_id` 一并剥掉（回放不是原来那次执行，不剥就会把无损回放误判
+        成不一致），但 `input_verdict_refs[].run_id` **不剥** —— 那是原件血缘，
+        串了别的 run 仍抓得到。教程第 32 章。1101 → 1118 条。
+        **2b 裁定落地**：`save_assessment` 的 `run_id` 从被 amends 的 fact 行
+        **继承**，不加 CLI 参数 —— 评审独立验过结构证明（`save_assessment` 签名无
+        此参数、`amend_verdict.py` argparse 也没有 ⇒ Agent 够不到）与行为证明
+        （关掉继承当场报红）。
+        ✅ 顺带验证了批 J-II 那条**可派生**守卫的回报：`run_id` 列的命名空间检查
+        **零改动**自动覆盖了本批新加的两列（实测 checked 含 `agent_verdicts` /
+        `evidence_sets`）—— 当初没写成清单式，这次就不用回去改它。
+
+### 🔴 两条 enforce 欠账（都归「引入同 decision_id 重试」的那一批）
+
+两条的根因都在**分发提示词**，不在实现 —— 两批都严格照提示词做了。记在这里
+免得随 commit 沉下去。
+
+1. **`runtime_run_id` 的强绑定是 per-agent、按数据有无启用的**（批 J-II）。
+   `NULL` 今天的含义是「迁移前的老行」，等六个 agent 都走上新路径之后会悄悄
+   变成「也可能是漏填的新行」，而没有任何东西会注意到这个转变。
+   ⇒ 加 **per-decision 一致性检查**：同一个 decision 里只要有一行带
+   `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理（R-3，
+   不是退回弱判据）。
+
+2. 🔴 **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）。它是 Agent 从命令行
+   抄下来的字符串，直接进 INSERT —— 那条 INSERT 里其余每个字段都经过
+   `FactBundle` 构造 + 规范序列化 + 严格重建，唯独它是挂在旁边的裸参数，
+   **绕过了批 A-I 立的「写边界重校验」原则（A3）**。
+   对比 `save_assessment`：同一个字段在那边是结构上不可能错的（继承、Agent
+   够不到）。同一批里两个写入点，一个结构安全、一个完全不设防。
+   ⚠️ 真正难受的不是「Agent 忘了加」（那是 `None`，**看得见**），是**抄错**：
+   存进一个合法但指错的 run_id，不报错、无人读，等到 enforce 那一批才发现
+   攒了一批脏血缘。先例 `Evidence.raw_hash` 没有这个毛病，因为它是**算出来的**。
+   ⇒ 修法便宜：`decision_runs` 有 `(run_id, decision_id)`，而 `fb.task_id` 就是
+   decision_id ⇒ 「给了 `run_id` 就必须在 `decision_runs` 里存在、且属于这个
+   `task_id`」，一条 SELECT。**这是写边界校验，不是 `latest_verdict_ids()` 过滤** ——
+   后者才是追加 5.1 说的那个 enforce，两件事别混。
+
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。排在批 J 之后、
       批 F 之前：它给 raw 加溯源字段，那些字段要指向一个不含歧义的 `run_id`

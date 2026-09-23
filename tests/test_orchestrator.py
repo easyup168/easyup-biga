@@ -374,9 +374,29 @@ class TestSnapshotFreeze:
     def test_specialist_task_只给日线三个agent带esid(self, db):
         orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
         for a in ("market", "sector", "technical"):
-            assert "--evidence-set-id" in orch._specialist_task(a, "BIGA-20260101-001", "es-x")
+            assert "--evidence-set-id" in orch._specialist_task(a, "BIGA-20260101-001", "es-x", "rid-x")
         for a in ("emotion", "news"):
-            assert "--evidence-set-id" not in orch._specialist_task(a, "BIGA-20260101-001", "es-x")
+            assert "--evidence-set-id" not in orch._specialist_task(a, "BIGA-20260101-001", "es-x", "rid-x")
+
+    def test_JI_evidence_set落库带本次run_id(self, db):
+        """🔴 批 J-I item 4：编排器把 ctx.run_id 传进 freeze_index_daily ⇒
+        evidence_sets.run_id == 这次 run 的 id。这条接线只有代码、容易漂，钉住它。"""
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        orch.run(ctx)
+        with connect(db, readonly=True) as c:
+            got = c.execute("SELECT run_id FROM evidence_sets").fetchall()
+        assert got and all(r[0] == ctx.run_id for r in got), (
+            f"evidence_sets.run_id 没绑到本次 run：{[r[0] for r in got]} != {ctx.run_id}")
+
+    def test_JI_六个agent的任务文本都带run_id(self, db):
+        """🔴 批 J-I item 3：--run-id 给**每一个**产落库记录的 agent（含 risk），
+        不只读冻结快照那三个。"""
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        RID = "deadbeef" * 4
+        for a in ("market", "sector", "technical", "emotion", "news"):
+            assert f"--run-id {RID}" in orch._specialist_task(a, "BIGA-20260101-001", "es-x", RID)
+        assert f"--run-id {RID}" in orch._risk_task("BIGA-20260101-001", [1, 2], RID)
 
     def test_freeze失败则整体FAILED(self, db):
         """freeze 抓不到 ⇒ 异常上抛 ⇒ FAILED（fail-closed，不退回各自抓一份）。"""
