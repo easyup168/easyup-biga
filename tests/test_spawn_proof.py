@@ -78,6 +78,38 @@ def fake_runtime_db(path: pathlib.Path, runs: list[tuple[str, str]]) -> pathlib.
     return path
 
 
+
+def fake_runtime_db_task_runs(path: pathlib.Path,
+                              runs: list[tuple[str, str]],
+                              execs: list[tuple[str, str]] = ()) -> pathlib.Path:
+    """造一份**只有 `task_runs`** 的运行时库 —— 这是编排器路径的真实形状。
+
+    `runs = [(agent, decision_id), …]`   真 spawn（`task_kind` 为 NULL，run_id 是 uuid 形）
+    `execs = [(agent, decision_id), …]`  Specialist 自己在会话里跑 shell
+                                          （`task_kind='exec'`，run_id 形如 `exec:<名>`）
+
+    字段形状照抄真库 —— 实测 `BIGA-20260922-001` 在 `task_runs` 里有 12 行真 spawn
+    与 5 行 exec，而 `subagent_runs` 里一行都没有。
+    """
+    conn = sqlite3.connect(path)  # store-exempt: 外部运行时库的仿件
+    conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                 " child_session_key TEXT, requester_session_key TEXT,"
+                 " task_kind TEXT, task TEXT, created_at INTEGER)")
+    for i, (agent, did) in enumerate(runs):
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)", (
+            f"uuid-run-{i}", agent, f"agent:{agent}:subagent:uuid-{i}",
+            "agent:main:orchestrator-abc123", None,
+            f"本次决策编号 {did}。请给出…", 2000 + i))
+    for i, (agent, did) in enumerate(execs):
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)", (
+            f"exec:name-{i}", agent, f"agent:{agent}:subagent:uuid-x{i}",
+            f"agent:{agent}:subagent:uuid-x{i}", "exec",
+            f"cd ~/ws && python3 skills/… --task-id {did}", 3000 + i))
+    conn.commit()
+    conn.close()
+    return path
+
+
 @pytest.fixture()
 def wire(tmp_path, monkeypatch):
     """`wire(agent_runs里的, 运行时记录)` —— 两侧分别给。"""
@@ -792,3 +824,71 @@ def test_扫到了活口径():
     seen = [p for p in repo_files(".py", ".md")
             if _STALE in p.read_text(encoding="utf-8")]
     assert len(seen) >= 3, f"只扫到 {len(seen)} 处，扫描范围可能坏了"
+
+
+class TestTaskRunsSource:
+    """🔴 2026-09-23 · 运行时把一次 spawn 记在哪张表不是恒定的。
+
+    实测 `BIGA-20260922-001`（至今唯一一张编排器真实产出的卡）：
+    `subagent_runs` **0 行**，`task_runs`（排除 exec）**12 行**。
+    原来只读 `subagent_runs` ⇒ 对那张真卡报「判不了」——一张真卡、一次真 spawn，
+    核验却给不出结论。⇒ 两张都读。
+    """
+
+    def _wire(self, tmp_path, monkeypatch, ours, runs, execs=()):
+        rows = [{"agent": a} for a in ours]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: rows, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: rows)
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(fake_runtime_db_task_runs(
+            tmp_path / "rt.db", runs, execs)))
+
+    def test_只有task_runs时也认得出spawn(self, tmp_path, monkeypatch):
+        """P1：编排器路径的真实形状。去掉 task_runs 分支 ⇒ 这条红。"""
+        did = "BIGA-20260922-001"
+        self._wire(tmp_path, monkeypatch, ["market"], [("market", did)])
+        proof = pa.spawn_proof(did)
+        assert proof.readable
+        assert proof.rows == 1, "task_runs 里的真 spawn 没被算进来"
+        assert proof.per_agent["market"] == (True, True)
+
+    def test_exec行不算被spawn(self, tmp_path, monkeypatch):
+        """P2：`task_kind='exec'` 是 Specialist 自己跑 shell，不是「被起起来」。
+
+        不排掉它 ⇒ 一个只跑过 exec、从未被 spawn 的 agent 会被判成 spawn 过，
+        而这正是这套核验要抓的伪造形状。
+        """
+        did = "BIGA-20260922-002"
+        # market 真被 spawn；sector 只有 exec 行
+        self._wire(tmp_path, monkeypatch, ["market", "sector"],
+                   [("market", did)], [("sector", did)])
+        proof = pa.spawn_proof(did)
+        assert proof.per_agent["market"] == (True, True)
+        assert proof.per_agent["sector"] == (True, False), \
+            "只有 exec 行的 agent 被当成 spawn 过了 —— exec 过滤没生效"
+
+    def test_两张表都取不到才算判不了(self, tmp_path, monkeypatch):
+        """R-3：少一张表 ≠ 读不到。两者在调用方那里是完全不同的结论——
+        「零条记录」会被判成伪造，「判不了」不会。"""
+        empty = tmp_path / "empty.db"
+        # store-exempt: 外部运行时库的仿件（建库但一张表都不建）
+        sqlite3.connect(empty).close()
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: [], raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: [])
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(empty))
+        assert pa.spawn_proof("BIGA-20260922-003").readable is False
+
+    def test_只有subagent_runs的历史卡不受影响(self, tmp_path, monkeypatch):
+        """回归：C-II 之前的卡记在 `subagent_runs`，加了第二个来源之后仍然认得。"""
+        did = "BIGA-20260921-001"
+        rows = [{"agent": "emotion"}]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: rows, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: rows)
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(fake_runtime_db(tmp_path / "rt.db", [("emotion", did)])))
+        proof = pa.spawn_proof(did)
+        assert proof.readable and proof.rows == 1
+        assert proof.per_agent["emotion"] == (True, True)
+
