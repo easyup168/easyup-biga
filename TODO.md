@@ -972,7 +972,9 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       归档四个平面，各自选型与触发条件写清楚（历史数据面触发于 §45 开工，
       分析查询跟 §46 选股闭环，Provider 归档按数据集类型——全市场/批量
       从建那刻就走文件，单标的/小体积留 SQLite；触发条件由用户拍板确认）。
-      **两个前置条件真正都已满足，可以开始写分发提示词**
+      设计探活已补完（完整链路、`coordinator.py` 会被静默破坏的消费方、
+      `Evidence.raw_hash` 语义耦合都已查清楚）。**分发提示词已就绪**
+      （`docs/guide/orchestration-kickoff-prompt.md` 「批 I」节）
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 设计探活已完成（2026-09-23），
       按外部材料自己的分阶段建议拆成两批：
   - [x] 批 G-I · Outbox（Outbound Only）—— **已落地（2026-09-23）**。四类事件

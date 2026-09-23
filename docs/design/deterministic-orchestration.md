@@ -654,6 +654,86 @@ raw 层现在存的**不是 raw**：链路是 `get_json()` → `json.loads` →
 
 排在批 J 之后、批 F 之前：它给每条 raw 记录加溯源字段，
 那些字段要指向哪个 `run_id` —— 得先有一个不含歧义的 `run_id`。
+✅ 这个子问题已经解决：`orchestrator.py:201`
+`save_fact_bundle(risk_fb, run_id=ctx.run_id)` 确认 risk 的事实包和其余
+Stage 1 六个 skill 走同一个 `ctx.run_id`（批 F 复用了 J-I 的 capture
+路径），不存在"risk 有没有独立调用点"这个分支。
+
+#### 设计探活（2026-09-23）：损失点比原始描述更早，且有一处会被静默破坏的消费方
+
+开工前把这条链从头跟了一遍，不止是"json.dumps 重新排了序"这一步。
+
+**完整链路（比原始 bullet list 更早出现损失）**：
+
+```text
+skills/_sources/http.py::get_text()   HTTP body → str（按 encoding 参数解码，默认 utf-8）
+        ↓
+skills/_sources/http.py::get_json()   str → Python 对象（json.loads），原始文本就地丢弃
+        ↓
+各 collector（market_calc.py 等六个 calc/scan skill）
+        把 get_json() 的返回值揣进 c.raw: list[(source, payload, src_as_of)]
+        ↓
+skills/_store/db.py::save_raw_snapshot()
+        blob = json.dumps(payload, sort_keys=True)   ← 原始设计描述点名的这一步
+        sha  = payload_sha256(payload)                ← 同样基于重排后的对象
+        ↓
+raw_market_snapshot.payload_json / content_sha256
+```
+
+原始设计描述只点名了最后一步（"json.dumps(sort_keys=True) 落盘"），但真正
+第一次损失发生在 `get_json()` 内部——原始响应文本被 `json.loads` 解析成
+Python 对象后，那段文本**没有被保留到任何地方**，六个 collector 攒进
+`c.raw` 的从一开始就是解析后的对象，不是原始文本。⇒ 只改
+`save_raw_snapshot` 的序列化方式不够，`c.raw` 这条累积路径本身就已经
+丢了原始文本，需要往回追到 `get_json()` 才能补上。
+
+🔴 **`get_text()` 这一层还有一个原始设计描述完全没提到的损失，本批
+建议明确排除在范围外**：它按 `encoding` 参数（默认 `utf-8`）把 HTTP 响应
+体解码成 `str`，如果某个数据源实际编码不是 utf-8（比如 GBK，国内老牌
+财经站常见），这一步解码本身就可能已经出错，且比"键序被打乱"更隐蔽——
+错误的解码在多数情况下不会抛异常，只会产出乱码字符串，静默地把错误的
+文本当成"原始"存下去。⇒ **本批只解决"文本级"的原始性**（保留
+`get_json()` 解析前的那段 `str`，不再重新 `json.dumps`），**不解决
+"字节级"的原始性**（`get_text()` 的编码假设是否正确）——除非分发提示词
+的建造会话核实后发现某个现用数据源的编码假设确实是错的，那是一个独立
+问题，不在本批顺手带过。
+
+**🔴 一个会被静默破坏的现有消费方，普查中才找到**：`skills/_snapshot/
+coordinator.py:191-198` 的 `load_raw_snapshot` 消费方——
+
+```python
+snap = load_raw_snapshot(...)
+raw = snap["payload"]          # 当前期望：一个可切片的 list（K 线数组）
+if bars > len(raw): ...
+```
+
+它把 `payload` 当**已解析对象**在用（`len()`、切片）。如果本批把
+`payload_json` 的语义从"重新序列化的 JSON"直接换成"原始文本"，这个消费方
+会拿到一个 `str`，`len(raw)` 数的是字符数不是 K 线根数，且不会报错——
+这正是本仓库最想防的那种"看起来正常、其实错了"的静默破坏。⇒ **这一批
+必须是新增字段，不是替换语义**：`payload_json`/`load_raw_snapshot()`
+返回的 `payload` 继续是解析后的对象（保持 `coordinator.py` 不用改），
+原始文本另存一个新字段（例如 `raw_text`），`content_sha256` 改成基于
+这个新字段计算——具体列名、`save_raw_snapshot`/`load_raw_snapshot` 的
+签名怎么变，留给分发提示词细化，但"不改 `payload` 现有语义"这条边界要
+守住。这与 `E-I` 的 `LegacyAdapter`、`K` 的卡级冻结名单回退是同一个
+"新增字段、旧读法继续成立"模式，不发明第四种写法。
+
+**`Evidence.raw_hash` 的语义耦合，需要在实现时留一句话**：
+`skills/_contract/evidence.py` 的 `raw_hash` 字段文档写着它指向
+`raw_market_snapshot.content_sha256`。本批之后 `content_sha256` 的计算
+依据变了（从"重排后的对象"变成"原始文本"），但由于 raw 层只追加、旧行
+不改写，这是"新行语义变了、旧行不受影响"的标准形状（同 schema 演进的
+惯例），不需要做迁移，只需要在 `payload_sha256` 或建表注释里写清楚
+"这一列的计算依据在某个 schema 版本之后变了"，免得将来有人拿新旧两种
+`content_sha256` 直接比较。
+
+**六个调用方需要跟着改，不是只改 `skills/_store/db.py` 内部实现**：
+`market_calc.py` / `emotion_calc.py` / `technical_calc.py` /
+`sector_calc.py` / `news_scan.py` / `skills/_snapshot/coordinator.py` 都调用
+`save_raw_snapshot`——`payload` 参数的形状变化（多一个原始文本）是一次
+真正的签名变更，六处调用点都要跟着改，普查已经点名，不需要分发提示词
+的建造会话重新搜一遍。
 
 ### 批 K · Pipeline Registry + Agent Registry（数据架构 §16 / §17）
 
