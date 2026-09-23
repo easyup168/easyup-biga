@@ -15,6 +15,87 @@
 
 ## [未发布]
 
+### ✨ 新增 · 批 L —— `cn.trading_calendar`：第一张真实的 `fact_*` 表，`market_is_open` 认节假日了
+
+`skills/_sources/tradetime.py` 长期白纸黑字写着「已知边界：不认节假日」——
+纯 weekday 判据会把工作日上的法定节假日（元旦、国庆首日等）当成开市。它有两个真实
+生产消费方（`news-scan` 判「此刻是否连续竞价」、`emotion-calc` 判「这个数是真零还是
+还没产生」），却零测试覆盖。这一批修这个缺陷，顺带做成一件更大的事：把
+`architecture.md` §5.2 画了很久的 `raw → fact → derived` 分层图里的**中间那层**第一次
+落成真实 schema —— 在此之前十张表里只有 raw 层被实例化过，`fact_*` 只存在于文档。
+用一个非行情、体量小、判据清楚的数据集给 §45「第一版完整市场数据」那一批打样。
+
+**为什么这么设计**（几处不显然的裁定）：
+
+- **数据源选深交所官方 monthList，是探活后综合选出来的**（dev-workflow 第 1 条：设计
+  先探活）。把能免鉴权拿到的都真打了一遍 curl：新浪 `klc_td_sh.txt` 可达但返回**加密串**，
+  解密要一个 JS 引擎（重依赖，不收）；东财 `RPTA_WEB_TRADE_DATE` 可达但**数据脏**
+  （把周日列成交易日、无未来、尾部塞 `20311231` 哨兵行）；timor.tech 放假 API 可达但它是
+  **办公日历不是交易所日历**——调休上班的周末它标工作日，而交易所那天不开市（用新浪
+  日线实测核实：2026-02-14 等调休日 `traded=False`）。只有深交所官方 monthList
+  一手官方、结构化 JSON、每月每天带交易标志、缺日/未发布当场抛错——判据最清楚。
+  这也与仓库对 `a-stock-data`（Provider Catalog / 接口参考）的既定定位一致，`jyrq`/`jybz`
+  字段形状抄自它。
+- 🔴 **一条诚实写出来的部署约束**：`www.szse.cn` 从本项目当前唯一部署环境（WSL）
+  **连不通**（TCP 握手后挂死，HTTPS/HTTP 都 45s 超时）。这不是适配器的 bug，是这台机器
+  到交易所站点的网络事实。后果：本环境里 `fact_trading_calendar` 保持空表、
+  `market_is_open()` 恒走 weekday 回退（安全方向）。⇒ **解析层由离线 fixture 全测、
+  落库链由注入桩 fetcher 全测**（联网那层不进离线测试，沿用禁网围栏）；真实抓取会在
+  能连通深交所的运行环境里把日历填进来，届时 `market_is_open()` 自动从回退切到查表。
+  消费方（`market_is_open`）与它的读取关系**真实且被测**，只是数据写入取决于网络可达性
+  ——不是 L-1 的「零消费方」。写下来是因为：认证/取数类故障，第一反应总会怪新系统，
+  而这里的空表是网络事实，排查方向天生容易错。
+- **回退方向绝不能倒**（红线 R-3）：`is_trading_day()` 查不到返回 `None`，
+  `market_is_open` 把 `None` 当「可能开市」回退到 weekday——顶多让依赖它的静默判据**多报**
+  一条缺失项（Card 更保守），**绝不把「查不到」当「休市」**：后者会在真实交易日里以为
+  休市，是危险得多的方向。探针 P5 钉死「无数据/超范围时结果与改之前逐一相同」。
+- **`session_in_progress()` 不改，并加特征测试锁住**：它回答的是「这批数据声明的交易日
+  过完了没」（纯时间比较：声明的 trade_date 是不是今天且未到收盘），跟「今天是不是
+  节假日」不是同一个问题。给它加节假日感知会把 `emotion` 推向危险方向——节假日的 0
+  会被当成真「冰点」而不是「还没产生」。它周末上午也返回 True 是**设计如此**（那天的
+  数据确实还没过完），不是缺陷。加特征测试是防后续会话顺手「一起改了」。
+- **完整性 fail-closed**：`parse_trading_calendar` 要求响应覆盖该月每一个自然日，
+  缺日/未发布/多出别月的日期都当场抛错——宁可整月拒绝，也不放行半份月历把「没数据」
+  和「休市」混成一谈。
+- **不接 `SnapshotCoordinator`**：那套解决「同一次决策运行内多个 Specialist 必须看同一份
+  易变网络数据」；交易日历是低频更新的只读参考表，一年抓几次即可，硬套会引入一套不必要
+  的每次-运行开销。日历落 raw 直接调 `save_raw_snapshot`。
+- **只追加、历史事实不 UPDATE**：交易所若事后补发调整（临时增/删交易日），写更晚
+  `retrieved_at` 的新行，`is_trading_day` 按 `retrieved_at` 取最新一条——覆盖旧行就
+  没法回答「我们当时看到的日历是什么」（与 raw 层同一条 L-8 先例）。
+
+**建的东西**：
+
+- schema **v15**：`fact_trading_calendar`（`trade_date`/`is_open`/`source`/`as_of`/
+  `retrieved_at`/`snapshot_id`→raw/`created_at`，`CHECK(is_open IN (0,1))`）——
+  这个仓库**第一张真实的 `fact_*` 表**，接 `_append_only()` 触发器。
+- `skills/_sources/szse.py`：深交所日历 Provider，照 `sina.py` 的分层——
+  `parse_trading_calendar`（不联网纯函数，能对已存 raw 重放）+ `fetch_trading_calendar`
+  （联网薄函数）+ `refresh_trading_calendar`（抓取→原样落 raw→归一化进 fact 表，
+  fetcher 可注入以离线测落库链）。`TradingCalendar.server_as_of = None`（F16：端点不带
+  单一时刻，调用方用取回时刻当 as_of）。
+- `skills/_store/db.py`：`save_trading_calendar`（只追加）+ `is_trading_day`（读最新一条，
+  库/表不存在返回 `None` 不抛错）。
+- `skills/_sources/tradetime.py`：`market_is_open` 加 `path` 参数、有日历数据以它为准、
+  查不到回退 weekday（`session_in_progress` 不动）。
+- 测试：`tests/test_tradetime.py`（21 条特征测试锁基线）+ `tests/test_szse.py`
+  （解析/落库/日历感知/回退/免鉴权，P1/P2/P4/P5/P6）+ `tests/test_store.py`
+  给 `fact_trading_calendar` 加只追加回归。
+
+**🔴 探针记录**（G-1：每道新守卫先弄坏、见它红、再还原）：
+
+- **P3 · `fact_trading_calendar` 只追加**：从 v15 迁移里删掉 `_append_only()` 调用，
+  跑 `test_每张表都有只追加触发器` → 红：`AssertionError: 这些表可被改写：
+  ['fact_trading_calendar']`（自动发现新表、要求它接触发器的判据真的生效）。补回 → 绿。
+- **P4 · `market_is_open` 的日历查询是载荷代码**：把 `market_is_open` 临时改回
+  weekday-only（保留 `is_trading_day` import 但不调用），跑 `test_元旦被判成休市` →
+  红：`AssertionError: assert True is False`（喂了日历数据元旦仍报开市，证明日历分支
+  不是摆设）。还原 → 绿。
+- **解析完整性 fail-closed 是载荷代码**：临时删掉 `parse_trading_calendar` 的整月完整性
+  校验，跑 `test_缺日抛错` / `test_多出别的月份的日期抛错` → 红：两条都
+  `Failed: DID NOT RAISE SourceError`（残月/串月被静默放行）。还原 → 绿。
+- 三次探针跑完 `grep -rn PROBE skills/` 确认工作区无残留。
+
 ### 🔧 变更 · 文档规约放过 `docs/external/` 下未跟踪的文件
 
 `.gitignore` 已把 `/docs/external/*` 整体挡住（运营者的决策，2026-09-23：那目录
