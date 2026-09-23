@@ -15,6 +15,82 @@
 
 ## [未发布]
 
+### 🔴 新增 · 批 G-I：外发通知 outbox（Outbound Only，确定性编排设计文档 §6 批 G）
+
+**为什么**：出卡是一次 170~200 秒的**同步**调用，而「Card 完成 / UNKNOWN /
+risk 否决 / 运行失败」这四类事件此前**没有任何外发通道** —— 人只能守着终端等
+它跑完。这一批建一条「推」的通道：与 Card **同事务**入队一行 `notification_outbox`，
+一个独立 worker 异步把它投出去。**只做推，不接受任何飞书方向的输入**（那是批 G-II：
+异步执行、飞书 trigger、`main` 移出路由、`deploy/openclaw/` + R-2 —— 本批一概不碰，
+没有新的攻击面）。
+
+建的东西：
+
+- `skills/_contract/notify.py`（契约层唯一一份）：`NOTIFICATION_EVENT_TYPES` 四类白名单
+  + `card_event_type()`（把一张**已产出**的卡分到 `risk_block`/`card_unknown`/`card_completed`）
+  + `NOTIFY_FAILURE_STATES`。分类判据放契约层的理由同 `RunState`/`RUN_ORIGINS`：
+  `enqueue` 落库校验、`persist` 分类两处都 import 这一份，两份必漂。
+  🔴 `risk_block` 判据是 `stance==VETO_STANCE` **不是 status 猜** —— `status='BLOCK'` 也
+  可能是判官自己权衡的（无否决），而 veto stance 是契约里「制衡层否决」的唯一权威信号。
+  🔴 `card_unknown` 判据取「任一 verdict UNKNOWN 或有缺失项」，**故意偏向报不确定**
+  （R-3：UNKNOWN/缺失必须显式推出去，不藏在一个 `card_completed` 背后让人以为一切正常）。
+- schema **v11** 两张只追加表：`notification_outbox`（幂等键 `(event_type, aggregate)`）
+  + `notification_deliveries`（投递尝试日志）。
+- `_store.db`：`save_card_with_notifications`（Card + outbox 同事务）、`enqueue_run_failed`、
+  `record_delivery`、`undelivered_notifications`、`list_deliveries`；`save_card` 收成它的
+  薄封装（不入队通知）。
+- `RunState.NOTIFICATION_PENDING`（插在 `CARD_PERSISTED` 与 `COMPLETED` 之间）。原本推迟到
+  批 G（无消费方），现在有了生产方（编排器入队）与消费方（`STATE_MEANING` + worker）。
+  编排器走 `CARD_PERSISTED → NOTIFICATION_PENDING → COMPLETED`；`_fail()` 入队 run_failed；
+  `run_ledger.cmd_move` 在终态转移时入队 run_failed（bash 侧的 TIMEOUT/CANCELLED）。
+- `skills/decision-card/scripts/notify_worker.py`：outbox 的读取方，可替换投递接口
+  `Deliverer` + 桩 `StdoutDeliverer`（真飞书 adapter 是批 G-II 的生产方，本批不接通真实 API）。
+
+**🔴 一个需要判断的设计问题：outbox 要不要纯只追加？** 两条路都摆上台面：
+
+- (A) **采用** · `notification_outbox` 纯只追加，投递状态另开 `notification_deliveries`
+  追加日志，「投没投成」变成一条派生查询（deliveries 里有没有 `status='delivered'`）。
+- (B) 放弃 · 给 outbox 开一列 `delivered_at`、投递成功 UPDATE 它一次。
+
+选 **(A)**。理由不是「少写一张表也要忍」，是**本仓库的状态变更本来就这么记**：
+`run_events` 就是先例（run 的当前状态不在 `decision_runs` 上原地 UPDATE，而是追加一行、
+当前状态 = 最新一行）；`agent_verdicts` 的修订用 `amends` 指回原件、`decision_records`
+的回放用 `replay_of` 指回原卡 —— **从不原地改状态**（L-8：一 UPDATE，「当时看到的」
+就永久重建不出来了）。投递状态是同一形状的小状态机（pending→delivered/failed→重试再
+failed…），append 日志天然记得下「第几次、结果如何、什么时候」，UPDATE 一列只留得下终值。
+(B) 还要给 `test_每张表都有只追加触发器` 开一个它看不见的口子（schema.py 原话「例外必须
+自己举手」）—— 拿一道有用的守卫换一列方便，不划算。⇒ (A) 与 `amends`/`replay_of`/`run_events`
+先例一致，(B) 会引入本仓库**第一处被允许 UPDATE 的业务表**。
+
+**同事务原子性（P1）**：card_* 通知与 Card 在 `save_card_with_notifications` 的**同一个
+`connect()`** 里落库 —— 通知那步失败（非法 `event_type`、非严格 JSON）就整段回滚，
+Card 也不落库，不会「卡进去了、通知没进去」。run_failed 反过来是**尽力而为**：在失败
+终态转移**之后**入队（幂等 `aggregate=run_id`），通知入队失败绝不回滚「这次运行失败了」
+这条记录 —— 分发提示词的同事务要求只对 Card+outbox，不对 run_failed。
+
+**🔴 探针记录（G-1：每道新守卫先把被守的东西弄坏、确认报红、再还原）**：
+
+| 探针 | 怎么弄坏的 | 报红输出 | 已还原 |
+|---|---|---|---|
+| P1 同事务 | `save_card_with_notifications` 在插卡后 `conn.commit()` 提前提交 | `assert load_online_card(...) is None` 失败：非法通知场景下卡仍被落库（`test_非法event_type_卡也不落库`/`test_payload非严格JSON` 两条同时红）| ✅ |
+| P1 白名单 | 关掉 `event_type not in NOTIFICATION_EVENT_TYPES` 那道 raise | `Failed: DID NOT RAISE <class 'ValueError'>` —— 非法 event_type 被静默接受 | ✅ |
+| P3 只追加 | 从 `_V11` 去掉 `notification_outbox` 的只追加触发器 | `test_outbox不能UPDATE`（UPDATE 成功、没抛 `AppendOnlyViolation`）+ `test_outbox不能DELETE` 同红；deliveries 两条仍绿（触发器还在）⇒ 探针有指向性 | ✅ |
+| P2 幂等 | 去掉 INSERT 的 `ON CONFLICT(event_type, aggregate) DO NOTHING` | `sqlite3.IntegrityError: UNIQUE constraint failed: notification_outbox.event_type, notification_outbox.aggregate` —— 重复入队从无害 no-op 变成抛错（两条 P2 全红）| ✅ |
+| P5 必经态 | 把 `(CARD_PERSISTED, COMPLETED)` 加回 `_ORCHESTRATED` | `Failed: DID NOT RAISE IllegalTransition` —— 跳过 NOTIFICATION_PENDING 直达 COMPLETED 又变合法 | ✅ |
+| P4 worker | 让 `deliver_pending` 不再调 `deliverer.deliver` | 四类事件的投递调用集为空、与期望集不符（`test_四类事件都被投出` 红）| ✅ |
+| run_failed | 关掉 `run_ledger.cmd_move` 里 `a.to in NOTIFY_FAILURE_STATES` 的入队 | `ValueError: not enough values to unpack (expected 1, got 0)` —— 终态转移后 outbox 空 | ✅ |
+
+另外，新加的 `NOTIFICATION_PENDING` 由**既有守卫**兜底：不给它在 `run_ledger.STATE_MEANING`
+里写一句话，`test_每个状态都有消费方` 当场红（「加了状态但没人读」）——L-1 的现成落点。
+
+**✅ schema 版本号撞车，已解决**：本批开工时（HEAD=1824361）v11 是下一个空号；批 F
+（当时未合并、另一棵工作树）也占用了 v11。批 F 先合并落地（`e5b959f`），合并
+`orchestration` 进本批工作树时按 J-I/J-II 的先例重新编号：本批的两张新表改占 **v12**，
+迁移体本身一字未动。`schema.py` 里两个版本号的注释都留了记号。
+
+**明确不做**：飞书真实 API、异步执行模型、`deploy/openclaw/`、`main` 路由改动、
+Preflight/Question Bridge、cron 调度 worker —— 全在批 G-II / Phase 3。
+
 ### 变更（批 F）· risk 的事实挪进编排器：确定性早退省一次 LLM 调用
 
 **为什么**：`risk_check.py::build_fact_bundle()` 本来就是纯 Python、fail-closed、只给
