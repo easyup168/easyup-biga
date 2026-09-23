@@ -2,7 +2,7 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / **G-II**）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / **K**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -1881,16 +1881,147 @@ P6  🔴 一处必须 live 验（参照 J-II 与批 C-I 的先例，线下 mock 
 
 ---
 
-## 批 I / K / L / H · 现在不写分发提示词
+## 批 K · Pipeline Registry + Agent Registry —— roster 从五处收成一处
+
+⚠️ **依赖已清**：批 F 已合并（`e5b959f`），`orchestrator.py` 里
+`RISK_AGENT`（67 行）/`SNAPSHOT_INDEX_AGENTS`（82 行）这两处这一批要收编
+的独立字面量已经定型，没有更晚的改动。开工第一件事 `git log --oneline -5`
+确认这一点，不要假设本提示词里的行号还准。
+
+这一批不是新增能力，是**收编**：2026-09-21 `news` 没被 spawn 那次事故
+（进了契约名单、agent 建好了，但 `allowAgents` 白名单漏了它，Card 照常
+出、只是少一个领域，没有任何报错）现在只靠 `test_roster_matches_config.py`
+做数据驱动对账兜底——对账不是单一源。这一批的设计探活（2026-09-23，见
+设计 SSOT 同名小节）普查出 roster 实际上散在**五处**，其中 `tools/verify/
+adapter_spike.py` 那处零测试覆盖、`test_roster_matches_config.py` 本身还
+有个 `skipif` 静默跳过的口子——都比原始事故描述更细，做之前完整读一遍
+普查结论，不要重新普查一遍。
+
+```text
+把 STAGE1_AGENTS/STAGE2_AGENTS/RISK_AGENT/SNAPSHOT_INDEX_AGENTS 这几个
+散落的独立字面量，改成从一份新的 AGENT_REGISTRY 派生；给 Card 加一个
+生成时冻结的期望 roster 字段，让 absent_agents 不再"现算现取今天的
+Registry"。只做 Pipeline + Agent 两个 Registry，不做 Dataset/Provider。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` 的「批 K」小节全文
+  （设计探活 + 设计方向，2026-09-23）——roster 五处普查结论、"Pipeline
+  版本化"为什么要拆成两半、`test_roster_matches_config.py` 的 `skipif`
+  缺口，都已经写清楚，不要重新调查一遍
+- `skills/_contract/verdict.py` 全文，尤其 `STAGE1_AGENTS`/
+  `STAGE2_AGENTS`（93-94 行）与 `STANCE_VOCAB`（113 行起）——`discipline`
+  在 `STAGE2_AGENTS` 里但**故意不在** `STANCE_VOCAB` 的 key 集里（裁定 13：
+  它从不被 spawn），Registry 引入之后这条区分**必须继续成立**
+- `skills/_contract/run.py` 的 `RunState`——`RUN_STATES`/`TERMINAL_STATES`
+  怎么用 `vars()`/内省从类属性派生 `frozenset`，不手抄第二份清单。K 要对
+  `AGENT_REGISTRY` 做同样的事，照抄这个已验证过的形状，不发明新写法
+- `skills/decision-card/scripts/orchestrator.py` 的 `RISK_AGENT`（67 行）/
+  `SNAPSHOT_INDEX_AGENTS`（82 行）两处独立字面量，以及它们各自的用法
+  （214/223/296/355 行附近）——这是这一批要收编的两处
+- `skills/_contract/card.py` 的 `absent_agents`（362 行起，`@property`）
+  ——现算现取今天的 `STANCE_VOCAB` key 集的证据，这一批要给它加一条
+  "生成时冻结优先"的读取路径
+- `tools/verify/adapter_spike.py` 的 `STAGE1`（41 行）——独立字面量，
+  只 import `_runtime`、不 import `_contract`，不在 pytest 下跑，
+  `test_roster_matches_config.py` 完全看不到它，是普查找到的第三处漂移
+  风险
+- `tests/test_roster_matches_config.py` 的 `skipif`（84 行，
+  `not CONFIG.exists()`）——本机没有运行时配置时**不报红，直接跳过**，
+  是否在这一批一并修，由你自己判断范围（见下）
+
+## 做什么
+
+1. **`AGENT_REGISTRY`**（`_contract` 新增）：一个 agent 一条
+   `AgentDefinition`（`agent_id` / `stage` / 是否真的会被 spawn / 是否
+   消费 `SnapshotCoordinator` 冻结的快照）。只装**已经在生产路径上有
+   消费方**的字段——不装外部材料示意稿里 `required_datasets` 之类的
+   字段（绑定 Dataset Registry，裁定表已明确推迟，装了就是 L-1 的死
+   配置）。
+2. `STAGE1_AGENTS` / `STAGE2_AGENTS` / `RISK_AGENT` / `SNAPSHOT_INDEX_AGENTS`
+   全部改成从 `AGENT_REGISTRY` 派生的模块级常量，不再手写字面量。
+   `STANCE_VOCAB` 的 key 集**保持独立**，但改成对 Registry 断言子集
+   关系——不能因为 Registry 存在就把 `discipline` 意外带回
+   `absent_agents` 的权威里。
+3. **`tools/verify/adapter_spike.py` 迁到 Registry**——不是顺手，是这一批
+   "是否还有消费方在读独立字面量"验收判据之一，普查已经点名这一处。
+4. **卡级冻结名单**：`orchestrator.py` 构建 Card 时，把当时 `AGENT_REGISTRY`
+   算出的期望 roster 写进 `card_json`（新字段，回放路径照旧不重算）；
+   `absent_agents` 优先读这个冻结字段，只有老卡（字段不存在）才回退到
+   读**今天**的 Registry——`E-I` 的 `LegacyAdapter`、`J-II` 的
+   `spawn_check` 结构化 join 都是这个"有就用、缺就退回"模式，不发明
+   第四种写法。
+5. `test_roster_matches_config.py` 的 `skipif` 缺口——修不修、修成什么样
+   （比如改成 R-3 式的"报 UNKNOWN/missing"而不是静默跳过）你自己判断
+   范围，判断结果写进 CHANGELOG，不要不声不响地扩大或缩小这一批的范围。
+6. 明确不做：不生成/不写 `~/.openclaw-biga/openclaw.json`——Registry
+   最多提供"照 Registry 应该长什么样的 patch 建议"给人工核对着跑
+   `biga config patch`（R-1：仍然只走 `bin/biga`）。
+
+## 不要做
+
+- 不建 Dataset Registry / Provider Registry——裁定表已明确只做 Pipeline
+  + Agent 两个，其余四个（见总体设计 §34 的六个建议）没有已证明的消费方
+- 不要让 `discipline` 因为 Registry 的引入而意外出现在 `absent_agents`
+  的权威集合里——它在 `STAGE2_AGENTS` 但故意不在 `STANCE_VOCAB`，这条
+  区分是裁定 13 的直接后果，不是疏漏
+- 不要给老卡（`card_json` 里没有冻结 roster 字段的历史卡）回填这个新
+  字段——raw/历史记录永不改写的先例（L-8）同样适用在这里，老卡就是没有
+  这个字段，靠"缺就回退到读当下 Registry"兜底，不是靠事后写入补齐
+- 不要顺手把 `apply_config.py`/`deploy/openclaw/`（那是批 G-II 的范围）
+  或 Dataset/Provider Registry 的雏形也做了——想到了记进 TODO.md
+
+## 必须做的探针（G-1）
+
+P1  派生一致性：`AGENT_REGISTRY` 派生出的 `STAGE1_AGENTS`/`STAGE2_AGENTS`/
+    `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS`，在当前 roster 下必须与重构前的
+    手写字面量逐项相等——这条验证的是"重构没有改变行为"，不是新增能力
+P2  🔴 冻结名单：构造两张卡，中间人为改变 `AGENT_REGISTRY`（比如临时加一个
+    agent），断言先生成的那张卡的 `absent_agents` 读到的还是**生成时**
+    冻结的名单，不随 Registry 后续变化而变化——这正是要堵的"同一张历史卡
+    在不同时间点给出不同答案"那个静默漂移，普查里说过还没有实例发生过，
+    但机制上成立
+P3  老卡兼容：构造一张没有冻结字段的老卡（模拟老 `card_json`），
+    `absent_agents` 正确回退到读当下 Registry，不报错、不炸
+P4  `adapter_spike` 迁移：改 `AGENT_REGISTRY` 里增删一个 Stage 1 agent，
+    断言 `adapter_spike.py` 的 `STAGE1` 跟着变——不再是独立字面量
+P5  `STANCE_VOCAB` 边界：断言 Registry 存在之后，即使 `AGENT_REGISTRY`
+    给 `discipline` 也建了一条 `AgentDefinition`（`STAGE2_AGENTS` 本来就
+    含它），`discipline` 依然没有出现在 `absent_agents` 的权威集合里
+P6  如果这一批决定顺手修 `skipif` 缺口：模拟"本机没有运行时配置"的场景，
+    断言不再是静默 skip，而是给出一个显式的、R-3 式的信号
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 I / L / H · 现在不写分发提示词
 
 🔴 **2026-09-23 批 F 与批 G-I 已先后合并进 orchestration**，且都独立复核过关
 ——下表里"等 F 落地"这条依赖，凡是引用它的行，现在都已解除。
-批 F、批 G-I、批 G-II 的分发提示词都已经写好（见前面几节），不在这张表里了。
+批 F、批 G-I、批 G-II、批 K 的分发提示词都已经写好（见前面几节），不在
+这张表里了。
 
 | 批 | 现状 |
 |---|---|
-| I（RawArtifact） | 两个前置条件都已满足：`run_id` 已无歧义（J-I/J-II 落地），**批 F 已落地**（`e5b959f`，risk 搬移已定型，raw 溯源字段该指向哪个调用点现在看得清楚了）。**已具备写分发提示词的条件** |
-| K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**批 F 已落地**（`orchestrator.py` 里 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 这块 F 动过的部分已经定型），阻塞已解除。**已具备写分发提示词的条件** |
+| I（RawArtifact） | **不是"已具备条件"，是有一个真正的未了前置**：设计 SSOT §0 裁定表明写着
+"批 I 开工前必须先把 `architecture.md` §5.1 改成按平面分"（控制面/历史数据面/
+分析/归档四个平面各自的选型与触发条件），而 §5.1 至今**仍是原来那个"SQLite
+vs PostgreSQL+Redis"二选一的写法**，没有按平面拆过——这不是笔误，是一次
+真正的架构文档重写，且四个平面各自的"什么时候该建"触发条件，总体设计
+`docs/external/2026-09-23-baga-full-system-architecture.md` §33 只给了
+方向（SQLite→Control Plane、Parquet→历史数据面……），没有给触发条件，需要
+真正做判断，不该由写分发提示词的这个动作顺手替用户拍板。⚠️ 好消息是：
+上次台账把这条记成"待批 F 落地后看更清楚"的那个子问题——raw 溯源字段该
+指向哪个 `run_id`——已经在本次核对中有了确切答案：`orchestrator.py:201`
+`save_fact_bundle(risk_fb, run_id=ctx.run_id)`，risk 的事实包和其余 Stage 1
+六个 skill 走的是**同一个** `ctx.run_id`（批 F 特意复用了 J-I 的 capture
+路径，没有另起一套），批 I 不用再为"risk 是不是有个不同的调用点"纠结。
+但 §5.1 那个前置仍然没解除，写分发提示词前需要用户先决定怎么处理 |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 

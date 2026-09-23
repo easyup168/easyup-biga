@@ -962,8 +962,18 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         规范名。**本批不修**（不属于批 F 范围）
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。批 J 的依赖
-      已解除（run_id 已消歧义），**批 F 已落地（e5b959f，risk 搬移已定型）**，
-      两个前置条件都已满足，可以开始写分发提示词
+      已解除（run_id 已消歧义），批 F 已落地（e5b959f）。
+  🔴 **上一条纠正**：这里曾写「两个前置条件都已满足，可以开始写分发提示词」——
+      不准确，是只查了粗粒度的门槛（J/F 是否落地），没有核对设计 SSOT §0
+      裁定表自己写明的前置：「批 I 开工前必须先把 `architecture.md` §5.1
+      改成按平面分」，而 §5.1 至今仍是原来"SQLite vs PostgreSQL+Redis"
+      二选一的写法，没有拆过。这是一次真正的架构文档重写（四个平面各自
+      的"什么时候该建"触发条件，总体设计 §33 只给了方向没给判据），需要
+      用户拍板，不该由写分发提示词这个动作顺手带过。
+      ✅ 已解决的子问题：raw 溯源字段该指向哪个 `run_id`——
+      `orchestrator.py:201` 确认 risk 的事实包和其余 Stage 1 六个 skill
+      走同一个 `ctx.run_id`（批 F 复用了 J-I 的 capture 路径），不用再
+      为"risk 有没有独立调用点"纠结。**§5.1 那条前置仍未解除**
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 设计探活已完成（2026-09-23），
       按外部材料自己的分阶段建议拆成两批：
   - [x] 批 G-I · Outbox（Outbound Only）—— **已落地（2026-09-23）**。四类事件
@@ -985,14 +995,16 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
           不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
   - [ ] 批 G-II · Inbound Trigger —— **G-I 已落地，阻塞已解除**。
         `notification_outbox` 表结构与 `NOTIFICATION_PENDING` 状态转移
-        已定型，可以开始写分发提示词。核心交付物：飞书"出卡"从自由对话
-        变成结构化 trigger，main 的 LLM 全程不参与路由决策——这是真正关掉
-        2026-09-21 那次 $0.4 白花事故的地方，风险与 E-III/J-II 同量级
+        已定型，**分发提示词已就绪**（`docs/guide/orchestration-kickoff-prompt.md`
+        「批 G-II」节）。核心交付物：飞书"出卡"从自由对话变成结构化
+        trigger，main 的 LLM 全程不参与路由决策——这是真正关掉 2026-09-21
+        那次 $0.4 白花事故的地方，风险与 E-III/J-II 同量级
 - [ ] 批 K · Pipeline Registry + Agent Registry —— 2026-09-21 `news` 没被
       spawn 那次事故的结构性解法（现在只有对账测试，不是单一源）；
       顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）。
       设计探活已完成（2026-09-23）。**F 已落地合并（e5b959f）**，阻塞已解除，
-      可以开始写分发提示词
+      **分发提示词已就绪**（`docs/guide/orchestration-kickoff-prompt.md`
+      「批 K」节），可以开新会话开工
 - [ ] 批 L · `cn.trading_calendar` —— P0 六个 dataset 里**今天**唯一有
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
