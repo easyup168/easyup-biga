@@ -94,6 +94,50 @@ class TestGate:
         assert before in (None, 0)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# exclude_decision_id：飞书 inbound 路径先占号、才拉起 bin/biga-card ——
+# 闸门跑的时候，"最近一次占号"默认就是它自己（P6 live 真实撞过，2026-09-23）
+# ══════════════════════════════════════════════════════════════════════════
+class TestExcludeSelf:
+
+    def test_排除自己刚占的号就不再自比(self, fresh):
+        """🔴 P6 live 真实复现：飞书路径占号 → 拉起 bin/biga-card → 闸门看见
+        "最近一次占号是 0s 前"——那正是它自己。不排除时，每一次飞书触发
+        都会被自己挡住，100% 必中，不是偶发。"""
+        did = db.reserve_decision_id(by="feishu:evt-1", path=fresh)
+        assert budget.check_budget(path=fresh, exclude_decision_id=did) == [], \
+            "排除自己那个号之后，不该再拿它当『上次占号』或『还在跑』的证据"
+
+    def test_不排除时刚占的号确实会拦住自己(self, fresh):
+        """反面：不传 exclude_decision_id（CLI 路径的默认值）时，
+        行为必须和改之前完全一样——这条不是新加的，是钉住没改坏旧路径。"""
+        did = db.reserve_decision_id(by="cli", path=fresh)
+        reasons = budget.check_budget(path=fresh)
+        assert any("最小间隔" in r for r in reasons)
+        assert did in " ".join(reasons)
+
+    def test_排除自己不放过别的真实占号(self, fresh):
+        """🔴 排除必须精确到那一个号——同一天如果**还有别的**尝试，那次依旧要拦，
+        不能变成『传了 exclude 就整体放行』。"""
+        other = db.reserve_decision_id(by="人连点两下", path=fresh)
+        mine = db.reserve_decision_id(by="feishu:evt-2", path=fresh)
+        reasons = budget.check_budget(path=fresh, exclude_decision_id=mine)
+        assert any("最小间隔" in r for r in reasons), \
+            "排除的是我自己那个号，不该连别人那次也一起放过"
+        assert other in " ".join(reasons) and mine not in " ".join(reasons)
+
+    def test_当日上限不受排除影响(self, fresh, monkeypatch):
+        """🔴 DAILY_CAP 数的是『今天总共占了几个号』，被排除的这一个自己确实
+        算一个——排除只管『上次占号』『还在跑』这两条，不该连带把今天的
+        总数也扣掉（那会让上限形同虚设：每次都排除自己，永远到不了上限）。"""
+        monkeypatch.setattr(budget, "MIN_GAP_SEC", 0)
+        monkeypatch.setattr(budget, "INFLIGHT_SEC", 0)
+        monkeypatch.setattr(budget, "DAILY_CAP", 1)
+        did = db.reserve_decision_id(by="feishu:evt-3", path=fresh)
+        assert any("上限" in r for r in
+                   budget.check_budget(path=fresh, exclude_decision_id=did))
+
+
 class TestCli:
     """判据落在**命令行行为**上 —— 那才是飞书与 cron 真正会走的路。"""
 
