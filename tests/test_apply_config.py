@@ -63,6 +63,18 @@ class TestRenderPatch:
         assert mcp == {"servers": {"biga-card-trigger": None}}, \
             "必须显式 null 掉曾经写过的那个键，不能只是不提它"
 
+    def test_patch关掉飞书流式卡片(self):
+        """默认 "partial" 撞 HTTP 400（docs/troubleshooting/feishu-streaming-card-400.md）。
+
+        钉进配置即代码而不是靠一次性 `config patch`：后者重装/迁移到新环境时
+        不会重放，会原样复现同一个静默故障（网关日志记成发出成功，用户收不到）。
+
+        🔴 必须是 `{"mode": "off"}`，不能是布尔值 —— live 的 schema 校验拒绝过
+        一次 `"streaming": false`（真实报错：`must be object`）。bool 是旧版
+        OpenClaw 的写法，现在只在 `openclaw doctor --fix` 的迁移路径里认。
+        """
+        assert ac.render_patch()["channels"]["feishu"]["streaming"] == {"mode": "off"}
+
     def test_patch里没有任何凭据或可识别id(self):
         """公开仓库纪律：patch 只碰它管的键，绝不含 appSecret / token / ownerAllowFrom。"""
         import json
