@@ -1630,18 +1630,136 @@ P5  **VETO 回归**（不是顺带，是这一批不能退步的底线）：构�
 
 ---
 
-## 批 I / G / K / L / H · 现在不写分发提示词
+## 批 G-I · Outbox（Outbound Only）——只推送通知，不接受任何飞书输入
+
+⚠️ **依赖已清**：批 E/J 系列都已合并，`_store/schema.py` 现在没有别的批次占着
+（批 F 正在动 `orchestrator.py`/`card_ops.py`/`risk_check.py`，跟这一批要动的
+文件基本不相交——`card_ops.persist()` 是唯一可能撞车的点，开工第一件事
+`git log --oneline -5` 看批 F 有没有已经落地，落地了就以那份为准重新核对
+行号，不要假设本提示词里的行号还准）。
+
+🔴 **这一批只做"推"，不做"收"。** 不接受任何飞书方向的输入，没有新的攻击面，
+不涉及 R-2。真正有风险的"飞书变成 trigger、绕开 main 自由判断"是下一批
+（批 G-II，现在不写）的事，这一批只是给它准备好地基。
+
+```text
+给「Card 完成 / UNKNOWN / Risk BLOCK / 运行失败」这四类事件建一条推送通道：
+新建 notification_outbox 表（与 Card 同一个事务写入），一个 worker 把它
+投递出去（先接一个可替换的投递接口，不要求这一批真的打通飞书 API），
+RunState 加 NOTIFICATION_PENDING。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` 的「批 G」小节
+  （2026-09-23 设计探活）——设计依据，做之前完整读一遍，尤其是
+  "outbox 是真新表""异步执行是真新基础设施"这两条纠正
+- `skills/_contract/run.py` 全文（50-170 行左右）——`RunState` 13 个状态、
+  `RUN_STATES`/`TERMINAL_STATES` 怎么从类属性派生、`_ORCHESTRATED`/
+  `_FAILURE`/`_INPUT_REQUIRED` 这几条转移表怎么拼成 `LEGAL_TRANSITIONS`。
+  60-61 行就是 `NOTIFICATION_PENDING` 当初被推迟的那条注释
+- `skills/_store/schema.py`：读 `_V7`（`evidence_sets`/`decision_runs`/
+  `run_events` 三张表怎么建、只追加触发器怎么写）作为新表的样板，不要
+  发明新的建表风格。看一眼 `decision_runs` 的 `trigger_id` 列（这一批不用
+  它，但要知道它已经存在，将来批 G-II 会接上，命名上不要撞车）
+- `skills/decision-card/scripts/card_ops.py::persist()`——Card 落库的地方，
+  新的 outbox 写入要在**同一个 `connect()` 事务**里，不是两次独立提交
+- `agents/_store/db.py` 里任何一个 `save_*` 函数的写边界重校验写法
+  （规范序列化 → 严格重建 → 校验 → INSERT）——新表的写入函数照这个模式写，
+  不要跳过重校验这一步
+
+## 做什么
+
+1. **schema 新迁移**（当前 `SCHEMA_VERSION` 见 `schema.py` 尾部，用下一个
+   号）：`notification_outbox` 表。至少要有 `event_type` / `aggregate`
+   （建议就是 `decision_id`）/ `payload_json` / `created_at`，`UNIQUE
+   (event_type, aggregate)` 做幂等键——同一个决策的同一类事件只能入队一次。
+   🔴 **一个没有预先答案、需要你自己判断并写清楚理由的设计问题**：这张表
+   要不要跟其余 8 张表一样是纯只追加（投递状态另开一张
+   `notification_deliveries`/类似的追加日志表记录"第几次投递、结果如何"，
+   "有没有投递成功"变成一条派生查询），还是给 `notification_outbox` 本身
+   开一个例外、允许 `delivered_at` 这一列被 UPDATE 一次。两条路都要在
+   `CHANGELOG.md` 写清楚为什么选这条、跟本仓库现有的"revision 链用
+   `amends` 而不是原地改"（`agent_verdicts`）这个先例是不是一致。
+2. **`RunState` 加 `NOTIFICATION_PENDING`**，插在 `CARD_PERSISTED` 与
+   `COMPLETED` 之间：`CARD_PERSISTED → NOTIFICATION_PENDING → COMPLETED`。
+   🔴 这个状态只代表"outbox 行已入队"，**不代表"已经投递成功"**——
+   worker 投递是异步的，不能让一次 Feishu API 抽风把 Run 卡在非终态。
+   入队这一步必须快（跟其余转移一样是纯 DB 操作），不要在这条转移里等
+   worker 真的把消息发出去。
+3. **`orchestrator.py` 里 `CARD_PERSISTED` 之后的那次转移**（批 F 可能已经
+   在动这附近的代码，先 `git log`/`git blame` 确认现状）：Card 落库的同一个
+   事务里，同时写一行 `notification_outbox`（`event_type` 从 Card 的
+   `status`/`missing` 推出来——`BUY`/`WAIT` 之类正常收尾算
+   `card_completed`，`status` 里能看出 risk 否决的算 `risk_block`，`missing`
+   非空到某个程度或 `verdict=UNKNOWN` 的算 `card_unknown`；`FAILED`/
+   `TIMEOUT`/`CANCELLED` 这几个终态各自的失败通知在各自转移那里写，不要
+   全塞进 `CARD_PERSISTED` 那一步——那几个终态压根不会经过它）。
+4. **worker**：一个独立的、可以单独跑的脚本（放 `tools/` 还是 `skills/`
+   你自己判断，参照现有类似脚本的位置），扫 `notification_outbox` 里没投递
+   成功的行，调用一个**投递接口**（先做成一个可替换/可 mock 的抽象——
+   这一批不需要真的接通飞书 API，接口先对接一个"打印到 stdout"或类似的
+   桩实现，真正的飞书 adapter 是批 G-II 才有生产方）。
+5. **`bin/biga-card` 现在完全同步**（`wait "$_ORCH_PID"`），这一批**不改**
+   这个同步模型——`NOTIFICATION_PENDING` 是运行内部的一个转移，不是
+   "先 ACK 用户、后台继续跑"的那个异步（那是批 G-II 的核心工作）。
+   这一批的 worker 是在 Card 已经写完之后另起一个进程/cron 去补投递，
+   跟 `bin/biga-card` 本身的调用者体验完全无关。
+
+## 不要做
+
+- 不要碰 `entry_guard.py`、根 `AGENTS.md`、`main` 的 `allowAgents`——
+  "飞书触发绕开 main 自由判断"是批 G-II 的核心交付物，这一批不涉及任何
+  入站的东西
+- 不要建 `deploy/openclaw/` 或任何 `agents.yaml`/`tool-policy.yaml`/
+  `apply_config.py`——那是批 G-II，跟这一批没有依赖关系但不要顺手做
+- 不要给 `RUN_ORIGINS` 加新值或改它的生产方——这一批不产生任何
+  `origin="feishu"` 的 run，通知是"任何 run 完成后都推"，跟 run 从哪来无关
+- 不要真的去接通真实飞书 API——这一批的验收不依赖真实投递成功，见下面
+  G-1 探针 P4 的范围
+- 不要把 `notification_outbox` 的幂等键设计成需要外部系统配合才能生效的
+  形状——`(event_type, aggregate)` 必须在 BigA 自己的库里就能保证幂等，
+  不能依赖"飞书那边也会去重"
+
+## 必须做的探针（G-1）
+
+P1  同事务：构造一个会在写 `notification_outbox` 那步失败的场景（比如
+    `event_type` 传非法值），断言 Card **也不会**被落库——两者要么一起
+    成功要么一起失败，不能有 Card 进去了、通知没进去的中间状态
+P2  幂等：同一个 `(event_type, aggregate)` 入队两次，断言只有一行生效
+    （或者第二次入队被拒/被合并——具体行为你定，但要有一条测试钉住
+    "不会造成同一个通知被投递两次"）
+P3  🔴 只追加：对 `notification_outbox`（以及如果你新开了投递日志表）真跑
+    UPDATE/DELETE，断言被拒——跟这仓库其余 8 张表同一个判据，不能因为是
+    新表就漏掉这一条
+P4  worker 投递：四类事件（`card_completed`/`card_unknown`/`risk_block`/
+    运行失败）**各自**至少构造一个场景，断言 worker 真的调用了投递接口、
+    传的 payload 里有对应决策号——用 mock/桩接口验证，不要求真实调用飞书
+    API 成功
+P5  `NOTIFICATION_PENDING` 转移的合法性：`LEGAL_TRANSITIONS` 更新之后，
+    `test_run_transitions`（或同类测试）要能证明"从 `CARD_PERSISTED` 跳过
+    `NOTIFICATION_PENDING` 直接到 `COMPLETED`"现在是非法转移（如果你的
+    设计确实要求必须经过这个状态），以及"worker 还没投递成功"不会让 Run
+    卡在非终态——`COMPLETED` 的达成不能依赖 outbox 投递的结果
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 I / G-II / K / L / H · 现在不写分发提示词
 
 🔴 **2026-09-23 批 J（J-I + J-II）已双双合并进 orchestration，且都独立复核
 + live 补验过关**——下表里"等批 J"这条依赖，凡是引用它的行，现在都已解除。
-批 F 的分发提示词已经写好（见上一节），不在这张表里了。
+批 F 与批 G-I 的分发提示词都已经写好（见上两节），不在这张表里了。
 
 | 批 | 现状 |
 |---|---|
 | I（RawArtifact） | "`run_id` 得先由批 J 变成没有歧义的"这条已解除（J-I/J-II 双双落地，`agent_verdicts`/`evidence_sets`/`agent_runs` 的 `run_id` 语义都已单一）。**已具备写分发提示词的条件**，但建议等 F 落地——F 会不会想让 raw 溯源字段指向"relocate 后的" risk 调用点，晚一步看得更清楚 |
 | K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**已具备写分发提示词的条件**。⚠️ 与 F 一样会碰 `orchestrator.py`（K 要把 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 改成从 Registry 派生）——等 F 落地合并之后再写，避免同一批文件二次冲突 |
-| G | 依赖 E 系列完整落地（已解除），仍建议等 F 落地——飞书 trigger 那部分与 F 的
-  "risk 前移"无直接耦合，只是分发时习惯上一起考虑（同批 E 的排法） |
+| G-II（Inbound Trigger） | 依赖批 G-I 落地——需要 `notification_outbox` 与 `NOTIFICATION_PENDING` 已经存在，`decision_runs.trigger_id` 才有地方接。这是"飞书变成结构化 trigger、绕开 main 自由判断"的核心交付物，风险与 E-III/J-II 同量级，等 G-I 合并、拿到它实际的表结构与状态转移之后再写，避免分发提示词里的具体字段名跟 G-I 最终落地的不一致 |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
