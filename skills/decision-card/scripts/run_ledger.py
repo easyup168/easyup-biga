@@ -33,6 +33,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from _contract import (  # noqa: E402
+    NOTIFY_FAILURE_STATES,
     RUN_ORIGINS,
     TERMINAL_STATES,
     RunState,
@@ -41,6 +42,7 @@ from _contract import (  # noqa: E402
 from _store import (  # noqa: E402
     IllegalTransition,
     UnknownRun,
+    enqueue_run_failed,
     init_schema,
     open_run,
     run_journey,
@@ -58,6 +60,7 @@ STATE_MEANING: dict[str, str] = {
     RunState.RISK_RUNNING: "制衡层 risk 审查中。",
     RunState.SYNTHESIZING: "Supervisor 合成 Card 中。",
     RunState.CARD_PERSISTED: "Card 已落库，等 spawn 核验与收尾。",
+    RunState.NOTIFICATION_PENDING: "外发通知已入队（与 Card 同事务），worker 异步补投中（批 G-I）。",
     RunState.COMPLETED: "正常完成，卡已落库并通过核验（bin/biga-card 退出码 0）。",
     RunState.FAILED: "执行失败：守卫拒绝 / spawn 核验未过 / 采集异常（退出码 4）。",
     RunState.TIMEOUT: "超过硬超时预算，被收掉（退出码 1）。",
@@ -106,10 +109,21 @@ def cmd_move(a: argparse.Namespace) -> int:
     detail = json.loads(a.detail) if a.detail else None
     try:
         transition(a.run_id, a.expect, a.to, detail=detail)
-        return 0
     except (IllegalTransition, UnknownRun) as e:
         print(str(e), file=sys.stderr)
         return 1
+    # 🔴 批 G-I：bash（bin/biga-card）经这里把 run 收进失败终态（TIMEOUT/CANCELLED，
+    #    也可能 FAILED）—— 这是 run_failed 通知「在各自转移那里写」的 bash 侧
+    #    （编排器内部的 FAILED 在 orchestrator._fail 那侧，两处共用 enqueue_run_failed
+    #    这一份实现）。转移成功后再入队：best-effort、幂等（aggregate=run_id），
+    #    通知失败不回滚已记录的终态。
+    if a.to in NOTIFY_FAILURE_STATES:
+        reason = detail.get("reason") if isinstance(detail, dict) else None
+        try:
+            enqueue_run_failed(a.run_id, reason=reason)
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
 
 
 def cmd_status(a: argparse.Namespace) -> int:

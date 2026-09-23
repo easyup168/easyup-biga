@@ -75,6 +75,7 @@ A 股短线**决策辅助**系统。
 | 30 | [迁 risk 并退役旧修订路径](30-migrate-risk-retire-amend.md) | 确定性编排批 E-III（收官）：六个里最危险的偏偏形状最普通 —— risk 的 stance 是 `VETO_STANCE`，迁错=「真该拦的决策放行了」；核心是 **VETO 穿透**（否决从 AgentAssessment 穿到 DecisionCard 真拦 BUY），而这条链「不用改代码」正是最该测的；「退役 amend」≠ 删 `save_verdict`；`无法判定` 可挂 WARNING ⇒ risk 不需要 `--verdict` 事后降级 | ✅ |
 | 31 | [收敛 `run_id` 三同名](31-run-id-namespace.md) | 确定性编排批 J-II：一个名字被三个东西共用、且不报错（「一个 id 扛五件事」的反面）；三处必须一起改；「改名免费」要用 grep 证明；`RENAME COLUMN` 会**改坏触发器体也不报错** ⇒ 真跑 SQL；结构化 join 照抄 `CROSS_CHECK_PAIRS` 不发明第二种；「命名空间是否一致」这种猜错也不红的前提必须 live 验一次 | ✅ |
 | 32 | [让 `run_id` 贯穿全链（capture）](32-run-id-capture.md) | 确定性编排批 J-I：capture 与 enforce 拆开做（区别在**攒这一列的边际成本**，不在有没有人用）；判断行的 run_id **从事实行继承**不让 Agent 传（判据别建在可篡改输入上），「不可能不一致」用结构＋行为两条证据证明；加 nullable 字段两个 `from_dict` 都用 `.get` 否则历史卡 `KeyError`；属于「这次执行」的字段必须进 `comparable()` 剥离清单；跨文件模块污染只在全量红（`_load` 要幂等）；可派生守卫替新列自动把关 | ✅ |
+| 33 | [外发通知 outbox](33-outbound-notifications.md) | 确定性编排批 G-I（只推不收）：投递状态用**追加日志**不给 outbox 开 `delivered_at` 原地改（同 `run_events`/`amends` 先例）；**card 通知与卡同事务、run_failed 尽力而为**（原子性看「谁离了谁更糟」）；`NOTIFICATION_PENDING` 只代表入队、`COMPLETED` 不等投递；run_failed 两处触发共用一份实现、没塞进 `transition()`；`ON CONFLICT DO NOTHING` 冲突时 `lastrowid` 不可靠 ⇒ 看 `rowcount`；加状态靠既有「每个状态都有消费方」守卫兜底；迁移版本号是共享命名空间、多批并行会静默撞 | ✅ |
 
 ---
 
