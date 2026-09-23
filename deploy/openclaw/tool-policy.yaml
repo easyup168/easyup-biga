@@ -1,0 +1,25 @@
+# deploy/openclaw/tool-policy.yaml —— 命令面 + 工具服务（配置即代码，批 G-II）
+#
+# 覆盖：/card 命令怎么被 OpenClaw 识别、它直达哪个工具服务。
+# 不覆盖：工具服务本身干什么（那在 skills/card/scripts/card_trigger_mcp.py）。
+#
+# 🔴 敏感值一律不落这里
+# --------------------
+# `commands.ownerAllowFrom`（真实飞书 open_id）不在这个文件里 —— 它是可识别的个人
+# 信息，属于仓库外的 live 配置（~/.openclaw-biga/openclaw.json）。apply_config.py
+# **只增量合并它管的这几个键**，绝不覆盖 ownerAllowFrom、appId、appSecret、gateway
+# token 这些 live 值（`config patch` 递归合并，不碰没提到的键）。
+
+commands:
+  # 飞书没有原生斜杠菜单，/card 作为**纯文本命令**发（channels/feishu.md）。
+  # text:true 让命令层解析 /card —— 这是「命令消息绕过 model」那条快路径的开关。
+  text: true
+
+mcp_servers:
+  # /card 的 command-dispatch:tool 指向的工具服务。command-tool: biga_card_trigger
+  # 就是这个服务暴露的那个工具（FastMCP，stdio）。
+  # args 里的脚本路径由 apply_config.py 补成**部署根的绝对路径**（网关 spawn 它时
+  # cwd 不确定，必须绝对）。
+  biga-card-trigger:
+    command: python3
+    script: skills/card/scripts/card_trigger_mcp.py   # 相对部署根，apply 时转绝对

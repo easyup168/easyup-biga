@@ -258,7 +258,17 @@ trap '_reap_orch' EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
-timeout $(( CARD_DEADLINE_SEC + 60 )) $PY skills/decision-card/scripts/orchestrator.py &
+
+# 🔴 批 G-II：飞书入站触发经环境变量把 origin / trigger_id / 预占决策号透传给
+#    orchestrator。三样都没设 = 人工 CLI（origin=cli，orchestrator 自己现占号）——
+#    **现有同步体验一字不变**（这正是「异步只对飞书生效、不许改坏人工 CLI」的落点）。
+#    异步发生在 inbound.py → 本脚本 这条边界（inbound 把本脚本整个脱离进程树拉起、
+#    立刻 ACK），不在本脚本内部：bin/biga-card 自己仍然从头同步跑到 Card 落库。
+ORCH_ARGS=()
+[ -n "${BIGA_CARD_ORIGIN:-}" ]      && ORCH_ARGS+=(--origin "$BIGA_CARD_ORIGIN")
+[ -n "${BIGA_CARD_TRIGGER_ID:-}" ]  && ORCH_ARGS+=(--trigger-id "$BIGA_CARD_TRIGGER_ID")
+[ -n "${BIGA_CARD_DECISION_ID:-}" ] && ORCH_ARGS+=(--decision-id "$BIGA_CARD_DECISION_ID")
+timeout $(( CARD_DEADLINE_SEC + 60 )) $PY skills/decision-card/scripts/orchestrator.py "${ORCH_ARGS[@]}" &
 _ORCH_PID=$!
 wait "$_ORCH_PID"
 ORCH_RC=$?

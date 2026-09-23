@@ -421,6 +421,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="程序驱动出卡（DecisionOrchestrator）")
     ap.add_argument("--origin", default="cli", choices=["cli", "feishu", "cron"])
     ap.add_argument("--trigger-id", default=None)
+    # 🔴 批 G-II：飞书入站已由 inbound.py 原子占好号（幂等键 = 飞书 event id），把号
+    #    透传进来 —— orchestrator.run 用它、不再重占（ctx.decision_id 非空即走既有分支）。
+    #    人工 CLI 不传，仍在 run() 里现占。
+    ap.add_argument("--decision-id", default=None,
+                    help="预占的决策号（飞书入站幂等占号后透传；CLI 留空现占）")
     ap.add_argument("--model-ref", default="anthropic/claude-sonnet-5")
     ap.add_argument("--json", action="store_true", help="输出 Card 的 JSON 而非文本卡")
     a = ap.parse_args(argv)
@@ -445,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
 
     ctx = new_run_context(origin=a.origin, non_interactive=True,
-                          trigger_id=a.trigger_id)
+                          trigger_id=a.trigger_id, decision_id=a.decision_id)
     print(f"run {ctx.run_id}   （查进度：bin/biga-card --status {ctx.run_id}）",
           file=sys.stderr)
     orch = DecisionOrchestrator(model_ref=a.model_ref)

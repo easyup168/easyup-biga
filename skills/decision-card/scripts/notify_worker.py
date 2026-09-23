@@ -107,13 +107,30 @@ def deliver_pending(
     return {"pending": len(pending), "delivered": delivered, "failed": failed}
 
 
+def _make_deliverer(name: str) -> Deliverer:
+    """按名字造投递器。`stdout` 是桩（默认，测试/离线）；`feishu` 是批 G-II 的真投递方。
+
+    🔴 feishu 的凭据从环境变量读、仓库里不落（见 feishu_deliverer.py）。造它本身不
+    出网（token/发消息都推迟到第一次 deliver），所以这里 import 失败以外不会有副作用。
+    """
+    if name == "stdout":
+        return StdoutDeliverer()
+    if name == "feishu":
+        from feishu_deliverer import FeishuDeliverer  # 局部导入：桩路径不依赖它
+        return FeishuDeliverer()
+    raise SystemExit(f"未知投递器 {name!r}（可选 stdout / feishu）")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="投递 notification_outbox 里待发的外发通知（批 G-I worker）")
+        description="投递 notification_outbox 里待发的外发通知（批 G-I worker / 批 G-II 真飞书）")
     ap.add_argument("--limit", type=int, default=100,
                     help="单次最多投递多少条（默认 100）")
+    # 🔴 批 G-II：默认仍是桩（离线/测试不出网）；--deliverer feishu 才接真实飞书 API。
+    ap.add_argument("--deliverer", default="stdout", choices=["stdout", "feishu"],
+                    help="投递渠道：stdout 桩（默认）/ feishu 真投递")
     a = ap.parse_args(argv)
-    summary = deliver_pending(limit=a.limit)
+    summary = deliver_pending(deliverer=_make_deliverer(a.deliverer), limit=a.limit)
     print(f"待投 {summary['pending']}  投出 {summary['delivered']}  "
           f"失败 {summary['failed']}", file=sys.stderr)
     return 0

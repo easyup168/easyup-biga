@@ -522,6 +522,68 @@ def reserve_decision_id(
     raise RuntimeError("当天 1000 个决策编号全被占用 —— 这不正常，先查 decision_ids 表")
 
 
+def reserve_decision_for_trigger(
+    trigger_id: str, *, by: str | None = None, day: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> tuple[str, bool]:
+    """幂等地为一次外部请求占号。返回 `(decision_id, created)`（批 G-II）。
+
+    `created=False` ⇒ 这个 `trigger_id` 之前已经占过号（飞书事件**重投**），返回那次
+    的号、**不起新决策**；`created=True` ⇒ 这次是新占的号。入站适配器据 `created`
+    决定「起一次真出卡」还是「回一句已在处理」。
+
+    🔴 为什么它必须原子，而不是「先查 trigger 在不在、不在就占号」
+    ------------------------------------------------------------------
+    「先查再占」中间有窗口：两次同时到达的重投都查到「没占过」，各占一个号，
+    最后合出两张卡 —— 与 `reserve_decision_id` docstring 记的 2026-09-21 盘中
+    「两次端到端混进同一个号」同形状，只是这次的触发源是**同一个飞书 event 的重投**。
+    唯一可靠的并发仲裁是数据库自己的唯一约束（`decision_ids.trigger_id`，schema v13）：
+    两个并发 INSERT 只有一个成功，另一个撞 UNIQUE、回退到「返回已占的那个号」。
+
+    与 `reserve_decision_id` 的关系：它是后者的**幂等包装** —— 复用同一套「主键冲突
+    仲裁占号」的候选号循环，只是每个候选号带上 `trigger_id` 一起 INSERT，于是占号与
+    「这个号是为哪次外部请求占的」是**同一个原子写**。绑在号分配器上而不是新开一张
+    入站幂等表：设计探活点名「这一列已经在等着被用」，且身份模型本就是
+    Trigger → Decision（一个 trigger 一个决策；重试复用同一号、不重占 ⇒ 不撞约束）。
+    """
+    if not isinstance(trigger_id, str) or not trigger_id.strip():
+        raise ValueError(f"trigger_id 必须是非空字符串，收到 {trigger_id!r}")
+    init_schema(path)
+
+    def _lookup() -> str | None:
+        with connect(path, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT decision_id FROM decision_ids WHERE trigger_id=?", (trigger_id,)
+            ).fetchone()
+        return row["decision_id"] if row else None
+
+    # 快路径：这个 trigger 之前占过号就直接返回（重投的常见情形 —— 顺序重投，非并发）。
+    existing = _lookup()
+    if existing is not None:
+        return existing, False
+
+    for _ in range(1000):
+        cand = new_task_id(_next_free_seq(day or now_cn().strftime("%Y%m%d"), path),
+                           day=day)
+        try:
+            with connect(path) as conn:
+                conn.execute(
+                    "INSERT INTO decision_ids (decision_id, reserved_at, reserved_by,"
+                    " trigger_id) VALUES (?,?,?,?)",
+                    (cand, now_cn().isoformat(), by, trigger_id))
+            return cand, True
+        except sqlite3.IntegrityError as e:
+            # 🔴 两种撞法必须分开：trigger_id 撞 = 并发同 trigger 抢先，回退返回它的号
+            #    （幂等）；decision_id 主键撞 = 号被别的决策占了，换下一个号继续。
+            if "trigger_id" in str(e):
+                won = _lookup()
+                if won is not None:
+                    return won, False
+                raise  # trigger 撞了却查不到 —— 不是并发占号，是真异常，别吞
+            continue  # decision_id 被抢，重算下一个
+    raise RuntimeError("当天 1000 个决策编号全被占用 —— 这不正常，先查 decision_ids 表")
+
+
 def load_online_card(
     decision_id: str,
     *,
