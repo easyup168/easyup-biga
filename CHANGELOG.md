@@ -15,6 +15,2744 @@
 
 ## [未发布]
 
+### 🔧 变更 · `images/` 里的文件名统一命名规则
+
+`bigA01.png`（透明底白字变体）跟其余四张 `LOGO_BigA0N.png` 命名不成一套——
+缺 `LOGO_` 前缀、开头大小写不一致，编号还跟 01 号重叠，容易让人误以为
+是跟 `LOGO_BigA01` 平行的另一份设计，而它其实是 01 号的变体（`f202049`
+那次加它时讲得很清楚：透明底白字与黑字白底互补，不是替代关系，只是没有
+把这层关系体现进文件名）。改名为 `LOGO_BigA01_Transparent.png`，README
+「品牌素材」清单同步更新（把互补而非替代这条说明也补进条目本身，之前只
+写在 commit message 里）。历史 CHANGELOG 条目里的旧文件名不回改——那是
+对"当时"的真实记录。
+
+### 🔧 变更 · 批 H-II —— `_runtime`/`_snapshot` 迁进 `src/easyup_biga/{runtime,application}/`，旧路径留薄壳
+
+接批 H-I，把两个**已经是共享包、已有多消费方**的基础设施包搬进 `src/`：
+`skills/_runtime`（`OpenClawRuntimeAdapter`+`MCPClient`，被 market/sector/technical
+三个 Specialist 与 `orchestrator.py`、`adapter_spike.py` 消费）→ `easyup_biga.runtime`；
+`skills/_snapshot`（`SnapshotCoordinator`，跨层协调 domain/providers/persistence）→
+`easyup_biga.application`。`git mv` 5 个真实文件（2 `__init__` + `adapter`/`mcp`/
+`coordinator`）保留 history、内容逐字节不变；旧包原地留 5 个 re-export 薄壳，写法
+**直接照抄 H-I** 定的两种形状（包级壳自挂 `src/` 到 `sys.path`、子模块壳
+`sys.modules[__name__] = 真实模块` 做身份等同）⇒ 全仓 13 处 `from _runtime`/
+`from _snapshot import ...` 一个字符不改。`pyproject.toml` 无需改（H-I 已挂 `src/`）。
+
+**为什么比 H-I 简单得多**（§8.1 探活已预判，实测逐条坐实）：H-I 撞过的三个坑这里
+都不存在 —— ① 两个包**零 `__file__` 用法**（重跑 `grep __file__` 确认；唯一一处
+`self.config_path.parent` 是运行时对象属性、不是自定位），所以没有 `db.py`/
+`tradetime.py` 那种「深一层 → `DEFAULT_DB_PATH` 算成 `src/data/biga.db`」的深度陷阱，
+P3 的 `--check` 迁移前后逐字段相同、无需任何补救；② 只有 1 处按子模块路径直接导入
+（`test_runtime_adapter.py:29`），H-I 是 10+ 处；③ **零 AST 守卫硬编码
+`skills/_runtime`/`skills/_snapshot` 路径**（重跑 `git grep` 确认），所以这一批
+**不改任何测试的路径常量** —— H-I 那 4 处 `CONTRACT_DIR`/`STORE_DIR` 是因为「唯一
+实现」类守卫本就只盯 `_contract`/`_store`，与这两个包无关。
+
+**一个把「子模块壳为什么必须用身份等同（idiom B）」从理论变成实证的细节**：
+H-I 里「`import *` 会漏掉下划线私有名」还只是预防性论证；这一批
+`test_runtime_adapter.py:29` 真的写着
+`from _runtime.mcp import Grant, MCPError, _extract_first_json_object,
+_parse_rpc_response, _text_of` —— **三个下划线开头的名字**。若子模块壳用
+`from easyup_biga.runtime.mcp import *`，这三个名字不会被 re-export，该语句当场
+`ImportError`。`sys.modules[__name__] = 真实模块` 让 `_runtime.mcp` **就是**
+`easyup_biga.runtime.mcp`，私有名一并可见。这条 import 正好也是 P1 sabotage 的红灯
+落点，双重坐实了 idiom B 的必要性。
+
+**明确不做（H-III 范围，§8.1 已裁定）**：不挖 `orchestrator.py`/`feishu_deliverer.py`/
+`notify_worker.py`（只被 `decision-card` 一个 skill 消费，抽出来是造只有一个消费方的
+共享包，L-1 的反面）；不建 `integrations/`/`cli/` 空目录；**不改** `coordinator.py`
+内部 `from _contract`/`from _sources`/`from _store` 三行跨包导入（内容改动，属于
+「H-II/H-III 都落地后的跨包引用清理批次」）。⇒ 承接 H-I 记下的那笔账：
+`easyup_biga.application`（coordinator）与 `persistence`/`providers` 一样，暂时仍需
+`skills/` 同时在 `sys.path` 上才自足（`runtime` 的 adapter/mcp 无跨包导入、更接近自足）
+—— 这是 Strangler 中间态，接受、记下，不在这一批顺手改。
+
+**探针记录（G-1，均见过红或前后对照）**：
+- P1 导入兼容：AST 扫全仓收集 8 条去重 `_runtime`/`_snapshot` import（13 处出现），
+  在**全新子进程**（只挂 `skills`，逼壳自挂 `src`）逐条真执行 → 零 ImportError。
+  sabotage：删 `skills/_runtime/mcp.py` 壳 → 红，精确点名 `test_runtime_adapter.py:29`
+  那条（含三个下划线名）→ 还原绿。
+- P2 非 pytest 路径：`python3 -c "sys.path.insert(0,'skills'); import _runtime,_snapshot"`
+  成功，解析到 `easyup_biga.runtime.adapter` / `easyup_biga.application.coordinator`。
+- P3 一致性：`bin/biga-card --check BIGA-20260923-004` 迁移前后逐字段相同（无深度 bug）。
+- P4 测试条数：`--collect-only` 迁移前后都是 **1362**（不减）。
+- P5 隔离自检：`tools/verify/isolation.py` 判词前后一致（5✅+1🔶）。
+- P6 身份等同：`_runtime.adapter`/`_runtime.mcp`/`_snapshot.coordinator` 三者
+  `assert shim is real` 全过 —— 壳与本体是同一个模块对象，不是拷贝。
+
+**独立复核（2026-09-24）**：六道探针逐一亲手重跑，含两处 sabotage-revert（P1
+删 `mcp.py` 壳复现精确报错；额外验证了「idiom B 必要性」本身——把 `mcp.py` 的壳
+临时换成 `import *` 写法，真的在 `_extract_first_json_object` 这个私有名上炸
+`ImportError: cannot import name`，逐字对应报告的论证，不是空口断言）。
+`pyproject.toml` 确认未改、AST 守卫路径确认零硬编码，均与报告一致。
+
+对报告自己提出的两处请裁定：
+1. `application/` 目前只有 `SnapshotCoordinator` 一个成员，算不算过早建层——
+   **批准，不算**。L-1/「不预建空目录」防的是「造一个没有真实消费方的占位」，
+   判据是"这个具体东西是否真实存在且有消费方"，不是"这个目录下文件数量够不够
+   多"。`SnapshotCoordinator` 本身真实存在、有多消费方、扮演的正是 application
+   层该扮演的跨层协调角色——文件数量是实现细节，不是该不该建这一层的判据。
+2. 命名为 `application`（而非先用更保守的名字占位）——**批准，合理**。这不是单纯
+   追随 §29 骨架的外部建议，是外部建议与 `SnapshotCoordinator` 自身角色（不产生
+   域类型、不打外部接口、不建表，只协调另外三层）的双重吻合；即使未来 H-III
+   落地后发现命名需要调整，改一个目录名的成本远小于这次迁移本身，不构成"先保守
+   占位"的理由。
+
+**独立复核额外发现一处报告没覆盖到的真实问题**：`.gitignore` 第 25 行有一条
+`runtime/`——本仓库初始化骨架那次（`872f891`）跟 `.env`/`*.key`/`*.pem` 一起加的，
+从那以后仓库内**从未存在**过任何叫 `runtime` 的目录（`git log -S"runtime/" --
+.gitignore` 确认只有那一次改动），是一条从写下来那天就没有真实生效对象的死规则
+——直到这一批把 `_runtime` 改名成 `runtime`，第一次撞上了它（`git check-ignore
+-v src/easyup_biga/runtime` 命中这一行）。这次没有造成数据丢失（H-II 会话自己
+已经 `git add` 过这些文件，已追踪路径不受 gitignore 影响），但隐患是真实的：
+`git add .`/`git add -A` 这类命令今后遇到这个目录会静默跳过，不报任何错——如果
+哪天这些文件从 index 里掉出去过（比如一次 `git rm --cached` 或分支操作失误），
+重新添加时会悄悄漏掉整个目录。删掉这条规则（`audit_public.sh` 的"运行时产物不
+进仓库"一项复查过，删除后仍然全绿，没有别的东西因此意外泄露）。
+
+### 📐 设计 · 批 H-II 设计探活 + 分发提示词 —— H 又拆一层，收窄成两个有把握的包
+
+批 H-I 落地时明确留白了四件事：`_runtime`/`_snapshot` 往哪迁、
+`application`/`integrations`/`cli` 三个命名空间装什么。轮到 H-II 时先探活
+这四件事，而不是照 §29 骨架硬填——结论是四件事里只有两件现在有把握：
+`_runtime`（352+253 行，市场/板块/技术三个 Specialist 与 orchestrator.py
+共同消费）→ `runtime`；`_snapshot`（266 行，同时 import 三个 H-I 已迁移包，
+协调另外三层而不自成一层）→ `application`。探活确认这两个包**没有** H-I
+撞过的三个坑：零 `__file__` 用法、几乎零直接子模块导入（仅 1 处）、零
+AST 守卫硬编码路径——可达性机制直接照抄 H-I，不需要重新设计。
+
+**`integrations`/`cli` 与挖 `orchestrator.py` 出来单独建包，留给 H-III**：
+探活发现 `orchestrator.py`/`feishu_deliverer.py`/`notify_worker.py` 三个
+§29 骨架点名放 `application`/`integrations` 的候选，实际全部活在
+`skills/decision-card/scripts/` 里，只被 `decision-card` 一个 skill 消费
+——跟 H-I 三个包"第二个消费方出现才抽取"（裁定 15 同源理由）不是一回事，
+现在抽出来是造一个只有一个消费方的共享包，L-1 的反面。
+
+分发提示词见 `docs/guide/orchestration-kickoff-prompt.md` 同名小节；探活
+全文见设计 SSOT §8.1。
+
+### 🔧 变更 · 批 H-I —— 三个共享基础设施包迁进 `src/easyup_biga/`，旧路径留薄壳
+
+外部评审 §29 建议把代码长期迁到 `src/easyup_biga/{domain,application,providers,
+runtime,persistence,integrations,cli}`。设计文档 §8 已裁定采纳、并把代价写在明处
+（作废 19 章教程路径、`sys.path.insert(0,"skills")` 是承重墙、结构改动无行为判据）。
+这一批（H-I）只搬 §8 自己讨论过、给了具体缓解方案的三个包：
+`skills/_contract` → `easyup_biga.domain`、`skills/_store` → `easyup_biga.persistence`、
+`skills/_sources` → `easyup_biga.providers`。**纯目录搬迁**（`git mv` 保 history，
+21 个子模块文件内容逐字节不变），旧包原地留 re-export 薄壳 ⇒ 全仓 199 处
+`from _contract import ...` 之类的导入**一个字符都不用改**。
+
+**为什么拆出 H-II 留白**：`_runtime`/`_snapshot` 往哪迁、`application`/`integrations`/
+`cli` 三个命名空间装什么 —— §8 的缓解表**没讨论过**，说明当时也没想清楚。现在硬做
+只能得到没有设计依据的猜测性目录，还违反「按需创建，不预建空目录」（`agents/` 已吃
+过这个教训）。⇒ 留白，等真有内容要放时再建。也没有引入真打包层
+（`[project]`/`pip install -e .`）：`src/` 仍是靠 `sys.path` 手动挂载的普通目录树。
+
+**裁定：`persistence`/`providers` 暂时不自足，接受**。这两个包内部仍是
+`from _contract import ...`（旧写法，没改），只挂 `src/`、不挂 `skills/` 会
+`ModuleNotFoundError: _contract`（独立复核实测确认；`domain` 因为是叶子包、
+不依赖别的两个包，反而自足）。真实运行时 `skills/` 与 `src/` **恒同时在
+path 上**（薄壳自挂 + `pyproject.toml` 都挂了两条），这条限制从不在真实
+路径上发作，是纯结构性的观察，不是活 bug。改法是把这两个包内部的跨包
+`from _contract import` 换成 `from easyup_biga.domain import`——但那是
+**内容改动**，会让「结构改动无行为判据、行为不变即通过」这条验收方式
+失效，且 §29 与 §8 都没有把这一步纳入讨论范围。⇒ 留给 H-II（或专门的
+「跨包引用清理」批次），H-I 里明确记录、不当成意外发现，也不假装它不
+存在——这正是 Strangler Pattern 的中间态（新代码暂时还依赖旧壳的一角），
+不是遗漏。
+
+**薄壳怎么写的**（两个不显然的裁定）：
+- 包级壳（3 个）用自身 `__file__` 相对路径把 `src/` 挂上 `sys.path` —— **不依赖
+  pytest 的 `pythonpath`**，因此 `bin/biga-card` 拉起的子进程、`systemd-run` 脱树跑的
+  （都不经过 pytest 配置）也能 import 到 `easyup_biga`。`pyproject.toml` 里**另外**把
+  `src/` 列进 `pythonpath` 只为 pytest 内**直接** `import easyup_biga.*` 稳定可达 ——
+  两条路径分别覆盖、分别验证（见 P5）。
+- 子模块壳（21 个）用 `sys.modules[__name__] = 真实模块` 别名，让 `_store.db` 与
+  `easyup_biga.persistence.db` 成为**同一个模块对象** —— 连下划线私有名都一致，杜绝
+  「壳与本体漂移」。`import *` 会漏掉下划线名、且污染 stdlib 名，故不用它。
+
+**🔴 一个「纯目录搬迁」本不该有、却真的有的行为变化**：`db.py` 与 `tradetime.py`
+用 `__file__` 相对路径**自定位**（`DEFAULT_DB_PATH` = 仓库根/`data/biga.db`；tradetime
+把 `skills/` 挂上 path）。这两个文件从 `skills/_X/` 迁到 `src/easyup_biga/Y/` 深了一层，
+`parent.parent.parent` 于是从「仓库根」变成了「`src/`」—— `DEFAULT_DB_PATH` 悄悄算成
+`src/data/biga.db`，指向一个不存在的库。**全套 1358 条测试没抓到它**（测试都用
+`tmp_path`/`BIGA_DB_PATH`，不走默认路径），是 P3 的 `bin/biga-card --check` 当场撞红
+（迁移前「组装一致」→ 迁移后 `StoreNotInitialised: src/data/biga.db`）。⇒ 给这两处
+`__file__` 深度各补一级 `.parent`，注释写清「这不是改行为，是**保住**行为」。
+教训：**对自定位文件，纯移动不是行为中立的** —— 这正是 §8 说「结构改动唯一可信的
+验收是行为不变」的实例，也是 P3 存在的全部理由。
+
+**🔴 守卫常量（L-13）**：契约/DB「唯一实现」两道 AST 守卫认的是**真实类定义在哪个
+目录**（`CONTRACT_DIR`/`STORE_DIR`）。迁移后真实定义搬走、旧路径只剩薄壳（无类定义），
+常量不改这道守卫会在新目录上**静默失效**。开工提示词点名两处
+（`test_contract_single_impl.py`、`test_no_raw_sqlite.py`），重跑清单又扫出**另外两处**
+同形状、提示词没列的：`test_decision_id_ownership.py` 读 `skills/_store/db.py` 源码找
+`save_verdict`、`test_store.py` 读 `schema.py`/`db.py` 源码找 `subagent_runs` 注释并按
+`skills/_store/` 前缀排除 store 自调 —— 四处全部改指新位置。**只改提示词点名的两处
+就会漏掉后两处**，那正是「重跑 grep 确认清单没变」这条纪律要防的。
+
+**探针记录（G-1，每道都见过红）**：
+- P1 导入兼容：AST 扫全仓收集 136 条去重 import，在**全新子进程**（只挂 `skills`，逼壳
+  自挂 `src`）逐条真执行 → 零 ImportError。sabotage：删 `skills/_sources/sina_news.py`
+  壳 → 探针红，精确点名 4 条失败语句及出处（`news_scan.py:73` 等）→ 还原绿。
+- P2 「唯一实现」守卫在新位置生效：在 `src/easyup_biga/domain/` 放第二个 `Evidence`
+  → `test_contract_目录里每个契约恰好定义一次` 红；移除 → 绿。再把 `CONTRACT_DIR`
+  临时改回旧路径 → 守卫在干净树上就红（test_A 把真实域类当成「第二份实现」、exactly-once
+  在薄壳里数出 0 个契约类）⇒ 证明改常量是**承重**的、不是装饰。`STORE_DIR` 同构验证。
+  ⚠️ 与提示词设想的「改回旧路径→悄悄漏过」不同：因为真实代码**已经搬走**，旧常量是
+  **大声报错**而非静默放过 —— 更好，同样证明必要性。
+- P3 一致性：`bin/biga-card --check BIGA-20260923-004` 迁移前后逐字段相同（修完深度 bug 后）。
+- P4 测试条数：`pytest --collect-only` 迁移前后都是 **1358**（不减）。
+- P5 非 pytest 路径：`python3 -c "sys.path.insert(0,'skills'); import _contract,_store,_sources"`
+  （不经 pytest 配置）成功，模块解析到 `easyup_biga.*`、`DEFAULT_DB_PATH` 指向仓库根。
+- P6 隔离自检：`tools/verify/isolation.py` 迁移前后判词一致（5✅+1🔶，本批不碰端口/单元/nvm）。
+
+### 🔧 变更 · `THIRD_PARTY_NOTICES.md` 补上真实依赖审计，不再是占位模板
+
+上一批开源合规材料（`901556f`）落地时，`THIRD_PARTY_NOTICES.md` 如实写着
+"this compliance pack does not attempt to infer the current BigA
+repository's actual dependency inventory. Before the next public release,
+replace this section"——诚实，但那次审计一直没人做。这次做了：AST 扫全仓
+`.py` 收集三方 import（`pyproject.toml` 没有 `[project.dependencies]`、
+没有锁文件，扫源码是唯一办法），核对到只有两个真三方包
+（PyYAML 6.0.3、pytest 9.0.3，都是 MIT，装的版本号与许可证都从
+`importlib.metadata` 直接读的，不是抄记忆）；确认没有任何改写/搬运的
+三方源码（扫了 `skills/`/`bin/`/`tools/`/`deploy/` 找"adapted
+from"/"vendored"等标记，零命中）；补上 OpenClaw 本身是独立装的 MIT
+运行时、不是本仓库打包分发的一部分。同时把「Data-provider notice」的
+通用清单换成真实的五个数据源（深交所官方 + 新浪日线/快讯、腾讯行情、
+东财股池——四个非官方接口），但**没有**编造 ToS/限流条款——那几列
+如实写"Not reviewed"，因为确实没做过那份法律审查，属于 R-3 同一个
+道理：不知道就说不知道，不能因为在写文档就放松这条。
+
+### 🐛 修复 · AST 纯度守卫在无 git 退化模式下误判 `docs/external` 参考代码为第二份实现
+
+写批 H 分发提示词时跑 `test_scan_fallback.py`（模拟"没有 `.git`"场景，
+给外部深度评审发现的"发布包里没有 git 元数据、守卫集体报错"这条真事故
+兜底）附带发现：`docs/external/` 下一份外部评审自带的示意代码
+（示范 `Evidence`/`DecisionCard` 长什么样的 `domain_models.py`、示范
+`Repository` 直接 `import sqlite3` 的 `repository.py`）触发了两条 AST
+纯度守卫——「契约只有一份实现」「DB 唯一入口」。根子：这两条守卫走
+`_scan.repo_files()`，正常路径用 `git ls-files -co --exclude-standard`，
+被 `.gitignore` 挡住的未跟踪参考材料天然不可见；但 fallback 测试故意
+模拟"没有 git"退化成纯文件系统遍历，这时 gitignore 完全不生效，参考
+材料第一次进入扫描范围，两条路径对同一批文件给出不同判断——是 L-13 的
+形状，守卫在自己的降级模式下悄悄看见了更多东西，而没人告诉它这些不该算。
+`test_orchestration_single_source.py` 早就为它自己的扫描器加过同样的
+排除（`docs/external/` 在它的 `_EXEMPT_PREFIX` 里），这次把同一个判断
+补进 `_scan.py` 的共享判据 `is_external_reference()`，避免每处各写一份
+（那正是 `_scan.py` 自己存在的理由），两处改动各自 sabotage-revert 验证
+独立生效，并各补一条不靠子进程/fallback 模式就能发现回归的直接单测。
+
+### ✨ 新增 · 批 L —— `cn.trading_calendar`：第一张真实的 `fact_*` 表，`market_is_open` 认节假日了
+
+`skills/_sources/tradetime.py` 长期白纸黑字写着「已知边界：不认节假日」——
+纯 weekday 判据会把工作日上的法定节假日（元旦、国庆首日等）当成开市。它有两个真实
+生产消费方（`news-scan` 判「此刻是否连续竞价」、`emotion-calc` 判「这个数是真零还是
+还没产生」），却零测试覆盖。这一批修这个缺陷，顺带做成一件更大的事：把
+`architecture.md` §5.2 画了很久的 `raw → fact → derived` 分层图里的**中间那层**第一次
+落成真实 schema —— 在此之前十张表里只有 raw 层被实例化过，`fact_*` 只存在于文档。
+用一个非行情、体量小、判据清楚的数据集给 §45「第一版完整市场数据」那一批打样。
+
+**为什么这么设计**（几处不显然的裁定）：
+
+- **数据源选深交所官方 monthList，是探活后综合选出来的**（dev-workflow 第 1 条：设计
+  先探活）。把能免鉴权拿到的都真打了一遍 curl：新浪 `klc_td_sh.txt` 可达但返回**加密串**，
+  解密要一个 JS 引擎（重依赖，不收）；东财 `RPTA_WEB_TRADE_DATE` 可达但**数据脏**
+  （把周日列成交易日、无未来、尾部塞 `20311231` 哨兵行）；timor.tech 放假 API 可达但它是
+  **办公日历不是交易所日历**——调休上班的周末它标工作日，而交易所那天不开市（用新浪
+  日线实测核实：2026-02-14 等调休日 `traded=False`）。只有深交所官方 monthList
+  一手官方、结构化 JSON、每月每天带交易标志、缺日/未发布当场抛错——判据最清楚。
+  这也与仓库对 `a-stock-data`（Provider Catalog / 接口参考）的既定定位一致，`jyrq`/`jybz`
+  字段形状抄自它。
+- 🔴 **一条诚实写出来的部署约束**：`www.szse.cn` 从本项目当前唯一部署环境（WSL）
+  **连不通**（TCP 握手后挂死，HTTPS/HTTP 都 45s 超时）。这不是适配器的 bug，是这台机器
+  到交易所站点的网络事实。后果：本环境里 `fact_trading_calendar` 保持空表、
+  `market_is_open()` 恒走 weekday 回退（安全方向）。⇒ **解析层由离线 fixture 全测、
+  落库链由注入桩 fetcher 全测**（联网那层不进离线测试，沿用禁网围栏）；真实抓取会在
+  能连通深交所的运行环境里把日历填进来，届时 `market_is_open()` 自动从回退切到查表。
+  消费方（`market_is_open`）与它的读取关系**真实且被测**，只是数据写入取决于网络可达性
+  ——不是 L-1 的「零消费方」。写下来是因为：认证/取数类故障，第一反应总会怪新系统，
+  而这里的空表是网络事实，排查方向天生容易错。
+- **回退方向绝不能倒**（红线 R-3）：`is_trading_day()` 查不到返回 `None`，
+  `market_is_open` 把 `None` 当「可能开市」回退到 weekday——顶多让依赖它的静默判据**多报**
+  一条缺失项（Card 更保守），**绝不把「查不到」当「休市」**：后者会在真实交易日里以为
+  休市，是危险得多的方向。探针 P5 钉死「无数据/超范围时结果与改之前逐一相同」。
+- **`session_in_progress()` 不改，并加特征测试锁住**：它回答的是「这批数据声明的交易日
+  过完了没」（纯时间比较：声明的 trade_date 是不是今天且未到收盘），跟「今天是不是
+  节假日」不是同一个问题。给它加节假日感知会把 `emotion` 推向危险方向——节假日的 0
+  会被当成真「冰点」而不是「还没产生」。它周末上午也返回 True 是**设计如此**（那天的
+  数据确实还没过完），不是缺陷。加特征测试是防后续会话顺手「一起改了」。
+- **完整性 fail-closed**：`parse_trading_calendar` 要求响应覆盖该月每一个自然日，
+  缺日/未发布/多出别月的日期都当场抛错——宁可整月拒绝，也不放行半份月历把「没数据」
+  和「休市」混成一谈。
+- **不接 `SnapshotCoordinator`**：那套解决「同一次决策运行内多个 Specialist 必须看同一份
+  易变网络数据」；交易日历是低频更新的只读参考表，一年抓几次即可，硬套会引入一套不必要
+  的每次-运行开销。日历落 raw 直接调 `save_raw_snapshot`。
+- **只追加、历史事实不 UPDATE**：交易所若事后补发调整（临时增/删交易日），写更晚
+  `retrieved_at` 的新行，`is_trading_day` 按 `retrieved_at` 取最新一条——覆盖旧行就
+  没法回答「我们当时看到的日历是什么」（与 raw 层同一条 L-8 先例）。
+
+**建的东西**：
+
+- schema **v15**：`fact_trading_calendar`（`trade_date`/`is_open`/`source`/`as_of`/
+  `retrieved_at`/`snapshot_id`→raw/`created_at`，`CHECK(is_open IN (0,1))`）——
+  这个仓库**第一张真实的 `fact_*` 表**，接 `_append_only()` 触发器。
+- `skills/_sources/szse.py`：深交所日历 Provider，照 `sina.py` 的分层——
+  `parse_trading_calendar`（不联网纯函数，能对已存 raw 重放）+ `fetch_trading_calendar`
+  （联网薄函数）+ `refresh_trading_calendar`（抓取→原样落 raw→归一化进 fact 表，
+  fetcher 可注入以离线测落库链）。`TradingCalendar.server_as_of = None`（F16：端点不带
+  单一时刻，调用方用取回时刻当 as_of）。
+- `skills/_store/db.py`：`save_trading_calendar`（只追加）+ `is_trading_day`（读最新一条，
+  库/表不存在返回 `None` 不抛错）。
+- `skills/_sources/tradetime.py`：`market_is_open` 加 `path` 参数、有日历数据以它为准、
+  查不到回退 weekday（`session_in_progress` 不动）。
+- 测试：`tests/test_tradetime.py`（21 条特征测试锁基线）+ `tests/test_szse.py`
+  （解析/落库/日历感知/回退/免鉴权，P1/P2/P4/P5/P6）+ `tests/test_store.py`
+  给 `fact_trading_calendar` 加只追加回归。
+
+**🔴 探针记录**（G-1：每道新守卫先弄坏、见它红、再还原）：
+
+- **P3 · `fact_trading_calendar` 只追加**：从 v15 迁移里删掉 `_append_only()` 调用，
+  跑 `test_每张表都有只追加触发器` → 红：`AssertionError: 这些表可被改写：
+  ['fact_trading_calendar']`（自动发现新表、要求它接触发器的判据真的生效）。补回 → 绿。
+- **P4 · `market_is_open` 的日历查询是载荷代码**：把 `market_is_open` 临时改回
+  weekday-only（保留 `is_trading_day` import 但不调用），跑 `test_元旦被判成休市` →
+  红：`AssertionError: assert True is False`（喂了日历数据元旦仍报开市，证明日历分支
+  不是摆设）。还原 → 绿。
+- **解析完整性 fail-closed 是载荷代码**：临时删掉 `parse_trading_calendar` 的整月完整性
+  校验，跑 `test_缺日抛错` / `test_多出别的月份的日期抛错` → 红：两条都
+  `Failed: DID NOT RAISE SourceError`（残月/串月被静默放行）。还原 → 绿。
+- 三次探针跑完 `grep -rn PROBE skills/` 确认工作区无残留。
+
+### 🐛 修复 · 隔离自检漏认 `%h` 写法与 `.timer` 单元 —— 装 notify-worker 定时器时亲手撞到
+
+`isolation.py::check_namespaces()` 判据是「引用了 BigA 路径的单元，名字必须带
+`-biga`」，但实现只认字面绝对路径、只 glob `*.service`。装
+`notify-worker-biga.{service,timer}`（见下一条）后拿它自查，报告只数到网关
+那一个单元——查下去发现两处盲点：① 单元文件要进公开仓库，不能把真实家目录
+硬编码进去，只能用 systemd 的 `%h` 写法，而检查只认 `str(BIGA)` 那个字面展开
+路径；② 检查从不 glob `*.timer`，定时器单元完全不在扫描范围内。两处叠加的
+后果不是报红，是**这道守卫对这一类单元完全失明**——不确认它没事，是根本
+没看见它。改成 body 里出现字面路径或 `%h/.openclaw-biga` 任一即算引用，
+候选文件同时 glob 两种后缀；新增 4 条测试，sabotage-revert 验证过两处
+改动各自都会被抓到（错误信息与真实报告行为一致：判不了，不是通过）。
+写下来是因为这正是 R-2 反复出现的那个模式——不是新红线，是同一条红线
+第 N 次在新地方被撞到，见 CLAUDE.md 那张表。
+
+### ✨ 新增 · `bin/biga-notify` + systemd 定时器 —— 给 `notify_worker.py` 接上调度方
+
+对齐 `docs/external/2026-09-23-biga-minimal-feishu-design.md` §6/§13：投递
+脚本本身（批 G-I）与真投递凭据（`FeishuDeliverer`，P6 live 修的那批）早就
+都有了，缺的只是「谁、多久调一次它」——这个缺口在 TODO 里挂了很久，且
+真会咬人：忘记 `--deliverer feishu` 就是「通知一直攒在 outbox 里」，P6 live
+真跑时就撞过一次。`bin/biga-notify` 把默认值固化成真投递（仍可显式传参
+覆盖回 stdout 桩排查），systemd timer 每 2 分钟跑一次（`Type=oneshot` +
+`OnBootSec`/`OnUnitActiveSec`），已用配套的 `install_notify_timer.py --apply`
+真实装上并 `enable --now`。装/卸载脚本不经 `bin/biga`（R-1 例外——纯 BigA
+自己的 systemd 定时器，跟 OpenClaw 的 profile/gateway 完全无关，不存在可
+转发的子命令）；单元名装前用 `check_r2()` 先查一遍 `-biga` 后缀，不等隔离
+自检才发现（该守卫本身随即也在这批里补上了两处盲点，见上一条）。
+
+### 🔧 变更 · 文档规约放过 `docs/external/` 下未跟踪的文件
+
+`.gitignore` 已把 `/docs/external/*` 整体挡住（运营者的决策，2026-09-23：那目录
+放本地参考材料，不打算提交）——但 `test_docs_convention.py` 的三条检查（文件名
+规则、开头类别声明、日期前缀 + 只读标注）当时按磁盘扫描，不知道这条新策略，继续
+对着这些永远不会提交的文件报错。
+
+这与既有的"未跟踪文档要不要计入条数"是两条不同的判据，没合并：条数那条的前提是
+"这份文档以后会提交，提交前查出来有价值"；`docs/external/` 新文件的前提反过来——
+它们**没有**"以后会提交"的那一刻，"提交前该长什么样"这套约定对它们不适用，不是
+放松检查，是检查的前提本身不成立。已经提交过的老文件（`2026-09-19-upstream-
+source-design-v1.md`）不受影响，继续跟踪、继续受检——用 `git ls-files` 核对过
+两者状态不同，不是猜的。
+
+新增 `_is_untracked_external()`，复用已有的 `_tracked_docs()`（加了
+`functools.lru_cache`，避免每条 parametrize case 各自 shell 一次 `git ls-files`）。
+sabotage-revert 验证：把判据改回恒 `False` ⇒ 17 条失败原样重现；还原后全量测试
+**首次在本次会话里真正全绿**（此前这 17 条一直是背景噪音，被反复误认成"已知的、
+与当前改动无关的失败"）。
+
+### 🐛 修复 · 批 G-II P6 live 真跑发现：飞书投递改走 `bin/biga message send`——不再需要 appId/appSecret
+
+Card 完成、正确入队通知之后，第一次手动跑 `notify_worker.py --deliverer feishu`
+报错缺 `BIGA_FEISHU_APPID`/`APPSECRET`/`OWNER_ID` 三个环境变量——`notify_worker.py`
+至今没有调度方（已知缺口），意味着也没有"谁在正确环境里带着这三个凭据跑它"这件事
+本身的答案。
+
+而**网关那一刻已经在用一条真实、已认证的飞书连接**——它刚收到并处理了触发出卡的
+那条消息。独立实现一套 HTTP 客户端 + 独立凭据是重复发明这条连接已经在做的事。
+`openclaw` CLI 本就有 `message send --channel feishu --target <id> --message <text>`
+（`bin/biga message send`），走网关自己的飞书通道——**不需要 appId/appSecret**，
+这两个值从此不出现在这个类里。唯一还需要的是"发给谁"（`BIGA_FEISHU_OWNER_ID`，
+一个标识符，不是凭据），且它本就有处可去（`channels.feishu.allowFrom[0]`，与出卡
+触发的 owner 白名单同源）。
+
+`FeishuDeliverer.deliver()` 改成 shell 一次 `bin/biga message send`（R-1：经
+`bin/biga`，绝不裸 `openclaw`，与 `apply_config.py`/`inbound.py` 同一个
+`_run_biga` idiom）；`tests/test_feishu_deliverer.py` 整批重写——旧版 `app_id`/
+`app_secret` 假值随之删掉，不是漏测，是那两个参数已经不存在。
+
+**验证不只是离线**：sabotage-revert（去掉 `--target` ⇒ 两条测试翻红；还原绿）
+之后，真的手动跑通了一次——`bin/biga message send --dry-run` 先确认目标解析
+正确，再真发：Feishu API 返回真实 `messageId` + `receipt`（不是本地 exit code
+自证），**运营者在飞书里确认收到了**。这是这一批第一次有一条外发通知真的从
+「代码认为发出去了」走到「人在飞书里看见了」。
+
+⚠️ **同一时间收到一份外部材料**（`docs/external/2026-09-23-biga-openclaw-
+feishu-delivery-fix.md`，本地参考、不提交）提出更完整的目标架构
+（`DeliveryContext`/`NotificationAdapter`/`NotificationRouter`/账号与会话线程/
+退避重试表）。核心原则与这次的修法一致（凭证属于 Channel，不属于 Agent/BigA）；
+它顺带提的"worker 重启会不会重复发送"，查证 `undelivered_notifications()` 的
+真实查询（`WHERE NOT EXISTS (...status='delivered')`）已经安全，不是缺口。
+其余多渠道/多账号/会话线程部分是在给一个今天零消费方的通用通知系统打样（L-1）——
+按裁定，先不建，留作以后"真的出现第二个渠道/第二个账号"那天的设计参考。
+
+### 🐛 修复 · 批 G-II P6 live 真跑发现：预算闸门拒了它自己刚占的号
+
+准备好 live 环境后真发了第一条飞书 `/card`。main 认出请求、跑了 `inbound.py`，
+`accept_trigger` 正确占了号（`BIGA-20260923-003`）、正确拉起了 `systemd-run` 脱树
+（entry_guard 判 HUMAN，journal 确认单元真的起来了）——到这里为止，这次返工要防的
+东西全部兑现。但 `bin/biga-card` 自己的预算闸门（`check_budget()`）紧接着**拒绝了
+这次运行**，报「距上次占号只有 0s」「还有 1 次运行没出卡」，两条理由都指向的是
+`BIGA-20260923-003`——也就是它自己。
+
+根因：预算闸门的「上次占号」查的是 `decision_ids` 表里最新一行。CLI 路径下，
+`bin/biga-card` 先过闸门、后占号（orchestrator 自己占），闸门跑的时候号还不存在，
+"最新一行"自然是**别的**、更早的尝试。飞书 inbound 路径反过来——`accept_trigger`
+为了拿幂等键，**先**占号、**再**拉起 `bin/biga-card`；闸门跑的时候，"最新一行"
+就是它自己刚占的那个。gap 恒为 0s，"还没出卡"也恒为真——**这条路径上，闸门 100%
+会拒绝每一次触发，不是偶发**。这解释了为什么离线探针测不出来：P1/P3 的测试直接
+调 `accept_trigger` 或桩掉 launcher，从没让`bin/biga-card` 自己的闸门在同一条真实
+调用链上跑过。
+
+修复：`check_budget()` 新增 `exclude_decision_id` 参数，排除掉「跟自己比」这一条
+（`DAILY_CAP`——今天总共占了几个号——不受影响，这次自己确实算一次）；
+`bin/biga-card` 把 `$BIGA_CARD_DECISION_ID`（飞书路径才有，CLI 路径本就没有）
+传进去。`tests/test_budget_gate.py` 新增 `TestExcludeSelf` 四条：排除自己就不再
+自比、不排除时（CLI 默认）行为一字不变、排除自己不连带放过同一天**别的**真实
+占号、`DAILY_CAP` 不受排除影响。
+
+**验证**：sabotage-revert 亲手复现——把排除逻辑改回"假装排除、实际不排除"
+（`others = reserved`）⇒ 新增四条里两条当场翻红，报错文本与真实 live 事故完全同形；
+还原绿。全量 1258 条测试（新增 4 条，`sync_test_count.sh` 已同步）+
+`audit_public.sh` 十一项复跑仍绿。
+
+⚠️ **这条比 MCP 路由那个坑更靠后、更隐蔽**：MCP 那个坑在"main 能不能碰到工具"
+这一步就报错，錶面现象很显眼；这个坑要走到"main 已经成功发起、`accept_trigger`
+已经成功占号、`systemd-run` 已经成功脱树"这么远，才在**下一个进程**里被同一套
+闸门用**自己刚写的那一行**拒绝——四道离线探针（P1-P4）分别验证了各自的那一段，
+没有一道探针把这几段串成一条真实调用链去跑，所以谁都没测出来。
+
+### 🐛 修复 · 批 G-II P6 live 预检发现：config patch 省略 mcp 键不等于删除
+
+给 P6 live 验证做准备时，把返工后的配置 apply 到真实 live，发现 `mcp.servers.
+biga-card-trigger` 那条**没有消失**——它还指向一个这次返工已经从仓库删掉的脚本
+（`skills/card/scripts/card_trigger_mcp.py`），对应的 stdio 子进程也还活着。
+
+根因：`render_patch()` 不再往 patch 里写 `mcp` 键（因为不再注册 MCP server 了），
+但 `config patch` 的合并语义是"patch 没提到的键原样保留"——**省略只是「不管」，
+不是「删」**。任何 live 配置只要曾经 apply 过带 `mcp.servers` 的旧版 patch，这个键
+就会一直留在那，指向的脚本删了也不会跟着消失。这是"只增量合并自己管的键"这条设计
+本身的一个盲点：它保护了"不该碰的"，但没区分"不该碰的"和"曾经管过、现在不该再管的"。
+
+修复：`render_patch()` 显式加 `"mcp": {"servers": {"biga-card-trigger": None}}`——
+只删本脚本自己曾经写过的那一个键（不是整个 `mcp` 对象，给别的 MCP server 留位置），
+用 `config patch` 自己文档化的"null 删"语义真正撤回它。`tests/test_apply_config.py`
+的 `test_patch不注册mcp_server` 改名 `test_patch显式删掉曾经注册的mcp_server`，
+断言从"不含 mcp 键"改成"含显式 null"——原断言在这次真复现之前会一直误报绿（不含
+`mcp` 键 ≠ live 上那个键真的没了，两者在离线测试里看着一样，只有对着真实已污染的
+live 配置才能分辨）。
+
+**验证**：sabotage-revert 亲手复现——去掉 `"mcp"` 那行 ⇒ 新测试 `KeyError: 'mcp'`
+翻红；还原绿。全量 1254 条测试 + `audit_public.sh` 十一项复跑仍绿。
+
+### ✨ 新增 · 批 G-II —— Inbound Trigger：飞书出卡变结构化触发，main 只发起、编排脱树
+
+批 G-I 让卡跑完能**推**回飞书。这一批做反方向、风险大得多的那半：让飞书能
+**触发**出卡，但**出卡的编排绝不在 main 的会话进程树里跑**。它关掉的是 2026-09-21
+两次事故（19:31 四孤儿 spawn、21:03 出卡递归 L-14）的共同根子——**出卡编排跑在了一个
+agent 会话里，于是它能自己拼 `sessions_spawn`、还能递归再拉一次出卡**。
+
+🔴 **这一批的立场在建造中变过一次，如实记下来**（详见教程第 37 章 §三/§四）：
+最初照批 C-II 的激进立场做「**main 压根收不到这类请求**」——用 `command-dispatch: tool`
+让 `/card` 绕过 model 直达一个 MCP 工具。**live 上走死了**：`command-dispatch` 在建
+`toolSchema` 时够不到**会话内才连接**的 MCP stdio 工具（`docs/gateway/cli-backends.md`：
+session-scoped，不 outlive the run），报 `Tool not available`；而 main 在会话里调同一个
+工具反而算得对。加上运营者两个约束（**一个飞书机器人**做全部交互、**LLM 可用不追求
+0 LLM**）——一个私聊里 `bindings` 按 peer 路由、没法按内容分流，于是退回到 BigA
+全仓一致的形态：**`/card` 是普通技能，main 认出出卡请求 → 用 shell 跑 `inbound.py`**。
+不变式从「main 全程不参与」诚实降级为「**main 只发起、编排绝不在 main 进程树里**」——
+后者靠 `systemd-run` 脱树挡死（与谁发起无关），才是这批真正要防的东西。
+
+**为什么这么设计**（几处不显然的裁定）：
+
+- **出卡触发是纯技能（SKILL.md + shell 跑脚本），不用 MCP server。** BigA 全仓技能
+  都是这个形态（`decision-card` / 各 `*-calc` / `news-scan` / `risk-check`）。曾为迁就
+  command-dispatch 引入过一个 stdio MCP 工具 `biga_card_trigger`，但 command-dispatch
+  够不到它（见上）、且与全仓形态不一致 ⇒ **整体删除**（连带删掉一版试过的「专用非-main
+  agent + binding」，因单机器人单私聊无法按内容分流）。`/card` 回归成 `skills/card/SKILL.md`
+  + `skills/card/scripts/inbound.py`：main 用 shell 跑 `inbound.py --origin feishu
+  --trigger-id <event id>`，脚本秒回 ACK。
+- **幂等键绑 `decision_ids` 不绑 `decision_runs`。** 身份模型是 Trigger→Decision→
+  多个 Run。绑在每次尝试一行的 `decision_runs.trigger_id` 会**误伤将来的重试**
+  （重试复用同一 trigger、会撞唯一约束）；绑在号分配器 `decision_ids`（每决策一行）
+  正好——重试复用同一号、不重占 ⇒ 不撞约束，且占号本就是决策身份的原子仲裁点。
+  **「先查 trigger 在不在、不在就占号」中间有竞态窗口——唯一约束才是唯一可靠的
+  并发仲裁**（本仓库第三次用这句话，前两次在 `decision_ids`/`run_events`）。
+- **异步用 `systemd-run` 把出卡拉出 agent 进程树。** 受理要快（立刻 ACK）、出卡要慢
+  （后台 170~200s）。但命令工具在网关进程里跑，直接 fork 的 `bin/biga-card` 会继承
+  运行时血缘/service env、被 `entry_guard` 判成 AGENT 拒掉。解法是**新增一条被允许
+  的路径**（不改 entry_guard 已在拦的那条）：`systemd-run --user` 把它拉成瞬态
+  systemd 单元 ⇒ 血缘变 `systemd --user`、无 service env ⇒ 判成 HUMAN——正是
+  entry_guard 本就允许的「外部 Trigger」那一类。**不是绕过守卫，是走它本就留的门。**
+- **人工 CLI 与飞书走同一个 `bin/biga-card`**（同五道守卫、同 orchestrator，不分叉
+  两套决策逻辑）。异步只在 `inbound.py → bin/biga-card` 边界；`bin/biga-card` 内部
+  照旧同步。人工 CLI 没有那三个透传环境变量 ⇒ `origin=cli` ⇒ **同步体验一字不变**。
+- **`tools.deny:[ask_user]` 只给被 spawn 的非交互流水线 agent，main 不在名单。**
+  半年前不能做（那时 main 同时是交互入口和出卡入口，禁它会连累飞书/TUI），批 C-II
+  之后前提不成立。agent 名单**从 `_contract` 派生、不手写**（裁定 15 / dev-workflow
+  第五问）：`discipline` 在 STAGE2 名单里但没建（裁定 13）⇒ 按「真有 AGENTS.md」
+  过滤掉。**这条是设计探活点名必须补测的**——config 层的落点就是「main 不在 patch 里」。
+- **`apply_config.py` 撞 R-2 但机关早在。** 一切经 `bin/biga`（强制 `--profile biga`、
+  绝不裸 `openclaw`）、装 systemd 服务前拒绝任何非 `-biga` 单元名（`OPENCLAW_SYSTEMD_UNIT`
+  env 覆盖是唯一能绕过推导的口子，堵上它）、装后由 `isolation.py::check_namespaces()`
+  核对。`config patch` 递归合并 ⇒ 只碰它管的键（`tools.deny`/`commands.text`），
+  **不碰 appSecret/gateway token/ownerAllowFrom 这些 live-only 值——仓库里一个凭据都
+  不落**。
+
+**建的东西**：
+
+- schema **v14**：`decision_ids` 加 `trigger_id` 列 + partial unique index
+  （`WHERE trigger_id IS NOT NULL`）。`_store.reserve_decision_for_trigger`（幂等
+  占号，返回 `(decision_id, created)`）+ `find_run_by_trigger`（入站幂等查询侧）。
+- `skills/card/scripts/inbound.py`：入站适配器 `accept_trigger`——幂等占号
+  → 异步拉起（`detached_biga_card_launcher` 脱离进程树）→ 立刻 ACK。launcher 是依赖
+  注入点（离线测桩）；带薄 CLI（`--origin/--trigger-id/--json`），SKILL.md 让 main 跑它。
+- `skills/card/SKILL.md`：`/card` 技能（model-invocable）——指引 main 认出出卡请求后
+  跑 `inbound.py`、原样转达 ACK、**不 spawn / 不自己编排 / 不等**。
+- `skills/decision-card/scripts/feishu_deliverer.py`：`FeishuDeliverer` 实现批 G-I 的
+  `Deliverer` 协议，接真飞书 API（HTTP 传输是注入点、凭据从环境变量读）。
+  `notify_worker.py` 加 `--deliverer feishu`（默认仍是 stdout 桩）。
+- `deploy/openclaw/`（新目录）：`agents.yaml` / `tool-policy.yaml` /
+  `profile.template.json` / `apply_config.py`。
+- `bin/biga-card`：认 `BIGA_CARD_ORIGIN/TRIGGER_ID/DECISION_ID` 三个环境变量透传给
+  orchestrator（都没设 = 人工 CLI，同步路径不变）。`orchestrator.py` 加 `--decision-id`。
+
+**探针（G-1，每道都亲手弄坏、见过红、已还原）**：
+
+- **P1 幂等**：关掉 `reserve_decision_for_trigger` 的去重（跳过快查 + 插入不带
+  trigger 标记）⇒ `created2` 变 `True`、adapter 拉起两次 ⇒ 幂等两条测试翻红。还原绿。
+- **P2 编排脱树**：给 `detached_biga_card_launcher` 的 systemd-run 去掉 `--user`、
+  或把回退路径清 `OPENCLAW_SERVICE_*` 那段删掉 ⇒ 两道结构测试翻红（不脱树/漏 service
+  env ⇒ entry_guard 会判 AGENT）。还原绿。⚠️ P2 第一版用裸 substring 查「代码里不许
+  出现 `sessions_spawn`」，结果抓到了 `inbound.py` docstring 里为解释「防的是什么」而
+  提到的这个词（与「描述『不要写 X』别抄 X」同构）——改成 AST 查真实 import。
+- **P3 异步**：给 `accept_trigger` 塞 `time.sleep(2)`（模拟同步等出卡）⇒
+  「受理 < 1s」断言翻红。还原绿。
+- **P4 R-2**：把 `check_r2` 的判据改成 `if False`（fail-open）⇒ 非 `-biga` 单元名
+  不再被拒 ⇒ `DID NOT RAISE R2Violation` 翻红。还原绿。
+- **P5 tools.deny**：把 `main` 塞进 deny patch（并关掉那句 `assert "main" not in`）⇒
+  「main 不在 deny」断言在集合里查到 `'main'` ⇒ 翻红。还原绿。
+- **P6 live**（真飞书 event → 卡 → 投递）：外部收尾，见下方「已知问题/待办」。
+
+**探针记录里没有抄任何真值**：飞书 open_id / appId / appSecret / gateway token
+一个都没进这份 CHANGELOG（公开仓库纪律——描述「不要写 X」的规则时不抄 X）。
+
+**现状**：schema **v14**（仍是十张表；批 I 的 raw_text 列在 v13、本批 decision_ids.trigger_id 列在 v14，都是给既有表加列）、测试 **1254** 条、
+教程 **37** 章。全部在独立 worktree（`wt-g-ii`，不含未跟踪文件干扰）里跑过。
+### 变更（批 I）· raw 层真的存 raw —— 新增 `raw_text` 列，`content_sha256` 改基于原始响应文本（schema v13）
+
+**为什么这是证据链最底层的问题**：raw 层此前存的**不是 raw**。链路是
+`get_json()` → `json.loads` → 落盘时 `json.dumps(sort_keys=True)`。于是
+`content_sha256`（`Evidence.raw_hash` 指向的那个指纹）算的是**我们自己重排后**
+的字节，不是数据源发来的字节 —— 键序 / 空白 / 浮点表示 / 原始编码全部丢失，
+上游改了序列化而没改数据，指纹看不出来。对一个卖点是「证据可追溯、可回放」
+的系统，这是最不能含糊的一处。而 `schema.py` 的建表注释当时还写着「这里存的是
+从数据源拿到的字节，**不做任何归一化**」——`sort_keys` 就是归一化，那句注释是假的
+（L-3 的标准形状：注释断言了一件没发生的事）。
+
+**做了什么**：
+
+- `_sources/http.py` 加 `get_json_and_text()`，**同时**交出解析结果与原始响应
+  文本；`get_json()` 收敛成它的薄封装。原文不再在 `json.loads` 之后就地丢弃。
+- 四个适配器把原文一路带出来：`sina.IndexDaily` / `eastmoney.{Pool,Breadth,Board}Result`
+  / `sina_news.NewsFeed` 各加 `raw_text` 字段；`tencent.fetch_index_quote` 改成
+  返回 `(quotes, 原始响应体)`（它一次请求拿回所有代码，body 只此一份，而 raw 层
+  里那份 `{code: 片段}` 是从 body 抠出再组装的**派生物**）。多页聚合的源（板块榜 /
+  快讯）的 `raw_text` 是各页响应体的 **JSON 数组**，每个元素逐字节等于对应那次的
+  响应体。
+- `_store` schema **v13**：`raw_market_snapshot` 加 `raw_text` 列（`ALTER TABLE
+  ADD COLUMN`，可空）。`db.raw_text_sha256()` 是 `content_sha256` 的新口径
+  （`sha256(原文)`）。`save_raw_snapshot(raw_text=...)` 必填非空；六个采集调用方
+  的 `Evidence.raw_hash` 一并改走 `raw_text_sha256`，与 raw 层同口径。
+- **建表注释改回真话**：点名 `payload_json` 是解析后再 `sort_keys` 的规范表示
+  （给回读用、归一化过的），`raw_text` 才是未归一化的原始文本、`content_sha256`
+  基于它算。
+
+**🔴 新增列、不替换 `payload_json` —— 设计探活救下的一处静默破坏**：普查发现
+`_snapshot/coordinator.py` 的 `read_index_daily` 把 `load_raw_snapshot()["payload"]`
+当**已解析对象**用（`len(raw)` / 切片）。如果把 `payload_json` 的语义直接换成原始
+文本，这个消费方会拿到一个 `str`，`len()` 数的是字符数不是 K 线根数，**且不报错**
+——正是本仓库最想防的「看起来正常、其实错了」。所以本批是**新增字段**：
+`load_raw_snapshot()` 返回的 `payload` 继续是解析后的对象（coordinator 不用改），
+原文另存 `raw_text`。这与 E-I 的 LegacyAdapter、K 的卡级冻结名单回退是同一个
+「新增字段、旧读法继续成立」模式，不发明第四种写法。
+
+**为什么旧行不迁移**：raw 层只追加（L-8）。v13 之前的行没有原文可填（那段文本在
+`get_json` 内部早被丢弃、重建不出来），硬回填只能编。所以 `raw_text` 可空、旧行留
+`NULL`、其 `content_sha256` 保持旧口径（`payload_sha256`，函数保留未删、由
+`tests/fixtures/payload-sha256-vectors.json` 钉住）。**新行语义变了、旧行不受影响**
+是 schema 演进的标准形状。`Evidence.raw_hash` 的文档补了一句：别拿跨 v13 的两个
+`content_sha256` 直接比。
+
+**探针（G-1）—— 每道守卫都亲手弄坏、见过红、再还原**（`tests/test_raw_artifact.py`）：
+
+- **P1/P6 原始性**：把 `save_raw_snapshot` 的 INSERT 改成往 `raw_text` 列写重排后的
+  `blob`。红：存下来的是 `[{"close":...}]`（sort_keys、无空白），与构造的带乱序
+  key、多余空白的原始响应体逐字节不符（diff 直接把 bug 摆出来）。还原后绿。
+- **P2 哈希基于原文**：把 `content_sha256` 改回 `payload_sha256(payload)`。红：两次
+  「数据相同、键序不同」的响应产出**同一个** sha（`d8497d…` == `d8497d…`），
+  `assert ha != hb` 失败。还原后绿。
+- **P3 消费方不被破坏**：把 `load_raw_snapshot` 里的 `json.loads` 去掉，让 `payload`
+  变成 `str`。红：探针 `isinstance(payload, list)` 失败，**且真实消费方**
+  `test_snapshot` / `test_snapshot_wiring` 的冻结读取（`len`/切片）一并翻红 ——
+  证明这条守的不是我自己写的断言，是 coordinator 那条真实路径。还原后绿。
+- **P4 漏传即报错**：删掉 `raw_text` 非空校验。红：`raw_text=""` 时 `DID NOT RAISE`
+  ——一个漏改的 collector 就能静默往新列塞空值。还原后绿。
+- **P5 加列后仍只追加**：从 schema `_V1` 拿掉 `raw_market_snapshot` 的只追加触发器。
+  红：`UPDATE ... SET raw_text=...` `DID NOT RAISE AppendOnlyViolation`。还原后绿
+  ——确认 `ADD COLUMN` 没有意外绕开触发器，连新列本身的 UPDATE 也被拦。
+- **P7 多页源按页保真**（自补，堵设计探活外我自己最担心的一处）：P1/P6 走的是**单次
+  请求**的源；多页聚合的源（快讯 / 板块榜）`raw_text` 是各页 body 的 JSON 数组。把
+  `fetch_feed` 的 `raw_text` 改成 `json.dumps(raw_pages)`（**解析后**的页而非原文页）。
+  红：`json.loads(raw_text)` 取回的是 `{'result': {...}}` 解析对象，不是原始 body 字符串。
+  还原后绿 —— 证明每一页的响应体都逐字节进了那个数组。
+
+### 新增（批 I）· `tests/test_raw_artifact.py` —— raw 原始性的七道探针（+10 条）
+
+对应上面 P1–P7，10 条测试。加上新教程章节带来的 4 条 `test_docs_convention`
+参数化用例，批 I 自身的全量条数 **1170 → 1184**。
+
+⚠️ **合回 orchestration 时的两处台账笔误，复核时改正**：CHANGELOG/教程原写测试
+数 **1194**，worktree 干净跑出来的实际是 **1198**；三张验证用真卡引用的日期前缀
+写错了两个（应为 `BIGA-20260921-025`/`-024`，不是 `-0922-`）。都已在复核合并时改正。
+
+⚠️ **教程章节号与批 I 撞车**：批 I 与批 K 各自独立选中「第 35 章」，按落地先后
+顺序处理——K 先落地保住 35（`35-agent-registry.md`），批 I 改记 **第 36 章**
+（`36-raw-artifact.md`）。
+
+⚠️ **schema 版本号与批 G-II 撞车（待 G-II 合回时处理）**：批 I 与批 G-II 都在各自
+独立 worktree 里把新迁移记成 `_V13`——批 I 先合回 orchestration，保住 v13；
+G-II 合回时需要把自己的迁移重编号为 v14（迁移 SQL 本体不动，只改版本标签），
+按 J-I/J-II、F/G-I 已验证过的既定协议处理，这里先记一笔。
+
+### 🔴 新增 · 批 K：Agent Registry —— roster 从五处收成一处（确定性编排设计文档 §6 批 K）
+
+**为什么**：有一次真实的静默事故（2026-09-21）——`news` 进了契约的 Stage 1 名单、agent
+也建好了，但运行时白名单漏了它 ⇒ 只 spawn 四个、**无任何报错**、Card 照常出只是少一个
+领域；而 `risk` 如实报「Stage 1 缺席：news」，让排查方向天生指向 news 本身。当时的应对
+是 `test_roster_matches_config.py` 做数据驱动**对账**——对，但那是对账、不是单一源。开工前
+的设计探活普查发现 roster 实际散在**五处**，其中 `tools/verify/adapter_spike.py` 那处**零
+测试覆盖**（不 import `_contract`、不在 pytest 下跑，对账根本看不到它）。这一批把它们
+**结构性**收成一处：名册只手写一次，其余全部派生。
+
+**做了什么**：
+
+- **新增 `skills/_contract/registry.py`**：`AGENT_REGISTRY`（一个 agent 一条
+  `AgentDefinition`：`stage`/`spawned`/`reads_snapshot`）。派生照抄 `run.py::RUN_STATES` 已
+  验证过的 `vars()` 内省形状——`STAGE1_AGENTS`/`STAGE2_AGENTS`/`RISK_AGENT`/
+  `SNAPSHOT_INDEX_AGENTS`/`EXPECTED_ROSTER` 全部从它派生，不再手写平行清单。字段**只装有
+  消费方的**：没装外部示意稿里的 `required_datasets`（绑定被裁定表推迟的 Dataset Registry，
+  装了就是 L-1 死配置）。`RISK_AGENT` 写成会 fail-closed 的纯函数 `_sole_spawned_stage2()`：
+  「Stage 2 且 spawned」不是恰好一个就在 import 时 `RuntimeError`（今天恰好只有 risk；哪天
+  `discipline` 上线成 spawned，这里当场炸，逼人想清楚谁是制衡层入口，而不是静默取第一个＝R-3）。
+- **`verdict.py` 不再手写 `STAGE1_AGENTS`/`STAGE2_AGENTS`**，`_contract/__init__` 改从 registry
+  re-export；`orchestrator.py` 删掉自己的 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 两个独立字面量，
+  改 import；`adapter_spike.py` 的 `STAGE1` 迁到 `STAGE1_AGENTS`（收编前的第五处、零覆盖那处）。
+- **`DecisionCard.expected_roster`（卡级冻结名单）**：合成那一刻把当时 `EXPECTED_ROSTER`
+  冻进 `card_json`，`absent_agents` 优先读它、只有老卡（字段不存在）才回退到读**今天**的
+  Registry。堵的是一处静默漂移：`absent_agents` 原是 `@property`，现算现取**当下**名册，
+  于是一张历史卡今天 `--show` 会用今天的 roster——若这期间 roster 变过，同一张卡的这个字段
+  在不同时间给不同答案而 `card_json` 没变。**老卡不回填**（L-8）；**回放原样透传、不重算**
+  （`replay.py` 把 `expected_roster=original.expected_roster` 传给 `synthesize()`，和
+  `input_verdict_refs` 一样 ⇒ `comparable()` 两边恒等，`--check` 不误报组装不一致）。
+- **`STANCE_VOCAB` 保持独立**（它是 stance 词表、不是 roster），只对 Registry 断言**子集**
+  关系；`discipline` 在册（`STAGE2_AGENTS` 含它）但 `spawned=False` ⇒ 不进 `EXPECTED_ROSTER`
+  ⇒ 永不被判「缺席」（裁定 13：没有输入源、从不 spawn）。
+- **`architecture.md` §6.3** 加了 registry.py 一行（它是 `skills/_*/*.py` 入口，
+  `test_每个入口都在设计文档里被提过` 要求点名并说清解决什么问题）。
+
+**范围判断 · `test_roster_matches_config.py` 的 `skipif` 缺口（分发提示词留给建造会话定）**：
+原来整个 `TestRosterConsistency` 挂 `@skipif(not CONFIG.exists())`，fresh clone / CI 上
+**静默跳过整组**——连**不需要配置**的「契约名单 vs 已建 agent」都被一起跳过。R-3：算不出来
+不该悄悄变成「没查出问题」。**收窄修**：① 不需配置的半边**照常跑**（CI 上也拦得住漂移）；
+② 需配置的半边（读仓库外、人工维护的 `openclaw.json`）在配置缺席时发一条可见的
+`RuntimeConfigUnavailable` 警告再 skip。**没**改成「配置不在就 fail」——CI 上本就不该有那份
+机器专属配置，fail 是把环境差异误报成代码错误。
+
+**探针记录（G-1：每道新守卫先弄坏、见红、还原）**——七道，全部见红且逐字节还原：
+
+| 探针 | 怎么弄坏的 | 报红 |
+|---|---|---|
+| P1 派生一致性 | `technical.reads_snapshot` 关掉 | `FAILED …test_SNAPSHOT_INDEX_AGENTS等于旧frozenset` |
+| P2 冻结名单 | 让 `absent_agents` 无视冻结字段、永远用今天的 Registry | `FAILED …TestP2FrozenRoster`（冻结卡跟着回退源变了） |
+| P3 老卡兼容 | 去掉 `absent_agents` 的 `None` 兜底 | `FAILED …TestP3OldCardCompat`（老卡 `set(None)` 崩） |
+| P4 adapter_spike 迁移 | `STAGE1` 改回独立字面量 `("market","sector")` | `FAILED …test_adapter_spike的STAGE1派生自contract` |
+| P5 discipline 不进权威 | `EXPECTED_ROSTER` 改成收全部 agent（含 discipline） | `FAILED …TestP5DisciplineNeverAbsent` |
+| P6 skipif 可见信号 | 配置缺席时静默 skip（删掉那条警告） | `FAILED …test_config缺席时发…警告而非静默skip` |
+| RISK_AGENT fail-closed | `discipline` 改 `spawned=True`（两个 spawn 的 Stage 2） | `import _contract` 当场 `RuntimeError` |
+
+两个探针**自身**的坑一并记下（探针也会有 bug，`dev-workflow` §3）：判据一开始写成小写
+`"failed"` 而 pytest 打大写 `FAILED`，六道明明红的被误报「没红」；P1 第一版是「把 news 挪到
+Stage 2」，结果先触发了 `RISK_AGENT` 的 fail-closed（import 炸），没验到 P1 自己声称验的东西
+（L-13 形状）——改成「关 `technical.reads_snapshot`」才干净地报红。
+
+**验收**：schema **不变**（批 K 是纯契约/派生，无迁移）；测试 **1198** 条全绿（在 worktree
+干净 checkout 里跑，不含共享树里那批 gitignore 的外部材料）；`bin/biga-card --check` 拿三张
+**批 K 之前**落库、`card_json` 里没有 `expected_roster` 的真卡（BIGA-20260922-001、
+BIGA-20260921-025、BIGA-20260921-024）回放逐字段相同；`audit_public.sh --worktree` 十一项全绿。
+
+⚠️ **过程记一笔（不是新问题，是复现的老形状）**：开工不久发现共享工作树里冒出不属于本批的
+改动（另一会话在做批 G-II，动了 `_store/*` 与 `orchestrator.py`）。按第 28 章（批 C-III）
+的先例，把本批挪进独立 `git worktree` 做，并先把已落在共享树上的自己那部分**逐个干净还原**
+——尤其 `orchestrator.py` 那处 import 耦合着还没进共享树的 `registry.py`，不一起还原会让
+共享树 `ImportError`、卡住对方会话。
+
+### ✅ 复核 · 批 G-I 独立复核 + 合回 orchestration，schema v11 撞车按先例解决
+
+批 G-I（外发通知 outbox）在独立 worktree（`.claude/worktrees/g-i`）里做完后，
+独立复核了一遍，然后按既定顺序合回主线：**先把 orchestration（含已落地的
+批 F）并进 g-i、解冲突、验绿，再把 g-i 合回 orchestration**——这条顺序不是
+形式主义，是为了让冲突解决过程本身留在一个独立分支上可审查，而不是直接
+在主线上现场解。
+
+**复核做了什么**（不是读报告，是重新跑）：
+
+- 通读 `_contract/notify.py`、`RunState` 的 diff、新增两张表的建表语句。
+- 亲手把 `notification_outbox` 的只追加触发器关掉，跑 `TestP3AppendOnly`
+  ——UPDATE/DELETE 两条测试当场翻红，还原后绿，证明触发器是真的在拦、
+  不是"建了但没人测过它会不会拦"。
+- 复制一份真实生产库 `data/biga.db`进 worktree，验证 v11→v12 迁移能在
+  **已经被批 F 迁过一次的真实数据**上干净跑通（不只是空白测试夹具），
+  `bin/biga-card --check` 迁移前后都过。
+
+**合并冲突，按已有先例处理**（这个形状这批之前已经出现过两次：J-I/J-II
+的 v9/v10，这次是第三次）：
+
+- **schema 版本号撞车**：批 F 与批 G-I 在各自独立 worktree 里都把自己的新
+  迁移记成 `_V11`（两边分叉时都看不到对方）。判据仍是"谁先合进
+  orchestration 谁保留编号"——批 F 先落地（`e5b959f`），保住 v11；
+  G-I 的两张新表改记 **v12**，只改版本标签，迁移 SQL 本体不动。
+- **教程章节号撞车**（这次是新出现的一种，此前只在 schema 版本号上见过）：
+  批 F 与批 G-I 各自独立选中了"第 33 章"。同样按落地顺序处理：F 的
+  `33-risk-facts-into-orchestrator.md`已先落地，G-I 的章节
+  `git mv` 成 `34-outbound-notifications.md`，连带修正文内自引用的
+  "# 第 33 章"标题、两处 v11→v12 引用、以及一处已过时的"schema 撞车"
+  描述段落（原文写的是"待解决"，此时已经解决，改成描述实际解法）。
+- `card_ops.py::persist()`：两批各自独立在同一个函数尾部追加了逻辑
+  （F 改了`.get()`取值风格并加了 spawn 过滤；G-I 加了通知入队块）。
+  合并时保留 F 更简洁的内联`.get()`写法，G-I 的通知块整段保留，正确嵌进
+  `if replay_of is None:`分支（回放路径不重复入队通知）。
+
+**现状**：schema **v12**（十张表）、**1170** 条测试、教程 **34** 章。
+合回 orchestration 后在独立 worktree（不含任何未跟踪文件干扰）里重新跑过
+一次完整套件与 `audit_public.sh --worktree`，全绿。
+
+⚠️ **一个容易误判的现象记在这里，免得下次又走一遍排查**：合并落地后在
+**主工作区**直接跑全量测试会看到若干 `test_docs_convention.py` 失败——
+原因是主工作区里躺着另一个并发会话产生的、`docs/external/` 下未跟踪的
+研究材料（被 `.gitignore` 挡着，永远不会进仓库，但**在场就会被参数化测试
+扫到**），与本次合并无关。这正是 CLAUDE.md「验收数字与徽章」一节警告过的
+同一种失败形状的另一次出现：**判断"这次改动是否让套件变红"，必须在一个
+不含无关未跟踪文件的环境里判断**（本次用了一次性 `git worktree`），不能
+直接看主工作区当下跑不跑得绿。
+
+**未决项**（批 G-I 自己在交付时披露的，不是本次复核新发现，已记入
+`TODO.md`）：`notify_worker.py` 是 outbox 的真实读取方且测过（P4），但
+**尚未接入任何调度**——没有 cron / systemd 定时去调它，靠人工起。判据是
+"调度命令的字面量"，这条现在还不满足，留给 Phase 3 或批 G-II 顺带解决。
+
+### 🔴 新增 · 批 G-I：外发通知 outbox（Outbound Only，确定性编排设计文档 §6 批 G）
+
+**为什么**：出卡是一次 170~200 秒的**同步**调用，而「Card 完成 / UNKNOWN /
+risk 否决 / 运行失败」这四类事件此前**没有任何外发通道** —— 人只能守着终端等
+它跑完。这一批建一条「推」的通道：与 Card **同事务**入队一行 `notification_outbox`，
+一个独立 worker 异步把它投出去。**只做推，不接受任何飞书方向的输入**（那是批 G-II：
+异步执行、飞书 trigger、`main` 移出路由、`deploy/openclaw/` + R-2 —— 本批一概不碰，
+没有新的攻击面）。
+
+建的东西：
+
+- `skills/_contract/notify.py`（契约层唯一一份）：`NOTIFICATION_EVENT_TYPES` 四类白名单
+  + `card_event_type()`（把一张**已产出**的卡分到 `risk_block`/`card_unknown`/`card_completed`）
+  + `NOTIFY_FAILURE_STATES`。分类判据放契约层的理由同 `RunState`/`RUN_ORIGINS`：
+  `enqueue` 落库校验、`persist` 分类两处都 import 这一份，两份必漂。
+  🔴 `risk_block` 判据是 `stance==VETO_STANCE` **不是 status 猜** —— `status='BLOCK'` 也
+  可能是判官自己权衡的（无否决），而 veto stance 是契约里「制衡层否决」的唯一权威信号。
+  🔴 `card_unknown` 判据取「任一 verdict UNKNOWN 或有缺失项」，**故意偏向报不确定**
+  （R-3：UNKNOWN/缺失必须显式推出去，不藏在一个 `card_completed` 背后让人以为一切正常）。
+- schema **v11** 两张只追加表：`notification_outbox`（幂等键 `(event_type, aggregate)`）
+  + `notification_deliveries`（投递尝试日志）。
+- `_store.db`：`save_card_with_notifications`（Card + outbox 同事务）、`enqueue_run_failed`、
+  `record_delivery`、`undelivered_notifications`、`list_deliveries`；`save_card` 收成它的
+  薄封装（不入队通知）。
+- `RunState.NOTIFICATION_PENDING`（插在 `CARD_PERSISTED` 与 `COMPLETED` 之间）。原本推迟到
+  批 G（无消费方），现在有了生产方（编排器入队）与消费方（`STATE_MEANING` + worker）。
+  编排器走 `CARD_PERSISTED → NOTIFICATION_PENDING → COMPLETED`；`_fail()` 入队 run_failed；
+  `run_ledger.cmd_move` 在终态转移时入队 run_failed（bash 侧的 TIMEOUT/CANCELLED）。
+- `skills/decision-card/scripts/notify_worker.py`：outbox 的读取方，可替换投递接口
+  `Deliverer` + 桩 `StdoutDeliverer`（真飞书 adapter 是批 G-II 的生产方，本批不接通真实 API）。
+
+**🔴 一个需要判断的设计问题：outbox 要不要纯只追加？** 两条路都摆上台面：
+
+- (A) **采用** · `notification_outbox` 纯只追加，投递状态另开 `notification_deliveries`
+  追加日志，「投没投成」变成一条派生查询（deliveries 里有没有 `status='delivered'`）。
+- (B) 放弃 · 给 outbox 开一列 `delivered_at`、投递成功 UPDATE 它一次。
+
+选 **(A)**。理由不是「少写一张表也要忍」，是**本仓库的状态变更本来就这么记**：
+`run_events` 就是先例（run 的当前状态不在 `decision_runs` 上原地 UPDATE，而是追加一行、
+当前状态 = 最新一行）；`agent_verdicts` 的修订用 `amends` 指回原件、`decision_records`
+的回放用 `replay_of` 指回原卡 —— **从不原地改状态**（L-8：一 UPDATE，「当时看到的」
+就永久重建不出来了）。投递状态是同一形状的小状态机（pending→delivered/failed→重试再
+failed…），append 日志天然记得下「第几次、结果如何、什么时候」，UPDATE 一列只留得下终值。
+(B) 还要给 `test_每张表都有只追加触发器` 开一个它看不见的口子（schema.py 原话「例外必须
+自己举手」）—— 拿一道有用的守卫换一列方便，不划算。⇒ (A) 与 `amends`/`replay_of`/`run_events`
+先例一致，(B) 会引入本仓库**第一处被允许 UPDATE 的业务表**。
+
+**同事务原子性（P1）**：card_* 通知与 Card 在 `save_card_with_notifications` 的**同一个
+`connect()`** 里落库 —— 通知那步失败（非法 `event_type`、非严格 JSON）就整段回滚，
+Card 也不落库，不会「卡进去了、通知没进去」。run_failed 反过来是**尽力而为**：在失败
+终态转移**之后**入队（幂等 `aggregate=run_id`），通知入队失败绝不回滚「这次运行失败了」
+这条记录 —— 分发提示词的同事务要求只对 Card+outbox，不对 run_failed。
+
+**🔴 探针记录（G-1：每道新守卫先把被守的东西弄坏、确认报红、再还原）**：
+
+| 探针 | 怎么弄坏的 | 报红输出 | 已还原 |
+|---|---|---|---|
+| P1 同事务 | `save_card_with_notifications` 在插卡后 `conn.commit()` 提前提交 | `assert load_online_card(...) is None` 失败：非法通知场景下卡仍被落库（`test_非法event_type_卡也不落库`/`test_payload非严格JSON` 两条同时红）| ✅ |
+| P1 白名单 | 关掉 `event_type not in NOTIFICATION_EVENT_TYPES` 那道 raise | `Failed: DID NOT RAISE <class 'ValueError'>` —— 非法 event_type 被静默接受 | ✅ |
+| P3 只追加 | 从 `_V11` 去掉 `notification_outbox` 的只追加触发器 | `test_outbox不能UPDATE`（UPDATE 成功、没抛 `AppendOnlyViolation`）+ `test_outbox不能DELETE` 同红；deliveries 两条仍绿（触发器还在）⇒ 探针有指向性 | ✅ |
+| P2 幂等 | 去掉 INSERT 的 `ON CONFLICT(event_type, aggregate) DO NOTHING` | `sqlite3.IntegrityError: UNIQUE constraint failed: notification_outbox.event_type, notification_outbox.aggregate` —— 重复入队从无害 no-op 变成抛错（两条 P2 全红）| ✅ |
+| P5 必经态 | 把 `(CARD_PERSISTED, COMPLETED)` 加回 `_ORCHESTRATED` | `Failed: DID NOT RAISE IllegalTransition` —— 跳过 NOTIFICATION_PENDING 直达 COMPLETED 又变合法 | ✅ |
+| P4 worker | 让 `deliver_pending` 不再调 `deliverer.deliver` | 四类事件的投递调用集为空、与期望集不符（`test_四类事件都被投出` 红）| ✅ |
+| run_failed | 关掉 `run_ledger.cmd_move` 里 `a.to in NOTIFY_FAILURE_STATES` 的入队 | `ValueError: not enough values to unpack (expected 1, got 0)` —— 终态转移后 outbox 空 | ✅ |
+
+另外，新加的 `NOTIFICATION_PENDING` 由**既有守卫**兜底：不给它在 `run_ledger.STATE_MEANING`
+里写一句话，`test_每个状态都有消费方` 当场红（「加了状态但没人读」）——L-1 的现成落点。
+
+**✅ schema 版本号撞车，已解决**：本批开工时（HEAD=1824361）v11 是下一个空号；批 F
+（当时未合并、另一棵工作树）也占用了 v11。批 F 先合并落地（`e5b959f`），合并
+`orchestration` 进本批工作树时按 J-I/J-II 的先例重新编号：本批的两张新表改占 **v12**，
+迁移体本身一字未动。`schema.py` 里两个版本号的注释都留了记号。
+
+**明确不做**：飞书真实 API、异步执行模型、`deploy/openclaw/`、`main` 路由改动、
+Preflight/Question Bridge、cron 调度 worker —— 全在批 G-II / Phase 3。
+
+### 变更（批 F）· risk 的事实挪进编排器：确定性早退省一次 LLM 调用
+
+**为什么**：`risk_check.py::build_fact_bundle()` 本来就是纯 Python、fail-closed、只给
+事实不给结论。它唯一的问题是**位置** —— 跑在一个被 spawn 的 LLM 会话**内部**。老
+路径为了触发这次「免费、快」的本地计算，先得花一次 LLM 调用（spawn risk → 它读提示词
+→ exec 脚本 → 读 JSON → amend stance）。真正花钱耗时的是那两次 LLM turn，不是脚本本身。
+
+这一批把 `build_fact_bundle()` 的调用从「risk 被 spawn 之后自己在 LLM 会话里跑」挪到
+「编排器在决定要不要 spawn risk 之前，直接 `import` 它、免费地跑」。`run_id` 走批 J-I
+已打通的 capture 路径（`save_fact_bundle(fb, run_id=ctx.run_id)`）。
+
+- **两种确定性早退不再 spawn risk**：`build_fact_bundle` 的两条提前 return（`foreign`
+  证据跨决策污染 / 完全没有上游）都产 `status='failed'`、`verdict='UNKNOWN'`，是**机械
+  终局**——`missing` 已写清缺什么，stance 只能是「无法判定」，LLM 解读没有任何信息增量。
+  判据是 `fb.status == 'failed'`（契约铁律钉死 `failed ⟹ verdict='UNKNOWN'`，而走到底那条
+  永远是 `completed/partial`，所以这个判据不会误伤「覆盖不足但仍值得解读」）。编排器自己
+  落库、直接拿 `verdict_ref` 参与合成，卡上 risk 呈现「给出事实、判定 UNKNOWN、无 stance」，
+  **不是「缺席」**（`absent_agents` 单独管缺席）。
+- **其余情况仍 spawn risk，但 risk 不再自己跑 skill**：编排器先落好 fact，`_risk_task`
+  提示词整个换掉——「事实已算好，verdict_ref=NN，别重跑 skill，读它、按判断表给 stance、
+  `amend_verdict.py --ref NN --stance <词>`」。提示词自包含（把该判断的字段全给它），
+  免得它去 grep/find 找东西（那是实测踩过 62 秒 12 次工具调用的坑）。
+- **`risk_check.py` 的 CLI 原样保留**（手工调试/人工复核仍要能独立跑），两条路径共用
+  同一个 `build_fact_bundle`/`save_fact_bundle`，不发明第二套。
+- **`agents/risk/AGENTS.md` 约束 1 改写**：从「怎么跑 `risk_check.py`」改成「事实已算好、
+  你只解读」。**明确不留兜底自跑路径**——编排器永远先算好再 spawn，收到的 `verdict_ref`
+  一定有效；真去自跑会撞下面那道守卫。这不跟着改就是 L-6（契约与实际行为对不上）。
+
+### 修复（批 F）· 一个 (task_id, agent) 至多一份 fact —— 堵掉静默双写（schema v11）
+
+**为什么**：`save_fact_bundle` 落 fact 行时 `amends` 恒为 `NULL`，而 v6 的
+`ux_verdict_amends_linear` 只管 `WHERE amends IS NOT NULL` —— **fact 行天生在它管辖之外**。
+于是对同一个 `(task_id, agent)` 第二次写 fact，两行都是 `amends=NULL`，唯一索引一条都拦
+不住 ⇒ **静默产生两条并存的判定原件**。批 F 把 risk 的事实挪进编排器后，如果 risk 没听
+新提示词、又自己跑一遍 `risk_check.py --task-id <同一个 did>`，正好触发这个双写：
+`latest_verdict_ids()` 取 `MAX(verdict_id)` 会悄悄改用 risk 双跑那条，编排器预先算的那条
+被架空——而「这次决策的 risk 事实原件是哪一条」从此有歧义。对一个卖点是「证据可追溯、
+可回放」的系统，这最不能有。
+
+- schema **v11** 加分区唯一索引 `ux_fact_per_task_agent ON agent_verdicts(task_id, agent)
+  WHERE kind='fact'`，与 `ux_decision_online` / `ux_verdict_amends_linear` 同形（唯一约束
+  由数据库兜底，不靠应用层「先查再插」）。assessment / 历史合体行不在 WHERE 内，不受影响。
+- `save_fact_bundle` 接住 `IntegrityError` 翻成**指路的 `ValueError`**（不是裸
+  `IntegrityError`）：说清「已经有一份 fact（verdict_ref=NN）」，指出手工复核加 `--no-store`。
+  🔴 判据匹配的是**列名**（`agent_verdicts.task_id` + `agent_verdicts.agent`），不是索引名
+  ——SQLite 的 `UNIQUE constraint failed` 报的是列不是索引（第一版判据落在索引名上，被探针
+  当场抓到，这正是 L-13 的形状）。`risk_check.py` 的 CLI 也接住它、干净退出码 2。
+- 🔴 **加索引前实测生产库**：`kind='fact'` 的行里没有任何 `(task_id, agent)` 重复
+  （唯一 1 条 fact 行）——`CREATE UNIQUE INDEX` 在有重复时会直接报错，append-only 下没法
+  事后清洗，所以必须先确认干净再加。
+
+**G-1 探针（弄坏→报红→还原）**：
+
+1. **守 A · v11 唯一索引**。从 `MIGRATIONS` 移除 `(11, _V11)`（索引不建）后跑
+   `test_P4_CLI双跑同一did` → **FAILED**，stderr 实证 `verdict_ref=6` 后又 `verdict_ref=7`
+   ——第二次 `risk_check` 静默产生了第二条并存 fact 原件（正是守卫要防的洞）。还原后绿。
+   另有内联永久红灯 `test_P4_红灯_删掉唯一索引则第二次静默并存`（tmp 库里 `DROP INDEX`
+   后两次 save 并存两条），证明索引 load-bearing。
+2. **守 B · `status=='failed'` 不 spawn 判据**。把判据临时改成 `if False and …`（永远 spawn）
+   后跑 P1/P2 → **FAILED**，报错 `编排在 RISK_RUNNING 失败：[risk] verdict='UNKNOWN' 却给出
+   stance='放行'` ——揭示这道判据不只是省 spawn，还挡住了「对 UNKNOWN 事实强行要 stance」
+   这个契约违规。还原后绿。
+
+### 修复（批 F）· 执行账本只记真被 spawn 的 agent —— 修早退场景的 spawn_check 误判
+
+**为什么**（这是设计文档没点名、批 F 引入的一处真实交互，独立发现并修掉）：早退不 spawn
+risk，但 risk 仍在卡上 ⇒ `persist()` 原本会给 risk 写一行 `agent_runs`（执行账本）。而
+risk 根本没被 spawn（没有 LLM turn、没花钱、运行时 `subagent_runs` 里没它）⇒
+`tools/verify/spawn_check.py` 会看到「`agent_runs` 有行、`subagent_runs` 没有」，把 risk
+判成 **forged（伪造）**，`bin/biga-card` 据此 `exit 4` —— 一张正确产出的卡被判失败。
+
+给一个没执行过的 agent 记账本行，本身就是 **L-8 幽灵账本行**（记了没发生的事）。
+⇒ `card_ops.persist()`：提供 `runtime_run_ids` 时，它的 **key 集**就是「本次真正被 spawn
+的 agent」的权威名单，只给名单里的 agent 记账本行。判据是 key 在不在（不是 `.get()` 的
+值——被 spawn 但没拿到 runtime id 的是「key 在、值 None」，仍要记账）。不提供该映射
+（`synthesize.py` / 测试 / 回放）时维持原样。
+
+### 行为变化（批 F）· 全员 Stage 1 缺席不再判「零证据 FAILED」，改出一张满是缺失的卡
+
+因为 risk 现在**总会**落一条 fact（连「完全没有上游」都落一条无上游 UNKNOWN），编排器
+Stage 3 的 `ordered` 至少有 risk 这一条。老行为（全员缺席 → 库里零 verdict → 「零证据
+FAILED」）不再成立：现在出一张只有 risk「无上游」、满是缺失项的卡（「出一张标着不知道
+的卡，比不出卡强」）。那道 `if not ordered` 检查退成纵深防御（契约层 `synthesize` 也拦
+零 verdict，且抢在 synthesizer spawn 之前 fail-fast）。测试 `test_零证据则FAILED` 相应
+改成 `test_全员stage1缺席_出无上游fact的卡_不再零证据FAIL`。
+
+**VETO 回归底线**：这一批不改 risk 的判断实质，只改「事实从哪来」。P5（orchestrator 全
+路径）验证：risk 给「否决」、判官给 BUY ⇒ 合成阶段照旧拒（否决从 `amend` 一路穿到
+`DecisionCard`，一个环节都没断）；给 AVOID ⇒ 出卡、`risk.stance` 就是否决。
+
+### ✅ 复核 · spawn-proof 四轮修复（最初 + 回合二/三/四），独立复现确认成立
+
+下面四条（最初 `0a89ae0` → 回合二 `0c46a0e` → 回合三 `c061a60` → 回合四
+`0a114c7`）独立复核了一遍——这条链本身已经比 J-I/J-II 更规范：最初那版
+自己写明"未经独立评审会话复核"，后续三轮是真的独立评审、真的抓到前一轮
+自己引入的回归（回合二推翻回合一两条判据、回合三抓到回合二的重复计数、
+回合四抓到回合三丢证据），每轮都有具体数字支撑，不是空话。
+
+本次独立复核（2026-09-23，另开会话，未参与这条链的建造）做了两件事：
+
+1. **原样重跑 `orphan_spawns("20260921")`**，逐条核对 19:31:52 那批"招牌
+   例子"——`market`/`technical`/`emotion` 报"无决策号"、`sector` 报"只带
+   临时号 -000"，与回合四 commit 的 docstring 逐字对上，不是转述。
+2. **亲手把回合四的修复（`_merge_text_by_run_id`）改回回合三的版本**
+   （`_dedupe_by_run_id`），跑 `test_去重不能丢掉重复行携带的证据`——当场
+   翻红，报错信息与回合四描述的回归症状完全一致（"证据在去重时被丢了——
+   分类成了 '无决策号'"），还原后绿。
+
+干净 `git clone` 全量测试绿，`audit_public.sh` 十一项绿。这条链没有未决项。
+
+### 🔴 修复（评审回合四）· 去重顺手把一个诊断分支在真实数据上弄死了
+
+回合三的去重本身是对的（54 → 28、零重复、钱对），但它**去掉的不只是重复的行，
+还有那行携带的证据**。
+
+两张表的文本字段**不是同一份文档**：
+
+```
+task_runs.task              「[Subagent Context] You are running as a subagent…」渲染后的提示词
+subagent_runs.payload_json  「{"runId":…,"taskRunId":…}」spawn 载荷 JSON
+```
+
+实测：临时号 `-000` 在 `task_runs.task` 里出现 **0 次**，在
+`subagent_runs.payload_json` 里 **3 次**。而去重永远留 `task_runs`（先读）
+⇒ **「只带临时号 -000」这个分支再也不会亮**：09-21 实测 28 条全被归成
+「无决策号」，其中有一条本该是「临时号」。
+
+数量对、钱对，但读的人被**静默**送去了错误的诊断方向：
+「无决策号」= 压根没带号；「只带临时号」= **占号晚于 spawn**，
+也就是 L-11「身份晚于证据」—— schema v4 那整套机制专门要防的东西。
+⚠️ `orphan_spawns()` 自己的 docstring 把这一行当成招牌例子，而那个例子一度跑不出来。
+
+⇒ `_merge_text_by_run_id()`：同一个 `run_id` 的几行，扫决策号时扫它们文本的
+**并集**，而不是只扫胜出那条。修复后 09-21 那批与 docstring 逐条对上
+（market/technical/emotion「无决策号」、sector「只带临时号」），条数仍是 28、零重复。
+
+🔴 **为什么两个调用点不能共用一个去重函数**：`_runtime_spawn_records()` 用
+`_dedupe_by_run_id()` 是**安全的** —— 它两条查询都**先按决策号过滤、再去重**，
+只在某一张表命中的行不会被丢。`orphan_spawns()` 是**按天取 → 去重 → 再分类**，
+损失就发生在这个顺序差上。
+⇒ 同一段逻辑在一个调用点正确、在另一个调用点有损，**差别不在代码，在调用点的
+输入处于什么状态**。这是「漏改一个消费方」的变体，但更隐蔽：
+**列消费方清单查不出来**，得问「这段代码在每个调用点拿到的是什么」。
+
+### 🔴 修复（评审回合三）· 上一条的前提说反了，导致孤儿 spawn 重复计数
+
+回合二评审确认三条必改都真改掉了（判据两半各自被独立钉住、读失败不再变成对真卡
+的指控、`orphan_spawns()` 同源），但抓到上一条**自己引入的新回归**：
+
+**前提说反了。** 上一条写「运行时把一次 spawn 记在哪张表不是恒定的，两张都可能
+是落点」。实测 **`subagent_runs ⊂ task_runs`**：`subagent_runs` 去重后 67 个
+`run_id`，**67 个全在 `task_runs` 里，0 个独有**。不是「落点会变」，是
+`task_runs` 记全部、`subagent_runs` 只记子集。原来只读一张确实是盲区，
+但成因是「只看了子集」，不是「看错了表」。
+
+**那句话就是 bug 的根**：按它写代码就把两张表直接拼接，而同一次 spawn 两边各有
+一行。实测 `budget_report.py 20260921` 打出「孤儿 spawn **54 个**（约 \$5.40~\$8.10）」，
+其中 25 条逐字重复 —— 而这是个**报钱数的告警**，最容易让人下次直接忽略这个信号。
+修复后 **28 个（约 \$2.80~\$4.20）**，零重复条目。
+
+⇒ 取数处按 `run_id` 去重（`_dedupe_by_run_id`），顺序改成**先读全集 `task_runs`**
+（它有显式 `agent_id` 列，比从 session key 抠可靠）、`subagent_runs` 只补老库。
+去重与归一化**在同一处做一次** —— 沿用本仓库已立的那条原则。
+`run_id` 为空的行不参与去重（宁可重复，也不把两条不同记录合成一条）。
+
+**顺带两条**：`check_1_spawned()` 的三句话还停在只说 `subagent_runs`（同一个
+`SpawnProof` 两个消费方，上一条只改了 `spawn_check.py` 那个 —— 与它自己刚修的
+`orphan_spawns()` 是同一个形状，只是这次无害），现已接上 `by_source`；
+`field` 重复导入（`field as dc_field, field`）去掉。
+
+**一条残留写进 docstring**：这套判据证明的是「**被 spawn 了**」，不是标题写的
+「被 **Supervisor** spawn 了」—— 全程不看 `requester`。今天两者等价靠的是**配置**
+不是判据（七个 specialist 的 `subagents.allowAgents` 都是 `[]`，运行时
+`resolveSubagentTargetPolicy` 读的正是发起方自己那份名单；真实库里
+「specialist 起了别的 agent」0 条）。哪天给某个 specialist 开了 `allowAgents`，
+「A 起了 B」就会被算成「Supervisor 起了 B」且不报错。
+🔴 不要据此加 requester 判据：实测有 4 行真 spawn 的 requester 等于 child（自指），
+加了会误杀。
+
+⏭ **未做（评审建议另开一批）**：孤儿告警**分组显示**（生产 `orchestrator-<32位裸
+hex>` vs spike/测试的带标签会话）。评审实测那 15 条孤儿里，会话名自己就带着标签，
+区分是**按次的不是按天的** ⇒ 不需要「验证日」这种新口径。主张分组而非过滤：
+过滤是静音开关，而验证日恰恰是最容易跑出真孤儿的那天。
+
+### 🔴 修复（评审回合二）· 上一条的判据被实证绕过；同一个根还漏了第二个消费方
+
+独立评审对下面那条做了三件事，两件推翻了它的判据：
+
+**① 「排除 `task_kind='exec'`」是排除列表，实测能绕过。** 评审去读了已安装的
+运行时源码（不是数据库）：`taskKind` 是**自由文本开放列**（无枚举无校验），
+已发货的取值不止三个（`exec` / `automation_run` /
+`context_engine_turn_maintenance` / `<label>_generation`）。更要命的是
+`resolveTaskAgentId()` 会回退到**发起者自己的会话** ⇒ 任何在 agent X 会话里
+建出来的 task 行，缺省就带 `agent_id = X`。
+
+⇒ 造六行 `task_kind='image_generation'`、`agent_id` 是 specialist 本人、决策号
+写在它自己可控的文本里，`check_1_spawned` 报 **PASS「6 个 agent 两份记录都齐」**，
+而真实 spawn **零次** —— 正是外部评审 F3 要抓的形状，核验放行了它。
+（本次复核独立复现过这个伪造，不是转述。）
+
+⇒ 改成**肯定式**判据（`_REAL_SPAWN_SQL`），不枚举 kind：子会话的 agent 段必须
+等于 `agent_id`，且 `run_id` 必须是**裸 UUID**（真 spawn 没有命名空间前缀，
+工具/定时/后台执行都带 `tool:` / `cron:` / `exec:`）。实测全表三种已知 kind 被
+run_id 命名空间完整分开；对 `BIGA-20260922-001` 新旧判据都是 12 行，零回归。
+
+⚠️ **上一轮的探针钉不住这件事**：仿件里 `task_kind` 与 `run_id` 绑死，把实现换成
+`run_id NOT LIKE 'exec:%'` 也全绿 —— 它钉的是实例不是判据。新探针专门造了一个
+**第四种 kind**，退回排除列表当场报红。
+
+**② per-table 的 `except sqlite3.Error: pass` 把「表不存在」和「读失败」混成一种。**
+评审实测：上游把 `task` 列改名之后，真卡的结论不是「判不了」而是
+**FAIL「这个号从未被 spawn 过」** —— 一次读失败变成**对一张真卡的指控**，
+比退化成 UNKNOWN 坏一档，且与函数自己的 docstring 冲突。
+⇒ 三态分清：两张都不在 ⇒ 判不了；在的那张读炸 ⇒ 判不了；只有一张在 ⇒ 正常用它。
+口径照 `skills/_store/runtime.py::read_task_runs()`（先查 `sqlite_master`）——
+同一个仓库里早就有正确写法，只是没被复用。
+
+**③ 「通过是因为什么都没查」——同一个根上漏了第二个消费方。**
+`orphan_spawns()` 仍然只读 `subagent_runs`。实测三天对照：
+
+```
+20260921  subagent_runs 51 行 | task_runs 真 spawn 100 行
+20260922  subagent_runs  0 行 | task_runs 真 spawn  27 行
+20260923  subagent_runs  1 行 | task_runs 真 spawn   1 行
+```
+
+09-22 那天 `budget_report.py` 打出「✅ 无孤儿 spawn」—— **那个 ✅ 是读一张空表
+读出来的**，当天有 27 次真 spawn。而且它返回 `[]`（干净）不是 `None`（判不了），
+连 R-3 都没保护到。
+⇒ 改成与 `_runtime_spawn_records()` **同源**，共用同一份 `_REAL_SPAWN_SQL`。
+修完之后 09-22 从「无孤儿」变成 **15 条**（都是验证/spike 会话的 spawn：
+真花了钱、真没进卡，按这个检查的定义就是孤儿）。
+
+⚠️ 这条不是上一版引入的，但上一版的**全部论证**就是「运行时记在哪张表不是
+恒定的」—— 证完之后只修了两个消费方里的一个，正是 L-3：同一个事实两套口径，
+而其中一套已经被自己证明是错的。
+
+**④ 顺带**：`SpawnProof` 加 `by_source`（给 `source` 字段一个真消费方，L-1），
+报错从只说 `subagent_runs` 改成说出实际读到的来源分布；仿件那句「字段形状照抄
+真库」改准（只建查询用得到的 7 列，真库 33 列）。
+
+### 🔴 修复 · `spawn_check` 对编排器产出的真卡「判不了」—— 运行时记录不只在一张表
+
+**症状**：`BIGA-20260922-001`（至今唯一一张编排器真实产出的卡）跑 `spawn_check.py`
+报「判不了」(exit 2)。一张真卡、七次真 spawn，核验却给不出结论。
+
+**根因**：`spawn_proof()` 只读运行时的 `subagent_runs`。实测对照同一个决策号：
+
+```
+subagent_runs                      0 行
+task_runs（排除 task_kind='exec'） 12 行   ← market/sector/news/technical/emotion + risk + synthesizer
+```
+
+运行时把一次 spawn 记在哪张表**不是恒定的**。另一个会话 2026-09-23 走同一条
+Adapter 代码路径重新 spawn 时，`subagent_runs` 确实进了行 —— 两张表都可能是
+落点，只读一张就在另一张那侧变成盲区。
+
+⚠️ 这条**也是批 J-II 结构化 join 的地基**：join 的右表取自这份记录，地基是空的
+时候，join 再硬也命中不了。J-II 的实现没问题，它忠实地接在了一条本就断掉的判据上。
+
+**修法**：两张表都读，归一成 `{run_id, agent, source}`。
+- `subagent_runs` 的 agent 从 `child_session_key` 第二段抠；`task_runs` 有现成的
+  `agent_id` 列。归一化**只在取数处做一次**，消费端只比 `rec["agent"]`（不各解析
+  一遍，那是第二套口径 L-3）。
+- 🔴 排除 `task_kind='exec'`：那是 Specialist 自己在会话里跑 shell（`run_id` 形如
+  `exec:<名>`、requester 是它自己的子会话），不是「被 spawn 起来」。不排掉的话，
+  一个只跑过 exec、从未被 spawn 的 agent 会被判成 spawn 过 —— 正是这套核验要抓的
+  伪造形状。
+- 🔴 两张表**各自**容错：少一张不等于读不到。第一版把两条查询写在同一个 `try`
+  里，结果运行时库缺 `task_runs` 就整个 `return None` ⇒ 退化成「判不了」，而
+  「判不了」是会被忽略的。**现有测试当场抓到了这个**（仿件库只建了 `subagent_runs`，
+  四条老测试翻红）。只有两张都取不到才是真的读不到（R-3）。
+
+**探针**（弄坏→红→还原，G-1）：
+- P1 去掉 `task_runs` 这个来源 ⇒ 「只有 task_runs 时也认得出 spawn」与
+  「exec 行不算被 spawn」双红。
+- P2 去掉 exec 过滤 ⇒ 只有 exec 行的 agent 被判成 spawn 过，报红。
+- P3 把「两张都取不到才 None」改成永远返回列表 ⇒ 「零条记录」会被判成伪造而不是
+  判不了，报红。
+- 真实数据验证：修复前 `_runtime_spawn_records('BIGA-20260922-001')` 拿到 **0 条**，
+  修复后 **12 条**、7 个 agent 全认出、0 条 exec 混入。
+
+⚠️ **端到端仍未闭环**：那张卡的 `agent_runs` 侧是空的（它早于「persist 补记账本」
+那次修复），所以 `spawn_check` 现在仍报「判不了」——但运行时侧已经从 0 条变成 12 条。
+**下一张真实卡会免费给出完整结论**，不需要为此单独花钱 spawn。
+
+### ✅ 复核补验 · 批 J-I 的 `--run-id` 提示词机制，live 确认可靠
+
+下面这条修正记录了"`--run-id` 靠提示词指令传递、LLM 是否真的会带上它未被 live
+验证"。授权后（"跑吧"）做了一次真实 spawn 去确认。
+
+走真正的 `OpenClawRuntimeAdapter.attach()`/`start()`（与 `orchestrator.py` 起
+Specialist 同一条代码路径），任务文本**一字不差**照抄 `_specialist_task()` 的
+真实文案，只在末尾加一句要求 `--no-store`（避免真的写进生产账本，这是唯一
+刻意偏离）。
+
+不满足于 `sessions tail` 那种会脱敏 exec 参数的人类可读视图，直接查
+`~/.openclaw-biga/agents/emotion/agent/openclaw-agent.sqlite` 的
+`transcript_events` 原始表，拿到 LLM 真实发出的 `exec` 工具调用逐字内容：
+
+```
+python3 skills/emotion-calc/scripts/emotion_calc.py --task-id BIGA-VERIFYNOOP-001
+  --run-id b7c1a2e9d3f4a5b6c7d8e9f0a1b2c3d4 --no-store
+```
+
+`--run-id` 确实被带上了，值与提示词里给的完全一致——与 `--task-id` 同一种
+机制同样可靠，不是假设。命令本身因为验证用的 `task_id` 故意不合法
+（`BIGA-VERIFYNOOP-001` 不满足 `BIGA-YYYYMMDD-NNN`）而报错退出，这是预期内、
+与 `--run-id` 无关的副作用——`FactBundle` 的契约校验正常拦截，没有任何数据
+落库。成本 $0.097（123 input / 200 output tokens）。
+
+批 J-I 至此没有未决项。
+
+### ✅ 复核 · 批 J-I 独立复核 —— 机制成立，一条假设未 live 验证
+
+下面这条批 J-I 的条目自称"评审复核通过"。独立复核（2026-09-23，另开会话，
+未参与建造）动手验了其中最安全相关的一处：2b 裁定（`save_assessment` 的
+`run_id` 只能从被 amends 的 fact 行继承，Agent 在命令行上够不到）。
+
+把 `skills/_store/db.py` 里 `inherited_run_id = meta["run_id"]` 这行改成硬编码
+字符串，`tests/test_run_id_capture.py::TestInheritRunId` 的两条行为证明测试
+当场翻红——值对不上、以及"fact 无 run_id 时 assessment 也该是 None"两个场景
+都报错，还原后绿。commit 信息里"关掉继承当场报红"的描述复现成立。另外确认了
+`amend_verdict.py` 里确实没有任何 `run_id`/`run-id` 字样——CLI 层面 Agent 连
+尝试传都传不了。干净 `git clone` 全量 1118 条绿，`audit_public.sh` 十一项绿。
+
+**一条假设本批和这次复核都没有像 J-II 那样做 live 验证**：`--run-id` 走的是
+提示词指令（"跑你的 skill 时必须加 --task-id … --run-id …"），与 `--task-id`
+同一机制——LLM 是否真的会在真实 spawn 里带上它，线下测不出来，只能靠真实
+spawn 确认。检查生产库 `data/biga.db`：自 J-I 合并以来一次真实卡都没跑过
+（`user_version` 仍是 9，J-I 需要的 v10 列不存在），没有现成证据可查。
+
+风险等级比 J-II 那次低：不带就是 `None`（capture 不 enforce，到处都按"可能没有"
+处理，不是静默错值），且复用的是 `--task-id` 已经在生产路径上长期验证过的
+同一种机制，不是全新假设。是否要照 J-II 的先例、花一次可忽略的小成本真跑一次
+去确认，留给下一步决定，这里先如实记录"尚未验证"。
+
+### 🔴 新增 · 批 J-I：`run_id` capture 贯穿全链（EvidenceSet / Verdict / Card 绑定 Run）
+
+设计文档 §2 追加 5.1；总体设计 §43 短期重点第 2、3 条。**实现完成、离线全绿
+（1101→1112 条），四道探针 P1–P4 各自弄坏见红并已还原，但未交独立评审 —— 不自宣
+通过**（开工与评审分不同会话）。schema v9→**v10**。
+
+**只做 capture，不做 enforce**：让 `run_id` 能被存下来、传下去，**不改任何现有的判定/
+过滤逻辑**。`latest_verdict_ids()` 仍按 `decision_id` 聚合 —— 按 `run_id` 过滤（拒绝跨
+run 串读）要等真正的重试路径出现才做。**为什么现在只做一半**：追加 5.1 复盘发现，
+「把 run_id 存下来」一直有消费方（它从批 B 就存在，这里只是让 `agent_verdicts` /
+`evidence_sets` 等**已经在写别的字段**的表顺手多存一列），而「按 run_id 强制校验」没有
+消费方（没有重试路径就无意义）。现在是最便宜的时机：批 E 系列刚在这一层做完迁移，
+晚一步就要在同一层再开一次刀。
+
+**做了什么**（v10 迁移给 `agent_verdicts` / `evidence_sets` 各加一列 `run_id TEXT`，都
+nullable、不回填）：
+
+- **六个 skill 各加可选 `--run-id`**（照抄 `--evidence-set-id` 的 CLI 模式），落进
+  `save_fact_bundle(fb, run_id=…)` → `agent_verdicts.run_id`。⚠️ E-III 之后六个**全部**
+  走 `save_fact_bundle` 一条路径（不是旧提示词说的「risk 走 save_verdict，两条路」）。
+- **🔴 2b：`save_assessment` 从被 amends 的 fact 行「继承」run_id，不加 CLI 参数。**
+  事实行由 skill 写，判断行由 Agent 经 `amend_verdict.py --ref <fact_id> --stance …` 写 ——
+  它天然带着 `amends`→fact 行的指针。⇒ `save_assessment` 从 `load_verdict_meta(fact_id)`
+  取回那行的 `run_id` 直接用。理由不是省事：Agent 手传就可能传错，而「继承」在结构上
+  不可能与事实行不一致 —— **判据别建在可篡改的输入上**。
+- **`orchestrator._specialist_task` / `_risk_task` 给每一个 agent 的任务文本带
+  `--run-id {ctx.run_id}`**（六个都产落库记录，不只读冻结快照那三个）。与 `--task-id`
+  同机制：提示词说要加，跑完靠探针核实（capture 不 enforce）。
+- **`freeze_index_daily` / `save_evidence_set` 加 run_id**，编排器把 `ctx.run_id` 直接传进去
+  （Python 内部调用，不经 CLI）。`decision_runs` 早有 `evidence_set_id` 反向指针（run→set），
+  这一列是 set→run，直接、不用 join。
+- **`VerdictRef` / `DecisionCard` 各加 `run_id: str | None = None`**：`VerdictRef` 从存量行
+  的 `run_id` 列**直接搬**（`load_verdicts_and_refs` / `synthesize.py` 两处构造点都改），
+  `DecisionCard` 由 `card_ops.synthesize(run_id=ctx.run_id)` 填。两处 `from_dict` 都用
+  `.get("run_id")` —— 历史卡 JSON 没这个键，缺省 None，不是 `KeyError`。
+- **🔴 `comparable()` 把 `run_id` 与 `generated_at`/`elapsed_ms` 一同剥掉**：回放**不是**
+  原来那次执行尝试，它诚实地把 `card.run_id` 记成 None（不捏造），而原卡带着真实 run_id。
+  不剥的话，一旦在线路径开始产出带 run_id 的卡，回放它们的 `--check` 就会因「这次执行 ≠
+  上次执行」误报「组装不一致」。⚠️ `input_verdict_refs` 里各 ref 自带的 run_id **不剥** ——
+  那是判定原件的血缘，回放照原样带过去，两边相同，是要被核对的证据。
+
+**「继承」为什么在结构上不可能与事实行不一致（交接问题 4）**：两条独立证据 ——
+① `inspect.signature(save_assessment)` 里**没有** `run_id` 参数，`amend_verdict.py` 的
+argparse 里也没有 `--run-id`（实测 grep 过）⇒ Agent 在命令行上根本够不到这个值；
+② run_id 的唯一来源是 `meta`（按 `fact_id` 取回、且已校验 `kind=='fact'` 且同
+`(task_id, agent)` 的那一行）⇒ 存进去的 `assessment.run_id` 永远逐字节等于 `fact.run_id`
+（fact 有值继承有值、fact 是 None 继承 None）。两条都固化成测试（`TestInheritRunId`）。
+
+**探针记录（G-1：每道探针先弄坏、见红、还原）**：
+
+- **P1 · 在线落库真的存进去了**：把 `save_fact_bundle` 的 INSERT 里 run_id 硬改成 None ⇒
+  `assert None == 'cd5af379…'` 报红。另 `evidence_sets.run_id` 同样落库并取回比对。
+- **P2 · 没有 run_id 的历史行读得回、不被拒**：把 `DecisionCard.from_dict` 的 `.get("run_id")`
+  改成必填 `d["run_id"]` ⇒ 历史卡 JSON（无此键）当场 `KeyError: 'run_id'` 报红。还原后
+  `load_verdict`/`load_outcome`/`load_verdict_meta`/`verify_verdict_refs` 对 NULL 行全部不报错。
+- **P3 · 合成卡与 ref 追到同一个 ctx.run_id**：把 `synthesize` 里传给 `DecisionCard` 的
+  `run_id=run_id` 改成 `None` ⇒ `card.run_id` 断链为 None、报红（而 VerdictRef 仍带 run_id，
+  破坏点精确）。
+- **P4 · 回放不捏造 run_id**：把 `comparable()` 的 `d.pop("run_id")` 注释掉 ⇒ 回放带 run_id
+  的卡 `{'run_id': 'cd5af379…'} != {'run_id': None}` 误判不一致、报红（而「回放历史卡 run_id
+  保持 None」那条仍绿，破坏点精确）。
+
+**最可能被攻破的一处（交评审重点看）**：run_id 落进 `agent_verdicts` 的那一步，依赖
+**Agent 真的在跑 skill 时带上了 `--run-id`**。离线探针只证明了管线通（skill 接得住、存得进、
+传得出），没证明**live 的 Agent 确实照提示词加了这个参数** —— 与 `--task-id`/`--evidence-set-id`
+是同一种「提示词说要加、靠探针核实真加了」的机制，而核实那一步需要一次 live 端到端
+（本批未做，属 capture 的固有性质：不 enforce，漏了就是 None，不报错）。相比之下
+`evidence_sets.run_id`（编排器 Python 内部传 `ctx.run_id`，已由
+`test_JI_evidence_set落库带本次run_id` 端到端钉住）与 `save_assessment` 的继承（结构强制）
+不依赖 LLM 顺从，是可靠的；唯独 **fact 行这一列的捕获率取决于 Agent 是否照提示词加
+`--run-id`** —— 这是本批最软的一环，也是「capture 不 enforce」的固有性质（漏了是 None，
+不报错、不阻断出卡）。真正堵死它要等 enforce 那一批（重试路径出现后按 run_id 强制校验）。
+
+### ✅ 复核补验 · 批 J-II 的命名空间共享结论，独立复现确认成立
+
+下面这条修正记录了「原 live 补验的具体断言复核复现不出来」。用户授权后
+（"真正测试一遍吧"），独立复核补做了一次**真正走生产路径**的重新验证，而不是
+继续读第三方运行时的压缩源码猜测。
+
+区别于上一次：这次直接调用 `skills/_runtime/adapter.py::OpenClawRuntimeAdapter
+.attach()` + `.start()`——与 `orchestrator.py` 起 Specialist **完全同一条代码
+路径**（`attach()` 内部走 `bin/biga attach --print-config` 铸 grant，R-1 合规），
+而不是绕开 Adapter 直接调 MCP 工具。任务文本沿用同一个最小成本模板（「只回复
+两个字：收到，不要运行任何 skill」），实际花费 123 input / 5 output tokens。
+
+结果：`adapter.start()` 返回 `runtime_run_id='17ace698-0754-4d91-ab2c-35f34ca59610'`；
+立即查 `subagent_runs WHERE run_id = '17ace698-…'`，**命中 1 行**，`child_session_key`
+与 `SpawnHandle.session_key` 逐字一致。⇒ **`runtime_run_id` 与 `subagent_runs.run_id`
+确为同一命名空间，J2-3 结构化 join 的前提成立**——这次是一次干净、可复现、
+走真实代码路径的实测，不是转述。
+
+对上一次复现不出来的最合理解释：上一次的「live 补验」大概率不是经
+`OpenClawRuntimeAdapter.attach()` 起的（那次 `task_runs` 行没有 `collect`/
+`expectsCompletionMessage` 等 Adapter 固定会带的字段，`delivery_status` 也是
+`not_applicable`，形状与这次、以及两条真实历史生产行都不一样）——即绕开了
+Adapter 直接调 `sessions_spawn`，测的是另一条路径，不代表 BigA 实际生产会
+经过的路径。**不是「结论是错的」，是「上次验证的不是这条路径」。**
+
+J2-3 现在有了两件独立证据都成立：机制本身（P1–P5，见下方原条目）+ 走真实
+Adapter 路径的命名空间实测。批 J-II 可以视为完全验证过关，不再有未决项。
+
+### 🔴 修正 · 批 J-II「live 补验」的具体断言，独立复核复现不出来
+
+下面这条批 J-II 的条目写着「查运行时库 `subagent_runs WHERE run_id='e5c00e01-…'`
+查得到」，作为「`runtime_run_id` 与 `subagent_runs.run_id` 同一命名空间」这条
+结论的现场证据。
+
+**独立复核**（2026-09-23，另开会话，未参与 J-II 建造）原样重跑了同一条查询——
+`~/.openclaw-biga/state/openclaw.sqlite`（`BIGA_RUNTIME_DB` 的默认路径，与
+`phase1_acceptance.py::_runtime_spawn_records()` 用的是同一个文件）：
+
+```sql
+SELECT * FROM subagent_runs WHERE run_id = 'e5c00e01-4992-4634-9d2b-18346ff464b0'
+```
+
+返回 **0 行**。按 run_id 精确匹配、按 `child_session_key` 里的 `a4ee178b` 片段、
+按 `payload_json` 子串三种方式都搜不到；该表在这次 spawn 之后完全没有新行
+（最新一行仍是 2026-09-21 19:35，此后 66 行没变过，而这次复核发生在
+2026-09-23，其间数据库其他表一直在正常写入，不是库被闲置或轮转过）。
+
+同时能确认这次 spawn **真的发生过**——`task_runs` 表里有一条完全匹配的记录
+（`agent_id=emotion`，`requester_session_key` 带 `orchestrator-jii-nscheck`
+字样，任务文本正是「只回复两个字：收到。不要运行任何 skill，不要采集数据」），
+只是它没有在 `subagent_runs` 里留下对应行。
+
+不确定这是「当时查的是另一个库 / 另一个 profile」，还是「这一类 spawn 本来就
+不会被 `subagent_runs` 记下」——两条真实历史行（BIGA-20260921-021 的 Stage 1/2
+spawn）都带 `requesterOrigin.channel=feishu` 与完整的 `completion`/`delivery`
+结构，而这次验证 spawn 的 `task_runs` 行是 `delivery_status: not_applicable`，
+明显走的是不同的调用路径。**无论哪种解释成立**，现状是：J2-3 的结构化 join
+在真实生产 spawn 路径下是否真的命中，目前**没有一次成功复现的实测**——而这
+恰好是 J2-3 提交信息自己点名的风险：「猜错的后果是核验静默退化（join 永远
+匹配不上 ⇒ 每次走退回分支 ⇒ 看起来一切正常）」。
+
+不撤回已合并的迁移与 join 逻辑本身——P1/P2/P4/P5 与 P3「文本匹配更容易被
+蒙混」都已被独立复核亲手复现，逻辑本身站得住，问题只在这一条 live 断言。
+需要重新确认的是「这条 join 在真实 production spawn 上到底有没有命中」，
+不是重写代码。
+
+### 🔴 变更 · 批 J-II：收敛 `run_id` 三同名（`agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库）
+
+设计文档 §4「`run_id` 这个名字现在指三个互不相同的东西」。**✅ 评审复核通过**
+（2026-09-23，独立会话）：五道探针 P1–P5 外加红灯演练全见过红并已还原，一处 live
+命名空间补验实测通过。schema v8→**v9**。
+
+评审独立复现了两道（不看交接里贴的输出，自己弄坏）：关掉强绑定 ⇒ 伪造经文本匹配
+蒙混过关（stdout 实打实印出「1 个 agent 两份独立记录都齐」）；把命名空间守卫的表
+扫描改成空 ⇒ 三条全红，包括那条「必须真的扫到 decision_runs/run_events」的非平凡
+覆盖断言 —— 「全绿是因为什么都没查」这个模式确实被堵住了。
+
+**为什么现在做**：`run_id` 这个字面量在仓库里同时指三个东西，同住一个库、一份代码：
+编排的一次执行尝试（`decision_runs.run_id`，32 位 hex）、`agent_runs` 的账本行号
+（INTEGER 自增）、`SpawnHandle` 里运行时返回的 spawn id（UUID，且**从不落库**）。危害不是
+「某处算错」，而是**任何一条 join / 报表都会拿到语义正确但指向错误的数字，且不报错** ——
+与 §4 开头「decision_id 被迫承担五件事」是同一个病的反面。三处必须一起改：改一半留下的
+半新半旧命名空间比现在更难读（读者无法判断手上这个 `run_id` 属于已改还是未改的那半）。
+批 E 系列正在同一层（`_store`/契约）做迁移，**现在是最便宜的时机**。
+
+**做了什么**：
+
+- **J2-1 `agent_runs.run_id` → `ledger_id`**（迁移 `_V9`：`RENAME COLUMN`）。它从 Phase 1
+  起就是 INTEGER 自增账本行号，与编排 `run_id` 毫无关系。🔴 **实测全仓没有任何代码读这一列的
+  值** —— 唯一的引用是 `list_agent_runs` 的 `ORDER BY`，随迁移一并改名。⇒ 现在改是**免费**的，
+  等它有了第一个真实读取方就不是。不改 `_V1` 建表语句：全新库先按 v1 建出 `run_id`、再由这条
+  改名，是对的。
+- **J2-2 `SpawnHandle.run_id` → `runtime_run_id`，并落库**。它取自 `sessions_spawn` 的
+  `runId`（运行时 `subagent_runs.run_id` 那个 UUID）；在 adapter 内部叫 `run_id` 本来对
+  （忠实照抄运行时列名），一出 adapter 就和编排 `run_id` 撞名。同一条 `_V9` 给 `agent_runs`
+  加 `runtime_run_id TEXT`（nullable）；`record_agent_run`/`record_verdict_run` 加可选参数接住；
+  `card_ops.persist()` 加 **keyword-only、默认 None** 的 `runtime_run_ids: Mapping`（🔴 必须有
+  默认值：`synthesize.py` 与几条测试也在调它，签名不兼容会把不相干的东西一起弄红）；
+  `orchestrator.py` 从每个 Stage 1/risk 的 `SpawnResult.handle.runtime_run_id` 收成映射传进去
+  （**Stage 3 判官不产 verdict、不进映射**）。回放路径不记账本 ⇒ 也不写 `runtime_run_id`
+  （回放不重新执行 agent，给它记真实 spawn id 是假账）。
+- **J2-3 让 `spawn_check` 用上它（这才是 J2-2 的消费方）**。`spawn_proof()` 原先靠
+  `payload_json LIKE '%<决策号>%'` 文本匹配认 spawn（F3 残留）。改成：`runtime_run_id` 非空
+  时直接与运行时 `subagent_runs.run_id` 做**结构化 join**，为 NULL（历史行）时退回现有 LIKE。
+  🔴 形状**照抄 `risk_check.py::CROSS_CHECK_PAIRS`**（有 `evidence_set_id` 用它、缺失退回
+  `raw_hash`）逐字同形，不发明第二种兼容写法。退回分支的三态（`readable=False`⇒UNKNOWN /
+  `rows==0` 有行⇒伪造 / 逐 agent 伪造）一条没塌（R-3）。**不新增 SQL** —— join 的右表复用
+  已按决策号过滤的记录，因此「id 存在」同时蕴含「记录属于本决策」，比对全表存在性更硬。
+- **J2-4 一道新守卫**（`tests/test_store.py::TestRunIdNamespace`，判据**可派生不是清单**）：
+  BigA 自己 schema 里任何名为 `run_id` 的列必须是 `TEXT`，且其非 NULL 值必须能在
+  `decision_runs.run_id` 里找到。语义不同的第四个同名几乎必然过不了这两关（`agent_runs.run_id`
+  当年是 INTEGER，第一关就红）。**不碰运行时的 `subagent_runs`**（第四个同名，但那是运行时命名
+  空间，不归我们管；我们叫 `runtime_run_id` 正是为了在边界上认出它）。
+
+**🔴 一处 live 补验（线下无法替代，正文明确授权的付费例外）**：`SpawnHandle.runtime_run_id`
+与 `subagent_runs.run_id` 是不是同一命名空间 —— 这是 J2-3 整个结构化 join 的前提，线下只能
+靠「两边都像 UUID」猜，猜错的后果是 spawn 核验**静默退化**（join 永不匹配 ⇒ 每次走退回分支 ⇒
+看起来一切正常）。一个最小 spawn（任务只让 agent 回「收到」，成本远低于 $0.05 上限，不出卡、
+不走 `bin/biga-card`）：`start()` 返回 `runtime_run_id='e5c00e01-…'`，直接查运行时库
+`subagent_runs WHERE run_id='e5c00e01-…'` **查得到**、`child_session_key` 一致、spawn 正常
+完成。⇒ **同一命名空间，J2-3 成立。**
+
+**探针记录（G-1：每道守卫先弄坏、见红、还原）**：
+
+- **P1 · 改名后无人读旧名**：① 全仓 grep `\.run_id`，SpawnHandle 使用点已全部改到
+  `.runtime_run_id`，无残留；剩余的 `run_id` 都是 `subagent_runs.run_id`（运行时表，该留）
+  与迁移语句本身。② 把迁移目标名从 `ledger_id` 改成第三个名字（`xledger_id`）跑测试 ——
+  `list_agent_runs` 当场 `sqlite3.OperationalError: no such column: ledger_id`，6 条 TestAgentRuns
+  变红（**证明确有测试盯着列名，不是「反正没人读所以改什么都绿」**），已还原。
+- **P2 · 迁移后只追加触发器仍有效**🔴：`RENAME COLUMN` 会自动改写触发器体，名字还在而体被改坏
+  **不报错**，所以判据是真跑 SQL 不是看名字。对迁移后的 `agent_runs` 真跑 `UPDATE` 和 `DELETE`,
+  两者都被 `AppendOnlyViolation` 拒；非平凡演示：`DROP TRIGGER` 后同一条 `UPDATE` 影响 1 行成功
+  （证明「被拒」不是平凡通过）。已固化为 `test_迁移后agent_runs仍拒绝UPDATE和DELETE`。
+- **P3 · 结构化 join 真的比文本匹配硬**🔴：构造一条 `agent_runs` 行，其 `runtime_run_id` 在
+  `subagent_runs` 里不存在，但决策号出现在某条 `payload_json` 里（蹭上别人记录那个旧洞）。
+  弄坏：把 join 分支关掉（永远走弱路径）⇒ `spawn_check` 返回 0 放过、stdout 显示「1 个 agent
+  两份记录都齐」（伪造经文本匹配蒙混过关），测试翻红。还原后新判据报伪造（返回 1），旧 LIKE
+  判据放过它（同场景返回 0）—— 两条判据在同一份数据上给出相反结论。
+- **P4 · 退回分支不塌**：现有 10 条三态/绑定/覆盖用例（`wire` fixture 的 mock 行只有 `agent`
+  键 ⇒ `runtime_run_id` 缺失 ⇒ 走退回分支）逐条不变，全绿。
+- **P5 · J2-4 守卫见红**：临时往真实表 `raw_market_snapshot` 加 `run_id INTEGER` 列 ⇒ 守卫报
+  「声明为 'INTEGER'，应为 TEXT」，已还原。另有常驻自证：用临时表分别证明类型子句与值子句
+  各自会红（守卫函数本身非平凡通过）。
+
+**最可能被攻破的一处（交评审重点看）**：J2-3 的强绑定把「id 存在」限定在**按决策号过滤后的
+记录**里（`runtime_ids = {r.run_id for r in spawns}`，而 `spawns` 已按 `payload_json LIKE 决策号`
+过滤）。这依赖一条隐含前提：**真实 spawn 的 `subagent_runs.payload_json` 一定包含决策号**
+（`orchestrator._specialist_task` 把 `did` 写进任务文本）。若将来某条编排路径 spawn 时**不把
+决策号写进 payload**，那条真实记录会落在 `spawns` 之外 ⇒ 它的 `run_id` 不在 `runtime_ids` ⇒
+即便 `agent_runs.runtime_run_id` 存了正确的 id，强绑定也会**误报伪造**（fail-closed，方向安全，
+但会把真卡判失败）。live 补验只证了「同一命名空间」，没证「所有 spawn 路径都把决策号写进
+payload」——后者目前只有 orchestrator 一条路且确实写了，但这是评审该盯的假设。
+
+### 🔴 变更 · 批 E-III：迁 `risk` + 退役 `amend_verdict.py` 旧路径（Facts/Assessment 拆分收官）
+
+设计文档 §6 批 E 的最后一段。**实现完成、离线全绿（1068→1079 条），五道探针（P1–P5）
+外加三道红灯演练全见过红并已还原，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。
+
+**为什么**：`risk` 迁完之后六个 Specialist 全部产 `FactBundle`，`amend_verdict.py` 操作
+合体 `AgentVerdict` 的旧路径才能真正退役。🔴 但 `risk` 不是前五个那种迁移 —— 它的 stance
+是 `VETO_STANCE`（"否决"），是制衡层**唯一能拦住 BUY 的信号**。前五个迁错 stance 后果是
+「这句话不准」；这一个迁错后果是「一个真该被拦的决策放行了」。所以这一批的核心不是迁移
+本身（那跟前五个一样机械），是 **VETO 穿透验证**：否决必须能从 `AgentAssessment` 一路穿
+到 `DecisionCard` 真正拦截它的那一层。
+
+**做了什么**：
+
+- **`risk_check.py` 改产 FactBundle**（三个 return 点，含 foreign/no-upstream 两条
+  `status='failed'` 路径）：`build_verdict→build_fact_bundle`、`save_verdict→save_fact_bundle`。
+  ⚠️ risk 读**上游**五个 verdict 仍用 `load_verdict()`（多态，对新旧形状都返回
+  `AgentVerdict`）—— risk 是它们的消费方，那一半跟这次迁移无关，`AgentVerdict` 仍在 import。
+- **VETO 穿透，确认无需改代码**：`card_ops.load_verdicts_and_refs()` 用 `load_verdict()`
+  多态把 risk 的 `AgentAssessment(stance=否决)` 压回 `AgentVerdict.stance`，`DecisionCard`
+  的否决判据（`v.stance == VETO_STANCE` ⇒ 拒 BUY、必须 AVOID/BLOCK）读的正是这个字段 ——
+  没有任何一处绕过 `load_verdict` 直接读原始 `verdict_json`。穿透链完整，P2 钉死它。
+- **退役 `amend_verdict.py` 旧路径**：删掉操作合体 `AgentVerdict` 的 74 行（`--add-missing`/
+  `--add-warning` 对旧形状生效、`--verdict` 覆盖、`dataclasses.replace(original,…)` +
+  `save_verdict(amends=…)`）。`_assess_fact()`（fact 行只加 `--stance`）**保留** —— 六个
+  Specialist 以后永远走它，并顺手把它扩成也拒 `--verdict`（堵掉「fact 行给 --verdict 被静默
+  忽略」那个缝）。历史合体行（kind NULL/'verdict'）现在只读：对它跑 amend 明确报「已退役」。
+  🔴 **`save_verdict()` 不删也不废弃** —— 七个测试文件 + `phase1_acceptance.py` 还靠它造
+  「老形状」来测 `LegacyAdapter` 读路径宽；退役的是「活的 skill 还在写这个形状」，不是
+  「这个形状不该再被测试到」。amend 不再 import 它，函数本身留在 `_store`。
+- **`agents/risk/AGENTS.md`**：删掉 `--verdict UNKNOWN --stance 无法判定` 组合命令
+  （**先查了真实数据库**：risk 历史 `--add-missing` 只有两个码 `risk.coverage.insufficient` /
+  `risk.upstream.trade_date_inconsistent`，都已由 skill 自己报，不是 market 那种范围外判断
+  边界）。`无法判定` 允许挂在 skill 报的 WARNING 上（`check_stance_vs_verdict` 只禁 UNKNOWN
+  上的方向判断），所以 agent 不再需要 `--verdict` 事后把完整度降级；上游矛盾这类 agent
+  观察走「依据/未被审阅的面」自由文本。
+- **迁移旧路径测试**：`test_facts_split.py` 的 P6「老路径照常」→「旧路径已退役」；
+  `test_verdict_refs.py::TestAmendCLI` 三条旧路径 CLI 断言改成测退役 + fact 行新路径；
+  九处 `risk.build_verdict` 调用点改名 `build_fact_bundle`。
+
+**探针记录（G-1：每道守卫先弄坏、见红、还原）**：
+
+- **P2**（🔴 VETO 穿透，核心）：**弄坏** `AgentOutcome.to_agent_verdict()` 把 `stance` 丢成
+  `None`（断掉否决从 AgentAssessment 到 AgentVerdict 的传导）→ 跑「否决真的拦住 BUY」→
+  **报红 `DID NOT RAISE`**（BUY 没被拦）→ 还原。证明 P2 锚在**整条穿透链**上，不是断
+  「stance 字段等于否决」——后者就算穿透断了也照样绿。
+- **P1**（risk 产 FactBundle）：**弄坏** risk 的 return 退回 `AgentVerdict` → `type is FactBundle`
+  **报红** → 还原。
+- **P3**（旧路径退役）：**弄坏** 退役分支 `return 2`→`return 0`（假装成功）→「报退役不静默」
+  的 `assert rc==2` **报红** → 还原。P3 另用 AST 断言退役的代码真没了（`dataclasses` 不在
+  Name 里、`save_verdict` 不在被调用集里、`save_assessment` 还在）。
+- **P4**（`_assess_fact` 对 risk 正常）：risk fact 行加 `--stance 否决` 成功、加 `--add-missing`
+  被拒（复用 E-II 判据，换 risk 名字）。
+- **P5**（六个全新形状聚合不丢）：market/emotion/sector/technical/news/risk 全走 fact+assessment，
+  `load_verdicts_and_refs` 聚合六个、stance 全压回 —— Facts/Assessment 拆分的最终验收
+  （E-I P3 → E-II P4 → 这里六个全是新形状，一个旧的都没有）。
+
+### 🔴 变更 · 批 E-II：把 market/sector/technical/news 四个 skill 迁到 FactBundle
+
+设计文档 §6 批 E 的第二段。**实现完成、离线全绿（1039→1062 条），六道探针（P1–P6）
+外加四道红灯演练全见过红并已还原，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。
+
+**为什么**：E-I 只迁了 `emotion`（不读冻结快照、不进 `CROSS_CHECK` 的那个），把新三型
+的形状定了下来。这一批第一次让**读冻结快照**（market/sector/technical）与**参与
+`CROSS_CHECK`**（market/technical）的 Specialist 走新形状 —— 这两件事 E-I 都没真正测过。
+`risk` 仍留在 E-III（它带 `VETO_STANCE`，还消费其余五个的产出，等它们形状稳定再动最安全；
+退役 `amend_verdict.py` 的前提是**全部六个**都迁完，天然跟最后一个绑在一起）。
+
+**做了什么**：
+
+- **四个 skill 机械迁移**（形状与 E-I 迁 emotion 完全一致）：各自的 `build_verdict`→
+  `build_fact_bundle`（返回 `FactBundle`）、`save_verdict`→`save_fact_bundle`。
+  market/sector/technical **读冻结快照、填 `evidence_set_id`** 那部分逻辑一字未改 ——
+  这一批只改「产出的是哪个类型」。消费方（card_ops/risk_check/DecisionCard）**零改动**，
+  继续吃 `load_verdict` 的 `to_agent_verdict()` 兼容垫（②的裁定：不改成直接读
+  `AgentOutcome`，那没有消费方、提前做是 L-1）。
+- **①「Agent 追加的限制」缺失项归哪 —— 查了真实数据库，不照抄设计文档的例子**：
+  `data/biga.db` 里四个 skill 历史上靠 `--add-missing` 补的限制（去掉 `stance=` 类）只有
+  三个形状，**全部已经由 skill 自己检测**：market 涨跌家数 0/0/0 → `market.breadth.not_yet_formed`、
+  市场宽度源不可用 → `market.breadth.unavailable`、sector 盘前板块榜无数据 →
+  `sector.board.pre_session`（同名同码）。technical/news 的历史 `--add-missing` **一条都没有**
+  （全是 `stance=`）。⇒ ①的裁定对这四个 skill **不新增任何检测代码**，genuine 数据缺口
+  skill 早就在自己的 `missing[]` 里报了。
+- **唯一的例外 `market.trend.no_history`：裁定为「范围外」，skill 不产它**。
+  🔴 **它不是数据缺口** —— 实测 5 次「市场趋势——只有单日快照，无指数历史序列」修订，
+  原件**每一次都带着 `volume_ratio`**（≥21 根、整段 20 日序列），3 次还是 15/15 满字段的
+  PASS。也就是说 market 一直有整段序列，这句话从来不是「抓少了」，而是 agent 在说
+  「我看不出**趋势方向**」——那是**判断**（铁律 4），与 sector 早就裁定为范围外的
+  「板块连涨几天」（`sector_calc.py` 顶部注释）是同一条线：`missing[]` 是给「本该有却这次
+  没有」的，范围外的东西每次都在，混进去只会把真正的缺失淹没。⇒ 归 agent 回答的自然
+  语言「需要注意」，不进 `missing`、不加 `AgentAssessment` 字段、skill 源码里连 `trend`
+  这个词都不出现。（这一条命中了 E-I 交下来的 ⚠️ escape hatch；开工会话据实测证据停下来
+  确认过设计，未强行套用。）
+- **第五交付物：修 `agents/market/AGENTS.md` 模板**（本批**唯一**触碰 AGENTS.md，经设计
+  owner 明确授权）。老模板**强制** agent「想说趋势就必须往 `missing` 加 `market.trend.no_history`
+  + `--verdict WARNING`」——这本身是**旧契约漏的一个洞**：agent 拿 `--verdict` 把 skill
+  算的、可回放的完整度**事后降级**，把一个**判断上的保留**伪装成**数据缺失**。批 E 拆事实/
+  判断正是要焊死这条缝。迁移后 fact 行会**直接拒绝** `--add-missing`（`_assess_fact` 报错），
+  🔴 **不修模板的代价不是文档陈旧，是 market agent 下一次真实出卡就撞拒绝、然后像 F9 那样
+  抖动**（62s／12 次工具调用去找正确命令）。⇒ 删掉 `--add-missing … --verdict WARNING`
+  组合命令，趋势 caveat 改走 agent 已有的「需要注意」自由文本字段。
+  ⚠️ sector/technical/news 的 AGENTS.md 里还留着**可选**的 `--add-missing X.partial` 示例
+  （对应 genuine 数据缺口，skill 已自检、agent 正常只需 `--stance` 转述，不会撞上）——
+  破坏概率低，未在本批修，已记进 `TODO.md` 作为后续文档收敛。
+- **`amend_verdict.py`**：`_assess_fact` 对 fact 行拒绝 `--add-missing/--add-warning` 这条
+  **硬约束不变**，只把提示语从「留给批 E-II」改成终态口径（缺口归 skill 自己的 `missing[]`、
+  范围外 caveat 归「需要注意」，这一行只收 `--stance`）。`kind=='fact'` 路由是 E-I 就铺好的
+  通用路，四个新 agent 直接复用，未加新代码。
+
+**探针记录（G-1：每道守卫先弄坏、见红、还原）**：
+
+- **P1**（四个 skill 产合法 FactBundle、落库 `kind='fact'`）：另有一条主动红灯 ——
+  把 skill 产出退回合体 `AgentVerdict`，`save_fact_bundle` 当场 `TypeError: 只接受…FactBundle`
+  （写路径严，E-I 判据）。
+- **P2**（CROSS_CHECK 穿透新形状）🔴：**弄坏** market 的 `_es_id_for` 恒返回 `None`（断掉
+  es-id 流），跑「不同 evidence_set_id 应报冲突」→ **报红 `assert []`**（因两次冻结同一份
+  数据 raw_hash 相同、只有 es-id 判据能抓到，退回 raw_hash 兜底就漏报了）→ 还原。证明 P2
+  真的锚在 evidence_set_id 穿过新 FactBundle 形状这条链上，不是凑巧绿。
+- **P3**（①裁定：skill 自检缺口、market-trend 不产）🔴：**弄坏** —— 往 market 注入一条
+  `market.trend.no_history` → 「范围外不产」断言**报红 `assert not True`** → 还原。
+- **P5**（amend 路由四个 agent）🔴：**弄坏** `_assess_fact` 的 `--add-missing` 拒绝分支
+  （改成永不触发）→ 四个 agent 的「fact 行加 --add-missing 被拒」**全部报红**（rc 变 0）→ 还原。
+- **P6**（第五交付物验收）🔴：**弄坏** —— 往 market AGENTS.md 塞回一段带 `--add-missing`
+  的 bash 命令块 → 「模板命令块里没有 --add-missing」**报红** → 还原。P6 同时正向验证：
+  模板现在教的那条 `--stance` 命令对一条真实 market fact 行确实 rc=0、判断落上去、事实没被重打。
+- **P4**（回归：五新一旧六个 agent card_ops 聚合不丢）：market/sector/technical/news/emotion
+  走新三型 + risk 走老合体，`load_verdicts_and_refs` 聚合六个、stance 全压回、market 自检的
+  一条 missing 也没丢。
+
+### 🔴 新增 · 批 E-I：把事实和判断拆开（契约基础设施 + 一个试点）
+
+设计文档 §6 批 E 的第一段。**实现完成、离线全绿，六道探针（P1–P6）全见过红并已还原，
+但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。
+
+**为什么**：`AgentVerdict` 把两件东西焊在一个 frozen dataclass 里 —— 事实（skill 算的
+`result`/`evidence`/`missing`）和判断（`stance`，skill 跑完之后 Agent 才补得上）。第一步
+不是照抄设计文档那句「拆开」，是先查 `amend_verdict.py` **到底在补救什么** —— 它不是
+方便功能，是「没有它，Agent 想只加一个判断，就只能把整份事实重打一遍」这件事的补丁。
+这条断层已经咬了三次：`BIGA-20260920-002` 补丁路径建成前 15 条 Evidence 的
+`retrieved_at` 全部转述丢失（L-10）；F8 `amend_verdict.py` 把契约层 stance 校验抄了一遍、
+连盲区一起抄（L-3）；F9 Agent 靠第二条命令后补判断、报错后现读源码重试，Stage 1
+延迟翻倍。三条同源：事实与判断焊在一起，"只加一个判断"没有一条干净的路。
+
+**做了什么**：
+
+- **三个新契约类型**（`skills/_contract/facts.py`）：`FactBundle`（事实 = AgentVerdict
+  减去 stance，skill 产）、`AgentAssessment`（判断 = `stance` + `fact_ref` 指回哪份
+  FactBundle，**不抄事实**，Agent 产）、`AgentOutcome`（组合视图，程序产）。
+  `LegacyAdapter.split()/to_outcome()` 把任何历史 `AgentVerdict` 拆回新三型。
+- **事实层铁律抽成一份共用**（`verdict.py`）：`check_fact_invariants` / `check_stance_vocab`
+  / `check_stance_vs_verdict`，`AgentVerdict` 与 `FactBundle` **调同一份**，防 L-3
+  （F8 就是各写一遍、连盲区一起抄的实测）。跨型铁律（UNKNOWN 的事实上不许挂方向判断）
+  归 `AgentOutcome` 校验 —— 因为只有它同时握着 `verdict`（事实）和 `stance`（判断）。
+- **存储：新旧同住 `agent_verdicts`**（schema v8 加 `kind` 列：NULL/'verdict'=旧合体、
+  'fact'、'assessment'），复用既有的只追加触发器 + 线性 amend 唯一索引，不新开表。
+  `save_fact_bundle`（写严，拒收 `AgentVerdict`）、`save_assessment`（校验 fact_id 是
+  同 task_id/agent 的 fact 行、构造 AgentOutcome 跑跨型铁律、`ux_verdict_amends_linear`
+  兜住「一份事实最多一个判断」）、`load_outcome`。
+- **`load_verdict` 变多态，消费方零改动**：旧合体行直接 `from_dict`；新 fact/assessment
+  行走 `load_outcome` 拼成 AgentOutcome 再 `to_agent_verdict()` 压回。`DecisionCard`
+  的 `isinstance(v, AgentVerdict)` 严格检查、`risk_check` 读 `.stance` 全照旧。
+  🔴 这是刻意取舍：让 AgentOutcome 成为组合视图（`load_outcome` 返回它、探针拿它检查
+  拆分），但**没有**改 card_ops/risk_check/DecisionCard 去字面读它 —— 试点血缘面越小
+  越好，让 DecisionCard 收 AgentOutcome 会涟漪到卡的序列化/回放。收敛留 E-II/后续。
+- **读宽写严**：`LegacyAdapter` 能拆任何历史 verdict（读路径宽），新落库只收新形状
+  （写路径严）⇒ 旧格式随时间自然清零，不驻留成第二套要跟着演进的口径。
+- **试点只迁 emotion**：Phase 1 第一个建成、形状最简、**不进 `CROSS_CHECK_PAIRS`**
+  （那条只连 market↔technical），影响面最小。`emotion_calc.py` 的 `build_verdict`→
+  `build_fact_bundle`（返回 FactBundle）、`save_verdict`→`save_fact_bundle`。其余五个
+  skill **一字未改**，等 E-II。
+- **`amend_verdict.py` 认得 fact 行**：对 fact 行只加 `--stance`（写一行
+  `AgentAssessment`，事实一个字不重打 —— 这正是 L-10 核心的修法）；对 fact 行给
+  `--add-missing` **明确拒绝**并指路 E-II（见「已知问题」）。
+- **顺带还 D-II 的账**：`Evidence` 加可选 `evidence_set_id` 字段；三个日线 skill 读冻结
+  时填上；`risk_check.py` 的 CROSS_CHECK 升级为**优先比 `evidence_set_id`**（结构验证、
+  不看内容），两条都有才用、缺一条退回 `raw_hash`（老 Specialist 还没填这字段，不能
+  因此让检查失效）。D-II 承认的「两次独立抓取碰巧逐字节相同则 raw_hash 碰巧相等、漏报」
+  盲区就此堵上。
+
+🔴 **探针记录（每道守卫「怎么弄坏 / 报红 / 已还原」，L-13）**：
+
+- **P1（LegacyAdapter 往返逐字段一致）**：让 `to_agent_verdict()` 漏拼 `stance` ⇒
+  `test_legacy_adapter_round_trip` 红（还原出的 dict 少一个 stance 键）。已还原。
+- **A（`save_fact_bundle` 写严）**：让它接受 `AgentVerdict` ⇒ 写严测试红（本该 `TypeError`
+  拒收合体类型，却存进去了）。已还原。
+- **B（`load_verdict` 多态不静默丢新行）**：让多态分支对 kind='fact' 也走旧
+  `from_dict` ⇒ 读回来 stance 丢失、消费方拿到残缺 verdict，回归红。已还原。
+- **C（跨型铁律在 AgentOutcome）**：把 `AgentOutcome.__post_init__` 的
+  `check_stance_vs_verdict` 去掉 ⇒ 能给一个 UNKNOWN 的事实挂「亢奋」判断，
+  `test_cross_type_invariant` 红（本该 fail-closed）。已还原。
+- **D（事实层铁律共用一份，L-3）**：把 `check_fact_invariants` 弄坏一处 ⇒
+  `AgentVerdict` 的测试与 `FactBundle` 的测试**一起**红（证明是一份，不是两份）。已还原。
+- **P4（CROSS_CHECK 优先 evidence_set_id、缺失退回 raw_hash）**：禁用 evidence_set_id
+  偏好、一律退回 raw_hash ⇒ `test_同一个evidence_set_id不报` 红（同一个冻结集、两条
+  都无 raw_hash ⇒ 兜底误报「无法核实」）。
+  🔴 **评审复核发现一处假绿并已修**：同一道破坏下，`test_P4_都有evidence_set_id就比它_不同则报`
+  当初**仍绿** —— 它只断言「报了冲突」，而两条都无 raw_hash 的兜底也会印一条冲突，凑巧满足。
+  即「名字像在测这个特性的那条测试，不是真正锁住它的那条」（L-13 的形状）。已把它锚死在
+  只有 evidence_set_id 判据才印的「冻结集」+ 两个 es-id 值上；现在同一道破坏下它**也红**了。
+- 还原核对：`grep -rn PROBE skills tests` 无残留；`test_contract_behavior` /
+  `test_store` / `test_emotion_calc` / `test_facts_split` 全绿。
+
+**这一批明确没做**（留给 E-II）：迁其余五个 skill（market/sector/technical/news/risk）；
+退役 `amend_verdict.py`（要等全部迁完）；把 Agent 追加的「限制」缺失项归位（见下）。
+
+**已知问题 · Agent 追加的缺失项在新形状里还没有落点**：老 `amend_verdict.py` 让 Agent
+一条命令同时加 `stance`（判断）和 `--add-missing`（Agent 观察到的数据限制，比如「只有
+单日快照、无法判断趋势」）。拆开之后 `stance` 有家（`AgentAssessment`），但**Agent 追加
+的缺失项没有** —— 它既不是 skill 的事实（skill 不知道），也不是一个 stance。E-I 对 fact
+行的 `--add-missing` **明确拒绝并指路 E-II**，不静默吞。E-II 要想清它归哪：改由 skill
+自产、还是给 `AgentAssessment` 增一类字段。这是拆「事实 vs 判断」这条线时，一个一直骑在
+缝上的用法逼出来的真实边界问题（已记进 `TODO.md`）。
+
+### 🔴 修复 · 批 C-III：Orchestrator 健壮性四处收尾（外部架构复审复核）
+
+来源：2026-09-22 一份外部架构复审，逐条复核记在设计文档 §2 追加 5。这一批只做
+追加 5 里标了 ✅ 且判定「值得马上修」的四条，彼此独立。**实现完成、离线全绿
+（1005 → 1016：+7 条 C-III 探针/单测，+4 条本章带出的参数化 docs 测试），四道探针
+全见过红并已还原，`biga-card --check BIGA-20260922-001`
+回放一致、`audit_public.sh --worktree` 十一项全绿，但未交独立评审 —— 不自宣通过。**
+
+⚠️ 本批在**独立 git worktree（分支 `c-iii`，基于 `2e5e8ea`）**上做 —— 批 E-I 的
+未提交改动同时在主工作区里（那份 WIP 当时让测试红 25 条）。两批文件层面只在
+`_store/db.py` 相交，且区域不交叠（E-I 加的是新函数、C3-3 改的是既有
+`verify_verdict_refs`）。这是本项目第一次两批**真正并行**（A–E-I 之前都是串行、
+每批开工前上一批已提交），隔离开工是为了给 C-III 一个绿色基线、且不把 E-I 的
+半成品扫进 C-III 的提交。合并回 `orchestration` 时须重新核对是否真无冲突，
+不凭这次 diff 快照就认定安全。
+
+**C3-1 · `CARD_PERSISTED` 转移必须写在 `persist()` 成功之后**（评审 §17-18）
+原来 `transition(..., CARD_PERSISTED)` 先于 `card_ops.persist(card)`。为什么这是
+真 bug：`persist()` 抛错时，`run_events` 会留一条「已落库」的假记录，而库里其实
+没有这张卡 —— `run_events` 只追加、删不掉，于是**一个可修复的失败被记成了不可
+修复的谎**，`--status` 从此对这次运行说假话。改法：先 `record_id = persist(card)`、
+成功拿到号后才转移，`detail` 带真实 `record_id`（不再是占位串
+`{"record":"persisting"}`）。
+探针 P1：monkeypatch `card_ops.persist` 抛异常 → 断言 `run_events` 不含
+`CARD_PERSISTED`。未改代码时报红（`assert 'CARD_PERSISTED' not in [...]` 失败——
+状态链里确实多出这条假记录），改后绿、已还原。另一条断言 `detail.record_id` 是
+真实 `int`（未改时 `{"record":"persisting"}` → KeyError）。
+
+**C3-2 · Stage 1 部分启动失败时取消已启动的 handle**（评审 §28 + 追加 5.2）
+`handles = [ad.start(a, ...) for a in STAGE1_AGENTS]` 中途某个 `start()` 抛错时，
+之前已成功 start 的 handle 被直接丢弃 —— 那些 Specialist 会话继续跑到各自
+`runTimeoutSeconds` 才停，白烧钱。为什么值得单独记：这恰好是
+`OpenClawRuntimeAdapter.cancel()` 建好以来**一直缺的那个真调用方**（批 C-I/D-I/D-II
+三次评审都把它记为残留风险：`cancel()` 只在 N=2、无 drain 场景验过）——Stage 1
+五路正是 N 可达 5、天然有 drain 的真实取消场景。改法：列表推导换成显式循环 +
+已启动 handle 列表，`except` 分支里对已启动的逐个 `cancel()`（cancel 本身失败用
+`contextlib.suppress` 兜住，不盖原始异常）再抛。
+探针 P2：桩 adapter 第 3 个 `start()` 抛 `SpawnStartError` → 断言前两个已启动的
+handle 收到 `cancel()`（比对身份，不只数量）。未改代码时报红（`cancelled == []`——
+两个 handle 被孤儿化），改后绿、已还原。
+⚠️ 这是**离线**用桩 adapter 验证「调用发生」；真实 adapter 上 N=5/drain 的取消
+**命中正确性**（`active[]`↔`tasks[]` 同序映射）本批未在活运行时重跑 —— 见「已知问题」。
+
+**C3-3 · `verify_verdict_refs` 补 `agent` 字段核对**（评审 §8-16 的一部分）
+原来只核对 `verdict_id` 存在 + `content_sha256` 一致，不核对
+`ref.agent == 存量.agent`。为什么这是洞：`verdict_id` 是**跨 agent 的全局自增**
+（不按 agent 分号段），所以一条手工拼的 ref 可以声称「这是 market 的原件」、
+`verdict_id` 与 `sha` 却全指向 news 那一行 —— 此时「能找到 + hash 对」两道检查
+都通过，只有 agent 核对能拦下这种张冠李戴。`VerdictRef.agent` 的 docstring 早写明
+它必须与被引用行一致，这里补上真正强制那句话的检查。改法：`load_verdict_meta`
+已返回 `agent`，加一行比较，不一致就报（与 hash 检查各自独立，可同时报）。
+探针 P3：造两条不同 agent 的原件（market/news），伪造一条声称 market、
+`verdict_id`+`sha` 全指向 news 的 ref。前置断言：一条「agent 也说 news」的 ref
+核对通过（证明 forged 唯一破绽就是 agent，存在性/hash 都不触发——避开 A-I 评审
+栽过的「探针没命中目标条件」坑）。未改代码时报红（返回 `[]`，`assert len==1`
+失败），改后绿、已还原。真实数据零误伤：扫 37 张在线卡（1 张带 refs），新检查报
+0 问题。
+
+**C3-4 · Orchestrator 感知总预算，各阶段按剩余时间收窄**（评审 §35）
+`stage1_sec`/`risk_sec`/`synth_sec` 各自独立、互不感知 `deadline_sec` 还剩多少。
+Stage 1 吃满自己预算后，Risk 与 Synth 仍各自等全额，三段之和可以超过
+`deadline_sec`，只靠外层 bash `timeout` 硬顶 —— 纵深防御的最后一层，不该是唯一
+一层。改法：`run()` 里 `deadline = time.monotonic() + self.deadline_sec`，每段的
+`ad.wait()` 用 `_stage_timeout(deadline, 该段预算) = min(该段预算, 剩余)`；
+`remaining <= 0` 抛 `OrchestratorError` → 进 FAILED（与零证据/判官失败同一条失败
+路径）。顺带用上了 `orchestrator.py` 里一直是死代码的 `import time`。
+探针 P4：总预算设 50s（远小于任一段固定预算），断言三段 `wait` 拿到的 timeout
+都被压到 ≤50 且严格小于各自固定值。未改代码时报红（stage1 拿到 300，
+`300 <= 50` 失败），改后绿、已还原。另两条单测钉住 `_stage_timeout` 取较小者、
+剩余耗尽抛错。
+
+⚠️ 本批**不碰**（设计文档 §2 追加 5 明确划出的排期边界）：`run_id` 贯穿
+`agent_verdicts`/`evidence_sets`/`VerdictRef`/`DecisionCard` 这条链（追加 5.1：
+排期约束，没有「同 decision_id 重试」的消费方之前提前建是 L-1）；§26 的
+budget/flock 从 bash 挪进 Python（比这四件更大的一批）；§24-25 stale-run reaper
+的 cron/timer 调度（批 G 的地盘）。
+
+#### 已知问题（批 C-III）
+
+- **C3-2 的取消在真实运行时上未跑过 N=5/drain。** 离线探针证明的是
+  Orchestrator **会**对已启动的兄弟调 `cancel()`、且调在对的 handle 上（桩
+  adapter）。而 `cancel()` 内部把 `runId` 映射到 `taskId` 用的是 `active[]`↔
+  `tasks[]` 的**同序对应**，这条只在 C-I 的 `adapter_spike.py cancel` 里对
+  N=2、无 drain 实证过。C3-2 现在给了它第一个真实调用方（Stage 1 部分启动
+  失败），也就是说这条 live 场景**从此可被触发**，但本批（纯离线）没有在活
+  运行时上跑一次真实部分失败。⇒ 「`cancel()` 缺真实调用方」这半条残留风险
+  **已由 C3-2 解决**；「真实运行时 N=5/drain 同序映射正确性」这半条仍是 live
+  补验项，随第一次真实 Stage 1 部分失败（或专门造一次）补上。
+
+### 🔴 修复 · `agent_runs` 记账在批 C-II 之后再没被写过（live 验证才暴露）
+
+批 C-II 把出卡入口从 main 的提示词驱动切到 `DecisionOrchestrator`（程序驱动）
+之后，第一次真实端到端出卡验证发现 `tools/verify/spawn_check.py` 永远报
+「判不了」（rc=2）——不是安全洞（没把失败误判成功），但每次真实出卡都会印
+一条误导性的红字，且这条验证闸门自己已经名存实亡。
+
+**为什么会这样**：`spawn_check.py` 的判据要求 `agent_runs` 表有行，才能拿去跟
+运行时自己的 `subagent_runs` 交叉核对（业务代码写的东西证不了自己，这条
+交叉核对才是真证据）。写 `agent_runs` 这一步唯一的调用方是旧的 standalone
+`synthesize.py`（main 提示词驱动时期，main 自己跑这个脚本落卡）。批 C-II 把
+合成逻辑挪进了 `card_ops.synthesize()`/`persist()`（`orchestrator.py` 直接
+调用的模块函数），但没有把「记账本」这一步一并搬过来——`agent_runs` 从
+C-II 合并那天起就没被在线路径写过，只是当时没有真实运行过，直到 2026-09-22
+第一次 live 验证才暴露。
+
+**为什么这么久没被发现**：唯一守着这条不变量的测试
+（`test_store.py::TestAgentRunsIsLedgerNotProof`）只用 AST 扫「repo 里有没有
+非 `_store`/`tests` 的代码调用 `record_agent_run`」，而 `synthesize.py`
+本身仍然是合法的测试夹具（好几个测试文件拿它当子进程跑），扫描器找到它就
+满足了断言——即使生产入口再也不会真的执行它。这是「判据是文件里有没有这段
+文字，不是调度命令会不会走到它」，本仓库自己在别处反复强调的那条原则，
+这次自己没做到。
+
+**修法**：`card_ops.persist()` 在线路径（`replay_of is None`）补上
+`record_verdict_run()` 循环——这是 IO 边界该做的事，`synthesize()` 保持纯
+函数不变。回放路径显式跳过，因为回放没有重新执行任何 agent，记一遍「执行」
+是假账。新增两条回归测试钉住两个方向（在线必须记、回放必须不记），且都
+独立复现过红（去掉记账循环 → 在线测试报 `[] == [...]`；把守卫改成对回放
+也记账 → 回放测试报 `12 == 6`）。
+
+⚠️ 没有改 `test_我们自己的代码就在写它` 那条 AST 扫描——它的目的本来就是
+证明 `agent_runs` **可以被业务代码自己写**（因此不可信），不是验证生产
+入口真的在写；`synthesize.py` 作为测试夹具继续满足这条断言是对的，只是
+不足以覆盖生产入口自己有没有在写，那是 `spawn_check.py` 对着真实
+`decision_id` 才能查的事，这次靠一次真实 live 运行才查出来。
+
+### 🔴 变更 · 批 D-II：Specialist 改口读冻结快照（切三个 skill 的实际行为）
+
+设计文档 §6 批 D 剩下的部分。**这是 D 系列真正的高风险段** —— D-I 只在旁边把机制
+建好，这一批真正切 `market_calc.py` / `sector_calc.py` / `technical_calc.py` 的
+`fetch_index_daily` 调用点。**实现完成、离线全绿（985 → 1003），四道探针全见过红并已
+还原，但未交独立评审 —— 不自宣通过。**
+
+**为什么**：D-I 之后 `freeze_index_daily` 一直没有调用方，「所有 Specialist 看同一份
+数据」仍只是「机制上可以」。这一批让编排器真的冻结一次、三个日线消费者真的读同一份，
+把那句话从「可行」变成「这次决策真的如此」——而且**留了一条能报红的检查**，将来谁
+悄悄退回独立抓取会被抓到，不是改完就没人管了。
+
+**做了什么**：
+
+- **`orchestrator.py` 的 `SNAPSHOT_FROZEN` 接了真东西**：Stage 1 fan-out 之前调
+  `SnapshotCoordinator.freeze_index_daily(did, ["sh000001","sz399106"], bars=120)`
+  （🔴 **120 不是 25** —— 消费者里最大的是 `technical_calc.py::BAR_COUNT=120`，
+  D-I 评审复核时核过），evidence_set_id 存进转移 detail + `RunContext`（批 B 起就有
+  这个字段、一直是 None，这一批第一次真填）。freeze 失败 ⇒ 整体 FAILED（fail-closed，
+  不退回各自抓一份、悄悄丢掉共享保证）。`_specialist_task()` 只给日线三个 agent 的任务
+  文本加 `--evidence-set-id`（emotion/news 的 skill 没这个参数）。
+- **三个 skill 加可选 `--evidence-set-id`**（参照 `--task-id`，缺省 `None`）：给了就
+  `read_index_daily()` 读冻结、不联网、不重复落盘；没给就跟今天一样 `fetch_index_daily`。
+  🔴 **没给不当成更严格的版本** —— 手工单跑某个 skill 调试的路径不被连坐拦掉。
+  🔴 **给了坏号 fail-closed**：`SnapshotReadError` 直接上抛，**绝不静默退回独立抓取**
+  （那是最危险的：假装什么都对）。
+- **`raw_hash` 语义**：读冻结的 skill，`Evidence.raw_hash` 取冻结集登记的
+  `content_sha256`（整份 raw 的指纹，`SnapshotCoordinator.frozen_content_sha256()`
+  新增的只读访问器给），**不对自己读到的那一截重算** —— 不同消费者读 2/25/120 根，
+  对切片重算会得到三个不同哈希，而它们本该指向同一份。
+- **`CROSS_CHECK_PAIRS` 改判据，不是删**（`risk_check.py`）：`market.sh_close` ↔
+  `technical.close` 在共享同一份冻结数据后**值必然相等**，比值就退化成恒真死配置（L-7）。
+  改成核对两条 `Evidence.raw_hash` 是否相同：都读冻结 ⇒ 相同 ⇒ 不报；某个退回独立
+  抓取 ⇒ 出自另一份 ⇒ 不同 ⇒ 报红。守的东西从「数值凑巧对上」变成「真的共享了同一份」。
+
+🔴 **探针记录（每道新守卫「怎么弄坏 / 报红输出 / 已还原」，L-13）**：
+
+- **P5（坏号 fail-closed）**：让 technical 的冻结分支 `except: 退回 fetch` ⇒
+  `test_P5` 红：`assert 1 == 0`（fetch 被调了，本该 0）。已还原。
+- **P4（raw_hash 取冻结集那份、不对切片重算）**：让 sector 对读到的 2 根重算 hash ⇒
+  `test_P1` 红：sector 的 `d80e…` ≠ 冻结集 `f01a…`。已还原。
+- **P2（CROSS_CHECK 判据换了、且仍会红）**：把判据退回「比值」⇒ `test_P2` 与
+  `test_值相等也照报` 双红（值相等 ⇒ 漏掉 raw_hash 不一致，`assert []`）。已还原。
+- **freeze 真的接进编排**：把 `freeze_index_daily` 换成假号、跳过冻结 ⇒
+  `test_一次决策只冻2行raw` 红：`assert 0 == 2`。已还原。
+- 还原核对：`grep -rn PROBE skills tests` 无残留；三个 skill 的既有离线测试与
+  `test_orchestrator`/`test_risk_check` 全绿。
+
+**这一批明确没做**（留给后面）：不迁 breadth/pool/news/emotion 的抓取（不属于
+「三个日线消费者改口」）；不改 `SnapshotCoordinator` 的 `read_index_daily` 签名
+（只**新增**了只读访问器 `frozen_content_sha256`，属于分发提示词说的「签名接不上」）；
+不给 `Evidence` 加 `evidence_set_id` 字段（那是批 E 的契约改动，CROSS_CHECK 因此用
+已有的 `raw_hash` 而非 `evidence_set_id`）。
+
+### 新增 · 批 D-I：SnapshotCoordinator 基础设施（冻结一次、多处读）
+
+设计文档 §6 批 D 的第一段。**实现完成、离线全绿（956 → 985），五道探针全见过红并
+已还原，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话，见
+`docs/guide/orchestration-kickoff-prompt.md`）。
+
+**为什么**：`fetch_index_daily` 被 market / sector / technical **各自独立调用**（§2 复核
+成立的那条 §15 断言）——三次网络调用、各落一行 raw，理论上应该拿到同一份数据，但没有
+任何机制保证。「所有 Specialist 看的是同一份数据」（设计文档 §4 `evidence_set_id` 那一行）
+因此**无法验证**。这一批把「抓取」和「读取」拆开，让这句话从一句愿望变成一条可核对的
+属性 —— 但**只建地基、不改任何 Specialist**（那是 D-II，风险高得多，要等这层验实）。
+
+**做了什么**：
+
+- **新增 `skills/_snapshot/`（`SnapshotCoordinator`）**：
+  - `freeze_index_daily(decision_id, symbols, *, bars) -> evidence_set_id` —— 每个 symbol
+    在一次决策里**只真实抓一次**（用调用方给的 `bars` 取全量），原样落 `raw_market_snapshot`，
+    登记一行 `evidence_sets`。
+  - `read_index_daily(evidence_set_id, symbol, *, bars) -> IndexDaily` —— 从已冻结的 raw
+    **切片**出调用方要的根数，**不联网**。sector 要 2 根、market 要 25 根、technical 要
+    120 根，都从同一份底层数据切。🔴 要的根数超过冻结的根数 ⇒ 抛错，绝不静默返回更少
+    （R-3 / L-2：算不出来必须说算不出来，不 fail-open）。
+  - `frozen_snapshot_ids(evidence_set_id)` —— 反查这次冻结登记了哪几行 raw。
+- **`_sources/sina.py` 抽出纯函数 `parse_index_daily(symbol, payload)`**：`fetch_index_daily`
+  = 网络（`get_json`）+ `parse_index_daily`。🔴 **为什么抽**：读冻结快照要从存下来的 raw
+  重建 `IndexDaily`，若在 `_snapshot` 里再写一遍解析，就是同一判据两份实现（L-3）——
+  某天一处改了另一处没改，两条路径对「什么样的日线算合法」给出不同答案，且不报错。
+  抽取是纯空操作，解析逻辑一字未改（`tests/test_snapshot.py::TestParseExtraction` 锁住
+  正常解析 + 每一条形状校验仍在；全量测试条数只增不减）。
+- **`_contract.new_evidence_set_id()`**：`es-<uuid4>` —— 身份铸造只此一处，不让 `_snapshot`
+  自己发明第二套 id 规则。与 `new_run_id` / `new_trigger_id` 同在契约层。
+- **`_store.save_evidence_set` / `load_evidence_set`**：`evidence_sets` 表（批 B 建的）第一次
+  真的被写行。存储层对 `manifest` 结构**不做假设**（只负责严格 JSON 落库）——manifest 长
+  什么样、怎么反查，是冻结方的事，存储层若也内嵌一份就成了第二处要跟着演进的地方（L-3）。
+  `manifest_json` 记每个 symbol 的 `snapshot_id` ⇒ 能被**反向走通**回 raw 层，不是一段
+  只用于展示的自由文本。
+
+🔴 **探针记录（每道新守卫「怎么弄坏 / 报红输出 / 已还原」，L-13）**：
+
+- **P1（read 不重抓）**：在 `read_index_daily` 里加一行 `self._fetch(...)` 假装重抓 ⇒
+  `test_P1` 红：`底层抓取应仍是 1 次，实测 4 次 assert 4 == 1`。已还原。
+- **read fail-closed（越界）**：拆掉 `if bars > len(raw): raise` ⇒ `test_要的根数超过冻结的
+  根数就报错` 红：`DID NOT RAISE SnapshotReadError`（`raw[-6:]` 在 len=5 时静默返回 5 根）。已还原。
+- **P4（`evidence_sets` 只追加）**：临时拿掉 v7 里 `evidence_sets` 的只追加触发器 ⇒
+  `test_P4_UPDATE被拒` / `test_P4_DELETE被拒` 红（改删成功），且 `test_store.py::test_每张表
+  都有只追加触发器` **一并**抓到 `这些表可被改写：['evidence_sets']`（动态守卫也是活的）。已还原。
+- **P5（manifest 可反查）**：freeze 的 manifest 条目去掉 `snapshot_id` ⇒ `TestReverseQuery`
+  两条红（反查取不到行 / 字段不全）。已还原。
+- 还原核对：`grep -rn PROBE skills tests` 无残留，`schema.py` 不在 `git diff` 里（临时改动
+  逐字节复原）。
+
+**这一批明确没做**（留给 D-II，已记进 `TODO.md`「批 D-I 施工空档 + 批 D-II 输入」）：
+不改 market/sector/technical 的调用点；不动 `orchestrator.py` 的 `SNAPSHOT_FROZEN` 转移
+（它的 detail 仍诚实地写着「还没有真东西」——D-I 之后仍没有真消费方）；不动
+`CROSS_CHECK_PAIRS`（Specialist 真共享快照前它仍有意义，删早了是造假阴性窗口）。
+⚠️ 顺带记下：分发提示词把 technical 写成 `bars=25`，实测是 **120**——D-II 接线时冻结
+`bars` 要取 120，否则 technical 读 120 会撞 fail-closed。
+
+### 🔴 变更 · 批 C-II：DecisionOrchestrator + 生产入口切换 ★
+
+设计文档 §6 批 C 剩下的部分。**这次升级第一次改动生产入口 `bin/biga-card`。**
+948 条测试全绿（938 → 948）。**实现完成、离线全绿**，已过独立评审复核（`d35d286`）。
+P1/P2 live 补验一度挂起（需重启网关加载 synthesizer），**现已两条都真跑过**（2026-09-22）：
+P1 = `BIGA-20260922-001` 走 8 步细粒度链、`subagent_runs` 7 个 spawn 含 synthesizer；
+P2 = 把 L-14 递归提示词贴给真 main，它**拒绝**自我编排、0 spawn、不占号不落卡（「够不到」成立）。
+详见 `TODO.md`「批 C-II 收尾」。
+
+**为什么这是全案的中心**：这一批做完之后，「谁能启动出卡流程」的答案从
+「守卫拦住了不该启动的人」变成「除了这条 Python 路径，没有别的路能启动」。
+L-14 出卡递归事故就出在「谁能启动」这条边界上 —— 这一批把那条边界从**提示词约定**
+（`AGENTS.md` 写着「你就是执行者，照着步骤做」）变成**程序结构**（编排是个 Python
+对象，`main` 没有一条工具调用能到达它）。前者是运行时挡，后者是根本够不到。
+
+**做了什么**：
+
+- **新增 `skills/decision-card/scripts/orchestrator.py`（`DecisionOrchestrator`）** ——
+  程序驱动 Stage 0→3：占号（在 `open_run` 之前，`decision_id` 从头非空，不留 legacy
+  那个「开 run 时还没号」的口子）→ 8 步细粒度状态链（RECEIVED→PREFLIGHTED→
+  SNAPSHOT_FROZEN→STAGE1_RUNNING→STAGE1_COMPLETED→RISK_RUNNING→SYNTHESIZING→
+  CARD_PERSISTED→COMPLETED）→ Stage 1 五路 fan-out（共用一个 groupId）→ Stage 2
+  risk → Stage 3 spawn 判官 → 程序组装并落库。usage 落 `run_events.detail`（不落
+  `agent_runs`，L-1）。部分失败/超时：缺席 agent 记 `missing`、照常出卡；只有判官
+  没给判断或**零证据**才整体 FAILED。
+- **新增 `synthesizer` 判官 agent**（`agents/synthesizer/AGENTS.md` + 配置）——
+  一个 `subagents.allowAgents=[]` 的**叶子节点**：结构上没有 spawn 能力。综合判断
+  （status/headline/synthesis）从 `main` 手里移到它这里，靠 `outputSchema` 拿结构化
+  回复、不解析自然语言（F3/L-13 形状）。🔴 **为什么是新 agent 而不是 spawn `main`**：
+  判官若是 `main`，它带着 `main` 的全套 spawn 能力，一个提示词注入就能让它再拉起
+  一轮编排（L-14）；叶子 agent 从能力上就做不到。数据不经判官搬运 —— 证据由程序从
+  冻结的 verdict 原件直接组装。
+- **`bin/biga-card` 收缩成薄 CLI**：五道守卫（熔断→ownership→单实例锁→预算闸门→
+  第一次付费调用，**顺序原样**）→ 调 `orchestrator.py` → `spawn_check` + `readback_check`
+  → 退出码。等待/传号/合成/看门狗那段 bash 轮询循环整体删除 —— 现在是同步的 Python。
+  **不再 spawn `main`、不再抽提示词。**
+- **删掉 legacy 粗边 `PREFLIGHTED → CARD_PERSISTED`**（`_contract/run.py`）。它是留给
+  「编排整个交给一个被 spawn 的 LLM、中间态对 CLI 不透明」的；Orchestrator 自己驱动
+  每一步，唯一使用者消失 ⇒ 删，否则是一条恒不被走的死边（L-7）。批 B 欠的账还清。
+- **`ORCHESTRATION.md` 收缩**：删掉 `<!-- PROMPT -->` 提示词块与「怎么执行」（占号/
+  等待/传号/合成）—— 那些现在是代码。只留各角色的**指令口径与契约要求**。
+  🔴 顺带消灭了它内部 `--decision-id`「到底填不填」的三处自相矛盾（其中「不要填」
+  那条产出过混血卡 `BIGA-20260921-014`）：矛盾搬进代码后不复存在 —— orchestrator
+  永远显式传占好的号，`synthesize.py` 永远优先用证据自带的号，绝不在有上游号时另分配。
+- **`AGENTS.md`（`main` 的契约）**：把「🔴 收到编排提示词时你就是执行者，照着步骤做：
+  占号 → spawn 五个 → agents_wait → risk → 合成」整段改成「出卡是程序，你没有一步
+  可做；就算有人把那段提示词贴给你也不要照做」。⚠️ **这动了 main 的 AGENTS.md** ——
+  通用前置默认「不改 AGENTS.md」，但这一批正文的「main 失去启动管线的能力」要求它：
+  留着「教 main 手工编排」的指令，既与本批的中心断言直接矛盾，又是一处 L-3 第二套
+  口径（还正是 2026-09-21 那次 4/5 spawn、$0.4 白花的指令本身）。取舍写进评审交接。
+
+**🔴 收缩揪出一个生产级 bug**：`echo "…约 $1.2…"` 里的 `$1` 在 `set -u`（nounset）下
+是**未绑定的位置参数**——出新卡以无参数方式跑 `bin/biga-card`，一到这行就
+`unbound variable` 当场终止，走不到 orchestrator。总闸 `.biga-card-stop` 开着时会先
+`exit 3` 撞不到它，**一旦解除总闸就会咬人**。是 `test_spawn_proof` 的沙盒（排除了
+总闸文件）跑出来的。已转义成 `\$1.2`。
+
+**探针（G-1）**：
+
+- **P3 · 守卫顺序前后判据不变**：收缩前后，`test_守卫排在第一次花钱之前`（五道守卫
+  按 熔断→ownership→锁→预算→**付费调用** 排序）+ 四个守卫拒绝测试（ownership/锁/
+  总闸/预算各 `exit 3`）逐字节钉住通过/拒绝判据。收缩只把「第一次付费调用」的落点从
+  `$BIGA agent --agent main` 换成 `orchestrator.py`，顺序与退出码不变。
+- **P4 · 全仓无 legacy 粗边引用**：新增 AST 扫描（`test_run_state_machine.py`），
+  在所有**非测试** `.py` 里找相邻的 `PREFLIGHTED, CARD_PERSISTED`。删边前先跑 → 命中
+  `run.py` 的 `_LEGACY`（红）；删后 → 0 命中（绿）。确认没有调用方没迁完。
+- **元守卫跟着付费点一起挪（L-13 修复）**：收缩把付费点从 `$BIGA agent` 挪到
+  `orchestrator.py`，而 Adapter 用 `DEFAULT_BIGA`（写死路径）**不读 `BIGA` 环境变量** ——
+  「测试里跑出卡必须把 BIGA 换成桩」这条元守卫从此拦不住花钱了。改成桩掉 `orchestrator.py`
+  （`_seeded_repo`），并在 `_run` 里加运行时自证（沙盒的 orchestrator 不是桩就当场炸，
+  fail-closed 在使用点）。**探针**：把 `_seeded_repo` 的 orchestrator 桩去掉 → `_run`
+  的断言当场红；恢复 → 绿。
+- **P1（真跑端到端走 8 步链）/ P2（`main` 够不到 orchestrator，是「够不到」不是「被拒」）
+  尚未做** —— 需先重启网关让 `synthesizer` 进 roster。记进 `TODO.md`，未做完不算收口。
+
+**🔴 一次开发事故，如实记下**：验证 `$1.2` 修复时手工跑了一次无参数 `bin/biga-card`
+（总闸指向不存在的文件 ⇒ 没拦住），它 `timeout 10` 的外层被杀、但 `timeout 840
+orchestrator.py` 那个孙进程被**孤立后继续跑**，真的 spawn 了五个 Specialist。它自己的
+run/卡写到一次性临时库（已删），但被 spawn 的 Specialist 用**继承不到**我那个
+`BIGA_DB_PATH` 的默认库 = 生产 `data/biga.db`，落下 **11 条孤儿 verdict**
+（task `BIGA-20260922-001`，无 decision_record）。代价：约一次 fan-out 的真金白银。
+`data/biga.db` **git-ignored**（不进仓库、不影响克隆）、只追加（删不掉、也不该删，
+L-8）、且是孤儿（不上任何卡）。**教训**：开发期绝不手工跑无参数出卡入口 ——
+只有桩掉 orchestrator 的测试才安全。
+
+**残留风险**（详见 `TODO.md`）：P5（Orchestrator 不调 `cancel()`，C-I 那条同序映射
+残留原样带下去）；stall_watchdog 现在零消费方（`ask_user` 死锁改由 `runTimeoutSeconds`
+兜，但那条是否在 `blocked_tool_call` 下开火未验证，模块与测试保留待裁定）。
+
+**🔴 评审回合一 · 两条阻塞项已修（独立评审揪出，均改代码不改承诺）**：
+
+1. **`orchestrator.py` 加 ownership 守卫**。评审读代码确认：它的 `main()` 直接
+   `new_run_context → run()`，零守卫；而 `main` 有 shell 能 `exec python3
+   orchestrator.py` **绕过 bin/biga-card**。这让这一批写在 orchestrator.py 头部的中心
+   断言（「main 没有一条工具调用能到达它」）当前**是假的** —— 而关掉 L-14 正是 C-II
+   的理由。修法是小的、非新机制：`main()` 里调已有的纯函数 `entry_guard.classify_caller()`
+   —— agent 会话血缘命中运行时标记 → 拒绝 `exit 3`；人/cron 触发 → 放行。探针
+   （= P2 的血缘面）：把守卫关掉 → `run()` 被换成会炸的桩、执行流一跑到它就红；恢复→绿。
+2. **`bin/biga-card` 加 `trap` 收养兜底**。评审自己核对因果链发现：孤儿化事故的根因
+   **不是** `$1.2` 那个 bash bug（那行在编排调用之前，真崩在那根本到不了 spawn），而是
+   外层短 timeout 杀了上层 shell、`timeout 840 orchestrator.py` 孙进程孤立后跑完了整轮
+   spawn。第一条教训（桩跟着付费点挪）已落成代码，第二条却只是「以后小心」的承诺 ——
+   而本项目的规矩是安全保证必须是 Code Guard。⇒ 编排放后台 + `wait`，`trap` 接住
+   EXIT/TERM/INT/HUP，wrapper 一死就 `kill` 掉编排子进程。探针：把 `_reap_orch` 改成
+   空操作 → 真杀 wrapper 后子进程孤立存活、测试红；恢复→绿。
+
+评审独立复核为真的部分（记此备查）：952 全绿、11 条孤儿 verdict 逐字段一致且
+decision_records 0 行、synthesizer roster 接线、risk 否决强制 status 是既有构造期校验、
+`--check` 与 audit 重跑绿。两处次要点（AGENTS.md 越权改、单源测试排除 `docs/design/`）
+评审认同不改。总闸 `.biga-card-stop` 由评审重新点上（发现活口子后的临时止血）。
+P1/P2 live 待两条阻塞项修完、探针见红后，另开会话再跑。
+
+### 🔴 新增 · 批 C-I：Runtime Adapter + spike 补验
+
+设计文档 §6 批 C 的 `OpenClawRuntimeAdapter` 部分 + §7 剩下未验的三项。
+938 条测试全绿（899 → 938，+39：32 条离线适配器测试 + 7 条文档校验参数）。
+
+**为什么**：整个确定性编排升级压在一个假设上 —— Python 编排器能**不经 LLM
+轮次**驱动一次 spawn 并拿到同等运行时证据（`sessions_spawn` 是暴露给 agent 的
+MCP 工具，CLI 里没有对应子命令）。spike（§7）证明能，但只跑了 **1 次** spawn。
+批 C-II 是第一次改生产入口，不能带着三个没测过的假设开工：五路并行是不是真并行、
+grant 撑不撑得住 780s、失败报错是不是结构化的。C-I 把这三个「应该」变成「测过」。
+
+**做了什么**：
+
+- `skills/_runtime/mcp.py` —— 传输层。`Grant`（`biga attach --print-config` 铸
+  grant、持 token/url、用完删临时 `.mcp.json`，context manager）+ `MCPClient`
+  （`initialize` 握手 + `tools/call` 的 JSON-RPC，SSE/JSON 两种响应都认）。
+- `skills/_runtime/adapter.py` —— `OpenClawRuntimeAdapter.start / wait / cancel /
+  status`，加**状态归一化**。
+- `tools/verify/adapter_spike.py` —— 对着真实运行时把三个未知数测掉，运行时升级后
+  可重跑复验。🔴 它驱动**真实的** `OpenClawRuntimeAdapter`（不另写一套 MCP 调用，
+  否则测的是脚本不是产品 —— F3/L-13），且**会花钱**。
+
+**为什么单独一层 + 状态归一化**：`sessions_spawn`/`agents_wait`/`subagents` 回的
+状态是运行时自己的措辞（实测：`accepted`/`queued`/`running`/`done`/`killed`/
+`forbidden`），会随运行时版本变。适配器对外只暴露自定义的 `SpawnStatus`
+（running/succeeded/failed/timeout/cancelled/**unknown**），原始词只在这一层翻译 ——
+运行时改一个词只改一张映射表，不波及编排链。🔴 R-3 落在这里：认不出来的原始词映射到
+`UNKNOWN`，**绝不当 SUCCEEDED**（映射表是白名单 `.get(raw, UNKNOWN)`，不是「不是失败就算成功」）。
+
+**两条 API 硬约束（§7，不是设计选择）**：① `collect=true` 无 requesting run 时必须带
+`groupId`，fan-out 一批共用一个；② grant 带 TTL、不自回收只到期 ⇒ TTL 必须 ≥ 总预算
+（780s），用完主动删 `.mcp.json`。
+
+**cancel 的实测坑**：运行时的取消只认 `subagents.tasks[].taskId`（传 runId / taskName
+都被 `Task outside session tree` 拒），而它与 spawn 返回的 runId **无直接关联字段**，
+只能靠 `active[i]`（带 runId）↔ `tasks[i]`（带 taskId）同序对应映射。🔴 而 `active[]`
+顺序**不是** spawn 顺序（实测先 spawn market 再 emotion，active[] 里是 [emotion,
+market]）—— 必须按 `active[i].runId==目标` 定位 i，不能按 spawn 序 index。
+
+**token 用量**：`agents_wait` 带 `usage: {inputTokens, outputTokens}`，随
+`SpawnResult.usage` 带出来，但**这一批不写库** —— C-I 不接任何 run，没有 run_events
+可写；写库（进 `run_events.detail`，不进 `agent_runs`）是 C-II 的事。在有消费方之前
+建写入路径就是 L-1。
+
+🔴 **批 C-I 不接生产入口**：`bin/biga-card` 一个字都不改。把 Adapter 接进
+`DecisionOrchestrator`、让程序驱动 Stage 0→3，是批 C-II。
+
+**验证（G-1；live 三项走共享凭据、真实 spawn，已获授权）**：
+
+- **P1 五路并行**（`adapter_spike.py parallel`）：五个 Specialist 共用一个 groupId
+  fan-out，实测**峰值同时 5/5 在 RUNNING** —— 真并行（不是排队）。判据是区间相交，
+  不是「五个都成功」（成功但排队执行看起来完全正常，那是「延迟其实是正确性 bug」形状）。
+- **P3 失败结构化**（`adapter_spike.py failure`）：起一个不存在的 agent →
+  运行时 `{status:forbidden}` → Adapter 翻成 `SpawnStartError`，没让裸异常漏出去。
+- **cancel 对应**（`adapter_spike.py cancel`）：起两个、取消第一个，实测死的正是第一个、
+  第二个仍在跑 —— 同序对应映射正确（`active[]` 当时是乱序的，正好验到这一点）。
+- **P2 grant 长跑**（`adapter_spike.py grant-longevity`）：TTL=840s，t=0 真实起一次成功
+  （usage 123/5），**实测等 780s 后用同一 grant 复验仍可用**，退出后 `.mcp.json` 已删 ——
+  §7-2「grant 不自回收只到期」这句话原来没验过，这次跑了一次真实场景钉死它。
+- **P4 状态归一化探针**（离线）：把 `status()` 从 `normalize_status(raw)` 改成
+  `return raw`，`test_对外永远是归一化状态而非原始词` 当场报红
+  （`assert 'killed' == 'cancelled'`）。已还原。
+
+### 新增 · 批 C 分发提示词：拆成 C-I（Adapter）/ C-II（Orchestrator ★）
+
+批 B 评审通过后，`docs/guide/orchestration-kickoff-prompt.md` 补写批 C 的
+开工段——此前一直是「等 B 落地后再写」的占位。
+
+拆成两个会话的理由与批 A 拆成 A-I/A-II 相同：耦合面不同，且低风险的一半
+能给高风险的一半兜底。C-I（`OpenClawRuntimeAdapter` + 补验 spike 留下的
+三个未知数）完全不碰 `bin/biga-card`，可以独立验证「Python 能不能在不经
+LLM 轮次的情况下驱动一次 spawn」；C-II（`DecisionOrchestrator` + 生产
+入口切换）是这次升级第一次改动「出卡到底怎么被触发」这条路径——批 A-I/
+A-II/B 都是新增或加固既有校验，只有这一步是把生产入口本身换掉，代价与
+前面几批不对称，值得单独隔出一轮评审，不跟 C-I 混在一次交付里。
+
+顺带把 TODO.md 里批 C 那一行也拆成两行，并在 C-II 上标注它要还批 B 欠的
+一笔账（删掉 `LEGAL_TRANSITIONS` 里 `PREFLIGHTED → CARD_PERSISTED` 那条
+legacy 粗边，防止它变成 L-7 死边）。
+
+### 🔴 新增 · 批 B：运行身份 + 状态机（schema v7）
+
+设计文档 §4「身份模型」与 §5「显式状态机」。899 条测试全绿（837 → 899，+62）。
+
+**为什么**：此前只有 `decision_id` 一个身份，它被迫同时承担五件事，实测踩过三次——
+飞书事件重投没有幂等键（重投 = 重跑一次决策）、硬超时重试的两次尝试挤在同一个
+`decision_id` 上事后分不开、「所有 Specialist 看的是同一份数据」这句话没有
+`evidence_set_id` 根本无法验证。⇒ 把身份拆开：`trigger_id`（一次外部请求）/
+`decision_id`（一次业务决策）/ `run_id`（一次执行尝试）/ `evidence_set_id`（一片冻结数据）。
+
+**做了什么**：
+
+- `skills/_contract/run.py`：`RunContext` 值对象（第六个契约类型，已登记进
+  `test_contract_single_impl.py` 的 `CONTRACT_NAMES`）+ 13 个状态 `RunState` +
+  合法转移图 `LEGAL_TRANSITIONS`。状态清单从类属性**派生**，不手抄第二份。
+- schema **v7**：`decision_runs`（运行身份头）/ `run_events`（状态转移日志）/
+  `evidence_sets`（冻结切片登记，批 D 起有生产方）。三张表**建表时就带只追加触发器**
+  —— v4 建 `decision_ids` 时漏过一次（F1），这次不重蹈。
+- `skills/_store/runs.py`：`open_run()` / `transition(run_id, expected, next)` / `run_journey()`。
+- `skills/decision-card/scripts/run_ledger.py`：bash↔状态机的桥，兼 `--status` 渲染，
+  持有 `STATE_MEANING`（消费方知识）。
+- `bin/biga-card`：新增 `--status <run_id>`；老路径出卡时**best-effort** 记 run 记录。
+
+**为什么状态是事件溯源、而不是 `decision_runs` 上一个 `state` 列**：`decision_runs`
+是只追加的（触发器强制），原地 `UPDATE state` 直接被拒。当前状态由 `run_events`
+最新一行给出；`transition()` 靠 `UNIQUE(run_id, seq)` 做 compare-and-set——读到最新
+`seq`、断言当前状态 == expected、`INSERT seq+1`，并发两次同转移都写 `seq+1`，唯一约束
+只让一个落地。这与 `decision_ids` 用主键冲突占号是**同一招**：唯一约束是唯一可靠的
+并发仲裁，「先查再写」永远有竞态窗口。
+
+**为什么 13 个状态而不是评审的 15 个**：去掉 `IDENTITY_RESERVED`（与 `PREFLIGHTED`
+是同一瞬间）和 `SNAPSHOT_COLLECTING`（并入 `PREFLIGHTED→SNAPSHOT_FROZEN` 的转移，
+中间态无人读）——本系统里没有代码能进入、也没有消费方会读它们，凭空多一个状态就是
+一条 L-1 死配置。`NOTIFICATION_PENDING` 推到批 G（outbox 存在之前它没有消费方）。
+每个状态都要能指出「谁写它」（能从 `RECEIVED` 经合法转移到达）与「谁读它」
+（`--status` 说得清），两条都有结构性测试钉死。
+
+**为什么 `decision_runs.decision_id` 可空**：legacy 路径（`bin/biga-card`）在 RECEIVED
+时**还不知道决策号**——它由被 spawn 的 LLM 的 Stage 0 占，`bin/biga-card` 是靠 poll
+`MAX(decision_id)` 发现的。批 B 的硬约束是「不改行为 / 不改占号逻辑」，所以不能让
+`bin/biga-card` 提前占号。⇒ run 头开在占号之前、`decision_id` 留空，发现号后记进
+`CARD_PERSISTED` 事件的 `detail`。批 C 的 Orchestrator 在开 run 之前占号，那时它非空。
+
+**为什么 run 记录是 best-effort**：批 B「新旧并存，不改行为」是硬约束——记账失败
+绝不能改变出卡的退出码/流程/成本。所以 `bin/biga-card` 里所有 `_move` 调用吞掉自身
+错误。代价是记账静默失效时无人察觉，但那是可接受的：run 记录是**可观测数据**不是
+安全守卫，且它的正确性由测试（直接驱动 `run_ledger`/`_store.runs`）保证，不靠 live 路径。
+legacy 路径粒度是粗的（`RECEIVED→PREFLIGHTED→CARD_PERSISTED→COMPLETED`，跳过五个
+编排内部态）——那五个态由批 C 的 Orchestrator 产生，`bin/biga-card` 观测不到，
+**不伪造**（`LEGAL_TRANSITIONS` 里 `PREFLIGHTED→CARD_PERSISTED` 是一条显式登记的
+legacy 粗边，批 C 收缩 `bin/biga-card` 时删除）。
+
+**探针（G-1，每道新守卫都见过红）**：
+
+- **P1 并发同转移只有一个成功**（`test_并发同转移只有一个成功`）：8 线程同时对同一 run
+  做 `RECEIVED→PREFLIGHTED`，断言恰好 1 个成功、7 个 `IllegalTransition`。常绿。
+- **P3 拆掉 CAS 仲裁 → P1 变红**：把 `transition()` 里 `except IntegrityError` 从
+  `raise IllegalTransition` 改成 `pass`（吞掉 UNIQUE 冲突 = 退化成无条件写）。
+  P1 报红：`应恰好一个成功，实际 8`。已还原。
+- **P2 只追加触发器**（`test_UPDATE_decision_runs被拒` / `test_DELETE_run_events被拒`）：
+  从 schema v7 删掉 `_append_only("run_events", ...)`，建新库。两条报红（UPDATE/DELETE
+  成功），且 F1 兜底 `test_每张表都有只追加触发器` 也报红：`这些表可被改写：['run_events']`。
+  已还原。
+- **P4 无消费方的状态被抓到**（`test_每个状态都有消费方`）：给 `RunState` 加一个
+  `PROBE_ORPHAN`（不进 `STATE_MEANING`、无入边）。三条同时报红——消费方检查
+  `这些状态没有读取方（STATE_MEANING 缺）：['PROBE_ORPHAN']`、可达性检查
+  `从 RECEIVED 走不到（没人能写它）`、以及「恰好 13 个」的钉子。已还原。
+
+### 🔴 新增 · 批 A-II：契约值对象与不变量（A1/A2/A5/A6/A7/A8 + F-4）
+
+设计文档 §6 批 A 的后半段。A-I 已经把**写边界**堵上（写入前重新构造一遍），
+这一批把**类型本身**收紧——很多绕过路径不需要碰写边界，直接改一个已构造
+对象的字段就够了；类型层不收紧，写边界重校验就是唯一一道防线，防线破了
+就什么都不剩。837 条测试全绿（774 → 837，+63）。
+
+🔴 本批经过两轮独立评审才落地，评审挑出三条：F-5（`MissingItem`
+「冻结」之后仍能被 `.code = ...` 改掉，见 A1 小节）、F-6（Card roster
+「缺席」该不该硬拒，设计表格与实现口径不一致，见 A5 小节）、F-8
+（F-6 修完后的第二意见：「非空即放行」本身还太松，见 A5 之后单独一节）。
+三条都已修完才落地成下面这份记录——下方 A1/A5 两节写的已经是**修完
+之后**的最终口径，不是最初提交评审时的样子；F-5/F-6/F-8 各自的探针
+单独成节，不与原 8 个探针混在一起，因为它们验证的是评审**修出来**的
+行为，时间线上确实更晚。
+
+#### A1 · `MissingItem` 的身份从「文本」改成「code」
+
+**为什么**：`replay.py` 反推 `extra_missing` 时用 `m not in from_verdicts`，
+而 `MissingItem` 原来是纯 `str` 子类，`==`/`hash` 走的是文本。两条 verdict
+各自报「数据源不可用」——一条 code 是 `market.turnover.unavailable`，
+另一条是 `supervisor.agent_no_response`，文本相同但不是同一件事——旧身份
+语义会把它们塌成一条，回放时**少还原一条缺失项**，「回放悄悄让卡变好看」。
+
+`__eq__`/`__hash__` 改成只认 `.code`，且对非 `MissingItem` 一律返回
+`False`（不回退到 `str` 内容比较，否则 `==` 与 `hash()` 依据不同信号，
+是另一种静默 bug）。`sorted()`/`in`（子串）/`f"{m}"` 不受影响——它们走的是
+`str` 继承来的 `__lt__`/`__contains__`/`__str__`，从不经过 `__eq__`。
+
+⚠️ 副作用：`MissingItem("x") == "纯字符串"` 不再成立。仓库里靠这个成立的
+只有 5 处（全在测试里，拿 `.missing` 跟一份纯文本列表比较），已改成显式
+取 `.detail` 再比较。
+
+**探针**：造两条同文本异代码的 `MissingItem`，构造「追加 2」描述的真实场景
+（`tests/test_decision_card.py::test_同文本异代码的extra_missing不会被反推丢掉`），
+临时删掉 `__eq__`/`__hash__` 覆写，确认它精确复现旧 bug 的症状——
+`replay --check` 报「不一致」，回放出的 Card 少一条缺失项；恢复代码后转绿。
+
+#### F-5（评审阻塞项）· `MissingItem.code` 在「冻结」之后仍然可写
+
+**为什么**：`MissingItem` 不是 `@dataclass`（它是 `str` 子类，靠手写
+`__new__` 构造），A2 那次「把所有契约对象都冻结」的批量整改是按类扫的，
+根本没扫到它——`m.code = "supervisor.agent_offline"` 事后照样成功，
+不报任何错。这条洞比听起来更致命：A1 刚把 `MissingItem` 的身份从「文本」
+改成「code」，就近有一个字段能被绕过冻结原地改掉，等于 A1 立起来的身份
+保证当场被同一批次的另一个洞卸掉——`missing_ledger.py` 与
+`_check_restated_missing` 都拿 `.code` 当身份在用，事后能改就是「身份可以
+被人悄悄换掉而不留痕迹」。`TestVerdictFrozen` 当时测的是"容器"（`missing`
+是不是 tuple、`.append()` 是不是被挡住），没有测"容器里那个元素自己"能不能
+被改字段——同一个批次里两类不同的「冻结」，只验证了一类。
+
+修法：给 `MissingItem` 补 `__setattr__`/`__delattr__`，统一抛
+`dataclasses.FrozenInstanceError`（不用自造异常类型——`AgentVerdict`/
+`DecisionCard` 冻结失败时抛的就是这个，保持「所有契约对象冻结失败长一个
+样子」）。构造阶段的自我赋值走的是 `__new__` 里的 `object.__setattr__`，
+不经过这道覆写，不受影响。
+
+**探针**：`tests/test_contract_behavior.py::TestMissingItemFrozen`
+（新增类，4 条）。临时删掉 `__setattr__`/`__delattr__` 覆写，
+`test_code不能被重新赋值` 与 `test_code不能被删除` 精确转红
+（`Failed: DID NOT RAISE`）；`test_装在tuple里的元素同样不可变`
+（造一条真实 `AgentVerdict.missing` 里的元素，确认冻结跟着对象走，
+不是只在裸构造时生效）同样转红；`test_构造阶段不受影响`保持绿，
+证明修法没有连带堵死合法的构造路径。恢复后全绿。
+
+#### A2 · `AgentVerdict` / `DecisionCard` 冻结，`list`/`dict` → `tuple`/`Mapping`
+
+**为什么**：`tests/test_write_boundary.py` 的 P1/P2 探针（批 A-I）能成功，
+靠的正是这个洞——`v.missing.append(...)` 不重跑 `__post_init__`，
+一个已经通过校验的对象可以在**不触发任何校验**的情况下被改成非法状态。
+`frozen=True` 挡的是重新赋值（`v.verdict = "WARNING"`）；但光 frozen 挡不住
+「对同一个可变对象原地 mutate」——`missing`/`evidence`/`warnings`/`verdicts`
+换成 `tuple`（没有 `.append()`），`result` 换成 `MappingProxyType`（`[key]=`
+直接 `TypeError`）,两者缺一不可。
+
+`__post_init__` 里几处自我赋值（收敛 missing、补 `generated_at`、写
+`identity_warning`/`restate_warning`）全部改用 `object.__setattr__`——
+这是 Python 自己在 `dataclass(frozen=True).__init__` 里用的同一个后门，
+构造阶段用它不违反「冻结」的语义。
+
+⚠️ `to_dict()` 里 `result` 要显式 `dict(self.result)`——`json.dumps`
+不认 `MappingProxyType`，不转会在落库那一刻才炸 `TypeError`。
+
+**探针**：`tests/test_contract_behavior.py` 的 `TestVerdictFrozen`/
+`TestCardFrozen`。临时把两个类的 `@dataclass(frozen=True)` 改回
+`@dataclass`，`test_赋值被拒`（两处）与追加 4 点名的
+`test_篡改from_store被拒` 精确转红（`Failed: DID NOT RAISE`）；
+`.append()` 系列测试保持绿——证明它们测的是 tuple 类型本身，不依赖
+frozen，两道防线各自独立被验证。恢复后全绿。
+
+同时把 `card.py::from_dict` 一处过时的文档注释改了回来——它还在断言
+「`save_card` 会传 `from_store=card.from_store`」，那正是追加 4 描述、
+A-I 已经修掉的洞；代码早改了，注释没跟着改，是又一次 L-6 文档漂移。
+
+#### A5 · Card roster：拒绝重复 agent；缺席须有缺失项解释才放行
+
+**为什么**：`verdicts=[market的判定, market的判定]` 能直接构造——没有任何
+字段说得清「该信哪一条」。但「缺席」不能用同一把尺子量：Phase 1 单 agent
+skeleton、agent 掉线时 Supervisor 用 `supervisor.agent_offline` 显式登记，
+都是**合法的**缺席场景（`ORCHESTRATION.md` 已有文档化的处理方式）。
+
+⇒ 拆成两条判据，宽严不同：
+
+- **重复**没有合法场景，新卡硬拒（`_check_roster`，与 `_check_identity`
+  同一套新严旧宽三段式）。
+- **缺席**分两种情况：已建成的 roster（`STANCE_VOCAB` 的 key 集合，
+  已有测试 `TestStanceVocabMatchesContracts` 钉死它与 `agents/` 目录
+  一致）不全，且 `missing[]` 完全为空 ⇒ 拒绝——缺席必须显式登记
+  （如 `supervisor.agent_offline`），不许静默；roster 不全但 `missing[]`
+  非空（哪怕只有一条，不要求精确对应哪个缺席的 agent）⇒ 放行。不要求
+  精确对应是刻意的：`missing` 项的代码前缀是**发起方**的命名空间
+  （`market.*`/`supervisor.*`……），不是缺席 agent 的名字，按文本猜「这条
+  missing 说的是不是那个缺席的 agent」是本仓库反复踩过的「按字符串形状
+  分类」陷阱（L-13）——这里只问「有没有解释」，不问「解释得准不准」。
+
+只读属性 `DecisionCard.absent_agents` 报告缺席事实，`render()` 里接一行
+`已建成 roster 缺席：...`，人看卡面就能看到。
+
+**探针**：临时注释掉 `_check_roster()` 的调用，
+`TestCardRoster::test_重复agent被拒`、`test_旧卡里的重复agent只警告不拒`、
+`test_缺席且无解释被拒`、`test_旧卡里缺席无解释只警告不拒` 精确转红；
+`test_缺席但有解释就放行` 保持绿，证明"重复/缺席无解释/缺席有解释"三条
+判据真的互相独立，不是共用一套判断偶然都通过了。恢复后全绿。
+
+#### F-6（评审中等）· 「缺席该不该硬拒」与设计表格字面探针不一致
+
+上面 A5 描述的已经是**最终**口径。第一版实现是「缺席永不硬拒，只由
+`absent_agents` 报告事实，不阻断构造」——理由是不分青红皂白一律硬拒
+会牵连现有测试里几十处最小化单 verdict fixture，代价与收益不成比例。
+评审指出两个问题：① 这与设计文档表格里「缺席也应报红」的字面探针不
+一致，是「该不该硬拒」这件事本身没有定论，需要往上交，不是能靠读代码
+单方面裁定对错的事；② `absent_agents` 算出来了，但当时**没有任何代码
+读它**——零消费方（L-1），「缺席」这个事实只活在对象里，从不出现在
+人会看到的任何地方。
+
+裁决：折中方案——上面 A5 写的「roster 不全 + missing 全空 ⇒ 拒绝」。
+新判据复用 `_check_roster` 已有的 `from_store` 三段式（新卡严格拒绝、
+历史卡/回放只警告），不另起一套宽严规则。
+
+修法牵连的测试比预想的更宽——凡是构造 `DecisionCard` 时只给单个 agent
+判定、又不关心 roster 完整性的测试（`test_contract_behavior.py` /
+`test_decision_card.py` / `test_verdict_provenance.py` /
+`test_verdict_refs.py` / `test_write_boundary.py`，共约 30 处）全部要
+补上「满 roster」或「占位 missing」其中之一，是本次 F-6 修复里改动面最大
+的部分——但这是机械的测试维护，不是设计问题，设计问题已经在上面裁决完。
+
+**探针**（两处独立信号）：
+1. `render()` 接线：临时删掉 `render()` 里 `已建成 roster 缺席` 那一行，
+   `test_缺席出现在卡面上` 精确转红（断言在渲染文本里找不到那行）；
+   `test_全员到齐时卡面不显示缺席行` 保持绿。恢复后全绿。
+2. 硬拒判据本身：临时把 `if self.absent_agents and not self.missing`
+   短路成恒假，`test_缺席且无解释被拒` 精确转红
+   （`Failed: DID NOT RAISE`）；同一测试类的其余用例保持绿。恢复后全绿。
+
+#### F-8（第二轮独立复核）· 「非空」这条判据本身还留了一个口子
+
+F-6 落地后，把结果再交出去要第二意见——这次挑出的是 F-6 自己的判据
+不够严：「roster 不全 + missing 非空 ⇒ 放行」只问「有没有解释」，
+不问「解释够不够」。攻击场景可以直接构造出来：5 个 agent 静默缺席，
+只挂 1 条跟它们毫无关系的 `market.turnover.stale`，照样能通过——
+一条解释就能给任意多个缺席背书。
+
+评审给的修法没有推翻「不比较文本」这一半（那一半是对的，`_check_
+restated_missing` 已经因为类似的字符串形状分类吃过亏，见 L-13），
+而是指出还有一个不需要比较任何文本、只靠计数就能拿到的信号：
+
+    roster 不全 且 len(missing) <  len(absent_agents) ⇒ 拒绝
+    roster 不全 且 len(missing) >= len(absent_agents) ⇒ 放行
+
+对按 `ORCHESTRATION.md` 约定正确操作的路径（每个掉线 agent 各自登记
+一条）这条恒真，只在漏报时命中——成本是一行判据，不引入新的失败模式。
+
+🔴 这条不是"堵你们"：**"缺席要不要登记"这件事今天完全由 Supervisor
+LLM 的提示词自觉执行**——批 C 的 `DecisionOrchestrator` 会把它从
+"LLM 自己判断要不要说"改成程序强制，但那是以后的事。在那之前，
+任何依赖"LLM 会如实登记每一处缺席"的假设都值得一道结构性兜底，
+这道计数判据就是那道兜底，不是替代批 C。
+
+改动牵连面比预想的更宽——凡是"1 个 agent 到场 + 1 条占位 missing"
+这个 F-6 留下的修复模式，在 F-8 之后全部要么补够计数（占位 missing
+条数 ≥ 缺席数），要么换成"满 roster，把需要控制的那个 agent 换成
+自定义 verdict"（`_roster_with_verdict()`，新增的测试助手）——后一种
+更适合那些同时在断言 `len(card.missing)` 精确值、或者要测**后面**
+那条铁律 2/否决权检查的用例：给它们硬凑够计数只会让计数本身失去意义，
+真正该做的是让 roster 判据不介入，把舞台让给它们真正要测的那条检查。
+
+**探针**：临时把判据退回 F-6 版本（`not self.missing`），
+`test_缺席多于missing条数仍被拒`（造 1 个 agent、1 条 missing、5 个
+缺席——F-6 版本会放行）精确转红（`Failed: DID NOT RAISE`）；
+`test_缺席数与missing条数相等就放行`（5 条 missing 对 5 个缺席）与
+`test_missing条数多于缺席数也放行` 保持绿，证明"计数不足才拒绝"
+这条边界确实是新加的这一行在守，不是碰巧。恢复后全绿。
+
+#### A6 · `VerdictRef` 上卡：证明「这张卡用的是哪一条判定原件」
+
+**为什么**：Card 只装着 `AgentVerdict` 对象的一份拷贝，不记录它是从
+`agent_verdicts` 哪一行读出来的。回放想证明"当初用的原件"和"库里现在
+这一行"还是同一份，无从查起。
+
+新增 `VerdictRef(agent, verdict_id, content_sha256, contract_version)`，
+`DecisionCard.input_verdict_refs`（历史卡缺省空 tuple，可追加不强制）。
+核对函数 `_store.verify_verdict_refs()` **必须**比对
+`agent_verdicts.content_sha256` 这一列存量值，不能把 `AgentVerdict`
+对象重新序列化再算一遍——这是追加 4（A-I 评审复核）钉死的约束：
+`_canonical_dumps` 的格式不是冻结的（A-I 就加过一次 `separators`），
+走「重算」会让 A-I 之前落库的 239 条原件集体核对不上且静默失效。
+直接复用 `tests/test_write_boundary.py::TestVerdictContentShaIsHashOfStoredText`
+钉住的判据，没有另写一套。
+
+`synthesize.py --verdict-ids` 是唯一能建出 `VerdictRef` 的路径（`--verdicts`
+读裸 JSON 那条退路没有 verdict_id）；`replay.py` 把 `original.input_verdict_refs`
+原样带进重新合成的 Card，否则 `--check` 会把「回放没有重新记 VerdictRef」
+误判成组装不一致。
+
+**探针**：造一条哈希故意对不上的 `VerdictRef`
+（`tests/test_verdict_provenance.py::test_哈希对不上时报红`），
+临时把 `verify_verdict_refs()` 改成恒返回 `[]`，该测试与
+`test_verdict_id不存在时报红` 精确转红；「哈希对得上」与「没有 ref」
+两条保持绿，证明假阳性/假阴性两个方向都被独立验证。恢复后全绿。
+
+#### A7 · `confidence` 改名 `data_completeness`
+
+**为什么**：六个 skill 算的从来是 `len(result) / 应有字段数`——**字段
+覆盖率**，不是模型对自己判断的信心。叫 `confidence` 是在暗示一件
+从没发生过的事。`from_dict` 双键兼容（`data_completeness` 优先，
+没有则退回 `confidence`），历史卡不需要迁移就能继续读。
+
+**探针**：造一份「只有旧字段名 `confidence`」的字典模拟历史落库格式
+（`tests/test_contract_behavior.py::test_历史卡只有confidence字段仍能还原`），
+临时删掉 `from_dict` 里的 `confidence` 回退分支，该测试精确转红
+（读出 `0.0` 而不是期望值）。恢复后全绿。
+
+#### A8 · 修订血缘约束 + `load_card` 拆成两个 API
+
+**为什么**：实测无约束——修订可以指向另一个 agent、另一次决策的原件；
+一条原件可以有多条分叉修订；`load_card(decision_id=乱写, record_id=真)`
+会静默忽略 `decision_id` 正常返回。
+
+`save_verdict(amends=...)` 新增代码校验：`amends` 指向的原件必须存在，
+且 `task_id`/`agent` 都与新行一致——不同意图（跨 agent、跨决策）的修订
+在写入前就被拒，报错直接说清原件是谁、这次是谁。
+
+线性修订（一条原件最多一次修订，不许分叉）**不能只靠应用层"先查再插"**
+——`reserve_decision_id()` 当年的教训是这类竞态窗口必须靠数据库唯一约束
+仲裁。schema **v6**：`ux_verdict_amends_linear`，`agent_verdicts(amends)`
+上的局部唯一索引（`WHERE amends IS NOT NULL`）。设计文档与分发提示词里
+「批 B 落成 schema v6」的表述同步改成 v7——迁移列表只许在末尾追加，
+不许改动已发布的条目，这里是把设计文档的编号往后挪一位，不是重新设计。
+
+`_store.load_card(decision_id, *, record_id=None)` 拆成
+`load_online_card(decision_id)` 与 `load_card_by_record_id(record_id)`
+两个 API，不再存在「两个 id 都能传、其中一个被悄悄忽略」这条路；
+全仓 9 处调用点（`card_ops.py` / `missing_ledger.py` / `readback_check.py`
+/ `phase1_acceptance.py` 等）与 `_store/__init__.py` 的导出同步改名。
+
+**探针**（两处独立信号，各自验证）：
+1. 临时删掉 `save_verdict` 里的 agent/task_id 校验，
+   `TestAmendLineage::test_跨agent的修订被拒` /
+   `test_跨决策的修订被拒` 精确转红（`DID NOT RAISE`）；
+   `test_amends指向不存在的原件被拒` 转成裸
+   `sqlite3.IntegrityError: FOREIGN KEY constraint failed`
+   （证明代码校验原来在做真实的翻译工作，不只是装饰）。
+2. 临时删掉 schema v6 的 `CREATE UNIQUE INDEX`，
+   `test_同一条原件不许被修订两次` 精确转红（`DID NOT RAISE`）——
+   证明"不许分叉"这条真的靠数据库约束兜底，不是应用层的一厢情愿。
+
+均恢复后全绿。
+
+#### F-4 · `readback_check.py` 接入真实调用方（A-I 评审欠的账）
+
+**为什么**：A-I 建的毒行巡检只有测试和文档，没有任何自动路径会跑它——
+一条不会红的守卫，比没有守卫更糟：它占着"这件事已经有人管"的位置。
+
+接进 `bin/biga-card` 出卡之后、紧挨 `spawn_check`（同样只读、零成本，
+同样是"唯一每次都会跑到的地方"）。退出码必须被接住——不能重蹈
+`spawn_check` 当年"调用在、退出码被丢，守卫照样绿"的覆辙。但毒行是
+**历史遗留**，不是这次运行的错：新写入的行不可能再变成毒行（A3 的写
+边界重校验已经堵死那条路），巡检报红说明库里有一条**更早**的坏行，
+不该跟"这次出卡的 spawn 证据链断了"共用同一个信号——那会让人查错方向。
+⇒ 用独立退出码 `6`（`spawn_check` 是 `4`），摘要措辞也分开。
+
+**探针**：`tests/test_spawn_proof.py::TestReadbackWiredIntoRealPath`，
+复用同一套"造沙盒跑真实 `bin/biga-card`"的机制。把 `readback_check.py`
+换成"必然 `exit 1`"的桩，临时删掉 `bin/biga-card` 里对应的
+`if [ "$READBACK_RC" -ne 0 ]` 分支，`test_巡检报红时出卡命令的退出码跟着变`
+精确转红（`rc=0` 而不是期望的 `6`）。恢复后全绿；顺带确认了退出码
+不与 `spawn_check` 的 `4` 撞车、且卡片仍然照常渲染（钱已经花了）。
+
+#### 已知代价（不在这一批修，记进 TODO.md）
+
+`bin/biga-card` 的 `_sql()` 在 `data/biga.db` 尚不存在时会打一屏无害的
+`StoreNotInitialised` traceback 到 stderr（`BEFORE=` 那一行用 `readonly=True`
+打开一个还不存在的库）。功能不受影响（`BEFORE` 拿到空字符串，语义上
+恰好正确），真实机器建库之后不会再触发；是 F-4 测试沙盒时顺带发现的
+**既有**问题，与本批任何一项都无关，不顺手改。
+
+### 变更 · 设计文档补「追加 4」，把批 A-I 的评审教训喂给批 A-II
+
+`docs/design/deterministic-orchestration.md` §2 新增「追加 4」，
+`docs/guide/orchestration-kickoff-prompt.md` 的批 A-II 开工段同步指向它。
+
+为什么要补这一条：批 A-I 的评审复核（`33fc55a`）挑出两处「收窄类修法方向
+反了」，其中两条对**批 A-II 的具体做法**有直接约束——A2（`frozen=True`）
+的探针清单必须显式覆盖 `from_store`（实测里唯一被利用过的具体攻击面），
+A6（`VerdictRef.content_sha256`）的核对必须走「存量文本哈希」而不是
+「对象重算」，否则 A-I 之前落库的 239 条原件会集体核对不上且不报错。
+
+这两条结论已经写进了 A-II 的分发提示词（正文与探针清单都有），但设计
+SSOT 本身还没有对应内容——TODO.md 早就写明「为什么这么设计写在设计
+文档里，两处都写必然漂」，分发提示词与设计文档各自维护同一件事的解释，
+本身就是这条纪律要防的第二套口径。补齐之后分发提示词那句「先读 §2 的
+追加 2」也改成了「追加 2 与追加 4」，指向不再缺一半。
+
+### 🔴 新增 · 确定性编排升级的设计方案（第四份外部评审的落地计划）
+
+`docs/design/deterministic-orchestration.md` —— 七批迁移（A–G）的范围、顺序、
+判据与出口条件。**只有设计，没有代码。**
+
+#### 为什么要做这次升级
+
+翻 `architecture.md` §9，本项目自己踩出来的五条失败模式里**有四条同源**：
+
+| 事故 | 它其实是什么 |
+|---|---|
+| L-10 结构化数据经 LLM 转述，`retrieved_at` 全丢 | LLM 在**搬运**本该由程序传递的数据 |
+| L-11 身份晚于证据，两次运行合成一张卡 | LLM 决定了**什么时候**分配身份 |
+| L-14 出卡递归，187 个会话 / $8.99 | LLM 决定了**下一步跑什么命令** |
+| 飞书路径 4 spawn 缺 news、`sessions_yield`、占号在后 | LLM 决定了**调用谁、按什么顺序、怎么等** |
+
+我们已经加的五道护栏（契约改文字 → 单实例锁 → ownership 守卫 → 硬超时 →
+`ask_user` 看门狗）全部有效，但**全部只能限制损失** ——
+没有一道能让流程本身变成确定的。
+
+> 🔴 护栏已经建齐了。下一步不是第六道护栏，是**把车道拿回来**。
+> Program decides workflow. Agent decides judgment.
+
+#### 评审断言先复核，再采纳
+
+10 项可测断言在本仓库跑了探针，**10 项全部成立**。另有三条评审没说的：
+
+- **§22 的后果是「毒行」，不是「脏数据」**：`save_verdict(非法对象)` 成功落库，
+  而 `load_verdict()` 会因 `from_dict` 复校验抛错 —— 表有只追加触发器，删不掉也改不掉。
+  ⇒ **一次误写让那次决策永久无法回放。** 一个可修复的错误被变成了不可修复的错误
+- **§5 已经在回放路径上咬人**：`card_ops` 按 `(code, text)` 去重，
+  而 `replay.py` 反推 `extra_missing` 只按文本 ⇒ 实测回放丢掉一条缺失项。
+  **回放悄悄让卡变好看** —— 与教程第 8 章当年那个 bug 同形状，
+  这次的载体是 `MissingItem` 的 str 身份
+- **`ORCHESTRATION.md` 内部自相矛盾**：顶部提示词说 Stage 3「必须带 `--decision-id`」，
+  底部参数速查表说「不要填」。后者正是产出 `BIGA-20260921-014`（卡 014、证据 013）
+  的那条指令。**L-3 长在了「合并成唯一一份」之后的那一份里** ——
+  合并消灭了跨文件的第二套口径，没有消灭同一文件内的
+
+#### 评审的 drop-in 有一处会出事，已改
+
+§23 建议统一用 `separators=(",", ":")`。但 `payload_sha256` 目前不带它，
+而 `Evidence.raw_hash` 与 raw 层的对应关系就建在这个哈希上 ——
+照抄会**改变所有历史哈希，且失效是静默的**（两串 sha 都「看起来正常」）。
+⇒ 拆成两个函数，`payload_sha256` 只加 `allow_nan=False`，分隔符维持现状。
+
+#### 另外三处对评审做了改形
+
+- **不采用 §8 的六个具名字段 `DecisionInputs`** —— 写死 roster，`discipline`
+  （裁定 13 故意不建）一上线就要改类型定义。roster 是**配置**，不该是类型。
+  改用已验证过的结构性核对（`tests/_consistency.built_agents()`，F8/F10 用的就是它）
+- **状态机从 15 个状态收到 13 个** —— 只登记「有代码能进入、且有消费方会读」的状态。
+  凭空多一个就是一条 L-1 死配置
+- **不可变（§34 第 2 位）与三层拆分推后** —— 有了写边界重校验，可变性的**后果**
+  已被挡在库门外；而编排器本来就要重写全部构造点，合并做省一遍
+
+#### 文档规约补第三种形状
+
+跨阶段迁移**按主题命名**，生命周期仍是「阶段」（完成后冻结）。
+
+🔴 为什么不写成 `phase-2.5-<主题>.md`：`test_阶段文档必须带主题` 的判据是
+`^phase-\d+-[a-z]`，小数点不匹配；而放宽它的代价更大 ——
+`test_一个阶段只有一份设计文档` 按 `phase-(\d+)-` 计数，`phase-2.5-` 压根不会被计入，
+于是那条守卫对小数阶段**静默失效**。
+**给守卫开一个它看不见的口子，比多一种命名形状糟得多。**
+
+占用 `phase-3-` 也不行：Phase 3/4/5 在裁定、§9、§12、路线图里被按数字引用了几十处，
+重编号是 L-6 文档漂移的标准起点。
+
+#### ⚠️ 写这份设计的过程里，本仓库的守卫抓了我两次
+
+| 守卫 | 抓到什么 |
+|---|---|
+| F7 幽灵文件 | 我在陈述句里点名 `apply_config.py` —— 那个文件不存在。**设计文档提到一个文件，读者会认为这条风险已经有人管了** ⇒ 按约定加 `未建` 标注 |
+| F22 测试条数 | 我写的「基线 745」与实测对不上 —— **因为新增那份文档本身让 parametrize 多收了 3 条**。⇒ 跑 `sync_test_count.sh`；设计文档里那个数改标「冻结：开工快照」 |
+
+| 审查第 2 项「Gateway token」 | **第五次「描述规则时把真值抄进去」** —— 我在写「审查会抓到 64 位十六进制」这条探针说明时，把那个令牌参数名原样写进了文档。已记入 `CLAUDE.md` 那张表（原来是四次） |
+
+前两条不是笔误，而是那两道守卫**正好在它们声称守的位置上**。记在这里，
+因为本仓库更常见的是相反的情况（L-13：守卫查的地方和它声称守的地方不是同一处）。
+
+第三条更值得记：`CLAUDE.md` 预言过「好消息是审查脚本真的会抓到它」——
+**这次预言在写它的同一份文档里应验了**，而且犯的人知道这条规则、
+正在引用这条规则、还是抄了真值。
+⇒ 分发提示词里因此多了一句：这类探针的内容只写进临时文件，跑完删掉。
+
+### 🔴 修复 · 写边界重校验 + 严格 JSON（确定性编排批 A-I）
+
+`save_verdict` / `save_card` / `save_raw_snapshot` 曾经只在**读**的时候校验
+契约不变量（`from_dict()` 重跑一遍 `__post_init__`），写的时候完全不校验。
+`v.missing.append(...)` 这类构造后直接改字段的写法能绕过 `__post_init__`：
+
+```
+save_verdict(非法对象)   →  ✅ 成功落库
+load_verdict(同一行)     →  ❌ ValueError（铁律 1）
+```
+
+而 `agent_verdicts` / `decision_records` 都是只追加表（触发器强制）——
+**一次误写就让那次决策永久无法回放，一个可修复的错误变成了不可修复的错误**。
+当前生产库是干净的（239 条 verdict / 37 张卡，读不回来的 0 条，含 NaN/Infinity
+的 0 条）：这是预防性修复，不是救火。
+
+#### 改了什么
+
+三个写函数在 INSERT 之前都加了一道：
+`Domain Object → 规范序列化（拒绝 NaN/Infinity）→ 严格重建 → 不变量校验 → DB`。
+
+| 函数 | 重建走的路径 | 为什么这么走 |
+|---|---|---|
+| `save_verdict` | `AgentVerdict.from_dict(json.loads(blob))` | 没有历史宽松语义要留，直接触发完整校验 |
+| `save_card` | `DecisionCard.from_dict(json.loads(payload), from_store=replay_of is not None)` | 🔴 **不能**省略 `from_store` 这个参数——`from_dict()` 原来硬编码 `from_store=True`，如果重建时也用默认值，新卡的严格校验会被写路径自己悄悄降级成历史卡的宽松校验，「新卡严、旧卡宽」的三段式语义就被削平了。为此给 `DecisionCard.from_dict()` 新增了这个仅影响重建路径的可选参数，默认值不变，所有现有调用点不受影响。档位**不**从 `card.from_store` 读——那是评审复核纠正的一处，见下 |
+| `save_raw_snapshot` | 不需要新代码 | raw payload 没有契约对象、没有不变量；`sha = payload_sha256(payload)` 本来就在 `connect()` 之前执行，只要 `payload_sha256` 拒绝 NaN，这行天然就是写边界 |
+
+严格 JSON 拆成了两个函数而不是改一个：
+
+- **新的** `_canonical_dumps()`（含 `separators=(",", ":")` + `allow_nan=False`）
+  —— 只用于 `card_json` / `verdict_json` 这类**新增**载荷
+- `payload_sha256`（raw 层内容哈希）**只加 `allow_nan=False`**，分隔符维持原状
+
+原因：外部评审的 drop-in 建议统一加 `separators`，但 `payload_sha256` 早于它
+存在，`Evidence.raw_hash` 与 raw 层的对应关系建立在这个哈希**当前**的输出
+格式上——直接改会静默改变所有历史哈希（两串 sha 都「看起来正常」，只是
+再也对不上当时存的那个）。`tests/fixtures/payload-sha256-vectors.json`
+在改动**之前**用旧实现生成并立刻 `git add`，钉死这一点。
+
+#### 探针（G-1）—— 每一道都见过红
+
+| 探针 | 怎么弄坏 | 红的证据 |
+|---|---|---|
+| P1 | 合法 verdict 构造后 `missing.append(...)`，`save_verdict` | 暂时删掉重建那一行 → `DID NOT RAISE` |
+| P2 | 合法 BUY 卡构造后 `missing.append(...)`（特意避开身份维度，因为 `save_card` 原有的 `foreign` 检查已经管得到身份——用它做探针测不出这一批**新加**的部分） | 同上删掉重建那一行 → `DID NOT RAISE` |
+| P3 | 见 P1/P2 —— 把 A3 的重建调用临时注释掉 | 两条测试均变红（`DID NOT RAISE <class 'ValueError'>`），还原后复跑回绿 |
+| P4 | `result` 里塞 `nan`/`inf`/`-inf`（覆盖 save_verdict、save_card、save_raw_snapshot 三条路径） | 临时去掉 `_canonical_dumps` 里的 `allow_nan=False` → 6 条经过它的用例变红，3 条走 `payload_sha256` 的用例仍绿（证明两条路径互相独立，不是同一处代码在兜底） |
+| P5 | 历史哈希向量：**改动前**用旧实现生成 `tests/fixtures/payload-sha256-vectors.json` 并立刻 `git add`，全程未重新生成 | `test_历史向量逐条吻合` 全程未红过（这正是要的结果——它钉住的是「不变」） |
+| P6 | 新增 `tools/verify/readback_check.py`（只读遍历两张表，逐行 `load_verdict`/`load_card`），手工在测试库里裸 `INSERT` 一行「BUY + missing 非空」/「missing 非空 + PASS」的毒行 | `scan_verdicts`/`scan_cards` 各自抓到 1 条，`main()` 返回 `FAIL`；对生产库只读运行确认 0 条毒行 |
+
+真实回放确认（设计文档 §6 A3 明确要求）：在 `data/biga.db` 的一份 scratch
+副本上跑 `replay.py --store`——干净卡与「同一件事报了两遍」的历史卡都正常
+追加成功；`BIGA-20260919-002`（verdict 写着别的 task_id 的老卡）在
+**改动前就已经**被 `save_card` 原有的身份检查拒绝，不是这次新加的回归。
+生产库 `data/biga.db` 全程只读，mtime 未变。
+
+#### 新增
+
+- `tools/verify/readback_check.py`：毒行巡检，接入 `_verdict` 退出码三态、
+  `test_verify_exit_codes.py::_WIRED`、`test_store.py` 的巡检工具烟雾测试
+- `tests/test_write_boundary.py`：P1/P2/P4/P5 的永久回归测试
+- `tests/test_readback_check.py`：P6 的永久回归测试
+- `tests/fixtures/payload-sha256-vectors.json`：历史哈希向量
+
+#### 外部评审复核（同会话内、代码合并前发现，三条，均已处理）
+
+**F-1（阻塞，已修复）· `audit_public.sh` 的令牌判据收窄方向反了。**
+第一版把「Gateway token」的裸十六进制分支改成「必须有 token 标识符 + 赋值
+才算令牌」，为的是不再误伤 `payload_sha256` 的内容哈希（见下方 P5 相关段落）。
+评审用真实泄露形状逐条对照：`biga attach --token <hex>`（空格分隔，不含
+`:`/`=`）、`Authorization: Bearer <hex>`（key 是 Authorization 不是
+token）、散文里裸贴一个值——三种都是**真实存在**的泄露形状（前两种就是
+`biga attach --print-config` 铸 grant 时终端上会出现的原文），而收窄之后
+全部漏检。**方向错了**：安全检查的默认必须是「命中」，例外要自己举手——
+与只追加触发器「新表默认就该受保护」、测试计数守卫「默认必须最新」是同一条
+原则，反过来收窄正例等于把默认状态从「安全」改成「需要举证才安全」。
+
+⇒ 改法倒过来：**保留**裸 `\b[0-9a-f]{64}\b` 作为默认命中，只在同一行**也**
+出现 `sha256` 或 `raw_hash` 这类明确自称哈希的词时豁免。`chk()` 因此加了
+一个可选的第三参数（豁免模式），默认不传时九条既有检查行为逐字节不变。
+探针：造 9 行覆盖评审列出的全部形状——`OPENCLAW_MCP_TOKEN=`/`"token":`/
+`--token <空格>`/`Authorization: Bearer`×2/裸贴一次，以及
+`content_sha256 =`/`"sha256":`/`raw_hash=`——前 6 行命中、后 3 行豁免，
+与评审的对照表逐行吻合；删除探针文件后复扫回到十一项全绿。
+
+**F-1b（评审在复核 F-1 修法时发现，已修复）· 豁免的粒度是整行，命中的粒度
+是一个十六进制串——两者不相等就是漏检面。** `grep -Ev "$3"` 一旦命中就
+扔掉**整行**，于是同一行里只要出现过 `sha256`/`raw_hash` 字样，那一行上
+的**所有**十六进制（包括一个真令牌）都会被一并放过。例如
+`{"token":"<真令牌>","sha256":"<内容哈希>"}` 或者一段解释这条检查本身的
+文档散文（"OPENCLAW_MCP_TOKEN 和 sha256 长得一样"）——后者尤其值得警惕：
+这正是本仓库已经栽过五次的「描述规则时抄了真值」最容易发生的地方，残余
+风险恰好压在经验上最脆弱的一处。
+
+⇒ 豁免的粒度改成与命中的粒度相等：`$3` 不再决定「扔不扔整行」，而是先用
+`sed -E "s/$3//g"` 把「自称哈希的键 + 赋值 + 它自己的十六进制串」这一小段
+**从文本里抠掉**，再对剩下的文本做正例匹配——同一行里其他独立的十六进制
+（不管是不是紧跟在 `sha256`/`raw_hash` 后面）该命中的仍然命中。
+`chk()` 因此从「按行豁免」改成「按子串抠除」。
+探针：把 F-1 的 9 行与 F-1b 指出的 4 种复合场景（令牌与哈希同键值对、
+令牌与哈希分列同一散文句/表格行、CLI 参数注释里顺带提哈希）合成 13 行，
+命中的行与预期精确对上（1–6、10–13 共 10 行命中，7–9 共 3 行豁免）；
+对整个真实工作区做同样的处理，命中 0 条（fixture 与本文件自身均不受影响）。
+
+**F-2（应修复，已修复）· 写边界的档位不该由对象自己的可变属性决定。**
+`from_store=card.from_store` 信任的是 `DecisionCard` 一个尚未 `frozen`
+的属性（那是批 A-II 的 A2）：`card.from_store = True` 不会报错。实测验证
+过，合法构造一张新卡后依次 `card.missing.append(重述的缺失项)` 与
+`card.from_store = True`，`_check_restated_missing()` 会被当成「历史卡」
+降级成警告而不是拒绝，`save_card` 因此成功落库——身份维度不受影响（另有
+一道不看 `from_store` 的独立检查兜底），暴露的只有重述缺失项这一条。
+
+🔴 评审同时纠正了一处因果表述：这**不是**「A-I 没碰过的旧洞」——`from_store`
+一直可变，但在 A-I 之前它只影响**构造期**的宽严；A-I 把它接进了**写边界**
+之后，篡改这一个字段的杀伤半径变大了（从「显示层多一条警告」变成「绕开
+新加的写边界重校验」）。这句因果要写准，不能记成恰好被顺手发现的旧问题。
+
+⇒ 改成从**调用参数**推导档位：`from_store=replay_of is not None`。
+`replay_of` 由 `card_ops.persist()` 的调用方决定（`synthesize.py` 在线
+路径永远不传，`replay.py --store` 永远传原始 `record_id`），不受 `card`
+对象自身状态影响，篡改 `card.from_store` 因此不再有任何效果。探针：原样
+重跑上面那个攻击，`save_card` 正确拒绝；三个真实历史决策（干净卡 / 带
+`restate_warning` 的卡 / 带 `identity_warning` 的卡）在 scratch 副本上
+`replay.py --store` 逐一重新验证，行为与改动前逐字节相同。
+
+**F-3（应修复，已修复）· `content_sha256` 是「存量文本」的哈希，
+不是「对象」的哈希，这个区别要为批 A-II 写下来。**
+`_canonical_dumps` 的格式不是冻结的（这一批就刚加过 `separators`）。
+批 A-II 的 A6（`VerdictRef.content_sha256` 上卡校验）如果核对时重新序列化
+对象再比对，而不是直接比对存量 `verdict_json` 文本的哈希，这一批之前落库
+的行会集体核对不上，而且是静默的——两串 sha256 都「看起来正常」。
+
+⇒ 在 `save_verdict` 里补了这条区别的注释，并加了一条钉住它的测试：
+`content_sha256 == sha256(存量 verdict_json 文本)` 永远成立，
+`content_sha256 == sha256(今天重新序列化对象)` 只在序列化格式从未变过时
+碰巧成立。探针：把 `content_sha256` 的计算临时改成对 `blob` 多拼一个空格
+再哈希，测试立即报出两串不同的 sha256；还原后复跑回绿。
+
+### 已知问题
+
+- **`tools/verify/readback_check.py` 目前没有任何自动调用方**——只有测试
+  和文档提到它，没有一条真实路径（`bin/biga-card` 或 cron 等）会跑它。
+  与 `spawn_check.py` 同一个形状：需要一个真实库才有东西可查，而
+  `data/biga.db` 只在出过卡之后才存在，pytest 覆盖不到生产库。这是分发
+  提示词 P6 没写清楚，不是这一批漏做——留给批 A-II 的分发提示词补
+  「接进 `bin/biga-card` 出卡之后那一段，只读、零成本，紧挨着
+  `spawn_check.py`」。
+
+### 变更 · 解除 `.biga-card-stop` 总闸（2026-09-22）
+
+2026-09-21 21:47 事故期间加的紧急止血文件，现已删除。**它自己写的两条解除条件
+逐条核过**，不是「看着差不多了」：
+
+| 它写的条件 | 核验方式 | 结果 |
+|---|---|---|
+| 触发源确认停止 | `ps aux` 数 `biga-card` 进程 | 0 个 |
+| 闸门真的接进路径 | 读 `bin/biga-card`：熔断 → ownership → flock → `check_budget` → `$BIGA agent` | ✅ 在第一个花钱的动作之前 |
+
+外加一条它没要求、但本仓库该要求的：**顺序由测试钉住**
+（`tests/test_entry_guard.py` 的顺序判据，18 条绿）。
+
+⚠️ 文件是 `.gitignore` 的，删除不进版本历史 ⇒ 原文已存档在仓库外。
+它记录的根因值得留在这里：
+
+> 原有的「出卡预算闸门」`skills/decision-card/scripts/budget.py`
+> **根本不在出卡路径上** —— `bin/biga-card` 与 `reserve_decision_id` 都没调它。
+
+那正是 L-1（写了但没有消费方）与 L-14（闸门装在身份的咽喉点，
+而成本的边界比它早一步）合起来的样子。`3d9ce90` 已经把它接进路径。
+
+### 🔴 新增 · SPIKE 通过：Python 能在不经 LLM 轮次的情况下 spawn，并留下同等证据
+
+全案唯一可能致命的未知已经消除。CLI 里没有 `sessions spawn` 子命令，
+`sessions_spawn` 只是暴露给 agent 的 MCP 工具 —— 所以「确定性编排器」这个设计
+成不成立，取决于 Python 能不能拿到同一条通路。
+
+**实测（2026-09-22）：能。** 用 `biga attach --print-config` 铸一个 MCP grant，
+对它直接做 JSON-RPC：
+
+| 判据 | 结果 |
+|---|---|
+| 产生 `subagent_runs` 行 | ✅ |
+| `controller_session_key` | ✅ `agent:main:main` |
+| `requester_session_key` | ✅ 同上 |
+| `child_session_key` 指向目标 agent | ✅ `agent:market:subagent:…` |
+| `payload_json` 里能找到决策号 | ✅ |
+| 消耗的 `main` LLM 轮次 | **0** |
+
+`agents_wait` 3.3s 同步返回，带 `result` 与 `usage`（123 in / 5 out）。
+⇒ `spawn_check.py` 现有四条判据**逐条满足，无需重新定义**；
+设计文档里准备的两条退路（逐个 `$BIGA agent` / 极薄 spawn-only 轮次）都不需要了。
+
+#### 为什么这次 spike 值一次真跑
+
+第一次调用**当场被拒**，错误信息是设计层面的：
+
+    sessions_spawn collect=true requires a requesting run id when groupId is omitted.
+
+Python 客户端天然没有 requesting run（它不是一次 agent 轮次）⇒
+**每次 fan-out 必须自己生成 `groupId`**。这是 API 硬约束，不是可选项。
+纸面推演推不出这一条 —— 它正是「『应该会……』和『实测是……』之间隔着一次运行」。
+
+另外两条也只有真跑才知道：grant 绑定在会话键上（`--session` 可指定，
+于是 `controller_session_key` 能**按 run 区分**，比现在挂在 `agent:main:main` 上强）；
+`agents_wait` 在编排器层就返回 token 用量。
+
+⚠️ **但 usage 先不写进 `agent_runs`** —— schema v2 删掉 token 列的理由仍然成立
+（唯一真相源是运行时，存第二份必然滞后）。先只在 `run_events` 留一条，
+等真有消费方再说（L-1）。
+
+#### 诚实标注没验的部分
+
+五个并行 fan-out（只验了 1 个）、grant 在 780s 长跑里的稳定性（只跑了 3.3s）、
+spawn 失败的结构化错误面（只见过一种）。
+**这三项不是「应该没问题」，是「没测过」** —— 已写进设计文档 §7 末尾，
+列为批 C 开工的第一件事。
+
+### 新增 · 任务分发提示词
+
+`docs/guide/orchestration-kickoff-prompt.md` —— 批 A-I / A-II / B 的自包含开工提示词。
+
+🔴 **开工与评审分不同会话。** 实现者带着「我知道我想干什么」的上下文，
+而那正是 L-13 能连续发生十次的原因 —— 判据写完看着对就交了，
+没有人以「它会不会红」的视角再看一遍。
+
+⚠️ 批 C–G 的提示词**现在不写**：C 依赖一次尚未做的 spike（Python 能否在不经过
+LLM 轮次的情况下产生同等的 `subagent_runs` 证据），D–G 依赖 A/B 的实际落地形状。
+**现在写出来的会是一份过期的分发清单** —— 那正是 L-6。
+
+
 ### 🔴 新增 · 事故 Hardening：ownership 守卫 + 硬超时 + `ask_user` 看门狗
 
 两份外部 hardening 建议（递归事故 / `ask_user` 死锁）的落地。

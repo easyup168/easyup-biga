@@ -19,8 +19,16 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "decision-card" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn  # noqa: E402
-from _store import connect, init_schema, load_card  # noqa: E402
+from _contract import (  # noqa: E402
+    STANCE_VOCAB,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    MissingItem,
+    new_task_id,
+    now_cn,
+)
+from _store import connect, init_schema, list_agent_runs, load_online_card  # noqa: E402
 
 
 def _load(name: str):
@@ -46,8 +54,14 @@ def verdict(agent="emotion", missing=None, **kw) -> AgentVerdict:
         task_id=DID, agent=agent,
         status="completed" if not missing else "partial",
         verdict=kw.pop("verdict", "PASS" if not missing else "WARNING"),
-        result={"limit_up_count": 78}, confidence=0.8,
+        result={"limit_up_count": 78}, data_completeness=0.8,
         evidence=[ev], missing=missing, elapsed_ms=1000, **kw)
+
+
+def full_roster() -> list[AgentVerdict]:
+    """六个已建成 agent 各出一条最小合法判定——供不关心 roster 完整性的
+    测试使用，避免触发 F-6 之后「缺席且无 missing 解释即拒」的判据。"""
+    return [verdict(agent=a) for a in sorted(STANCE_VOCAB)]
 
 
 def judgment(**kw) -> "card_ops.Judgment":
@@ -66,22 +80,32 @@ def db(tmp_path, monkeypatch):
 
 class TestSynthesize:
     def test_是纯函数_相同输入逐字段相同(self):
-        kw = dict(decision_id=DID, verdicts=[verdict()], judgment=judgment(),
+        kw = dict(decision_id=DID, verdicts=full_roster(), judgment=judgment(),
                   model_ref="m", generated_at="2026-09-19T16:00:00+08:00")
         assert card_ops.synthesize(**kw).to_dict() == card_ops.synthesize(**kw).to_dict()
 
     def test_聚合各Verdict的缺失项(self):
+        # 🔴 F-8：roster 判据按计数比较，只造 2 个 agent 会被判「缺席 4 个、
+        #    只解释了 2 条」而拒绝——这条测的是缺失项聚合，不是 roster，
+        #    补满另外 4 个 agent（无 missing）让 roster 判据不介入。
         c = card_ops.synthesize(
             decision_id=DID,
-            verdicts=[verdict(missing=["最高板"]), verdict(agent="risk", missing=["位置风险"])],
+            verdicts=[verdict(missing=["最高板"]), verdict(agent="risk", missing=["位置风险"]),
+                     verdict(agent="market"), verdict(agent="sector"),
+                     verdict(agent="technical"), verdict(agent="news")],
             judgment=judgment(), model_ref="m")
-        assert c.missing == ["最高板", "位置风险"]
+        # 🔴 A1：MissingItem 的 == 只看 code，比较人话内容要显式取 .detail
+        assert [m.detail for m in c.missing] == ["最高板", "位置风险"]
 
     def test_合并Supervisor自己发现的缺失项(self):
+        # 🔴 F-8：同上，补满 roster 免得计数判据抢在聚合逻辑前面报错。
         c = card_ops.synthesize(
-            decision_id=DID, verdicts=[verdict(missing=["最高板"])],
+            decision_id=DID, verdicts=[verdict(missing=["最高板"]),
+                                       verdict(agent="risk"), verdict(agent="sector"),
+                                       verdict(agent="technical"), verdict(agent="news"),
+                                       verdict(agent="market")],
             judgment=judgment(extra_missing=["risk agent 尚未上线"]), model_ref="m")
-        assert c.missing == ["最高板", "risk agent 尚未上线"]
+        assert [m.detail for m in c.missing] == ["最高板", "risk agent 尚未上线"]
 
     def test_去重且保序(self):
         """顺序稳定，回放的 diff 才是干净的。"""
@@ -89,27 +113,35 @@ class TestSynthesize:
             decision_id=DID,
             verdicts=[verdict(missing=["A", "B"]), verdict(agent="risk", missing=["B", "C"])],
             judgment=judgment(extra_missing=["A", "D"]), model_ref="m")
-        assert c.missing == ["A", "B", "C", "D"]
+        assert [m.detail for m in c.missing] == ["A", "B", "C", "D"]
 
     def test_model_ref带组装版本(self):
-        c = card_ops.synthesize(decision_id=DID, verdicts=[verdict()],
+        c = card_ops.synthesize(decision_id=DID, verdicts=full_roster(),
                                 judgment=judgment(), model_ref="anthropic/x")
         assert card_ops.SYNTHESIS_VERSION in c.model_ref
 
     def test_契约仍然拦得住(self):
-        """组装层不许绕过契约：缺失项非空还给 BUY，必须抛错。"""
+        """组装层不许绕过契约：缺失项非空还给 BUY，必须抛错。
+
+        🔴 F-8：满 roster，让 `_check_roster()` 通过、真正测到的是它后面
+        那条铁律 2 检查——否则 roster 判据会先报错，盖住这条测试要验的事。
+        """
         with pytest.raises(ValueError, match="不得给买入结论"):
-            card_ops.synthesize(decision_id=DID, verdicts=[verdict(missing=["最高板"])],
-                                judgment=judgment(status="BUY"), model_ref="m")
+            card_ops.synthesize(
+                decision_id=DID,
+                verdicts=[verdict(missing=["最高板"]), verdict(agent="risk"),
+                         verdict(agent="sector"), verdict(agent="technical"),
+                         verdict(agent="news"), verdict(agent="market")],
+                judgment=judgment(status="BUY"), model_ref="m")
 
     def test_comparable剥掉每次必然不同的字段(self):
         # 复用同一个 verdict：证据时间戳**不该**被 comparable 剥掉 ——
         # 回放用的是冻结证据，它的时间戳本来就必须一模一样。
         # 这里要隔离的只有 generated_at / elapsed_ms。
-        v = verdict()
-        a = card_ops.synthesize(decision_id=DID, verdicts=[v],
+        verdicts = full_roster()
+        a = card_ops.synthesize(decision_id=DID, verdicts=verdicts,
                                 judgment=judgment(), model_ref="m", elapsed_ms=100)
-        b = card_ops.synthesize(decision_id=DID, verdicts=[v],
+        b = card_ops.synthesize(decision_id=DID, verdicts=verdicts,
                                 judgment=judgment(), model_ref="m", elapsed_ms=999)
         assert a.to_dict() != b.to_dict()
         assert card_ops.comparable(a) == card_ops.comparable(b)
@@ -118,7 +150,7 @@ class TestSynthesize:
 class TestReplay:
     def _seed(self, db, *, extra_missing=()) -> DecisionCard:
         c = card_ops.synthesize(
-            decision_id=DID, verdicts=[verdict()],
+            decision_id=DID, verdicts=full_roster(),
             judgment=judgment(extra_missing=list(extra_missing)),
             model_ref="anthropic/claude-sonnet-5", elapsed_ms=21400)
         card_ops.persist(c)
@@ -134,7 +166,37 @@ class TestReplay:
         extras = ["risk agent 尚未上线", "discipline agent 尚未上线"]
         self._seed(db, extra_missing=extras)
         assert replay.main([DID, "--check"]) == 0
-        assert load_card(DID).missing == extras
+        assert [m.detail for m in load_online_card(DID).missing] == extras
+
+    def test_同文本异代码的extra_missing不会被反推丢掉(self, db):
+        """A1 的回归：追加 2 描述的那个实测场景。
+
+        `market.turnover.unavailable` 与 `supervisor.agent_no_response`
+        说的是同一句话「数据源不可用」——文本相同，但那是两件事
+        （一个源自己不可用 vs 这个 agent 没回应）。旧的 str 身份语义下，
+        `replay.py` 的 `m not in from_verdicts` 会把它们判成同一条，
+        反推出的 `extra_missing` 会**少一条**——「回放悄悄让卡变好看」。
+
+        A1 把 MissingItem 的身份改成只看 code 之后，这里必须能完整找回。
+        """
+        text = "数据源不可用"
+        v = verdict(missing=[MissingItem(text, "market.turnover.unavailable")])
+        extra = MissingItem(text, "supervisor.agent_no_response")
+        # 🔴 F-8：满 roster（其余 5 个 agent 无 missing）——这条测的是
+        # MissingItem 身份，不是 roster 计数，补满让 roster 判据不介入。
+        others = [verdict(agent=a) for a in ("risk", "sector", "technical", "news", "market")]
+        c = card_ops.synthesize(
+            decision_id=DID, verdicts=[v, *others],
+            judgment=judgment(extra_missing=[extra]),
+            model_ref="anthropic/claude-sonnet-5", elapsed_ms=100)
+        assert len(c.missing) == 2, "两条不同代码的缺失项不该被合成阶段去重"
+        card_ops.persist(c)
+
+        assert replay.main([DID, "--check"]) == 0
+        again = load_online_card(DID)
+        codes = sorted(m.code for m in again.missing)
+        assert codes == ["market.turnover.unavailable", "supervisor.agent_no_response"], (
+            f"回放反推 extra_missing 时把同文本异代码的两条合并成了一条：{codes}")
 
     def test_检查能发现不一致(self, db, monkeypatch, capsys):
         """守卫的守卫：--check 必须真的会红，否则它是空转的。"""
@@ -156,7 +218,7 @@ class TestReplay:
         self._seed(db)
         assert replay.main([DID, "--status", "AVOID", "--headline", "更保守",
                             "--model-ref", "anthropic/claude-opus-5", "--store"]) == 0
-        assert load_card(DID).status == "WAIT"          # 在线那条没变
+        assert load_online_card(DID).status == "WAIT"    # 在线那条没变
         with connect(db, readonly=True) as c:
             rows = c.execute("SELECT record_id, replay_of, status "
                              "FROM decision_records ORDER BY record_id").fetchall()
@@ -174,6 +236,39 @@ class TestReplay:
 
     def test_不存在的decision_id(self, db, capsys):
         assert replay.main(["BIGA-20260101-999", "--check"]) == 1
+
+
+class TestPersistWritesAgentRunsLedger:
+    """🔴 回归：批 C-II 把合成挪进 `card_ops.persist()` 之后，没有一并搬「记账本」
+    这一步（旧路径靠 standalone `synthesize.py` 记，新路径不再跑那个脚本）——
+    `agent_runs` 从此再没被在线路径写过，`tools/verify/spawn_check.py` 因此永远
+    「判不了」（它要拿这张表的行去跟运行时 `subagent_runs` 交叉核对）。
+    2026-09-22 第一次真实 live 验证时才暴露：不是 fail-open（没把失败判成成功），
+    是把成功判成了失败，且每次真实出卡都会印一条误导性的红字。
+
+    这条测试钉住修法：在线 `persist()` 必须记账本；回放 `persist()` 不许——
+    回放没有重新执行任何 agent，给它记一遍「执行」是假账。
+    """
+
+    def test_在线路径记账_每个verdict一行(self, db):
+        c = card_ops.synthesize(decision_id=DID, verdicts=full_roster(),
+                                judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        card_ops.persist(c)
+        rows = list_agent_runs(decision_id=DID, path=db)
+        assert sorted(r["agent"] for r in rows) == sorted(STANCE_VOCAB), (
+            "在线 persist() 必须给每个 verdict 记一行 agent_runs，"
+            "否则 spawn_check.py 永远判不了")
+
+    def test_回放路径不记账(self, db):
+        c = card_ops.synthesize(decision_id=DID, verdicts=full_roster(),
+                                judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        rid = card_ops.persist(c)
+        before = len(list_agent_runs(decision_id=DID, path=db, limit=1000))
+        card_ops.persist(c, replay_of=rid)
+        after = len(list_agent_runs(decision_id=DID, path=db, limit=1000))
+        assert after == before, (
+            "回放不该重复记账——它没有重新执行任何 agent，"
+            "记一遍「执行」是假账，会让 agent_runs 的行数与真实 spawn 次数脱节")
 
 
 class TestSharedCode:

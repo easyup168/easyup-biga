@@ -27,13 +27,15 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "skills"))
 
-from _contract import CN_TZ, AgentVerdict, Evidence  # noqa: E402
+from _contract import CN_TZ, AgentVerdict, Evidence, FactBundle  # noqa: E402
 from _store import (  # noqa: E402
     AppendOnlyViolation,
     connect,
     init_schema,
+    load_outcome,
     load_verdict,
     load_verdict_meta,
+    save_fact_bundle,
     save_verdict,
 )
 
@@ -59,8 +61,21 @@ def _verdict(agent="market", missing=None, verdict="PASS", status="completed",
                    label="上证指数点位")]
     return AgentVerdict(
         task_id="BIGA-20260918-001", agent=agent, status=status, verdict=verdict,
-        result={"sh_close": 3911.87}, confidence=1.0, evidence=ev,
+        result={"sh_close": 3911.87}, data_completeness=1.0, evidence=ev,
         warnings=[], missing=list(missing or []), elapsed_ms=1234, stance=stance)
+
+
+def _fact(agent="market"):
+    """一条新形状 FactBundle（批 E-III 后六个 skill 都产它）。"""
+    from datetime import datetime
+    as_of = datetime(2026, 9, 18, 15, 0, tzinfo=CN_TZ)
+    got = datetime(2026, 9, 20, 20, 42, 48, tzinfo=CN_TZ)
+    ev = [Evidence(field="sh_close", source="sina:kline/sh000001", value=3911.87,
+                   as_of=as_of, retrieved_at=got, calc_version="market-calc/1",
+                   label="上证指数点位")]
+    return FactBundle(
+        task_id="BIGA-20260918-001", agent=agent, status="completed", verdict="PASS",
+        result={"sh_close": 3911.87}, data_completeness=1.0, evidence=ev, elapsed_ms=1234)
 
 
 class TestRoundTrip:
@@ -109,41 +124,81 @@ class TestAppendOnly:
                                   status="partial"), amends=vid, path=db)
 
 
+class TestAmendLineage:
+    """A8：修订不许跨 agent、跨决策；一条原件最多被修订一次（不许分叉）。"""
+
+    def test_amends指向不存在的原件被拒(self, db):
+        with pytest.raises(ValueError, match="不存在"):
+            save_verdict(_verdict(), amends=99999, amend_reason="x", path=db)
+
+    def test_跨agent的修订被拒(self, db):
+        vid = save_verdict(_verdict(agent="market"), path=db)
+        with pytest.raises(ValueError, match="跨 agent 或跨决策"):
+            save_verdict(_verdict(agent="emotion"), amends=vid,
+                        amend_reason="不该被接受", path=db)
+
+    def test_跨决策的修订被拒(self, db):
+        vid = save_verdict(_verdict(), path=db)
+        base = _verdict()
+        # contract-exempt: 复制一份原件的字段，只改 task_id，模拟「另一次决策」
+        other_decision = AgentVerdict(
+            task_id="BIGA-20260919-001", agent=base.agent, status=base.status,
+            verdict=base.verdict, result=base.result,
+            data_completeness=base.data_completeness, evidence=base.evidence,
+            stance=base.stance)
+        with pytest.raises(ValueError, match="跨 agent 或跨决策"):
+            save_verdict(other_decision, amends=vid, amend_reason="不该被接受", path=db)
+
+    def test_同agent同决策的修订被接受(self, db):
+        vid = save_verdict(_verdict(), path=db)
+        new = save_verdict(_verdict(missing=["x"], verdict="WARNING",
+                                    status="partial"),
+                           amends=vid, amend_reason="合法修订", path=db)
+        assert load_verdict_meta(new, path=db)["amends"] == vid
+
+    def test_同一条原件不许被修订两次(self, db):
+        """探针：先合法修订一次，再对同一个 verdict_id 修订第二次，必须被拒。"""
+        vid = save_verdict(_verdict(), path=db)
+        save_verdict(_verdict(missing=["x"], verdict="WARNING", status="partial"),
+                    amends=vid, amend_reason="第一次修订", path=db)
+        with pytest.raises(ValueError, match="只能线性，不许分叉"):
+            save_verdict(_verdict(missing=["y"], verdict="WARNING", status="partial"),
+                        amends=vid, amend_reason="第二次修订，应该被拒", path=db)
+
+
 class TestAmendCLI:
     def _run(self, *args, db=None):
         env = {**dict(__import__("os").environ), "BIGA_DB_PATH": str(db)}
         return subprocess.run([sys.executable, str(AMEND), *args],
                               capture_output=True, text=True, env=env)
 
-    def test_追加缺失项写新行原件不动(self, db):
+    def test_旧合体行的修订路径已退役(self, db):
+        # 🔴 批 E-III：历史合体 AgentVerdict（save_verdict 仍能造它）的旧修订路径退役 ——
+        #    照抄一条旧命令，CLI 明确报错（rc=2）指路，不是静默改库。
         vid = save_verdict(_verdict(), path=db)
         r = self._run("--ref", str(vid),
                       "--add-missing", "market.trend.no_history", "趋势判不了",
                       "--verdict", "WARNING", db=db)
+        assert r.returncode == 2
+        assert "退役" in r.stderr and "只读" in r.stderr
+
+    def test_fact行加stance成功_写新行事实不动(self, db):
+        # 新形状：给 fact 行加一行 AgentAssessment，事实那行一个字不动
+        fid = save_fact_bundle(_fact(), path=db)
+        r = self._run("--ref", str(fid), "--stance", "放量上涨", db=db)
         assert r.returncode == 0, r.stderr
         new = int(r.stderr.split("verdict_ref=")[1].split()[0])
+        assert new != fid, "判断该落在新的一行"
+        oc = load_outcome(new, path=db)
+        assert oc.stance == "放量上涨"
+        # 事实那行的 evidence 原样在（没被重打），retrieved_at 仍是采集时刻
+        assert oc.fact.evidence[0].retrieved_at == _fact().evidence[0].retrieved_at
 
-        original, amended = load_verdict(vid, path=db), load_verdict(new, path=db)
-        assert original.missing == [] and original.verdict == "PASS"
-        assert amended.missing == ["趋势判不了"] and amended.verdict == "WARNING"
-        assert amended.missing[0].code == "market.trend.no_history"
-        assert amended.status == "partial"
-        # 证据一条不少，且仍是采集时刻
-        assert len(amended.evidence) == len(original.evidence)
-        assert amended.evidence[0].retrieved_at == original.evidence[0].retrieved_at
-        assert load_verdict_meta(new, path=db)["amends"] == vid
-
-    def test_加缺失项不给verdict时给出指路报错(self, db):
-        vid = save_verdict(_verdict(), path=db)
-        r = self._run("--ref", str(vid),
-                      "--add-missing", "market.trend.no_history", "x", db=db)
+    def test_fact行加add_missing被拒(self, db):
+        fid = save_fact_bundle(_fact(), path=db)
+        r = self._run("--ref", str(fid), "--add-missing", "market.x.y", "限制", db=db)
         assert r.returncode == 2
-        assert "WARNING" in r.stderr and "UNKNOWN" in r.stderr, \
-            "报错必须说清下一步怎么做，否则 agent 要花几轮去猜"
-
-    def test_什么都不改时拒绝(self, db):
-        vid = save_verdict(_verdict(), path=db)
-        assert self._run("--ref", str(vid), db=db).returncode == 2
+        assert "--stance" in r.stderr
 
     def test_ref不存在时报错说清原因(self, db):
         r = self._run("--ref", "999", "--add-missing", "market.trend.no_history", "x",
@@ -160,8 +215,16 @@ class TestSynthesizeByIds:
     def test_按id合成(self, db):
         a = save_verdict(_verdict("market", stance="放量上涨"), path=db)
         b = save_verdict(_verdict("emotion", stance="修复"), path=db)
+        # 🔴 F-8：2 个 agent 到场，另外 4 个天然缺席——roster 判据按计数
+        #    比较，4 条 --extra-missing 才够（本文件不测 roster）。
+        extra_missing_args = []
+        for i in range(4):
+            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
+                                   f"占位{i}——本文件不测 roster"]
         r = self._run("--verdict-ids", f"{a},{b}", "--status", "WAIT",
-                      "--headline", "h", "--model-ref", "m", "--no-store", db=db)
+                      "--headline", "h", "--model-ref", "m",
+                      *extra_missing_args,
+                      "--no-store", db=db)
         assert r.returncode == 0, r.stderr
         assert "market" in r.stdout and "emotion" in r.stdout
 
@@ -204,8 +267,11 @@ class TestContractsTeachTheSafePath:
             f"{path.name} 仍在示范 --verdicts（贴 JSON）—— 应改用 --verdict-ids"
 
     @pytest.mark.parametrize(
-        "path", sorted((REPO / "agents").glob("*/AGENTS.md")))
+        "path", sorted(p for p in (REPO / "agents").glob("*/AGENTS.md")
+                       if p.parent.name not in __import__("_consistency").SUPPORT_AGENTS))
     def test_契约讲清楚了第一次去哪拿verdict_ref(self, path):
+        # SUPPORT_AGENTS（如 synthesizer）不产 verdict_ref —— 它读别人的 verdict、
+        # 产出 Card 判断，没有「第一次去哪拿 verdict_ref」这回事，故排除。
         """🔴 判据不是「提到了这个词」，是「讲清楚了第一次去哪拿」。
 
         F9 的要害在这里：`news/AGENTS.md` 里 "verdict_ref" 本来就出现了 3 次

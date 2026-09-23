@@ -577,3 +577,9 @@ python3 skills/emotion-calc/scripts/emotion_calc.py --date 20260920 --no-store
 ---
 
 上一章：[04 · 数据层](04-store-layer.md)　|　下一章：06 · 建 Agent（编写中）
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field as dc_field
 
 _HERE = pathlib.Path(__file__).resolve()
@@ -28,14 +29,52 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    CONTRACT_VERSION,
     AgentVerdict,
     CardStatus,
     DecisionCard,
     MissingItem,
+    VerdictRef,
+    card_event_type,
 )
-from _store import load_card, save_card  # noqa: E402
+from _store import (  # noqa: E402
+    load_online_card,
+    load_verdict,
+    load_verdict_meta,
+    record_verdict_run,
+    save_card,
+    save_card_with_notifications,
+)
 
-__all__ = ["Judgment", "synthesize", "persist", "SYNTHESIS_VERSION"]
+__all__ = ["Judgment", "synthesize", "persist", "load_verdicts_and_refs",
+           "SYNTHESIS_VERSION"]
+
+
+def load_verdicts_and_refs(
+    verdict_ids: list[int],
+) -> tuple[list[AgentVerdict], list[VerdictRef]]:
+    """按 `verdict_id` 取回原件并配套构建 `VerdictRef` —— 在线合成与
+    DecisionOrchestrator **共用的一份**（dev-workflow 第五问：不手抄第二份）。
+
+    🔴 `content_sha256` 取自 `agent_verdicts` 那一列**当时写入的值**（`load_verdict_meta`），
+    不是把对象重新序列化再算 —— 见 A6/追加 4，重算会让 A-I 之前落库的行集体对不上。
+    """
+    verdicts: list[AgentVerdict] = []
+    refs: list[VerdictRef] = []
+    for vid in verdict_ids:
+        v = load_verdict(vid)
+        if v is None:
+            raise ValueError(
+                f"verdict_id={vid} 在 agent_verdicts 里不存在 —— "
+                f"确认 Specialist 跑 skill 时没有加 --no-store（加了就不落原件）。")
+        meta = load_verdict_meta(vid)
+        verdicts.append(v)
+        refs.append(VerdictRef(agent=v.agent, verdict_id=vid,
+                               content_sha256=meta["content_sha256"],
+                               contract_version=CONTRACT_VERSION,
+                               # 🔴 批 J-I：从存量行的 run_id 列直接搬（历史行是 None）。
+                               run_id=meta.get("run_id")))
+    return verdicts, refs
 
 #: 组装逻辑的版本。改了组装方式就要 +1，
 #: 否则「回放结论变了」会分不清是模型变了还是代码变了。
@@ -63,6 +102,9 @@ def synthesize(
     elapsed_ms: int = 0,
     generated_at: str = "",
     historical: bool = False,
+    verdict_refs: list[VerdictRef] | None = None,
+    run_id: str | None = None,
+    expected_roster: tuple[str, ...] | None = None,
 ) -> DecisionCard:
     """把 Verdict 组装成 Card。**纯函数，不碰 IO。**
 
@@ -83,6 +125,12 @@ def synthesize(
             传 True 让契约层降级为「记下来并显示在卡面上」。
             ⚠️ 它只影响**能不能构造**；`save_card()` 仍然无条件拒绝，
             所以「读一张旧卡再存回去」洗不白它。
+        verdict_refs: 🔴 A6：这批 verdicts 各自落库时的 `VerdictRef`
+            （agent / verdict_id / content_sha256 / contract_version）。
+            与 `verdicts` 是平行的两份数据，不强制一一对应——
+            旧调用方（例如 `_read_verdicts()` 读 JSON 文件的退路）
+            没有 verdict_id 可用时留空即可，Card 只是少一份可核对的证据，
+            不影响其余字段。核对走 `_store.verify_verdict_refs()`。
     """
     seen: set[str] = set()
     missing: list[MissingItem] = []
@@ -107,27 +155,100 @@ def synthesize(
         missing=missing,
         generated_at=generated_at,
         elapsed_ms=elapsed_ms,
+        input_verdict_refs=list(verdict_refs or []),
+        run_id=run_id,
+        # 🔴 批 K：在线路径把生成时的期望 roster 冻进卡（编排器传 EXPECTED_ROSTER）；
+        #    回放把原卡冻结的那份**原样带过去**（replay.py），不重算 —— 老卡为 None。
+        expected_roster=expected_roster,
     )
 
 
-def persist(card: DecisionCard, *, replay_of: int | None = None) -> int:
-    """落库，返回 `record_id`。在线路径 `replay_of=None`，回放路径填原始 record_id。"""
+def persist(card: DecisionCard, *, replay_of: int | None = None,
+            runtime_run_ids: Mapping[str, str] | None = None) -> int:
+    """落库，返回 `record_id`。在线路径 `replay_of=None`，回放路径填原始 record_id。
+
+    🔴 只在在线路径记账本（`agent_runs`，`record_verdict_run`）——回放不重新
+    执行任何 agent，给回放记一遍「执行」是假账。这与 `synthesize()` 保持纯函数
+    是同一个理由的另一半：`persist()` 才是 IO 边界，账本这类「这次真的跑过」
+    的记录只能长在这里，不能长在纯函数里。
+
+    `runtime_run_ids`（批 J-II，keyword-only、默认 None）：`agent → 运行时 spawn id`
+    的映射，编排器从每个 Stage 1/risk 的 `SpawnResult.handle.runtime_run_id` 收来
+    （Stage 3 的 synthesizer 不产 verdict，不进这个映射）。落进 `agent_runs.
+    runtime_run_id`，`spawn_check.py` 据此做结构化 join。
+    🔴 必须有默认值：`synthesize.py` 与几条测试也在调 `persist()`，它们没有这个
+    映射；不给默认值会把不相干的调用一起弄红。回放路径整段不记账本，自然也不写它。
+    🔴 批 F：提供这个映射时，它的 **key 集**同时是「本次真正被 spawn 的 agent」的权威
+    名单 —— 只有名单里的 agent 记账本行。risk 在两种确定性早退里由编排器免费算出事实、
+    未被 spawn，就不进映射、也不该有账本行（否则 L-8 幽灵行 + spawn_check 误判伪造）。
+
+    ⚠️ 这是批 C-II 的一处回归修复：旧的 standalone `synthesize.py`（编排从
+    main 的提示词驱动时期）在落库前调过这个账本；批 C-II 把合成逻辑挪进这个
+    模块的 `synthesize()`/`persist()`，但当时没有把这一步一并搬过来——`agent_runs`
+    从那天起再没被写过，`tools/verify/spawn_check.py` 因此永远「判不了」（它需要
+    这张表有行才能跟运行时的 `subagent_runs` 交叉核对）。2026-09-22 第一次真实
+    live 验证时才暴露（不是安全洞：把成功误判成失败，不是把失败误判成成功）。
+    """
+    if replay_of is None:
+        for v in card.verdicts:
+            # 🔴 批 F：runtime_run_ids 提供时，它的 key 集就是「本次真正被 spawn 的 agent」
+            #    的权威名单 —— 只给这些 agent 记执行账本行（agent_runs）。risk 在两种
+            #    确定性早退（证据跨决策污染 / 完全没有上游）里由编排器**免费**算出事实、
+            #    根本没被 spawn：给它记一行「执行过」既是 L-8 幽灵账本行（记了没发生的事），
+            #    又会让 spawn_check 把它误判成伪造（agent_runs 有行、运行时 subagent_runs
+            #    没有 ⇒ forged）。⚠️ 判据是 key 在不在，不是 rr.get() 的值 —— 被 spawn 但
+            #    没拿到 runtime_run_id 的 agent 是「key 在、值 None」，仍要记账。
+            #    不提供 runtime_run_ids（synthesize.py / 测试 / 回放）时维持原样：给所有 verdict 记账。
+            if runtime_run_ids is not None and v.agent not in runtime_run_ids:
+                continue
+            record_verdict_run(v, decision_id=card.decision_id,
+                               started_at=card.generated_at,
+                               finished_at=card.generated_at,
+                               model=card.model_ref,
+                               runtime_run_id=(runtime_run_ids or {}).get(v.agent))
+        # 🔴 批 G-I：在线路径出卡后，把这张卡分到一类外发通知并入队 —— **与 Card 落库
+        #    同一个事务**（save_card_with_notifications）。要么卡和通知一起进库，要么
+        #    一起回滚（探针 P1）。event_type 由 `_contract.card_event_type` 从卡本身推
+        #    （risk 否决 / UNKNOWN·缺失 / 正常），幂等键 aggregate=decision_id（一个决策
+        #    一张卡 ⇒ 一类事件至多入队一次）。payload 带决策号供 worker 投递（P4）。
+        #    回放路径不入队：回放不重新执行、也不该重推一遍通知。
+        notification = {
+            "event_type": card_event_type(card),
+            "aggregate": card.decision_id,
+            "payload": {
+                "decision_id": card.decision_id,
+                "status": card.status,
+                "headline": card.headline,
+                "missing_count": len(card.missing),
+                "run_id": card.run_id,
+            },
+        }
+        return save_card_with_notifications(card, [notification], replay_of=replay_of)
     return save_card(card, replay_of=replay_of)
 
 
 def comparable(card: DecisionCard) -> dict:
     """剥掉「每次必然不同」的字段，用于比较两张 Card 是否等价。
 
-    去掉 `generated_at` / `elapsed_ms` —— 它们描述的是**这次执行**，
+    去掉 `generated_at` / `elapsed_ms` / `run_id` —— 它们描述的是**这次执行**，
     不是**这个结论**。拿它们比较会让任何两次回放都「不一致」，
     于是一致性检查就退化成永远报警，很快没人看（又一个被忽略的守卫）。
+
+    🔴 批 J-I：`run_id` 属于同一类。回放**不是**原来那次执行尝试，它诚实地把
+    `card.run_id` 记成 None（不捏造，见 `replay.py`）——而原卡带着它真实的 run_id。
+    若不剥掉，一旦在线路径开始产出带 run_id 的卡，回放这些卡的 `--check` 就会因为
+    「这次执行 ≠ 上次执行」而误报「组装不一致」，把一个正确的无损回放判成坏的。
+    ⚠️ `input_verdict_refs` 里各 ref 自带的 `run_id` **不剥** —— 那是判定原件的血缘，
+       回放照原样带过去（`verdict_refs=list(original.input_verdict_refs)`），两边相同，
+       是要被核对的证据的一部分。
     """
     d = card.to_dict()
     d.pop("generated_at", None)
     d.pop("elapsed_ms", None)
+    d.pop("run_id", None)
     return d
 
 
 def load_original(decision_id: str) -> DecisionCard | None:
     """取回在线路径存下的那张 Card。"""
-    return load_card(decision_id)
+    return load_online_card(decision_id)

@@ -18,6 +18,7 @@
 #   bin/biga-card --list [n]      列出最近 n 张（默认 10）
 #   bin/biga-card --check <决策号> 用冻结证据重跑，断言**组装结果**逐字段相同
 #                                （验的是管线无损，不是「结论能被独立复算」——见 F14）
+#   bin/biga-card --status <run_id> 说出某次运行「死在哪一步」（批 B 状态机）
 #
 # ⚠️ 出一张新卡实测需要 **3 分钟左右**、约 $1.2。不是瞬时操作。
 
@@ -40,6 +41,11 @@ BIGA_STOP_FILE="${BIGA_STOP_FILE:-$ROOT/.biga-card-stop}"
 #    测试当场把真实出卡流程跑了起来 —— **一个坏掉时会花钱的测试**。
 BIGA="${BIGA:-$HOME/.openclaw-biga/bin/biga}"
 PY=python3
+RL="$PY skills/decision-card/scripts/run_ledger.py"
+
+# 🔴 批 C-II：run 记账不再在这里做。DecisionOrchestrator（Python）自己 open_run
+#    并驱动全部状态转移——它是唯一真正知道「走到哪一步」的地方。本脚本收缩成
+#    薄 CLI：五道守卫 → 调 orchestrator → 渲染 → 退出码。`--status` 仍用 run_ledger 读。
 
 _sql() { $PY - "$@" <<'EOF'
 import sys, pathlib
@@ -59,6 +65,11 @@ case "${1:-}" in
   --check)
     [ -n "${2:-}" ] || { echo "用法: biga-card --check <决策号>" >&2; exit 2; }
     exec $PY skills/decision-card/scripts/replay.py "$2" --check
+    ;;
+  --status)
+    # 批 B：说出某次运行「死在哪一步」。不花钱，事故排查要用（与 --show/--list 同类）。
+    [ -n "${2:-}" ] || { echo "用法: biga-card --status <run_id>" >&2; exit 2; }
+    exec $RL status "$2"
     ;;
   --list)
     n=${2:-10}
@@ -189,11 +200,15 @@ fi
 #   `check_budget()`，阈值只有一份（L-3）。这里拒绝的代价是 $0。
 if [ "${BIGA_CARD_FORCE:-0}" != "1" ]; then
   GATE=$($PY - <<'EOF' 2>&1
-import sys
+import os, sys
 sys.path.insert(0, "skills")
 sys.path.insert(0, "skills/decision-card/scripts")
 from budget import check_budget, explain
-r = check_budget()
+# 🔴 飞书 inbound 路径在拉起本脚本之前已经占了号（accept_trigger 的幂等占号）——
+# 排除掉这个号自己，闸门比的才是「跟别的尝试比」，不是「跟自己刚占的号比」
+# （P6 live 实测过：不排除时每一次飞书触发都会被这里拒，见 budget.py 文档字符串）。
+# CLI 路径没有这个 env（此时号也确实还不存在），传 None 就是原来的行为。
+r = check_budget(exclude_decision_id=os.environ.get("BIGA_CARD_DECISION_ID") or None)
 if r:
     print(explain(r)); sys.exit(3)
 EOF
@@ -208,162 +223,94 @@ EOF
 fi
 
 BEFORE=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
-SESS="card-$(date +%H%M%S)"
-echo "▸ 会话 $SESS   起 $(date +%T)"
-echo "  （实测 3 分钟左右、约 \$1.2；期间可以做别的事）"
+echo "▸ 程序驱动出卡  起 $(date +%T)"
+# 🔴 `\$1.2` 必须转义：脚本以无参数方式跑（出新卡），`set -u` 下裸 `$1` 是
+#    未绑定的位置参数会**当场终止脚本**。总闸开着时撞不到这行，一旦解除就会咬人。
+echo "  （实测约 3 分钟、约 \$1.2；期间可以做别的事）"
 
-# 🔴 提示词**不写在这里** —— 从 ORCHESTRATION.md 的标记块里抽。
+# 🔴 批 C-II：出卡由 DecisionOrchestrator（Python）驱动，不再 spawn main。
 #
-#    原来这段和 AGENTS.md 的 Stage 0~3 是同一段话的两份实现。
-#    实测：脚本这份 100% 被执行，契约那份在飞书路径下悄悄失效
-#    （4 spawn + yield + 占号在后，$0.4 白花）。
-#    ⇒ 合并成一份，这里只负责取出来。改步骤请改那个文件。
-ORCH="skills/decision-card/ORCHESTRATION.md"
-PROMPT=$(sed -n '/<!-- PROMPT:BEGIN -->/,/<!-- PROMPT:END -->/p' "$ORCH" 2>/dev/null \
-         | sed '1d;$d')
-if [ -z "${PROMPT// /}" ]; then
-  echo "🔴 取不到编排提示词：$ORCH 里没有 PROMPT 标记块。" >&2
-  echo "   没有它就只能让 Supervisor 凭契约自己编排 —— 实测会出错，所以直接停。" >&2
-  exit 2
-fi
-
-# 🔴 硬超时 —— 必须与单实例锁**配套**（外部评审 §16/§17）
-# ------------------------------------------------------------------
-# 锁保证同时只有一次。但如果持锁的那一次**永久卡死**，
-# 锁会正确地拦住后续所有调用 —— 于是整个出卡入口永久不可用。
+#    编排 / 等待 / 传号 / 合成 / 占号 全在代码里 —— 老路径那段「把提示词喂给
+#    main、轮询落库、看门狗防 ask_user 死锁」整体没了：orchestrator 是同步的，
+#    它自己 open_run、走 8 步细粒度状态链、通过 Adapter spawn 五个 Specialist +
+#    risk + synthesizer 判官，合成并落库，返回并渲染。
 #
-# 实测卡死场景（2026-09-21 journal）::
+#    🔴 main 在这里**没有步骤可执行** —— 它不是可被 spawn 的编排者，这条命令
+#    也不把任何提示词喂给它。这就是 L-14「谁能启动」那条边界从提示词约定变成
+#    程序结构的地方：不是「守卫拦住 main」，是「main 够不到编排器」。
 #
-#     stalled session: sessionKey=agent:main:card-214144
-#       state=processing age=886s reason=blocked_tool_call
-#       activeTool=ask_user recovery=none
-#
-# `$BIGA agent` 是**非交互**调用 ⇒ 没有人能回答 `ask_user` ⇒ 确定性死锁。
-# ⚠️ 今天卡住的是 `ask_user`，以后可能是别的工具。所以兜底不能针对某个工具，
-#    要针对「这一次运行最多活多久」。
-#
-# ⇒ 总预算写成**一个数**，而不是散落的 `--timeout 900` 加 `seq 60` 乘 5s：
-#    那种写法的真实上限是 1200s，而没有任何一处写着 1200。
+# 🔴 硬超时：orchestrator 内部按 BIGA_CARD_DEADLINE_SEC 分段等待；外层再套一个
+#    timeout 兜底，防它在 attach / 某个 MCP 调用上永久卡死（这是「锁 + 硬超时」
+#    那一节的初衷 —— 持锁的那一次若永久卡死，整个入口会永久不可用）。
 CARD_DEADLINE_SEC="${BIGA_CARD_DEADLINE_SEC:-780}"
-#: 留给「agent 返回后卡还没落库」的尾巴（Supervisor 可能还会被唤醒几轮）。
-CARD_SETTLE_SEC="${BIGA_CARD_SETTLE_SEC:-180}"
-AGENT_TIMEOUT=$(( CARD_DEADLINE_SEC - CARD_SETTLE_SEC ))
-SETTLE_TRIES=$(( CARD_SETTLE_SEC / 5 ))
-echo "  （总预算 ${CARD_DEADLINE_SEC}s：agent ${AGENT_TIMEOUT}s + 结算 ${CARD_SETTLE_SEC}s）"
 
-"$BIGA" agent --agent main --session-key "agent:main:$SESS" \
-  --timeout "$AGENT_TIMEOUT" -m "$PROMPT" >/dev/null 2>&1
+# 🔴 收养兜底（评审阻塞项 2）：wrapper 死了，它起的编排子进程不许活下来继续花钱。
+# ------------------------------------------------------------------
+# 事故复盘（教程 24 章）：$1.2 那个 bash bug 不是孤儿化的根因 —— 那行在文本顺序上
+# 排在编排调用之前，真在那崩溃根本到不了 spawn。真正的根因是：一个外层短 timeout
+# 杀掉了上层 shell，而 `timeout 840 orchestrator.py` 那个子进程**被孤立后继续跑完了
+# 整轮 spawn**。这不是「手工瞎跑」独有的触发方式 —— 任何一次工具调用把 timeout 设短
+# 都可能撞上同一个洞。
+#
+# ⇒ 用 trap 做**代码兜底**，不是「以后手工别乱跑」这种记在脑子里的承诺。本项目的规矩
+#   是：安全保证必须是 Code Guard，不能靠意图（这条对 main 成立，对「我们自己会小心」
+#   也一样成立）。编排放到后台 + wait —— 前台子进程会把信号拖到它返回，后台 + wait
+#   才能让 TERM/INT 立刻打断 wait、触发 trap 把子进程收掉。
+_ORCH_PID=""
+_reap_orch() { [ -n "$_ORCH_PID" ] && kill -TERM "$_ORCH_PID" 2>/dev/null; }
+trap '_reap_orch' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
-TICK=0
-echo -n "▸ 等待落库 "
-for _ in $(seq "$SETTLE_TRIES"); do
-  NOW=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
-  if [ "$NOW" != "$BEFORE" ]; then
-    echo "→ $NOW  $(date +%T)"
-    echo
-    $PY skills/decision-card/scripts/replay.py "$NOW"
-    echo
-    # 🔴 外部评审 F3：「Specialist 真的被调用过」这条最硬的约束，
-    #    此前**没有任何机器在管** —— 唯一能做真区分的核验只认
-    #    "emotion" 一个名字，而且从不在任何自动化流程里。
-    #
-    #    ⚠️ 手工跑 skill 再把 verdict_ref 喂给 synthesize.py，产出的
-    #      Card 与 agent_runs 记录，和「真的 spawn 了」逐字节相同 ——
-    #      两份都是 BigA 自己写的。区分它们只能靠 OpenClaw 运行时
-    #      自己记的那张表，而那张表 BigA 业务代码碰不到。
-    #
-    #    ⇒ 接在出卡之后，因为**这里是唯一每次都会跑到的地方**。
-    #      放进 pytest 不行：它需要一次真实运行。
-    #    🔴 **它的退出码必须被用上，否则它只是一句打印。**
-    #
-    #    外部深度评审指出：这里原来是裸调用，紧接着无条件 `exit 0`，
-    #    而脚本用的是 `set -uo pipefail`（没有 `-e`）⇒
-    #
-    #        spawn_check exit 1  →  biga-card 仍 exit 0
-    #        spawn_check exit 2  →  biga-card 仍 exit 0
-    #
-    #    真实语义是「跑了一次检查并打印结果」，
-    #    不是「spawn 证明是出卡流程的验收 Gate」。
-    #
-    #    ⚠️ 我自己那条守卫也没抓到 —— 它只查脚本里**有没有这个字符串**。
-    #      调用在、退出码被丢，守卫照样绿。
-    $PY tools/verify/spawn_check.py "$NOW"
-    SPAWN_RC=$?
-    echo
-    echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
-    if [ "$SPAWN_RC" -ne 0 ]; then
-      echo >&2
-      echo "🔴 spawn 核验未通过（rc=$SPAWN_RC）。" >&2
-      echo "   卡已落库，但**不能证明 Specialist 真的被调用过** ——" >&2
-      echo "   这张卡不要当证据用。" >&2
-      echo "   rc=1 有伪造 · rc=2 判不了（读不到运行时记录）" >&2
-      echo "   细节：python3 tools/verify/spawn_check.py $NOW" >&2
-      # ⚠️ 仍然把卡渲染出来了（上面已经渲染）——
-      #    出卡这件事已经发生、钱已经花了，藏起来没有意义。
-      #    要变的是**这条命令的成败**，而不是要不要给人看。
-      exit 4
-    fi
-    exit 0
+# 🔴 批 G-II：飞书入站触发经环境变量把 origin / trigger_id / 预占决策号透传给
+#    orchestrator。三样都没设 = 人工 CLI（origin=cli，orchestrator 自己现占号）——
+#    **现有同步体验一字不变**（这正是「异步只对飞书生效、不许改坏人工 CLI」的落点）。
+#    异步发生在 inbound.py → 本脚本 这条边界（inbound 把本脚本整个脱离进程树拉起、
+#    立刻 ACK），不在本脚本内部：bin/biga-card 自己仍然从头同步跑到 Card 落库。
+ORCH_ARGS=()
+[ -n "${BIGA_CARD_ORIGIN:-}" ]      && ORCH_ARGS+=(--origin "$BIGA_CARD_ORIGIN")
+[ -n "${BIGA_CARD_TRIGGER_ID:-}" ]  && ORCH_ARGS+=(--trigger-id "$BIGA_CARD_TRIGGER_ID")
+[ -n "${BIGA_CARD_DECISION_ID:-}" ] && ORCH_ARGS+=(--decision-id "$BIGA_CARD_DECISION_ID")
+timeout $(( CARD_DEADLINE_SEC + 60 )) $PY skills/decision-card/scripts/orchestrator.py "${ORCH_ARGS[@]}" &
+_ORCH_PID=$!
+wait "$_ORCH_PID"
+ORCH_RC=$?
+# 正常跑完，编排子进程已退出 —— 撤掉 trap，后面的 spawn_check / readback 不受它影响。
+trap - EXIT TERM INT HUP
+
+NOW=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
+if [ "$ORCH_RC" -ne 0 ] || [ "$NOW" = "$BEFORE" ]; then
+  echo >&2
+  if [ "$ORCH_RC" -eq 124 ]; then
+    echo "🔴 出卡超时（外层 $(( CARD_DEADLINE_SEC + 60 ))s 硬超时兜底触发）。" >&2
+  else
+    echo "🔴 出卡失败（orchestrator rc=$ORCH_RC，没有新卡落库）。" >&2
   fi
-  # 🔴 看门狗 —— 非交互 `ask_user` 死锁（外部评审 ASK-04）
-  # ----------------------------------------------------------------
-  # `$BIGA agent` 是非交互调用。Supervisor 一旦调 `ask_user`，
-  # 没有任何人能回答，而运行时自己说 `recovery=none` —— 它不会救。
-  # 硬超时兜得住，但要等满 ${CARD_DEADLINE_SEC}s；这里 30s 就能认出来。
-  #
-  # ⚠️ 放在**已有的**轮询循环里，不新建守护进程 ——
-  #    那会变成又一个「建了但没人跑」的组件（§9 L-1）。
-  #    而且这样它天然只看**我们自己这一次**：交互式会话里
-  #    `ask_user` 是正常能力，不能连坐。
-  if [ "${BIGA_CARD_NO_WATCHDOG:-0}" != "1" ] && [ $(( TICK % 6 )) -eq 0 ]; then
-    if $PY - "agent:main:$SESS" <<'EOF' >/dev/null 2>&1
-import sys
-sys.path.insert(0, "skills/decision-card/scripts")
-from stall_watchdog import find_blocked
-sys.exit(0 if find_blocked(sys.argv[1]) else 1)
-EOF
-    then
-      echo
-      echo "🔴 INTERACTION_UNAVAILABLE —— 这次运行卡在非交互 ask_user 上。" >&2
-      echo "   Supervisor 调了 ask_user，而 \`$BIGA agent\` 没有能回答的人。" >&2
-      echo "   运行时报 recovery=none —— 它不会自己恢复，所以这里主动收掉。" >&2
-      echo "   ⚠️ **不自动重试**：同一个请求很可能再次 ask_user，那是成本循环。" >&2
-      echo "   会话：agent:main:$SESS" >&2
-      echo "   细节：journalctl --user -u openclaw-gateway-biga.service --since -10min | grep stalled" >&2
-      if [ "${BIGA_CARD_KEEP_STALLED:-0}" != "1" ]; then
-        timeout 60 "$BIGA" sessions delete --agent main --yes "agent:main:$SESS" \
-          >/dev/null 2>&1 && echo "   已收掉该会话。" >&2
-      fi
-      exit 5
-    fi
-  fi
-  TICK=$(( TICK + 1 ))
-  echo -n "."
-  sleep 5
-done
-
-echo
-echo "⚠️  ${CARD_DEADLINE_SEC}s 内没有新卡落库。" >&2
-echo "   这**不代表失败** —— 按契约，一次提问要么出卡、要么说清为什么出不了。" >&2
-echo "   查这两处：" >&2
-echo "     python3 tools/verify/agent_trace.py --agent main -n 1   # 它最后在做什么" >&2
-echo "     bin/biga-card --list                                     # 卡是不是晚到了" >&2
-echo >&2
-
-# 🔴 放弃时要把那个会话**真的收掉**，否则它会一直停在 processing。
-#    journal 实测过 `recovery=none` —— 运行时自己不会救它。
-#    留着的后果不是花钱（它阻塞在工具调用上，不烧 token），
-#    而是：① 诊断里永远有一条 stalled session 噪音
-#          ② 下一次 spawn 核验要在一堆孤儿里找自己的记录
-if [ "${BIGA_CARD_KEEP_STALLED:-0}" != "1" ]; then
-  echo "▸ 收掉卡住的会话 agent:main:$SESS" >&2
-  # 🔴 `--yes` 不能省：`sessions delete` 默认会弹**销毁确认提示**。
-  #    在非交互环境里那会挂住 —— 正好又是这一整节在修的那个失败模式。
-  #    （第一版写的是 `--session-key`，实际签名是位置参数 `<keys...>`；
-  #      查一遍 --help 才发现，没查就会静默失败。）
-  timeout 60 "$BIGA" sessions delete --agent main --yes "agent:main:$SESS" \
-    >/dev/null 2>&1 \
-    && echo "   已收掉。" >&2 \
-    || echo "   ⚠️ 收不掉。手工：$BIGA sessions list --agent main --active 60" >&2
+  echo "   run_id 见上方 orchestrator 打印；查死在哪一步：bin/biga-card --status <run_id>" >&2
+  exit 4
 fi
-exit 1
+
+# 🔴 spawn 核验 + 毒行巡检 —— 沿用既有 gate 与退出码语义（F3 / F-4）。
+#    orchestrator 是真 spawn（走 Adapter → subagent_runs），核验理应通过；
+#    留着它是纵深防御，退出码语义与老路径一致（4 = spawn 未过，6 = 历史毒行）。
+$PY tools/verify/spawn_check.py "$NOW"
+SPAWN_RC=$?
+echo
+$PY tools/verify/readback_check.py
+READBACK_RC=$?
+echo
+echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
+if [ "$SPAWN_RC" -ne 0 ]; then
+  echo >&2
+  echo "🔴 spawn 核验未通过（rc=$SPAWN_RC）—— 卡（$NOW）不能证明 Specialist 真被调用过。" >&2
+  echo "   rc=1 有伪造 · rc=2 判不了（读不到运行时记录）。细节：spawn_check.py $NOW" >&2
+  exit 4
+fi
+if [ "$READBACK_RC" -ne 0 ]; then
+  echo >&2
+  echo "🔶 毒行巡检发现历史遗留问题（rc=$READBACK_RC）——与这次出卡无关。" >&2
+  echo "   这次的卡（$NOW）本身没事：spawn 核验已过。细节：readback_check.py" >&2
+  exit 6
+fi
+exit 0

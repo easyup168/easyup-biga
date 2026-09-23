@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import datetime
@@ -40,7 +41,8 @@ def series(closes, highs=None, lows=None):
     bars[-1] = sources.DailyBar(day=TRADE_DATE, open=bars[-1].open,
                                 high=bars[-1].high, low=bars[-1].low,
                                 close=bars[-1].close, volume=bars[-1].volume)
-    return sources.IndexDaily(symbol="sh000001", bars=bars, raw=[{}] * n)
+    return sources.IndexDaily(symbol="sh000001", bars=bars, raw=[{}] * n,
+                              raw_text=json.dumps([{}] * n))
 
 
 @pytest.fixture()
@@ -58,7 +60,8 @@ def build(**kw):
     kw.setdefault("break_source", set())
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return tc.build_verdict(**kw)
+    # 批 E-II：technical 迁到产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return tc.build_fact_bundle(**kw)
 
 
 class TestIndicators:
@@ -151,9 +154,9 @@ class TestGuards:
         v = build()
         assert v.verdict == "UNKNOWN" and v.result == {}
 
-    def test_字段数与confidence分母一致(self, wired):
+    def test_字段数与data_completeness分母一致(self, wired):
         v = build()
-        assert len(v.result) == tc._EXPECTED_FIELDS and v.confidence == 1.0
+        assert len(v.result) == tc._EXPECTED_FIELDS and v.data_completeness == 1.0
 
     def test_只做上证不做深证(self):
         """范围外 ≠ 数据缺失：不做深证是设计选择，不该出现在 missing 里。"""

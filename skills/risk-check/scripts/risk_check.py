@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""risk-check —— 从 Stage 1 的**冻结证据**里算出风险事实，输出 AgentVerdict。
+"""risk-check —— 从 Stage 1 的**冻结证据**里算出风险事实，输出 FactBundle。
+
+🔴 批 E-III：Facts/Assessment 拆分的最后一棒。risk 从产合体 `AgentVerdict` 迁到产
+`FactBundle`（只事实、无 stance），形状与前五个一致。risk 的 stance 是 `VETO_STANCE`
+（"否决"）—— 制衡层唯一能拦住 BUY 的信号，由 Risk Agent 事后 `amend_verdict.py --stance`
+追加一个 `AgentAssessment`，经 `load_verdict` 多态压回 `AgentVerdict.stance`、被
+`DecisionCard` 读到并拦截（穿透链见教程第 30 章）。
+⚠️ risk 读**上游**五个 verdict 仍用 `load_verdict()`（多态，对新旧形状都返回
+`AgentVerdict`）——risk 是它们的消费方，那一半跟这次迁移无关。
 
 🔴 它不采数据
 --------------
@@ -43,13 +51,14 @@ from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
     CROSS_CHECK_PAIRS,
     STAGE1_AGENTS,
-    AgentVerdict,
+    AgentVerdict,  # 上游判定（load_verdict 多态返回）仍是 AgentVerdict —— risk 是消费方
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
 )
-from _store import init_schema, load_verdict, save_verdict  # noqa: E402
+from _store import init_schema, load_verdict, save_fact_bundle  # noqa: E402
 
 AGENT = "risk"
 CALC_VERSION = "risk-check/1"
@@ -95,7 +104,7 @@ def _cmp(value: Any, op: str, bound: float) -> bool:
     return v > bound if op == ">" else v < bound
 
 
-def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> AgentVerdict:
+def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> FactBundle:
     t_start = time.monotonic()
     retrieved = now_cn()
     missing: list[MissingItem] = []
@@ -169,13 +178,13 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             "foreign_task_ids": foreign,
             "upstream_attribution": {v.agent: v.task_id for v in upstream},
         }
-        return AgentVerdict(
+        return FactBundle(
             task_id=task_id, agent=AGENT, status="failed", verdict="UNKNOWN",
             result=attribution,
             # 🔴 `confidence` 不能沿用 `len(result)/_EXPECTED_FIELDS` ——
             #    那个公式衡量的是「算出来多少字段」，在这里会把
             #    「我拒绝判断」算成一个不低的置信度。
-            confidence=0.0,
+            data_completeness=0.0,
             evidence=[Evidence(
                 field=k, source="derived:risk-check", value=val,
                 as_of=retrieved, retrieved_at=retrieved,
@@ -192,9 +201,9 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
         missing.append(MissingItem(
             "全部风险判据 —— 没有拿到任何上游判定，无从审起",
             "risk.upstream.none"))
-        return AgentVerdict(
+        return FactBundle(
             task_id=task_id, agent=AGENT, status="failed", verdict="UNKNOWN",
-            result={}, confidence=0.0, evidence=[], warnings=warnings,
+            result={}, data_completeness=0.0, evidence=[], warnings=warnings,
             missing=missing, elapsed_ms=int((time.monotonic() - t_start) * 1000))
 
     # 🔴 risk 的结论不可能比它最旧的输入更新鲜。
@@ -258,26 +267,53 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
                 break
     add("tripped_thresholds", tripped, "被触发的风险阈值")
 
-    # --- 被声明的重复事实：两个 agent 独立取的同一个值，必须相等 ---
-    # 🔴 这是裁定 15 的受控例外：允许重复，**前提是有人核对**。
-    #    不一致意味着两者看到的不是同一份数据 —— 那时它们的结论没有共同基准。
-    by_agent = {v.agent: v.result for v in upstream}
+    # --- 被声明的重复事实：两个 agent 从同一个源取同一个值 ---
+    # 🔴 裁定 15 的受控例外：允许重复，**前提是有人核对**。
+    #
+    # 判据从「值相等」改成「出自同一份冻结数据」（批 D-II）。批 D-II 之后
+    # market 与 technical 读的是**同一份**冻结快照（SnapshotCoordinator 冻结、
+    # 二者都带 --evidence-set-id 读），sh_close 与 close 由同一份数据算出，
+    # **值必然相等** —— 再比值就退化成恒真死配置（L-7，设计文档 §6 批 D 点名要防）。
+    #
+    # 改成核对两条 Evidence 的 raw_hash（= 冻结集登记的 content_sha256，整份 raw
+    # 的指纹）是否相同：
+    #   · 都读了同一份冻结快照 ⇒ 两个 raw_hash 都是那份的指纹 ⇒ 相同 ⇒ 不报。
+    #   · 某个 Specialist 没传 --evidence-set-id 悄悄退回独立抓取 ⇒ 它的 raw_hash
+    #     出自另一份数据（根数不同 / 抓取时刻不同）⇒ 不同 ⇒ 报红。
+    # 它仍然会红（探针 P2 钉住），只是守的东西从「数值凑巧对上」变成「真的共享了
+    # 同一份数据」—— 共享之后这条检查才不是恒真，而是「谁没读冻结快照」的探照灯。
+    ev_by_agent = {v.agent: {e.field: e for e in v.evidence} for v in upstream}
     xconf: list[str] = []
     for a, fa, b, fb, label in CROSS_CHECK_PAIRS:
-        va, vb = by_agent.get(a, {}).get(fa), by_agent.get(b, {}).get(fb)
-        if va is None or vb is None:
+        ea = ev_by_agent.get(a, {}).get(fa)
+        eb = ev_by_agent.get(b, {}).get(fb)
+        if ea is None or eb is None:
+            continue  # 某一方没产出这条证据 —— 归覆盖率/缺失项管，不在这里判
+        # 🔴 批 E-I：优先比 evidence_set_id —— 结构验证「真的读了同一个冻结集」，
+        #    比 raw_hash 硬。D-II 留的账：两次独立抓取碰巧逐字节相同时 raw_hash 会
+        #    碰巧相等、漏报「悄悄退回独立抓取」；evidence_set_id 不同就是不同，不看内容。
+        #    ⚠️ 两条都有 evidence_set_id 才用它；只要有一条没有（老 Specialist 还没填
+        #    这个字段），退回 raw_hash 比较 —— 不能因为一方字段缺失就让整条检查失效。
+        if ea.evidence_set_id is not None and eb.evidence_set_id is not None:
+            if ea.evidence_set_id != eb.evidence_set_id:
+                xconf.append(
+                    f"{label}: {a}.{fa} 与 {b}.{fb} 出自不同冻结集"
+                    f"（evidence_set_id {ea.evidence_set_id} ≠ {eb.evidence_set_id}）")
             continue
-        try:
-            same = abs(float(va) - float(vb)) < 1e-6
-        except (TypeError, ValueError):
-            same = va == vb
-        if not same:
-            xconf.append(f"{label}: {a}.{fa}={va} vs {b}.{fb}={vb}")
-    add("cross_check_conflict", xconf, "跨源校验不一致之处")
+        ha, hb = ea.raw_hash, eb.raw_hash
+        if ha is None or hb is None:
+            # sh_close/close 都有 raw 来源，两个溯源字段都为空本身就是异常：无从核实
+            # 是否同源 ⇒ 按不一致处理（fail-closed，不给「查不了就放过」）。
+            xconf.append(f"{label}: {a}.{fa} 或 {b}.{fb} 既无 evidence_set_id 又无 raw_hash，无法核实是否同源")
+        elif ha != hb:
+            xconf.append(f"{label}: {a}.{fa} 与 {b}.{fb} 出自不同数据"
+                         f"（raw_hash {ha[:12]}… ≠ {hb[:12]}…）")
+    add("cross_check_conflict", xconf, "跨源校验：两者是否读同一份冻结数据")
     if xconf:
         missing.append(MissingItem(
             "风险判断的事实基准 —— " + "；".join(xconf)
-            + " —— 两个 Agent 取的是同一个源，值却不同，说明它们看到的不是同一份数据",
+            + " —— 两个 Agent 本该读同一份冻结快照，raw_hash 却不同，"
+            "说明至少一方退回了独立抓取，它们看到的不是同一份数据",
             "risk.upstream.cross_check_conflict"))
 
     # --- 上游 stance 互斥 ---
@@ -311,9 +347,11 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
     else:
         status, level = "partial", "UNKNOWN"
 
-    v = AgentVerdict(
+    # 🔴 批 E-III：产 FactBundle（只事实、无 stance）。stance（否决/放行/…）由 Risk Agent
+    #    事后 amend_verdict.py --stance 追加一个 AgentAssessment，不重打这份事实。
+    v = FactBundle(
         task_id=task_id, agent=AGENT, status=status, verdict=level,
-        result=result, confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        result=result, data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence, warnings=warnings, missing=missing,
         elapsed_ms=int((time.monotonic() - t_start) * 1000))
     return v
@@ -325,10 +363,13 @@ _EXPECTED_FIELDS = 10
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="从 Stage 1 冻结证据算风险事实 → AgentVerdict JSON")
+        description="从 Stage 1 冻结证据算风险事实 → FactBundle JSON（批 E-III）")
     ap.add_argument("--verdict-ids", required=True,
                     help="Stage 1 各 Specialist 的 verdict_id，逗号或空格分隔")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--run-id", default=None,
+                    help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
+                         "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
     ap.add_argument("--no-store", action="store_true", help="不落判定原件")
     ap.add_argument("--render", action="store_true", help="附带人类可读摘要")
     args = ap.parse_args(argv)
@@ -346,26 +387,35 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
 
-    v = build_verdict(verdict_ids=ids, store=store,
-                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
-    ref = save_verdict(v) if store else None
+    fb = build_fact_bundle(verdict_ids=ids, store=store,
+                           task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
+    # 🔴 批 E-III：事实原件（FactBundle，不含 stance）直接落库；stance 由 Risk Agent 事后追加。
+    # 🔴 批 F：这个决策的 risk 事实由编排器在 spawn 之前就算好落库了 —— 你（risk）不该再
+    #    自己跑一遍。真跑了会撞上「一个 (task_id, agent) 至多一份 fact」的唯一索引，
+    #    save_fact_bundle 抛一个指路的 ValueError。这里接住它、干净退出（码 2），不让它
+    #    变成一坨 traceback（dev-workflow §8：报错要指路）。
+    try:
+        ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
 
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref else "  (未落库)"), file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             print(f"  {e.display_label:<26} = {e.value}", file=sys.stderr)
-        for w in v.warnings:
+        for w in fb.warnings:
             print(f"  ⚠ {w}", file=sys.stderr)
-        for m in v.missing:
+        for m in fb.missing:
             print(f"  ⚠ 缺失 [{m.code}] {m}", file=sys.stderr)
 
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":

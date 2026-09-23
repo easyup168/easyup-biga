@@ -1,0 +1,30 @@
+[
+  {
+    "payload": {
+      "a": 1,
+      "b": "中文",
+      "c": [
+        1,
+        2,
+        {
+          "d": null
+        }
+      ]
+    },
+    "sha256": "2aa0bd12bf62386a421365455e4c88e60aa1ae2c4db8228e7fe1876de42f3ef3"
+  },
+  {
+    "payload": {
+      "z": 1.5,
+      "a": true,
+      "nested": {
+        "k": "v",
+        "l": [
+          ",",
+          ":"
+        ]
+      }
+    },
+    "sha256": "0fa63c9843b67434dc3c0578bdfee45c7a7bf57eb8fd3e65bd1a09064f5f147b"
+  }
+]

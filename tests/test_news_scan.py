@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import datetime, timedelta
@@ -48,7 +49,7 @@ def _feed(now: datetime, *, n: int = 20, step_sec: int = 60,
     # 补一条很旧的，代表「窗口之前的数据我们也取到了」
     items.append(NewsItem(id=1, at=now - timedelta(minutes=span_extra_min),
                           text="很旧的一条", tags=(), is_quote=False))
-    return NewsFeed(items=tuple(items), raw={"pages": []})
+    return NewsFeed(items=tuple(items), raw={"pages": []}, raw_text="[]")
 
 
 def _build(monkeypatch, now: datetime, feed: NewsFeed, **kw):
@@ -59,8 +60,9 @@ def _build(monkeypatch, now: datetime, feed: NewsFeed, **kw):
     #    假时钟只假一半，比不假更难查。
     monkeypatch.setattr(evidence_mod, "now_cn", lambda: now)
     monkeypatch.setattr(NS, "fetch_feed", lambda **_: feed)
-    return NS.build_verdict(break_source=set(), store=False,
-                            task_id=new_task_id(1), **kw)
+    # 批 E-II：news 迁到产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return NS.build_fact_bundle(break_source=set(), store=False,
+                                task_id=new_task_id(1), **kw)
 
 
 MON_OPEN = datetime(2026, 9, 21, 10, 30, tzinfo=CN_TZ)      # 周一盘中
@@ -190,19 +192,20 @@ class TestEmptyFeedIsFailureNotQuiet:
         import _sources.sina_news as SN
         payload = {"result": {"status": {"code": 0},
                               "data": {"feed": {"list": []}}}}
-        orig = SN.get_json
-        SN.get_json = lambda *a, **k: payload
+        orig = SN.get_json_and_text
+        SN.get_json_and_text = lambda *a, **k: (payload, json.dumps(payload))
         try:
             with pytest.raises(SourceError, match="一条都没取到"):
                 SN.fetch_feed(pages=1)
         finally:
-            SN.get_json = orig
+            SN.get_json_and_text = orig
 
     def test_窗口内为空要进missing(self, monkeypatch):
         # 数据都在窗口之外
         old = MON_OPEN - timedelta(hours=5)
         feed = NewsFeed(items=(NewsItem(id=1, at=old, text="旧", tags=(),
-                                        is_quote=False),), raw={"pages": []})
+                                        is_quote=False),), raw={"pages": []},
+                        raw_text="[]")
         v = _build(monkeypatch, MON_OPEN, feed, window_min=60)
         assert "news.window.empty" in [m.code for m in v.missing]
 
@@ -216,13 +219,13 @@ class TestParseFailureIsNotQuietNews:
         rows += [{"nope": 1} for _ in range(9)]     # 9/10 解析不出来
         payload = {"result": {"status": {"code": 0},
                               "data": {"feed": {"list": rows}}}}
-        orig = SN.get_json
-        SN.get_json = lambda *a, **k: payload
+        orig = SN.get_json_and_text
+        SN.get_json_and_text = lambda *a, **k: (payload, json.dumps(payload))
         try:
             with pytest.raises(SourceError, match="不要当成"):
                 SN.fetch_feed(pages=1)
         finally:
-            SN.get_json = orig
+            SN.get_json_and_text = orig
 
 
 # ══ 外部评审 P1-3：连续事件流的时间语义 ═══════════════════════
@@ -341,7 +344,7 @@ class TestTruncatedResponseBecomesSourceError:
 
         monkeypatch.setattr(NS, "now_cn", lambda: MON_OPEN)
         monkeypatch.setattr(NS, "fetch_feed", boom)
-        v = NS.build_verdict(break_source=set(), store=False,
-                             task_id=new_task_id(1))
+        v = NS.build_fact_bundle(break_source=set(), store=False,
+                                 task_id=new_task_id(1))
         assert v.verdict == "UNKNOWN"
         assert "news.feed.unavailable" in [m.code for m in v.missing]

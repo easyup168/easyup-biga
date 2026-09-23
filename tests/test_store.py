@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import timedelta
@@ -16,14 +17,22 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-from _contract import AgentVerdict, DecisionCard, Evidence, new_task_id, now_cn
+from _contract import (
+    STANCE_VOCAB,
+    AgentVerdict,
+    DecisionCard,
+    Evidence,
+    new_task_id,
+    now_cn,
+)
 from _store import (
     SCHEMA_VERSION,
     AppendOnlyViolation,
     connect,
     init_schema,
     list_agent_runs,
-    load_card,
+    load_card_by_record_id,
+    load_online_card,
     load_raw_snapshot,
     load_verdicts,
     next_decision_id,
@@ -32,6 +41,7 @@ from _store import (
     reserve_decision_id,
     save_card,
     save_raw_snapshot,
+    save_trading_calendar,
 )
 
 TID = new_task_id(1, day="20260919")
@@ -50,7 +60,7 @@ def make_verdict(**kw) -> AgentVerdict:
     # contract-exempt: 构造真 dataclass 的 kwargs
     base = dict(
         task_id=TID, agent="emotion", status="completed", verdict="PASS",
-        result={"limit_up": 42}, confidence=0.8,
+        result={"limit_up": 42}, data_completeness=0.8,
         evidence=[Evidence(field="limit_up", source="biga.db:raw_market_snapshot",
                            value=42, as_of=t - timedelta(seconds=300),
                            retrieved_at=t, label="涨停家数")],
@@ -71,11 +81,15 @@ def make_card(**kw) -> DecisionCard:
     于是两条测试一直在用不合法的样本跑 —— 它们通过，只是因为没人拦。
     """
     did = kw.get("decision_id", TID)
+    # 🔴 只给 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按计数
+    #    比较（missing 条数须不少于缺席 agent 数），5 条占位才够
+    #    （本文件不测 roster）。
     # contract-exempt: 同上
     base = dict(
         decision_id=did, status="WAIT", headline="核心矛盾一句话",
         verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
+        missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
     )
     base.update(kw)
     return DecisionCard(**base)
@@ -113,6 +127,7 @@ class TestAppendOnly:
             ("decision_records", "UPDATE decision_records SET status='BUY'"),
             ("agent_runs", "UPDATE agent_runs SET verdict='PASS'"),
             ("raw_market_snapshot", "UPDATE raw_market_snapshot SET source='x'"),
+            ("fact_trading_calendar", "UPDATE fact_trading_calendar SET is_open=0"),
         ],
     )
     def test_UPDATE被数据库拒绝(self, db, table, sql):
@@ -120,17 +135,38 @@ class TestAppendOnly:
         record_agent_run(task_id=TID, agent="emotion", status="completed",
                          started_at="t0", finished_at="t1", elapsed_ms=1, path=db)
         save_raw_snapshot(source="em:api", as_of="a", retrieved_at="b",
-                          payload={"k": 1}, path=db)
+                          payload={"k": 1}, raw_text=json.dumps({"k": 1}), path=db)
+        save_trading_calendar(source="szse:calendar/2026-09", as_of="a",
+                              retrieved_at="b", days=[("20260901", True)], path=db)
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute(sql)
 
     def test_DELETE被数据库拒绝(self, db):
         save_raw_snapshot(source="em:api", as_of="a", retrieved_at="b",
-                          payload={"k": 1}, path=db)
+                          payload={"k": 1}, raw_text=json.dumps({"k": 1}), path=db)
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute("DELETE FROM raw_market_snapshot")
+
+    def test_迁移后agent_runs仍拒绝UPDATE和DELETE(self, db):
+        """🔴 批 J-II：v9 的 `RENAME COLUMN run_id TO ledger_id` 之后，只追加触发器
+        必须仍然真的拦得住写。
+
+        SQLite 的 `RENAME COLUMN` 会自动改写引用该列的触发器体 —— 名字还挂在
+        `sqlite_master` 里，但触发器体可能被改坏，而这**不会报错**。所以判据必须是
+        「真跑一次 UPDATE 和一次 DELETE 看拒不拒」，不是「触发器名字还在不在」。
+        （`db` fixture 走完整迁移到 v9，所以这里的 agent_runs 是改名之后的。）
+        """
+        record_agent_run(task_id=TID, agent="market", status="completed",
+                         started_at="a", finished_at="b", elapsed_ms=1,
+                         runtime_run_id="rt-x", path=db)
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("UPDATE agent_runs SET verdict='PASS'")
+        with pytest.raises(AppendOnlyViolation, match="只追加"):
+            with connect(db) as c:
+                c.execute("DELETE FROM agent_runs")
 
     def test_每张表都有只追加触发器(self, db):
         """🔴 判据取自**数据库里实际有哪些表**，不是手写清单。
@@ -175,16 +211,95 @@ class TestAppendOnly:
                           "VALUES ('x','y','z',0,'a','b')")
 
 
+def _run_id_namespace_violations(conn):
+    """批 J-II 的守卫本体，抽成函数以便自证它两条子句都会红。
+
+    返回 `(type_bad, value_bad, checked)`：
+      · `type_bad`  名为 `run_id` 却不是 TEXT 的列
+      · `value_bad` 名为 `run_id`、有非 NULL 值却追不到 `decision_runs.run_id` 的
+      · `checked`   实际扫到、带 `run_id` 列的表（证明不是一张都没扫到的平凡通过）
+
+    🔴 判据**可派生**：从 `sqlite_master` 现有的表推出来，不是手写清单
+    （`test_roster_matches_config` 的教训：清单只加固当时想到的那几列）。
+    语义不同的第四个同名几乎必然过不了这两关 —— `agent_runs.run_id` 当年是
+    INTEGER，第一关就红。
+    """
+    canonical = {r[0] for r in conn.execute("SELECT run_id FROM decision_runs")}
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")]
+    type_bad, value_bad, checked = [], [], set()
+    for t in tables:
+        cols = [c for c in conn.execute(f"PRAGMA table_info({t})") if c[1] == "run_id"]
+        if not cols:
+            continue
+        checked.add(t)
+        for c in cols:
+            if (c[2] or "").upper() != "TEXT":
+                type_bad.append(f"{t}.run_id 声明为 {c[2]!r}，应为 TEXT")
+        for (val,) in conn.execute(
+                f"SELECT run_id FROM {t} WHERE run_id IS NOT NULL"):
+            if val not in canonical:
+                value_bad.append(f"{t}.run_id={val!r} 追不到 decision_runs")
+    return type_bad, value_bad, checked
+
+
+class TestRunIdNamespace:
+    """🔴 批 J-II：防止「第四个语义不同的 `run_id`」再长出来。
+
+    §4 实测过三个互不相同的东西共用 `run_id` 这个名字（编排执行尝试 / 账本行号 /
+    运行时 spawn id）。这一批收敛成一个：在 BigA 自己的库里，`run_id` 只指编排的
+    一次执行尝试（`decision_runs.run_id`）。守卫见 `_run_id_namespace_violations`。
+    """
+
+    def test_当前schema里run_id列全部合规(self, db):
+        with connect(db, readonly=True) as c:
+            type_bad, value_bad, checked = _run_id_namespace_violations(c)
+        assert type_bad == [], type_bad
+        assert value_bad == [], value_bad
+        # 🔴 非平凡：必须真的扫到了已知的两处 run_id 列，否则「全绿」可能是没扫到。
+        assert {"decision_runs", "run_events"} <= checked, (
+            f"守卫没扫到已知的 run_id 列，覆盖坏了：checked={sorted(checked)}")
+
+    def test_类型子句会红_加一个run_id_INTEGER列(self, db):
+        """P5 的常驻版：造一张带 `run_id INTEGER` 的表，断言类型子句抓到它。
+
+        （另有一次对**真实 schema** 的手工探针，见 CHANGELOG —— 这里用临时表证明
+        守卫函数本身不是平凡通过，不改动已发布的迁移。）
+        """
+        with connect(db) as c:
+            c.execute("CREATE TABLE _probe_int (run_id INTEGER, x TEXT)")
+            type_bad, _, checked = _run_id_namespace_violations(c)
+        assert "_probe_int" in checked
+        assert any("_probe_int" in m for m in type_bad), (
+            f"新加的 run_id INTEGER 列没被守卫抓到：{type_bad}")
+
+    def test_值子句会红_run_id追不到decision_runs(self, db):
+        """TEXT 但语义不对（值不是任何真实执行尝试）也要被抓到 —— 这一关正是
+        「类型对了但换了个含义」的兜底，`agent_runs.run_id` 当年靠第一关就红，
+        将来若有人用 TEXT 装第四个同名，靠的是这一关。"""
+        with connect(db) as c:
+            c.execute("CREATE TABLE _probe_txt (run_id TEXT)")
+            c.execute("INSERT INTO _probe_txt VALUES ('not-a-real-run-id')")
+            type_bad, value_bad, _ = _run_id_namespace_violations(c)
+        assert type_bad == []                      # 类型没问题
+        assert any("_probe_txt" in m for m in value_bad), (
+            f"追不到 decision_runs 的 run_id 值没被抓到：{value_bad}")
+
+
 class TestDecisionRecords:
     def test_存取往返(self, db):
         card = make_card()
         save_card(card, path=db)
-        got = load_card(card.decision_id, path=db)
+        got = load_online_card(card.decision_id, path=db)
         assert got is not None
         assert got.to_dict() == card.to_dict()
 
     def test_派生列由卡对象生成(self, db):
-        card = make_card(status="AVOID", headline="高位风险")
+        # 满 roster + missing=[]：要验证 missing_count 的派生值真的是 0，
+        # 不能靠「占位 missing」绕过——那样 missing_count 就不是 0 了。
+        full_roster = [make_verdict(agent=a, task_id=TID) for a in sorted(STANCE_VOCAB)]
+        card = make_card(status="AVOID", headline="高位风险",
+                         verdicts=full_roster, missing=[])
         save_card(card, path=db)
         with connect(db, readonly=True) as c:
             row = c.execute("SELECT status, headline, missing_count "
@@ -210,8 +325,8 @@ class TestDecisionRecords:
         save_card(replay, replay_of=rid, path=db)
 
         # 在线那条仍然是原始结论
-        assert load_card(TID, path=db).status == "WAIT"
-        assert load_card(TID, record_id=rid, path=db).model_ref == "anthropic/claude-sonnet-5"
+        assert load_online_card(TID, path=db).status == "WAIT"
+        assert load_card_by_record_id(rid, path=db).model_ref == "anthropic/claude-sonnet-5"
         with connect(db, readonly=True) as c:
             assert c.execute("SELECT COUNT(*) FROM decision_records").fetchone()[0] == 2
 
@@ -222,7 +337,7 @@ class TestDecisionRecords:
         assert vs[0].evidence[0].as_of.tzinfo is not None
 
     def test_不存在返回None(self, db):
-        assert load_card("BIGA-20260101-999", path=db) is None
+        assert load_online_card("BIGA-20260101-999", path=db) is None
 
 
 class TestDecisionIdAllocation:
@@ -292,13 +407,38 @@ class TestAgentRuns:
         assert len(list_agent_runs(agent="emotion", path=db)) == 2
         assert len(list_agent_runs(path=db)) == 3
 
+    def test_runtime_run_id落库并读回(self, db):
+        """🔴 批 J-II：spawn id 落进 agent_runs.runtime_run_id，能原样取回。
+
+        这是 J2-3 结构化 join 的全部原料 —— 落不进去，spawn 核验就没有硬绑定
+        可用，只能永远走文本匹配的退回分支（静默退化，看起来一切正常）。
+        """
+        record_agent_run(task_id=TID, agent="market", status="completed",
+                         started_at="a", finished_at="b", elapsed_ms=1,
+                         runtime_run_id="rt-abc123", path=db)
+        row = list_agent_runs(agent="market", path=db)[0]
+        assert row["runtime_run_id"] == "rt-abc123"
+
+    def test_runtime_run_id默认为空(self, db):
+        """不传就是 NULL —— 历史行与回放路径都靠它如实表达「不知道 spawn id」。"""
+        record_agent_run(task_id=TID, agent="market", status="completed",
+                         started_at="a", finished_at="b", elapsed_ms=1, path=db)
+        assert list_agent_runs(agent="market", path=db)[0]["runtime_run_id"] is None
+
+    def test_从verdict记账也能带runtime_run_id(self, db):
+        v = make_verdict()
+        record_verdict_run(v, started_at="a", finished_at="b", decision_id=TID,
+                           runtime_run_id="rt-fromverdict", path=db)
+        assert list_agent_runs(agent="emotion", path=db)[0]["runtime_run_id"] \
+            == "rt-fromverdict"
+
 
 class TestRawSnapshot:
     def test_原样落盘并取回(self, db):
         payload = {"limit_up": 42, "rows": [{"code": "600000", "pct": 10.0}]}
         sid = save_raw_snapshot(source="em:api/clist", as_of="2026-09-19T15:00:00+08:00",
                                 retrieved_at="2026-09-19T15:00:03+08:00",
-                                payload=payload, path=db)
+                                payload=payload, raw_text=json.dumps(payload), path=db)
         got = load_raw_snapshot(sid, path=db)
         assert got["payload"] == payload
         assert got["source"] == "em:api/clist"
@@ -306,7 +446,8 @@ class TestRawSnapshot:
 
     def test_相同内容不去重(self, db):
         """采了两次就是两个事实，都留着 —— 去重会丢掉「这一刻也采到了」这条信息。"""
-        kw = dict(source="em:api", as_of="a", retrieved_at="b", payload={"k": 1})
+        kw = dict(source="em:api", as_of="a", retrieved_at="b", payload={"k": 1},
+                  raw_text=json.dumps({"k": 1}))
         a = save_raw_snapshot(**kw, path=db)
         b = save_raw_snapshot(**kw, path=db)
         assert a != b
@@ -332,7 +473,11 @@ class TestAgentRunsIsLedgerNotProof:
         callers = set()
         for f in repo_files(".py"):
             rel = str(f.relative_to(REPO))
-            if rel.startswith(("skills/_store/", "tests/")):
+            # 🔴 批 H-I：store 的真实实现已迁至 src/easyup_biga/persistence/，而
+            #    db.py 内部 record_verdict_run → record_agent_run 是**store 自调**，
+            #    不算「业务代码写它」。排除新旧两处（旧路径现为薄壳、无调用）——
+            #    只排旧路径会把 store 自调当成业务调用，守卫的语义就漂了。
+            if rel.startswith(("skills/_store/", "src/easyup_biga/persistence/", "tests/")):
                 continue
             try:
                 tree = ast.parse(f.read_text(encoding="utf-8"))
@@ -348,7 +493,10 @@ class TestAgentRunsIsLedgerNotProof:
 
     def test_源头注释已改正(self):
         """schema 与 db 的注释是权威处 —— 它们说错了，别处再怎么改都会漂回来。"""
-        for rel in ("skills/_store/schema.py", "skills/_store/db.py"):
+        # 🔴 批 H-I：真实源已迁至 src/easyup_biga/persistence/；旧路径现为薄壳，
+        #    薄壳里没有这条注释，读旧路径这条断言会误红。
+        for rel in ("src/easyup_biga/persistence/schema.py",
+                    "src/easyup_biga/persistence/db.py"):
             src = (REPO / rel).read_text(encoding="utf-8")
             assert "subagent_runs" in src, f"{rel} 没有指向真正的 spawn 证明"
 
@@ -382,7 +530,7 @@ class TestF23MissingDatabase:
         with connect(db, readonly=True) as c:
             assert c.execute("SELECT count(*) FROM decision_records").fetchone()[0] == 0
 
-    @pytest.mark.parametrize("tool", ["missing_ledger", "latency_report"])
+    @pytest.mark.parametrize("tool", ["missing_ledger", "latency_report", "readback_check"])
     def test_巡检工具不吐traceback(self, tmp_path, tool):
         """判据是**有没有 traceback**，不是退出码 —— 退出码本来就非零。"""
         import os

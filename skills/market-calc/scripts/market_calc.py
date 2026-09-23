@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""market-calc —— A 股市场状态事实计算，输出一份合法的 AgentVerdict。
+"""market-calc —— A 股市场状态事实计算，输出一份合法的 FactBundle。
+
+🔴 批 E-II：这个 skill 从产合体 `AgentVerdict` 迁到产 `FactBundle`（只事实、无 stance），
+形状与 E-I 迁 emotion 完全一致。stance 由 Market Agent 事后用 `amend_verdict.py --stance`
+追加一个 `AgentAssessment`（**不重打这份事实**）。消费方（card_ops/risk_check）零改动 ——
+`_store.load_verdict` 对新旧两种落库形状都返回一个 AgentVerdict。
 
 分工（architecture.md §6 硬约束 S-1 / S-2）
 --------------------------------------------
@@ -65,8 +70,8 @@ sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
-    AgentVerdict,
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
@@ -84,10 +89,11 @@ from _sources import (  # noqa: E402
 )
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
+    save_fact_bundle,
     save_raw_snapshot,
-    save_verdict,
 )
+from _snapshot import SnapshotCoordinator  # noqa: E402
 
 AGENT = "market"
 CALC_VERSION = "market-calc/1"
@@ -125,19 +131,26 @@ _EXPECTED_FIELDS = 15
 class Collector:
     """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
 
-    def __init__(self, date: str | None, break_source: set[str], store: bool):
+    def __init__(self, date: str | None, break_source: set[str], store: bool,
+                 evidence_set_id: str | None = None):
         self._lock = threading.Lock()
         self.date = date
         self.break_source = break_source
         self.store = store
+        # 给了就读冻结快照（不联网、不重复落盘），没给自己抓（手工调试路径）。
+        self.evidence_set_id = evidence_set_id
+        self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
         self.daily: dict[str, IndexDaily] = {}
         self.quotes: dict[str, IndexQuote] = {}
         self.breadth: BreadthResult | None = None
         self.missing: list[str] = []
         self.warnings: list[str] = []
-        self.raw: list[tuple[str, Any]] = []
+        #: (source, 解析后 payload, 该源自己的 as_of, 原始响应文本)。批 I：原文一并累积。
+        self.raw: list[tuple[str, Any, datetime, str]] = []
         #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
         self.hashes: dict[str, str] = {}
+        #: source → 冻结集 id（只有读冻结快照的 source 有）。Evidence.evidence_set_id 用它。
+        self.es_ids: dict[str, str] = {}
 
     def _note(self, *, missing: MissingItem | None = None,
               warning: str | None = None) -> None:
@@ -147,7 +160,8 @@ class Collector:
             if warning:
                 self.warnings.append(warning)
 
-    def _keep_raw(self, source: str, payload: Any, as_of: datetime) -> None:
+    def _keep_raw(self, source: str, payload: Any, as_of: datetime,
+                  raw_text: str) -> None:
         """记一份原始响应。**`as_of` 必须是这个源自己的时刻。**
 
         🔴 外部评审 F4：原来这里不收 `as_of`，落库时统一用一个全局变量
@@ -165,8 +179,10 @@ class Collector:
         **bug 正好落在两者之间从未被同时检查过的缝隙里**。
         """
         with self._lock:
-            self.raw.append((source, payload, as_of))
-            self.hashes[source] = payload_sha256(payload)
+            self.raw.append((source, payload, as_of, raw_text))
+            # 批 I：hash 基于**原始响应文本**算，与 save_raw_snapshot 的 content_sha256
+            # 同一口径（raw_text_sha256），Evidence.raw_hash 才对得上 raw 层。
+            self.hashes[source] = raw_text_sha256(raw_text)
 
     # -- 采集 --------------------------------------------------------------
 
@@ -177,12 +193,18 @@ class Collector:
                 f"{label}日线 —— 数据源被人为中断（--break-source sina_{key}）",
                 "market.index_daily.source_broken"))
             return
-        try:
-            d = fetch_index_daily(symbol, bars=BAR_COUNT)
-        except (SourceError, ValueError) as e:
-            self._note(missing=MissingItem(f"{label}日线 —— 数据源不可用: {e}",
-                                          "market.index_daily.unavailable"))
-            return
+        if self._coord is not None:
+            # 🔴 fail-closed：读冻结失败直接上抛 SnapshotReadError，不静默退回
+            #    fetch_index_daily（P5）。读的是本次决策冻结的那份，与 sector/
+            #    technical 同源。
+            d = self._coord.read_index_daily(self.evidence_set_id, symbol, bars=BAR_COUNT)
+        else:
+            try:
+                d = fetch_index_daily(symbol, bars=BAR_COUNT)
+            except (SourceError, ValueError) as e:
+                self._note(missing=MissingItem(f"{label}日线 —— 数据源不可用: {e}",
+                                              "market.index_daily.unavailable"))
+                return
 
         if self.date is not None and d.trade_date != self.date:
             # 显式指定了日期 = 一个契约。对不上就是没拿到要的东西。
@@ -193,7 +215,17 @@ class Collector:
 
         with self._lock:
             self.daily[key] = d
-        self._keep_raw(f"sina:kline/{symbol}", d.raw, d.server_as_of or now_cn())
+        if self._coord is not None:
+            # raw 已由 freeze 落库，这里不重复落盘；hash 用冻结集登记的整份 raw 指纹
+            # —— 与 technical 读同一 symbol 时得到同一个 raw_hash（risk CROSS_CHECK 靠它）。
+            with self._lock:
+                self.hashes[f"sina:kline/{symbol}"] = \
+                    self._coord.frozen_content_sha256(self.evidence_set_id, symbol)
+                # 批 E-I：Evidence 直接声明冻结集 id —— 比 raw_hash 更硬的结构核对。
+                self.es_ids[f"sina:kline/{symbol}"] = self.evidence_set_id
+        else:
+            self._keep_raw(f"sina:kline/{symbol}", d.raw,
+                           d.server_as_of or now_cn(), d.raw_text)
 
     def collect_quotes(self) -> None:
         if "tencent" in self.break_source:
@@ -201,16 +233,19 @@ class Collector:
                                           "market.turnover.source_broken"))
             return
         try:
-            q = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+            q, quote_body = fetch_index_quote([sym for sym, _ in MARKETS.values()])
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"成交额 —— 数据源不可用: {e}",
                                           "market.turnover.unavailable"))
             return
         with self._lock:
             self.quotes = q
-        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它
+        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它。
+        # raw_text 用整段响应体 `quote_body`（批 I）：raw 层里那份 {code: 片段} 是从
+        # body 抠出来重排的派生物，content_sha256 要证明源字节只能用 body 本身。
         self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
-                       max(v.server_as_of or now_cn() for v in q.values()))
+                       max(v.server_as_of or now_cn() for v in q.values()),
+                       quote_body)
 
     def collect_breadth(self) -> None:
         if "breadth" in self.break_source:
@@ -227,7 +262,8 @@ class Collector:
             self.breadth = b
         # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
         # 套上日线的交易日，就是把实时数写成上一个交易日的事实。
-        self._keep_raw("em:push2delay/ulist.np", b.raw, b.server_as_of or now_cn())
+        self._keep_raw("em:push2delay/ulist.np", b.raw,
+                       b.server_as_of or now_cn(), b.raw_text)
         # ⚠️ 不在这里发 as_of 警告：它依赖交易日，而交易日要等日线回来才知道。
         #    并行采集下在这里读是竞态，统一放到全部完成后做。
 
@@ -254,15 +290,16 @@ def _ma_volume(daily: IndexDaily) -> float | None:
     return sum(b.volume for b in window) / len(window)
 
 
-def build_verdict(
+def build_fact_bundle(
     *,
     date: str | None,
     break_source: set[str],
     store: bool,
     task_id: str,
-) -> AgentVerdict:
+    evidence_set_id: str | None = None,
+) -> FactBundle:
     t_start = time.monotonic()
-    c = Collector(date, break_source, store)
+    c = Collector(date, break_source, store, evidence_set_id)
 
     jobs = [lambda: c.collect_daily("sh"), lambda: c.collect_daily("sz"),
             c.collect_quotes, c.collect_breadth]
@@ -289,18 +326,25 @@ def build_verdict(
     retrieved = now_cn()
     as_of: datetime | None = None
 
-    def _raw_hash_for(source: str) -> str | None:
-        """这条证据出自哪份原始响应。
+    def _lookup(source: str, table: dict[str, str]) -> str | None:
+        """在 source→X 的表里查这条证据的 X（raw_hash / evidence_set_id 共用一套匹配）。
 
         派生字段（`derived:` 开头）没有单一来源，返回 None ——
-        **不硬凑一个哈希**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。
+        **不硬凑**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。
         """
         if source.startswith("derived:"):
             return None
-        if source in c.hashes:
-            return c.hashes[source]
-        cand = [k for k in c.hashes if source.startswith(k)]
-        return c.hashes[max(cand, key=len)] if cand else None
+        if source in table:
+            return table[source]
+        cand = [k for k in table if source.startswith(k)]
+        return table[max(cand, key=len)] if cand else None
+
+    def _raw_hash_for(source: str) -> str | None:
+        return _lookup(source, c.hashes)
+
+    def _es_id_for(source: str) -> str | None:
+        # 批 E-I：只有读冻结的 source 在 c.es_ids 里；其余（腾讯/涨跌家数）返回 None。
+        return _lookup(source, c.es_ids)
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
@@ -309,6 +353,7 @@ def build_verdict(
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
+            evidence_set_id=_es_id_for(source),
         ))
 
 
@@ -334,7 +379,8 @@ def build_verdict(
             field=field, source=source, value=value,
             as_of=retrieved, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=_raw_hash_for(source)))
+            raw_hash=_raw_hash_for(source),
+            evidence_set_id=_es_id_for(source)))
 
     if trade_date:
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
@@ -455,9 +501,10 @@ def build_verdict(
                 "derived:em:push2delay/ulist.np")
 
     if store:
-        for source, payload, src_as_of in c.raw:
+        for source, payload, src_as_of, raw_text in c.raw:
             save_raw_snapshot(source=source, as_of=src_as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(), payload=payload)
+                              retrieved_at=retrieved.isoformat(),
+                              payload=payload, raw_text=raw_text)
 
     # verdict 表达的是**数据完整度**，不是市场判断。
     # 「这算不算放量上涨」由 Market Agent 依据 AGENTS.md 里的口径来说。
@@ -469,13 +516,15 @@ def build_verdict(
     else:
         status, level = "partial", "UNKNOWN"
 
-    return AgentVerdict(
+    # 🔴 批 E-II：产 FactBundle（只事实、无 stance）。stance 由 Market Agent 事后
+    #    `amend_verdict.py --stance` 追加一个 AgentAssessment，不重打这份事实。
+    return FactBundle(
         task_id=task_id,
         agent=AGENT,
         status=status,
         verdict=level,
         result=result,
-        confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence,
         warnings=c.warnings,
         missing=c.missing,
@@ -484,9 +533,14 @@ def build_verdict(
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="A 股市场状态事实计算 → AgentVerdict JSON")
+    ap = argparse.ArgumentParser(description="A 股市场状态事实计算 → FactBundle JSON（批 E-II）")
     ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--run-id", default=None,
+                    help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
+                         "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="给了就读这份冻结快照的日线（编排出卡时传）；缺省自己联网抓（手工调试）")
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练用：人为中断某个数据源 (sina_sh|sina_sz|tencent|breadth)")
     ap.add_argument("--no-store", action="store_true", help="不写 raw_market_snapshot")
@@ -497,37 +551,38 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
 
-    v = build_verdict(date=args.date, break_source=set(args.break_source),
-                      store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
-    # 🔴 判定原件直接落库，返回一个 id 供 agent 引用。
+    fb = build_fact_bundle(date=args.date, break_source=set(args.break_source),
+                           store=store, task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                           evidence_set_id=args.evidence_set_id)
+    # 🔴 事实原件直接落库（批 E-II：FactBundle，不含 stance），返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：
-    #    15 条 evidence 的 retrieved_at 转述后一条不剩。
-    #    让数据不经过 LLM，是唯一可靠的修法。
-    ref = save_verdict(v) if store else None
+    #    15 条 evidence 的 retrieved_at 转述后一条不剩。让数据不经过 LLM 是唯一可靠的修法。
+    #    stance 由 Market Agent 事后 `amend_verdict.py --ref <这个号> --stance <词>` 追加。
+    ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
 
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref is not None else "  (未落库)"),
               file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             print(f"  {e.display_label:<22} = {e.value}"
                   f"   as_of {e.as_of:%Y-%m-%d %H:%M}", file=sys.stderr)
-        if v.warnings:
+        if fb.warnings:
             print("  警告:", file=sys.stderr)
-            for w in v.warnings:
+            for w in fb.warnings:
                 print(f"    · {w}", file=sys.stderr)
-        if v.missing:
-            print(f"  ⚠ 缺失项（{len(v.missing)}）:", file=sys.stderr)
-            for m in v.missing:
+        if fb.missing:
+            print(f"  ⚠ 缺失项（{len(fb.missing)}）:", file=sys.stderr)
+            for m in fb.missing:
                 print(f"    · {m}", file=sys.stderr)
 
     # 退出码：0=完整，2=有缺失但核心可用，3=核心缺失
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":

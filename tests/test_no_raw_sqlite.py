@@ -1,6 +1,7 @@
 """常驻守卫：业务代码里不许出现裸 sqlite3。
 
-全仓 AST 扫描，`skills/_store/` 之外的任何 .py 都不许：
+全仓 AST 扫描，`src/easyup_biga/persistence/`（批 H-I 前是 `skills/_store/`）
+之外的任何 .py 都不许：
 
   * `import sqlite3` / `from sqlite3 import ...`
   * 调用 `sqlite3.connect(...)`
@@ -22,9 +23,13 @@ import ast
 import pathlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-STORE_DIR = REPO / "skills" / "_store"
+# 🔴 批 H-I：DB 唯一入口的**真实实现**已迁至 src/easyup_biga/persistence/（旧路径
+#    skills/_store/ 迁移后只剩 re-export 薄壳，壳里没有 sqlite3）。这个常量若仍指
+#    旧路径，「裸 sqlite3」守卫会在新目录上静默失效——db.py 里的 `import sqlite3`
+#    本该被豁免，却因守卫在看错的目录而无从谈起。
+STORE_DIR = REPO / "src" / "easyup_biga" / "persistence"
 
-from _scan import repo_files  # noqa: E402
+from _scan import is_external_reference, repo_files  # noqa: E402
 
 EXEMPT_MARKER = "store-exempt:"
 
@@ -44,10 +49,22 @@ def _is_exempt(lines: list[str], lineno: int) -> bool:
 
 
 def _in_store(p: pathlib.Path) -> bool:
-    return STORE_DIR in p.parents
+    """`p` 不受「DB 唯一入口」约束——本体所在目录，或只读参考材料（原因见
+    `test_contract_single_impl.py::_in_contract` 同一处注释，同一个道理）。"""
+    return STORE_DIR in p.parents or is_external_reference(p)
 
 
 ALL_FILES = _py_files()
+
+
+def test_docs_external下的示意代码不算违规裸sqlite3():
+    """2026-09-23 实测撞到：`test_scan_fallback.py` 模拟"没有 git"退化成纯
+    文件系统遍历时，会扫到 `docs/external/` 下外部评审自带的示意代码
+    （一份示范 Repository 该长什么样的 `repository.py`，直接
+    `import sqlite3`，平时被 gitignore、正常 git 路径天然看不到），
+    误判成业务代码违规裸用 sqlite3。"""
+    fake = REPO / "docs" / "external" / "some-review" / "reference" / "repository.py"
+    assert _in_store(fake), "docs/external/ 下的文件应该被当作只读参考材料排除"
 
 
 def test_扫描范围非空():

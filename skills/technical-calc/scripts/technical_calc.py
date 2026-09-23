@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""technical-calc —— 指数技术指标，输出合法 AgentVerdict。
+"""technical-calc —— 指数技术指标，输出合法 FactBundle。
+
+🔴 批 E-II：从产合体 `AgentVerdict` 迁到产 `FactBundle`（只事实、无 stance），形状与
+E-I 迁 emotion 完全一致。stance 由 Technical Agent 事后 `amend_verdict.py --stance` 追加一个
+`AgentAssessment`（不重打事实）。消费方零改动（`load_verdict` 多态）。
 
 🔴 做**指数**，不做个股
 ------------------------
@@ -49,8 +53,8 @@ sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
-    AgentVerdict,
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
@@ -63,10 +67,11 @@ from _sources import (  # noqa: E402
 )
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
+    save_fact_bundle,
     save_raw_snapshot,
-    save_verdict,
 )
+from _snapshot import SnapshotCoordinator  # noqa: E402
 
 AGENT = "technical"
 CALC_VERSION = "technical-calc/1"
@@ -133,7 +138,8 @@ def _rsi(closes: list[float], n: int = RSI_WINDOW) -> float | None:
     return round(100 - 100 / (1 + ag / al), 2)
 
 
-def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> AgentVerdict:
+def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
+                      evidence_set_id: str | None = None) -> FactBundle:
     t_start = time.monotonic()
     missing: list[MissingItem] = []
     warnings: list[str] = []
@@ -142,12 +148,22 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
     retrieved = now_cn()
     as_of: datetime | None = None
     raw_hash: str | None = None
+    es_id: str | None = None  # 读冻结时填冻结集 id（批 E-I），供 risk CROSS_CHECK 结构核对
+
+    # 🔴 给了 evidence_set_id 就读本次决策的冻结快照（不联网、不重复落盘），
+    #    没给就跟今天一样自己抓（手工调试单跑不被连坐拦掉，批 D-II 做什么第 2 条）。
+    coord = SnapshotCoordinator() if evidence_set_id is not None else None
 
     daily = None
     if "daily" in break_source:
         missing.append(MissingItem(
             f"{SYMBOL_LABEL}日线 —— 数据源被人为中断（--break-source daily）",
             "technical.daily.source_broken"))
+    elif coord is not None:
+        # 🔴 fail-closed：读冻结失败（号不存在 / 没冻这个 symbol / 冻的根数不够）
+        #    直接上抛 SnapshotReadError，**绝不静默退回 fetch_index_daily**——
+        #    那是探针 P5 要防的（悄悄退回独立抓取 = 假装什么都对）。
+        daily = coord.read_index_daily(evidence_set_id, SYMBOL, bars=BAR_COUNT)
     else:
         try:
             daily = fetch_index_daily(SYMBOL, bars=BAR_COUNT)
@@ -157,22 +173,35 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
+        derived = source.startswith("derived:")
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=None if source.startswith("derived:") else raw_hash))
+            raw_hash=None if derived else raw_hash,
+            evidence_set_id=None if derived else es_id))
 
     if daily is not None:
         src = f"sina:kline/{SYMBOL}"
-        raw_hash = payload_sha256(daily.raw)
+        if coord is not None:
+            # 🔴 raw_hash 指向冻结集登记的 content_sha256（整份 raw 的指纹），
+            #    不对自己读到的这一截重算 —— 三个消费者读不同根数才能得到同一个
+            #    raw_hash，risk 的 CROSS_CHECK 靠它判断是否真的共享同一份（P4）。
+            #    raw 已由 freeze 落库，这里不重复落盘。
+            raw_hash = coord.frozen_content_sha256(evidence_set_id, SYMBOL)
+            # 批 E-I：Evidence 直接声明「我出自哪个冻结集」，比 raw_hash 更硬。
+            es_id = evidence_set_id
+        else:
+            # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+            raw_hash = raw_text_sha256(daily.raw_text)
         trade_date = daily.trade_date
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
             warnings.append(as_of_warning)
-        if store:
+        if store and coord is None:
             save_raw_snapshot(source=src, as_of=as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(), payload=daily.raw)
+                              retrieved_at=retrieved.isoformat(),
+                              payload=daily.raw, raw_text=daily.raw_text)
 
         closes = [b.close for b in daily.bars]
         add("trade_date", trade_date, "交易日", src)
@@ -272,19 +301,25 @@ def build_verdict(*, break_source: set[str], store: bool, task_id: str) -> Agent
     else:
         status, level = "partial", "UNKNOWN"
 
-    return AgentVerdict(
+    # 🔴 批 E-II：产 FactBundle（只事实、无 stance）；stance 由 Technical Agent 事后追加。
+    return FactBundle(
         task_id=task_id, agent=AGENT, status=status, verdict=level,
         result=result,
-        confidence=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
+        data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence, warnings=warnings, missing=missing,
         elapsed_ms=int((time.monotonic() - t_start) * 1000))
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="指数技术指标 → AgentVerdict JSON")
+    ap = argparse.ArgumentParser(description="指数技术指标 → FactBundle JSON（批 E-II）")
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练：人为中断 (daily)")
     ap.add_argument("--task-id")
+    ap.add_argument("--run-id", default=None,
+                    help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
+                         "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="给了就读这份冻结快照（编排出卡时传）；缺省自己联网抓（手工调试）")
     ap.add_argument("--no-store", action="store_true")
     ap.add_argument("--render", action="store_true")
     args = ap.parse_args(argv)
@@ -292,24 +327,26 @@ def main(argv: list[str] | None = None) -> int:
     store = not args.no_store
     if store:
         init_schema()
-    v = build_verdict(break_source=set(args.break_source), store=store,
-                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
-    ref = save_verdict(v) if store else None
+    fb = build_fact_bundle(break_source=set(args.break_source), store=store,
+                           task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+                           evidence_set_id=args.evidence_set_id)
+    # 🔴 批 E-II：事实原件（FactBundle，不含 stance）直接落库；stance 由 agent 事后追加。
+    ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref else "  (未落库)"), file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             print(f"  {e.display_label:<20} = {e.value}", file=sys.stderr)
-        for w in v.warnings:
+        for w in fb.warnings:
             print(f"  ⚠ {w}", file=sys.stderr)
-        for m in v.missing:
+        for m in fb.missing:
             print(f"  ⚠ 缺失 [{m.code}] {m}", file=sys.stderr)
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":

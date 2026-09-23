@@ -2,8 +2,8 @@
 
 AST 全仓扫描，拦三种「第二套实现」的形状：
 
-  A. 重名类      —— 仓库里除 `skills/_contract/` 外再定义 `Evidence` / `AgentVerdict`
-                     / `DecisionCard`。
+  A. 重名类      —— 仓库里除 `src/easyup_biga/domain/`（批 H-I 前是 `skills/_contract/`）
+                     外再定义 `Evidence` / `AgentVerdict` / `DecisionCard`。
   B. 近名类      —— 定义 `EmotionVerdict` / `MarketEvidence` / `MiniDecisionCard`
                      之类「看起来是自己那一版」的类。这是契约漂移最常见的起点。
   C. 字典版契约  —— 不定义类，直接手搓一个 key 长得和契约一样的 dict。
@@ -27,15 +27,22 @@ import pathlib
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-STORE_DIR = REPO / "skills" / "_store"
-CONTRACT_DIR = REPO / "skills" / "_contract"
+# 🔴 批 H-I：契约/存储的**真实实现**已迁至 src/easyup_biga/。守卫认的是真实类
+#    定义在哪，不是薄壳在哪——旧路径 skills/_contract、skills/_store 迁移后只剩
+#    re-export 薄壳（无类定义）。这两个常量若仍指旧路径，「唯一实现」会在新目录上
+#    **静默失效**：在 src/easyup_biga/domain 里另定义一个 Evidence 不会被抓到。
+STORE_DIR = REPO / "src" / "easyup_biga" / "persistence"
+CONTRACT_DIR = REPO / "src" / "easyup_biga" / "domain"
 
-from _scan import repo_files  # noqa: E402
+from _scan import is_external_reference, repo_files  # noqa: E402
 
 EXEMPT_MARKER = "contract-exempt:"
 
 #: A —— 契约类名，全仓只许 `_contract/` 定义
-CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard"}
+#: 🔴 A-II 补上 `MissingItem`（早就是契约对象，之前漏登记）与 `VerdictRef`
+#:    （A6 新增）；批 B 补上 `RunContext`（运行身份）—— 都在这里，不新开一份判据。
+CONTRACT_NAMES = {"Evidence", "AgentVerdict", "DecisionCard", "MissingItem",
+                  "VerdictRef", "RunContext"}
 
 #: B —— 近名类：名字里带这些词根的类定义，都算另起炉灶
 NAME_ROOTS = ("Evidence", "Verdict", "DecisionCard")
@@ -48,7 +55,7 @@ TEST_CLASS_PREFIX = "Test"
 DICT_SHAPES: dict[str, tuple[set[str], set[str]]] = {
     "AgentVerdict": (
         {"task_id", "agent", "status", "verdict", "result",
-         "confidence", "evidence", "warnings", "missing", "elapsed_ms"},
+         "data_completeness", "evidence", "warnings", "missing", "elapsed_ms"},
         {"task_id", "verdict", "elapsed_ms", "missing"},
     ),
     "Evidence": (
@@ -79,10 +86,25 @@ def _is_exempt(lines: list[str], lineno: int) -> bool:
 
 
 def _in_contract(p: pathlib.Path) -> bool:
-    return CONTRACT_DIR in p.parents
+    """`p` 不受「契约只有一份实现」约束——本体所在目录，或只读参考材料。
+
+    后者会真的出现：`docs/external/` 底下的外部评审/上游文档常带示意代码
+    （比如一份示范 `Evidence`/`DecisionCard` 该长什么样的 `domain_models.py`），
+    名字撞上契约类是因为描述的是同一个域，不是本仓库长出了第二份实现。
+    """
+    return CONTRACT_DIR in p.parents or is_external_reference(p)
 
 
 ALL_FILES = _py_files()
+
+
+def test_docs_external下的示意代码不算第二份实现():
+    """2026-09-23 实测撞到：`test_scan_fallback.py` 模拟"没有 git"退化成纯
+    文件系统遍历时，会扫到 `docs/external/` 下外部评审自带的示意代码
+    （一份示范 `Evidence`/`DecisionCard` 该长什么样的 `domain_models.py`，
+    平时被 gitignore、正常 git 路径天然看不到），误判成契约的第二份实现。"""
+    fake = REPO / "docs" / "external" / "some-review" / "reference" / "domain_models.py"
+    assert _in_contract(fake), "docs/external/ 下的文件应该被当作只读参考材料排除"
 
 
 def test_扫描范围非空():
@@ -132,7 +154,7 @@ def test_B_不许定义近名的自建契约类():
                 offenders.append(f"{p.relative_to(REPO)}:{node.lineno} class {node.name}")
     assert not offenders, (
         "发现自建的近名契约类（铁律 4）：\n  " + "\n  ".join(offenders)
-        + "\n需要扩展契约就改 skills/_contract/，不要在局部另起一个。"
+        + "\n需要扩展契约就改 src/easyup_biga/domain/，不要在局部另起一个。"
     )
 
 
@@ -235,5 +257,6 @@ def test_契约对象只从_store取_不自己解JSON列():
         "这些地方绕开了 `from_dict()` 的读取时校验：\n  " + "\n  ".join(bad) + "\n"
         "  `from_dict()` 每次反序列化都重跑一遍铁律校验 ——\n"
         "  那是静态扫描被绕过时唯一的后备防线，绕开它就什么都不剩了。\n"
-        "  改用 `_store` 的 `load_card()` / `load_verdict()`。"
+        "  改用 `_store` 的 `load_online_card()` / `load_card_by_record_id()` / "
+        "`load_verdict()`。"
     )

@@ -14,6 +14,7 @@ F6          资金字段被吞成 0 时，「主力净流入前 5」给出任意
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from dataclasses import dataclass
@@ -142,7 +143,8 @@ class TestF6ZeroSwallow:
         monkeypatch.setattr(
             sector_calc, "fetch_boards",
             lambda kind: BoardResult(kind=kind, total=20, raw={"pages": []},
-                                     boards=boards))
+                                     boards=boards,
+                                     raw_text=json.dumps({"kind": kind, "pages": []})))
         # 🔴 第二个桩是评审抓出来的：`build_verdict` 并发跑三个 job，
         #    只桩掉板块榜，`collect_date` 那一路**照样真的去连新浪**。
         #    于是这条「离线单测」在有网时绿、断网时红。
@@ -153,7 +155,7 @@ class TestF6ZeroSwallow:
         from test_sector_calc import daily
         monkeypatch.setattr(sector_calc, "fetch_index_daily",
                             lambda symbol, **kw: daily())
-        c = sector_calc.build_verdict(break_source=set(), store=False,
+        c = sector_calc.build_fact_bundle(break_source=set(), store=False,
                                       task_id="BIGA-20260921-001")
         codes = [m.code for m in c.missing]
         assert code in codes, codes

@@ -34,7 +34,7 @@ emotion 取自股池的 `qdate`，market 取自日线每行的 `day`。
 
 ⚠️ 用 f-string 拼出来的字段名（`market-calc` 的 ``f"{key}_close"``）扫不到。
 那类字段天然带市场前缀（`sh_` / `sz_`），跨 skill 撞名的可能性极低；
-而「加了字段忘了改常数」由各 skill 自己的 `confidence` 钉死测试负责。
+而「加了字段忘了改常数」由各 skill 自己的 `data_completeness` 钉死测试负责。
 **把局限写出来，比假装覆盖全了更有用。**
 """
 

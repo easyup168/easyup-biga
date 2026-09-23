@@ -75,7 +75,11 @@ class TestAdhocNotStorable:
         原来的 bug 之所以能同时存在于五个 specialist，就是因为每个调用点
         各写一遍默认值。守卫必须放在 `save_verdict` 里 —— 调用点会越来越多。
         """
-        src = (REPO / "skills/_store/db.py").read_text(encoding="utf-8")
+        # 🔴 批 H-I：db.py 的真实实现已迁至 src/easyup_biga/persistence/；旧路径
+        #    skills/_store/db.py 现在只是薄壳（无 save_verdict 定义）。这里读的是
+        #    「守卫写在唯一写入口里」，必须读真实定义所在的文件，读到薄壳会
+        #    StopIteration（找不到 save_verdict）——那是守卫在看错的地方。
+        src = (REPO / "src/easyup_biga/persistence/db.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "save_verdict")
@@ -168,7 +172,8 @@ class TestReservationIsAtomic:
         card = DecisionCard(
             decision_id=new_task_id(9), status="WAIT", headline="h",
             verdicts=[_verdict("market", new_task_id(9))],
-            synthesis="s", model_ref="m")
+            synthesis="s", model_ref="m",
+            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
         db.save_card(card, path=p)
         nxt = db.reserve_decision_id(by="t", path=p)
         assert nxt not in (first, new_task_id(9))
@@ -207,10 +212,18 @@ class TestSynthesizeReusesUpstreamId:
         ids = [db.save_verdict(_verdict(a, "BIGA-20260921-013",
                                         stance=STANCE_VOCAB[a][0]), path=p)
                for a in ("market", "emotion")]
+        # 🔴 F-8：2 个 agent 到场，另外 4 个天然缺席——roster 判据按计数
+        #    比较，4 条 --extra-missing 才够。
+        extra_missing_args = []
+        for i in range(4):
+            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
+                                   f"占位{i}——本文件不测 roster"]
         r = subprocess.run(
             [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
              "--verdict-ids", ",".join(map(str, ids)), "--status", "WAIT",
-             "--headline", "h", "--synthesis", "s", "--model-ref", "m", "--json"],
+             "--headline", "h", "--synthesis", "s", "--model-ref", "m",
+             *extra_missing_args,
+             "--json"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "BIGA_DB_PATH": str(p)})
         assert r.returncode == 0, r.stderr[-600:]

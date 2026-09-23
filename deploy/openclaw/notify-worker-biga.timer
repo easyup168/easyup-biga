@@ -1,0 +1,13 @@
+[Unit]
+Description=定期跑 BigA notify-worker，把积压的通知推给飞书（profile: biga）
+
+[Timer]
+# 开机 2 分钟后先跑一次（给系统一点启动缓冲），之后每 2 分钟跑一次。
+# 一次真实出卡要 170~200s——2 分钟的检查间隔已经足够「近实时」，
+# 且队列空时这条检查只是一次只读 SELECT，频率再高也谈不上浪费。
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=notify-worker-biga.service
+
+[Install]
+WantedBy=timers.target

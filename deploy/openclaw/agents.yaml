@@ -1,0 +1,38 @@
+# deploy/openclaw/agents.yaml —— 出卡流水线的 agent 工具策略（配置即代码，批 G-II）
+#
+# 覆盖：哪些 agent 该禁 ask_user、哪些不能禁。不覆盖：agent 的角色契约（那在各自
+# workspace 的 AGENTS.md）、roster 本身（那在 _contract，见下）。
+#
+# 🔴 为什么禁 ask_user
+# --------------------
+# 出卡是一条**非交互**路径：Specialist / risk / 判官都是被 spawn 的、没有人在另一头。
+# 它们一旦调 ask_user，运行时自己不会救（recovery=none），就是确定性死锁 ——
+# 实测卡过 646s / 886s 才被人发现（stall_watchdog.py 记的那次）。tools.deny:[ask_user]
+# 让这类死锁变成**即时、干净的失败**（工具直接不可用），而不是空等到硬超时。
+#
+# 🔴 为什么半年前不能做、现在能做
+# --------------------------------
+# 配置级 tools.deny 的粒度是**按 agent**。批 C-II 之前 main **同时**是交互入口和出卡
+# 入口，禁 main 的 ask_user 会连累它的正常飞书/TUI 交互 —— 所以当时否决了（记在
+# stall_watchdog.py 注释里）。批 C-II 把 main 移出出卡路径后，前提不成立了：现在禁的
+# 是**被 spawn 的流水线 agent**，main 根本不在名单里（探针 P5 钉住这一点）。
+#
+# 🔴 agent 名单不在这里手写
+# --------------------------
+# 裁定 15（事实单一源）+ dev-workflow 第五问（不留会漂的孪生清单）：出卡 roster 的
+# 权威源是 `skills/_contract`（STAGE1_AGENTS / STAGE2_AGENTS / SYNTHESIZER_AGENT）。
+# apply_config.py 从那里**派生**真实名单，只把「已建成的、被 spawn 的、非交互的」那些
+# 取出来禁 ask_user。discipline 在 STAGE2 名单里但**故意没建**（裁定 13）——派生时按
+# 「真有 workspace/AGENTS.md 的才算建成」过滤掉，不会给一个不存在的 agent 写配置。
+# 这里只声明**策略**，不复制**名单**。
+
+policy:
+  # 出卡流水线里被 spawn 的非交互 agent：一律禁 ask_user。
+  non_interactive_pipeline:
+    roster_source: _contract      # STAGE1_AGENTS + 已建的 STAGE2 + SYNTHESIZER_AGENT
+    deny: [ask_user]
+
+  # 交互入口：ask_user 是它的正常能力，**绝不禁**。
+  interactive:
+    agents: [main]
+    deny: []                       # 显式空 —— 让「main 不禁 ask_user」是写下来的意图，不是遗漏

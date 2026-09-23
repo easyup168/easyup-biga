@@ -121,9 +121,11 @@ class TestCardRendersWarnings:
             evidence=[Evidence(field="trade_date", value="2026-09-18",
                                source="probe", as_of=t, retrieved_at=t)],
             warnings=warnings)
+        # 🔴 只有 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按
+        #    计数比较，5 条占位才够（本测试类不测 roster）。
         return DecisionCard(decision_id="BIGA-20260921-001", status="WAIT",
-                            headline="h", verdicts=[v], synthesis="s",
-                            model_ref="m")
+                            headline="h", verdicts=[v], synthesis="s", model_ref="m",
+                            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
 
     def test_warning_出现在卡面上(self):
         text = self._card(["涨跌家数接口不返回交易日字段"]).render()
@@ -151,8 +153,8 @@ class TestMixedAsOfIsVisible:
                          as_of=now, retrieved_at=now, label="上涨家数"),
             ])
         text = DecisionCard(decision_id="BIGA-20260921-001", status="WAIT",
-                            headline="h", verdicts=[v], synthesis="s",
-                            model_ref="m").render()
+                            headline="h", verdicts=[v], synthesis="s", model_ref="m",
+                            missing=[f"占位{i}——本文件不测 roster" for i in range(5)]).render()
         assert old.strftime("%m-%d %H:%M") in text
         assert now.strftime("%m-%d %H:%M") in text, \
             "两个 as_of 必须都出现在卡上 —— 否则读的人以为它们是同一时刻"
@@ -185,6 +187,12 @@ class TestDecisionIdentity:
         # ⚠️ 用**真的 agent 名**，不是 a0/a1 —— F8 之后未登记的 agent
         #    在契约层就会被拒，而这组测试要验的是决策身份，不该被那条挡住。
         names = ["market", "emotion", "sector", "technical"]
+        # 🔴 最多用到 4 个 agent，STANCE_VOCAB 里另外至少 2 个（news/risk）
+        #    天然缺席——roster 判据按计数比较（missing 条数须不少于缺席
+        #    agent 数），5 条占位覆盖所有调用点的最坏情况（只传 1 个
+        #    tid 时缺席数最多，为 5）。这组测试要验的是决策身份，
+        #    不该被 roster 判据挡住。
+        kw.setdefault("missing", [f"占位{i}——本文件不测 roster" for i in range(5)])
         return DecisionCard(
             decision_id=did, status="WAIT", headline="h",
             verdicts=[self._v(names[i], t) for i, t in enumerate(tids)],

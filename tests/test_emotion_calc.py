@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -42,11 +43,12 @@ QDATE = "20260918"
 
 
 def pool(name: str, total: int, rows: list[dict] | None = None, qdate: str = QDATE):
+    raw = {"rc": 0, "data": {"tc": total,
+                             "qdate": int(qdate) if qdate else None}}
     return sources.PoolResult(
         pool=name, requested_date=QDATE, qdate=qdate, total=total,
         rows=rows if rows is not None else [{"lbc": 1, "zbc": 0}] * total,
-        raw={"rc": 0, "data": {"tc": total,
-                               "qdate": int(qdate) if qdate else None}},
+        raw=raw, raw_text=json.dumps({"pool": name, **raw}),
     )
 
 
@@ -77,14 +79,15 @@ def build(**kw):
     kw.setdefault("break_source", set())
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return ec.build_verdict(**kw)
+    # 批 E-I：emotion 是试点，现在产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return ec.build_fact_bundle(**kw)
 
 
 class TestHappyPath:
     def test_完整时是PASS(self, wired):
         v = build()
         assert (v.status, v.verdict) == ("completed", "PASS")
-        assert v.missing == []
+        assert v.missing == ()
 
     def test_核心字段与派生值(self, wired):
         r = build().result
@@ -105,18 +108,19 @@ class TestHappyPath:
         for field in ("advance_count", "decline_count", "flat_count"):
             assert field not in src, f"{field} 又出现在 emotion-calc 里了"
 
-    def test_字段数与confidence分母一致(self, wired):
-        """数据齐备时 confidence 必须正好 1.0。
+    def test_字段数与data_completeness分母一致(self, wired):
+        """数据齐备时 data_completeness 必须正好 1.0。
 
         移出涨跌家数之前这里的分母是 15、实际只有 13 个字段 ——
         **数据完整时也只读到 0.87，「完整」这件事永远表达不出来**。
         """
         v = build()
         assert len(v.result) == ec._EXPECTED_FIELDS
-        assert v.confidence == 1.0
+        assert v.data_completeness == 1.0
 
     def test_每个result字段都有证据(self, wired):
-        """契约铁律 3 —— 由 AgentVerdict 构造时强制，这里再从外部确认一次。"""
+        """契约铁律 3 —— 由 FactBundle 构造时强制（批 E-I 后 emotion 产 FactBundle），
+        走的是与 AgentVerdict 同一份 `check_fact_invariants`，这里再从外部确认一次。"""
         v = build()
         assert set(v.result) <= {e.field for e in v.evidence}
 
@@ -172,7 +176,7 @@ class TestMissingPaths:
     def test_全断时result为空且missing非空(self, wired):
         v = build(break_source={"limit_up", "broken_board", "limit_down"})
         assert v.result == {}
-        assert v.evidence == []
+        assert v.evidence == ()
         assert len(v.missing) >= 4
 
     def test_三档verdict都可达(self, wired):
@@ -199,7 +203,7 @@ class TestDateDiscipline:
     def test_宽松模式下日期不符只是警告(self, wired):
         v = build(date=None)
         assert v.verdict == "PASS"
-        assert v.missing == []
+        assert v.missing == ()
 
     def test_各池报告日期不一致时拒绝汇总(self, wired):
         """不同来源说的不是同一天，就不能当作同一天的事实汇总。"""

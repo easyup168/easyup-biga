@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import datetime
@@ -40,13 +41,15 @@ def result(kind="industry", boards=None, total=None):
         board("半导体设备", 4.83), board("医疗服务", 2.1), board("白酒", 0.5),
         board("银行", -0.3), board("地产", -1.8)]
     return sources.BoardResult(kind=kind, total=total or len(bs), boards=bs,
-                               raw={"pages": []})
+                               raw={"pages": []},
+                               raw_text=json.dumps({"kind": kind, "pages": []}))
 
 
 def daily():
     bars = [sources.DailyBar(day=d, open=1.0, high=1.0, low=1.0, close=1.0, volume=1)
             for d in ("20260917", TRADE_DATE)]
-    return sources.IndexDaily(symbol="sh000001", bars=bars, raw=[{}])
+    return sources.IndexDaily(symbol="sh000001", bars=bars, raw=[{}],
+                              raw_text=json.dumps([{}]))
 
 
 @pytest.fixture()
@@ -77,7 +80,8 @@ def build(**kw):
     kw.setdefault("break_source", set())
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return sc.build_verdict(**kw)
+    # 批 E-II：sector 迁到产 FactBundle（只事实、无 stance）而非 AgentVerdict。
+    return sc.build_fact_bundle(**kw)
 
 
 class TestHappyPath:
@@ -85,9 +89,9 @@ class TestHappyPath:
         v = build()
         assert (v.status, v.verdict) == ("completed", "PASS")
 
-    def test_字段数与confidence分母一致(self, wired):
+    def test_字段数与data_completeness分母一致(self, wired):
         v = build()
-        assert len(v.result) == sc._EXPECTED_FIELDS and v.confidence == 1.0
+        assert len(v.result) == sc._EXPECTED_FIELDS and v.data_completeness == 1.0
 
     def test_榜单按涨跌幅降序(self, wired):
         top = build().result["industry_top"]
@@ -193,10 +197,10 @@ class TestBoardPaginationIsConcurrent:
 
     @staticmethod
     def _fake(total: int, per: int = 100, delay=None):
-        """造一个分页接口。`delay` 让后面的页先回来，专门制造乱序。"""
+        """造一个分页接口（get_json_and_text 的桩）。`delay` 让后面的页先回来，制造乱序。"""
         import time
 
-        def get_json(url, **kw):
+        def get_json_and_text(url, **kw):
             import urllib.parse as up
             q = up.parse_qs(up.urlparse(url).query)
             pn = int(q["pn"][0])
@@ -207,8 +211,9 @@ class TestBoardPaginationIsConcurrent:
                              "f3": 1.0, "f62": 0.0, "f104": 1, "f105": 0,
                              "f204": "X"}
                     for i in range(min(per, max(0, total - lo)))}
-            return {"rc": 0, "data": {"total": total, "diff": rows}}
-        return get_json
+            payload = {"rc": 0, "data": {"total": total, "diff": rows}}
+            return payload, json.dumps(payload)
+        return get_json_and_text
 
     def test_乱序返回也要按页号拼(self, monkeypatch):
         """🔴 用 as_completed 的到达顺序拼页，同样的输入会产生不同的 raw。
@@ -226,7 +231,7 @@ class TestBoardPaginationIsConcurrent:
         """
         import _sources.eastmoney as em
         # 第 2 页故意最慢，保证它不是第一个回来的
-        monkeypatch.setattr(em, "get_json",
+        monkeypatch.setattr(em, "get_json_and_text",
                             self._fake(350, delay=lambda pn: 0.15 if pn == 2 else 0.0))
         r = em.fetch_boards("industry")
         assert len(r.boards) == 350
@@ -247,10 +252,11 @@ class TestBoardPaginationIsConcurrent:
             import urllib.parse as up
             pn = int(up.parse_qs(up.urlparse(url).query)["pn"][0])
             if pn == 3:                      # 第 3 页返回空
-                return {"rc": 0, "data": {"total": 350, "diff": {}}}
+                payload = {"rc": 0, "data": {"total": 350, "diff": {}}}
+                return payload, json.dumps(payload)
             return base(url, **kw)
 
-        monkeypatch.setattr(em, "get_json", holey)
+        monkeypatch.setattr(em, "get_json_and_text", holey)
         with pytest.raises(SourceError, match="分页没取全"):
             em.fetch_boards("industry")
 
@@ -263,6 +269,6 @@ class TestBoardPaginationIsConcurrent:
             n.append(url)
             return base(url, **kw)
 
-        monkeypatch.setattr(em, "get_json", counting)
+        monkeypatch.setattr(em, "get_json_and_text", counting)
         assert len(em.fetch_boards("industry").boards) == 42
         assert len(n) == 1, f"只有 42 行却发了 {len(n)} 次请求"

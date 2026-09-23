@@ -1,52 +1,18 @@
-"""BigA 数据访问层 —— 唯一 DB 入口。
+"""BigA 数据访问层 —— 薄壳（re-export），真实实现在 easyup_biga.persistence（确定性编排批 H-I）。
 
-🔴 业务代码不许出现裸 `sqlite3.connect`（tests/test_no_raw_sqlite.py 钉死）。
+保留旧包路径是为了让全仓既有的 `from _store import ...` 一个字符都不用改。
+本壳用自身 __file__ 相对路径把仓库内 src/ 挂上 sys.path —— 不依赖 pytest 的
+pythonpath，因此 bin/biga-card 拉起的子进程、systemd-run 脱树跑的（都不经过
+pytest 配置）也能 import 到 easyup_biga。
+
+⚠️ 真实实现看 src/easyup_biga/persistence/。这里只有 re-export，不要在此加逻辑。
 """
+import pathlib as _p
+import sys as _s
 
-from .db import (
-    DEFAULT_DB_PATH,
-    AppendOnlyViolation,
-    StoreNotInitialised,
-    connect,
-    db_path,
-    init_schema,
-    list_agent_runs,
-    load_card,
-    load_raw_snapshot,
-    load_verdict,
-    load_verdict_meta,
-    load_verdicts,
-    next_decision_id,
-    reserve_decision_id,
-    payload_sha256,
-    record_agent_run,
-    record_verdict_run,
-    save_card,
-    save_raw_snapshot,
-    save_verdict,
-)
-from .schema import SCHEMA_VERSION
+_SRC = _p.Path(__file__).resolve().parent.parent.parent / "src"
+if str(_SRC) not in _s.path:
+    _s.path.insert(0, str(_SRC))
 
-__all__ = [
-    "DEFAULT_DB_PATH",
-    "SCHEMA_VERSION",
-    "AppendOnlyViolation",
-    "StoreNotInitialised",
-    "connect",
-    "db_path",
-    "init_schema",
-    "list_agent_runs",
-    "load_card",
-    "load_raw_snapshot",
-    "load_verdict",
-    "load_verdict_meta",
-    "load_verdicts",
-    "next_decision_id",
-    "reserve_decision_id",
-    "payload_sha256",
-    "record_agent_run",
-    "record_verdict_run",
-    "save_card",
-    "save_verdict",
-    "save_raw_snapshot",
-]
+from easyup_biga.persistence import *  # noqa: F401,F403,E402
+from easyup_biga.persistence import __all__  # noqa: F401,E402

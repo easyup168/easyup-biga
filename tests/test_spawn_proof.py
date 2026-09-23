@@ -21,6 +21,11 @@
 ⇒ 这一版改成造一个**真的 sqlite**，让被测代码走完整的查询路径。
 
 > 假的东西造得太靠上，测的就是自己写的假货，不是产品代码。
+
+`TestReadbackWiredIntoRealPath` 是后来加的（F-4，设计文档 §6）：
+同一个 `bin/biga-card` 沙盒，验的是另一个检查（`readback_check.py`，
+毒行巡检）有没有被同样的方式接住退出码——两者是同一个形状的教训，
+放在同一个文件里复用沙盒机制，比另起一份更省。
 """
 
 from __future__ import annotations
@@ -73,6 +78,41 @@ def fake_runtime_db(path: pathlib.Path, runs: list[tuple[str, str]]) -> pathlib.
     return path
 
 
+
+def fake_runtime_db_task_runs(path: pathlib.Path,
+                              runs: list[tuple[str, str]],
+                              execs: list[tuple[str, str]] = ()) -> pathlib.Path:
+    """造一份**只有 `task_runs`** 的运行时库 —— 这是编排器路径的真实形状。
+
+    `runs = [(agent, decision_id), …]`   真 spawn（`task_kind` 为 NULL，run_id 是 uuid 形）
+    `execs = [(agent, decision_id), …]`  Specialist 自己在会话里跑 shell
+                                          （`task_kind='exec'`，run_id 形如 `exec:<名>`）
+
+    ⚠️ **只建查询用得到的 7 列**，真库那张表有 33 列（含 `task_id` 等）——
+    仿件不是真库的复制品，只保证被查的那几列形状一致。说成「照抄真库」会让
+    读者以为它能替真库回答别的问题。
+    实测 `BIGA-20260922-001` 在 `task_runs` 里有 12 行真 spawn 与 5 行 exec，
+    而 `subagent_runs` 里一行都没有。
+    """
+    conn = sqlite3.connect(path)  # store-exempt: 外部运行时库的仿件
+    conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                 " child_session_key TEXT, requester_session_key TEXT,"
+                 " task_kind TEXT, task TEXT, created_at INTEGER)")
+    for i, (agent, did) in enumerate(runs):
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)", (
+            f"uuid-run-{i}", agent, f"agent:{agent}:subagent:uuid-{i}",
+            "agent:main:orchestrator-abc123", None,
+            f"本次决策编号 {did}。请给出…", 2000 + i))
+    for i, (agent, did) in enumerate(execs):
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)", (
+            f"exec:name-{i}", agent, f"agent:{agent}:subagent:uuid-x{i}",
+            f"agent:{agent}:subagent:uuid-x{i}", "exec",
+            f"cd ~/ws && python3 skills/… --task-id {did}", 3000 + i))
+    conn.commit()
+    conn.close()
+    return path
+
+
 @pytest.fixture()
 def wire(tmp_path, monkeypatch):
     """`wire(agent_runs里的, 运行时记录)` —— 两侧分别给。"""
@@ -87,6 +127,59 @@ def wire(tmp_path, monkeypatch):
             "BIGA_RUNTIME_DB",
             str(fake_runtime_db(tmp_path / "rt.db", runtime)))
     return _w
+
+
+@pytest.fixture()
+def wire_rr(tmp_path, monkeypatch):
+    """像 `wire`，但 agent_runs 行带 `runtime_run_id`（批 J-II 结构化 join 用）。
+
+    `ours = [(agent, runtime_run_id 或 None), …]`；`runtime = [(agent, did), …]`
+    （复用 `fake_runtime_db`：第 i 条运行时记录的 `run_id` 是 `"run-{i}"`）。
+    """
+    def _w(ours: list[tuple[str, str | None]], runtime: list[tuple[str, str]]):
+        rows = [{"agent": a, "runtime_run_id": rr} for a, rr in ours]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: rows, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: rows)
+        monkeypatch.setenv(
+            "BIGA_RUNTIME_DB", str(fake_runtime_db(tmp_path / "rt.db", runtime)))
+    return _w
+
+
+class TestStructuredJoin:
+    """🔴 批 J-II · J2-3：有 `runtime_run_id` 时，spawn 核验用它与运行时
+    `subagent_runs.run_id` 做**结构化 join**，比按 `child_session_key` 段名的文本
+    匹配硬。这一组的全部理由是证明「新判据真的比旧的硬」，不是「新判据也能过」。
+    """
+
+    def test_伪造的runtime_run_id蹭不上别人的记录(self, wire_rr):
+        """market 那行 `runtime_run_id` 在运行时里根本不存在，但决策号出现在某条
+        `payload_json` 里（= 蹭上别人记录那个旧洞）。结构化 join 报伪造。"""
+        # 运行时只有一条属于本决策的记录，run_id="run-0"；agent_runs 记的却是 rt-fake。
+        wire_rr([("market", "rt-fake-never-spawned")], [("market", MINE)])
+        assert spawn_check.main([MINE]) == 1, "假 runtime_run_id 蹭上了别人的记录"
+
+    def test_同一场景下旧的LIKE判据会放过它(self, wire_rr):
+        """把 `runtime_run_id` 抹成 None（模拟历史行）——退回段名判据，
+        而 `child_session_key` 段名恰好是 `market`，于是**被放过**。
+        这正是 J2-3 要堵的洞：证明新旧判据在同一份数据上给出相反结论。"""
+        wire_rr([("market", None)], [("market", MINE)])
+        assert spawn_check.main([MINE]) == 0, (
+            "退回分支本应按段名放过 —— 若这里也报伪造，说明退回分支被写坏了")
+
+    def test_真实匹配的runtime_run_id通过(self, wire_rr):
+        """反方向：agent_runs 记的 `runtime_run_id` 与运行时那条的 `run_id` 一致
+        （`fake_runtime_db` 第 0 条是 `run-0`）⇒ join 命中 ⇒ 通过。
+        否则上面两条可以靠「join 永远不命中」平凡成立。"""
+        wire_rr([("market", "run-0")], [("market", MINE)])
+        assert spawn_check.main([MINE]) == 0
+
+    def test_历史行与新行混在同一决策里各走各的(self, wire_rr):
+        """market 有真 runtime_run_id（走 join、命中），news 是历史行（None，走段名、
+        命中）—— 任一 agent 缺 runtime_run_id 不让整条检查失效，也不互相污染。"""
+        wire_rr([("market", "run-0"), ("news", None)],
+                [("market", MINE), ("news", MINE)])  # news 是第 1 条 → run-1
+        assert spawn_check.main([MINE]) == 0
 
 
 class TestBoundToDecisionId:
@@ -165,14 +258,57 @@ class TestWiredIntoRealPath:
             "  一个不会被跑到的检查，和没有这个检查是一回事。")
 
     @staticmethod
-    def _seeded_repo(tmp_path, did: str, spawn_stub: str):
+    def _orch_path(work) -> pathlib.Path:
+        return work / "skills" / "decision-card" / "scripts" / "orchestrator.py"
+
+    @staticmethod
+    def _orch_stub(work, db, did: str) -> str:
+        """orchestrator.py 的桩内容：落一张真卡 + 渲染到 stdout + 退出 0。
+
+        🔴 批 C-II 之后，出卡的**付费动作**是 `orchestrator.py`（经 Adapter → 真
+           spawn），不再是 `$BIGA agent`。而 Adapter 用的是 `DEFAULT_BIGA`（写死的
+           真实路径），**根本不读 `BIGA` 环境变量** —— 所以桩必须落在 orchestrator.py
+           上，桩 `BIGA` 已经拦不住花钱了。这一处正是收缩把「付费调用」挪了地方、
+           而守卫还盯着老地方（L-13）会咬人的位置。
+        """
+        return (
+            "import sys\n"
+            f"sys.path.insert(0, {str(work / 'skills')!r})\n"
+            "from _contract import AgentVerdict, DecisionCard, Evidence, now_cn\n"
+            "from _store import init_schema, save_card\n"
+            "t = now_cn()\n"
+            f"TID = {did!r}\n"
+            f"init_schema({str(db)!r})\n"
+            "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
+            "                 verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
+            "                 stance='分化', elapsed_ms=1,\n"
+            "                 evidence=[Evidence(field='x', source='s', value=1,\n"
+            "                                    as_of=t, retrieved_at=t)])\n"
+            # 🔴 只落 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按计数
+            #    比较（missing 条数 >= 缺席 agent 数），给 5 条占位 missing 才够，
+            #    免得抢在这批探针要验证的事情前面报错。
+            "card = DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
+            "                    verdicts=[v], synthesis='', model_ref='m',\n"
+            "                    missing=['占位1 —— 本文件不测 roster',\n"
+            "                             '占位2', '占位3', '占位4', '占位5'])\n"
+            f"save_card(card, path={str(db)!r})\n"
+            "print('run stub-run   （查进度：bin/biga-card --status stub-run）',"
+            " file=sys.stderr)\n"
+            "print(card.render())\n"
+        )
+
+    @staticmethod
+    def _seeded_repo(tmp_path, did: str, spawn_stub: str, readback_stub: str | None = None):
         """造一个能走完出卡路径的沙盒。**不联网、不花钱。**
 
-        两个桩：
-          · `BIGA` → 直接往库里落一张真卡（替掉 agent 调用）
+        桩（`readback_stub` 缺省时不桩 —— 让真的 `readback_check.py` 跑在刚种下的
+        干净库上，它本该报 0 条毒行，用于验证 F-4 的接入不影响「一切正常」时的行为）：
+          · `orchestrator.py` → 直接往库里落一张真卡并渲染（替掉真 spawn，见 `_orch_stub`）
           · `spawn_check.py` → 由调用方决定退出码
+          · `readback_check.py` → 同上（F-4：设计文档 §6，A-I 评审欠的账）
         """
         import shutil
+        import subprocess
         work = tmp_path / "repo"
         shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
             # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
@@ -181,37 +317,42 @@ class TestWiredIntoRealPath:
             ".biga-card-stop", ".biga-card.lock",
             ".git", "__pycache__", "data", ".pytest_cache", ".claude", "memory"))
         db = tmp_path / "t.db"
+        # 预建空 schema，让 bin/biga-card 读 BEFORE（readonly）时库已存在、返回空。
+        subprocess.run(
+            [sys.executable, "-c",
+             f"import sys; sys.path.insert(0, {str(work / 'skills')!r}); "
+             f"from _store import init_schema; init_schema({str(db)!r})"],
+            check=True, capture_output=True)
 
-        seed = tmp_path / "seed.py"
-        seed.write_text(
-            "import sys\n"
-            f"sys.path.insert(0, {str(work / 'skills')!r})\n"
-            "from _contract import AgentVerdict, DecisionCard, Evidence, now_cn\n"
-            "from _store import init_schema, save_card\n"
-            "t = now_cn()\n"
-            f"TID = {did!r}\n"
-            "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
-            "                 verdict='PASS', result={'x': 1}, confidence=1.0,\n"
-            "                 stance='分化', elapsed_ms=1,\n"
-            "                 evidence=[Evidence(field='x', source='s', value=1,\n"
-            "                                    as_of=t, retrieved_at=t)])\n"
-            f"init_schema({str(db)!r})\n"
-            "save_card(DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
-            "                       verdicts=[v], synthesis='', model_ref='m'),\n"
-            f"          path={str(db)!r})\n", encoding="utf-8")
+        # 🔴 桩掉 orchestrator.py —— 这才是收缩之后的付费调用。
+        TestWiredIntoRealPath._orch_path(work).write_text(
+            TestWiredIntoRealPath._orch_stub(work, db, did), encoding="utf-8")
 
+        # BIGA 桩留成一个「响亮的空操作」：Adapter 走 DEFAULT_BIGA 不经这里，
+        # 万一有别的路径去调 $BIGA，这里会在 stderr 留痕而不是真起会话。
         stub = tmp_path / "fake-biga"
-        stub.write_text(f"#!/usr/bin/env bash\n{sys.executable} {seed}\n",
-                        encoding="utf-8")
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo '🔴 stub BIGA 被调用 —— C-II 后 orchestrator 用 DEFAULT_BIGA，"
+            "不该经过这里' >&2\nexit 0\n", encoding="utf-8")
         stub.chmod(0o755)
         (work / "tools" / "verify" / "spawn_check.py").write_text(
             spawn_stub, encoding="utf-8")
+        if readback_stub is not None:
+            (work / "tools" / "verify" / "readback_check.py").write_text(
+                readback_stub, encoding="utf-8")
         return work, db, stub
 
     @staticmethod
     def _run(work, db, stub):
         import os
         import subprocess
+        # 🔴 自证不花钱：收缩后付费点是 orchestrator.py（Adapter 走 DEFAULT_BIGA，
+        #    不读 BIGA 环境变量）。只在它已被桩掉的沙盒里跑 —— 桩没落上就当场炸，
+        #    而不是让一次真跑去触发真 spawn。fail-closed 在**使用点**，不靠元测试兜。
+        orch_src = TestWiredIntoRealPath._orch_path(work).read_text(encoding="utf-8")
+        assert "OpenClawRuntimeAdapter" not in orch_src, (
+            "sandbox 里的 orchestrator.py 不是桩 —— 这次 _run 会触发真 spawn（真花钱）")
         return subprocess.run(
             ["bash", str(work / "bin" / "biga-card")],
             capture_output=True, text=True, cwd=work, timeout=120,
@@ -267,6 +408,65 @@ class TestWiredIntoRealPath:
             "  而机器上本来就会反复跑别的决策，这个条件几乎总成立。")
         assert not any("LIMIT" in q for q in sqls), (
             "按决策号取不该有条数上限 —— 一天跑得多了，早先的决策会悄悄查不到。")
+
+
+class TestReadbackWiredIntoRealPath:
+    """F-4（设计文档 §6，A-I 评审欠的账）：毒行巡检必须接一个真实调用方。
+
+    `readback_check.py` 批 A-I 就建好了，但只有测试和文档——没有任何
+    自动路径会跑它。对照 `spawn_check.py` 当年的教训（调用在、退出码
+    被丢，守卫照样绿），这里同样要证明**退出码被用上**，不只是打印。
+    """
+
+    def test_出卡流程真的会调它(self):
+        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
+        run = text.split("# ── 出新卡")[1]
+        assert "tools/verify/readback_check.py" in run, (
+            "readback_check.py 没有被出卡流程调用 —— \n"
+            "  一个不会被跑到的检查，和没有这个检查是一回事。")
+
+    def test_干净库时不影响出卡命令成功(self, tmp_path):
+        """反面：readback_check 不桩，让它跑在刚种下的干净库上。"""
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-001", "print('桩：全齐')\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert r.returncode == 0, (
+            f"干净库却失败了：rc={r.returncode}\n{r.stderr[-260:]}")
+
+    def test_巡检报红时出卡命令的退出码跟着变(self, tmp_path):
+        """🔴 这条才是闸门的判据 —— 同 spawn_check 那次教训一样，
+        「字符串在不在」测不出退出码有没有被接住。
+
+        把巡检改成必然失败，断言 `bin/biga-card` 的退出码跟着变
+        （而不是像 spawn_check 当年那样被 `set -uo pipefail`
+        （没有 `-e`）吞掉，仍然 exit 0）。
+        """
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-002", "print('桩：全齐')\n",
+            readback_stub="import sys\nprint('桩：巡检报红', file=sys.stderr)\nsys.exit(1)\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert r.returncode == 6, (
+            f"巡检报红，但 biga-card 的退出码没有跟着变（rc={r.returncode}）—— \n"
+            f"  那它就只是一句打印，不是闸门。\n  stderr 尾部：{r.stderr[-300:]}")
+        assert "毒行巡检发现历史遗留问题" in r.stderr
+
+    def test_巡检报红不与spawn核验共用同一个信号(self, tmp_path):
+        """🔴 毒行是历史遗留，不是这次运行的错——它不该让人以为是
+        **这次**出卡的 spawn 证据链断了（那是 rc=4 该管的事）。
+        两者必须是不同的退出码，否则读者会查错方向。"""
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-003", "print('桩：全齐')\n",
+            readback_stub="import sys\nsys.exit(1)\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert r.returncode != 4, "毒行巡检不该冒充 spawn 核验失败的退出码"
+
+    def test_出卡命令仍然会渲染卡片(self, tmp_path):
+        """毒行是历史遗留，不该让「这次出的卡」被藏起来——钱已经花了。"""
+        work, db, stub = TestWiredIntoRealPath._seeded_repo(
+            tmp_path, "BIGA-20260922-004", "print('桩：全齐')\n",
+            readback_stub="import sys\nsys.exit(1)\n")
+        r = TestWiredIntoRealPath._run(work, db, stub)
+        assert "BIGA-20260922-004" in r.stdout
 
 
 # ─────────────────────────── 2026-09-21 21:03 事故：出卡递归
@@ -341,9 +541,10 @@ class TestNoCardRecursion:
             td = pathlib.Path(td)
             work, db, stub = TestWiredIntoRealPath._seeded_repo(
                 td, "BIGA-20260921-701", "print('桩：全齐')\n")
-            # 桩掉 agent：慢一点，好让第二次撞上锁
-            stub.write_text("#!/usr/bin/env bash\nsleep 8\n", encoding="utf-8")
-            stub.chmod(0o755)
+            # 🔴 持锁的是 orchestrator 那一段（flock 在调它之前拿到）——要让第二次
+            #    撞上锁，就得让**它**慢一点，桩 BIGA 已经不在出卡路径上了。
+            TestWiredIntoRealPath._orch_path(work).write_text(
+                "import time; time.sleep(8)\n", encoding="utf-8")
             env = {**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db),
                    "BIGA_CARD_FORCE": "1"}
             first = subprocess.Popen(["bash", str(work / "bin" / "biga-card")],
@@ -386,6 +587,70 @@ class TestNoCardRecursion:
             assert r2.returncode == 0, (
                 "总闸把 --list 也拦了 —— 事故当中最需要的就是看现状。\n"
                 f"  {r2.stderr[-200:]}")
+
+    def test_wrapper被杀会收掉编排子进程(self):
+        """🔴 评审阻塞项 2：wrapper（`bin/biga-card`）死了，它起的编排子进程不许孤立
+        继续跑完 spawn 真花钱。
+
+        事故根因**不是** `$1.2` 那个 bash bug —— 那行在文本顺序上排在编排调用之前，
+        真在那崩溃根本到不了 spawn。真正的根因：一个外层短 timeout 杀掉了上层 shell，
+        而 `timeout 840 orchestrator.py` 孙进程被孤立后跑完了整轮 spawn。修法是
+        `bin/biga-card` 的 trap（Code Guard），不是「以后别手工乱跑」（意图）。
+
+        判据是**真的杀 wrapper、看子进程还在不在**，不是「源码里有没有 trap」。
+        """
+        import os
+        import signal
+        import subprocess
+        import tempfile
+
+        def _alive(pid: int) -> bool:
+            try:
+                os.kill(pid, 0)
+                return True
+            except (ProcessLookupError, PermissionError):
+                return False
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            work, db, stub = TestWiredIntoRealPath._seeded_repo(
+                td, "BIGA-20260921-802", "print('桩：全齐')\n")
+            pidfile = td / "orch.pid"
+            # 编排桩：记下自己的 pid，长睡 —— 模拟 wrapper 被杀时它还在跑（不 spawn、不花钱）
+            TestWiredIntoRealPath._orch_path(work).write_text(
+                "import os, pathlib, time\n"
+                f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+                "time.sleep(120)\n", encoding="utf-8")
+            env = {**os.environ, "BIGA": str(stub), "BIGA_DB_PATH": str(db),
+                   "BIGA_CARD_FORCE": "1"}
+            proc = subprocess.Popen(
+                ["bash", str(work / "bin" / "biga-card")], cwd=work, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            orch_pid = None
+            try:
+                deadline = time.time() + 20
+                while not pidfile.exists() and time.time() < deadline:
+                    time.sleep(0.2)
+                assert pidfile.exists(), "编排子进程没起来，测试前提不成立"
+                orch_pid = int(pidfile.read_text())
+                assert _alive(orch_pid), "编排子进程此刻应当在跑"
+                # 杀掉 wrapper —— 模拟外层 timeout / 工具超时把上层 shell 收了
+                proc.terminate()
+                proc.wait(timeout=15)
+                gone = time.time() + 6
+                while _alive(orch_pid) and time.time() < gone:
+                    time.sleep(0.2)
+                assert not _alive(orch_pid), (
+                    f"wrapper 被杀后编排子进程 {orch_pid} 还活着 —— 孤儿化敞口还开着，\n"
+                    "  它会继续跑完 spawn 真花钱（教程 24 章那次事故的根因）。")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                if orch_pid and _alive(orch_pid):
+                    try:
+                        os.kill(orch_pid, signal.SIGKILL)
+                    except OSError:
+                        pass
 
 
 class TestOrphanSpawns:
@@ -562,3 +827,217 @@ def test_扫到了活口径():
     seen = [p for p in repo_files(".py", ".md")
             if _STALE in p.read_text(encoding="utf-8")]
     assert len(seen) >= 3, f"只扫到 {len(seen)} 处，扫描范围可能坏了"
+
+
+class TestTaskRunsSource:
+    """🔴 2026-09-23 · 运行时把一次 spawn 记在哪张表不是恒定的。
+
+    实测 `BIGA-20260922-001`（至今唯一一张编排器真实产出的卡）：
+    `subagent_runs` **0 行**，`task_runs`（排除 exec）**12 行**。
+    原来只读 `subagent_runs` ⇒ 对那张真卡报「判不了」——一张真卡、一次真 spawn，
+    核验却给不出结论。⇒ 两张都读。
+    """
+
+    def _wire(self, tmp_path, monkeypatch, ours, runs, execs=()):
+        rows = [{"agent": a} for a in ours]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: rows, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: rows)
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(fake_runtime_db_task_runs(
+            tmp_path / "rt.db", runs, execs)))
+
+    def test_只有task_runs时也认得出spawn(self, tmp_path, monkeypatch):
+        """P1：编排器路径的真实形状。去掉 task_runs 分支 ⇒ 这条红。"""
+        did = "BIGA-20260922-001"
+        self._wire(tmp_path, monkeypatch, ["market"], [("market", did)])
+        proof = pa.spawn_proof(did)
+        assert proof.readable
+        assert proof.rows == 1, "task_runs 里的真 spawn 没被算进来"
+        assert proof.per_agent["market"] == (True, True)
+
+    def test_exec行不算被spawn(self, tmp_path, monkeypatch):
+        """P2：`task_kind='exec'` 是 Specialist 自己跑 shell，不是「被起起来」。
+
+        不排掉它 ⇒ 一个只跑过 exec、从未被 spawn 的 agent 会被判成 spawn 过，
+        而这正是这套核验要抓的伪造形状。
+        """
+        did = "BIGA-20260922-002"
+        # market 真被 spawn；sector 只有 exec 行
+        self._wire(tmp_path, monkeypatch, ["market", "sector"],
+                   [("market", did)], [("sector", did)])
+        proof = pa.spawn_proof(did)
+        assert proof.per_agent["market"] == (True, True)
+        assert proof.per_agent["sector"] == (True, False), \
+            "只有 exec 行的 agent 被当成 spawn 过了 —— exec 过滤没生效"
+
+    def test_两张表都取不到才算判不了(self, tmp_path, monkeypatch):
+        """R-3：少一张表 ≠ 读不到。两者在调用方那里是完全不同的结论——
+        「零条记录」会被判成伪造，「判不了」不会。"""
+        empty = tmp_path / "empty.db"
+        # store-exempt: 外部运行时库的仿件（建库但一张表都不建）
+        sqlite3.connect(empty).close()
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: [], raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: [])
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(empty))
+        assert pa.spawn_proof("BIGA-20260922-003").readable is False
+
+    def test_只有subagent_runs的历史卡不受影响(self, tmp_path, monkeypatch):
+        """回归：C-II 之前的卡记在 `subagent_runs`，加了第二个来源之后仍然认得。"""
+        did = "BIGA-20260921-001"
+        rows = [{"agent": "emotion"}]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: rows, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: rows)
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(fake_runtime_db(tmp_path / "rt.db", [("emotion", did)])))
+        proof = pa.spawn_proof(did)
+        assert proof.readable and proof.rows == 1
+        assert proof.per_agent["emotion"] == (True, True)
+
+
+class TestRealSpawnPredicate:
+    """🔴 2026-09-23 评审实证：`task_kind` 是运行时里的**自由文本开放列**，
+    而 `agent_id` 的缺省解析会回退到发起者**自己的会话** ⇒ 任何 agent 在自己
+    会话里建出来的 task 行，缺省就带 `agent_id = 它自己`。
+
+    原来的「排除 task_kind='exec'」是排除列表，实测能被第四种 kind 绕过：
+    六行 `image_generation`、agent_id 是 specialist 自己、决策号写在它自己可控
+    的文本里 ⇒ 核验报「两份记录都齐」，而真实 spawn 零次。那正是 F3 要抓的。
+    """
+
+    def _wire(self, tmp_path, monkeypatch, ours, rows):
+        """rows = [(run_id, agent_id, child_session_key, task_kind, task), …]"""
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, requester_session_key TEXT,"
+                     " task_kind TEXT, task TEXT, created_at INTEGER)")
+        for i, (rid, aid, child, kind, task) in enumerate(rows):
+            conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+                         (rid, aid, child, child, kind, task, 5000 + i))
+        conn.commit(); conn.close()
+        r = [{"agent": a} for a in ours]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: r, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: r)
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+
+    def test_第四种task_kind且agent_id是自己_不算spawn(self, tmp_path, monkeypatch):
+        """P1（评审要求补的那道）：换一种没见过的 `task_kind`，判据仍要挡住。
+
+        这正是排除列表挡不住、肯定式判据能挡住的差别 —— 探针不能只钉
+        `exec` 这一个字面量，否则它钉的是实例不是判据。
+        """
+        did = "BIGA-20260922-777"
+        self._wire(tmp_path, monkeypatch, ["market"], [
+            # agent 在自己会话里调工具建的行：run_id 带命名空间前缀
+            (f"tool:image_generate:1", "market", "agent:market:subagent:self-1",
+             "image_generation", f"画一张图，参考本次决策编号 {did}")])
+        proof = pa.spawn_proof(did)
+        assert proof.per_agent["market"] == (True, False), (
+            "agent 在自己会话里建的 task 行被当成了 spawn —— "
+            "判据退回排除列表了？")
+
+    def test_真spawn仍然算(self, tmp_path, monkeypatch):
+        """非平凡：上一条不能靠「什么都不算 spawn」通过。"""
+        did = "BIGA-20260922-778"
+        self._wire(tmp_path, monkeypatch, ["market"], [
+            ("11111111-2222-3333-4444-555555555555", "market",
+             "agent:market:subagent:abc", None, f"本次决策编号 {did}。请…")])
+        assert pa.spawn_proof(did).per_agent["market"] == (True, True)
+
+    def test_child段名与agent_id不符_不算spawn(self, tmp_path, monkeypatch):
+        """伪造者把 agent_id 写成别人：两个字段对不上就不算。"""
+        did = "BIGA-20260922-779"
+        self._wire(tmp_path, monkeypatch, ["market"], [
+            ("11111111-2222-3333-4444-666666666666", "market",
+             "agent:emotion:subagent:abc", None, f"本次决策编号 {did}。请…")])
+        assert pa.spawn_proof(did).per_agent["market"] == (True, False)
+
+    def test_表在却读不了是判不了_不是零记录(self, tmp_path, monkeypatch):
+        """P2（评审要求补的那道）：一张表读失败 ≠ 这个号没有记录。
+
+        评审实测：上游把 `task` 列改名之后，真卡的结论不是「判不了」而是
+        FAIL「这个号从未被 spawn 过」—— 一次读失败变成对真卡的指控。
+        """
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        # 表在，但列名被上游改了 ⇒ 查询会炸
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, task_text TEXT, created_at INTEGER)")
+        conn.commit(); conn.close()
+        r = [{"agent": "market"}]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: r, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: r)
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+        assert pa.spawn_proof("BIGA-20260922-780").readable is False, (
+            "表在却读不了被当成了「零条记录」—— 那会让调用方判伪造")
+
+
+class TestOrphanSpawnsSameSource:
+    """🔴 评审抓到的「通过是因为什么都没查」：`orphan_spawns()` 落在只读
+    `subagent_runs` 的旧口径上。实测 2026-09-22 那天它打出「✅ 无孤儿 spawn」，
+    而当天 `subagent_runs` 0 行、`task_runs` 里有 27 次真 spawn。
+    """
+
+    def test_只有task_runs时也能发现孤儿(self, tmp_path, monkeypatch):
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, task_kind TEXT, task TEXT,"
+                     " created_at INTEGER)")
+        from datetime import datetime as _dt
+        lo = int(_dt.strptime("20260922", "%Y%m%d")
+                 .replace(tzinfo=pa.CN_TZ).timestamp() * 1000)
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?)", (
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "market",
+            "agent:market:subagent:x", None, "采集数据（没有决策号）", lo + 1000))
+        conn.commit(); conn.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+        got = pa.orphan_spawns("20260922")
+        assert got is not None, "两张表只有一张在，不该报判不了"
+        assert [(a, why) for _, a, why in got] == [("market", "无决策号")], got
+
+    def test_去重不能丢掉重复行携带的证据(self, tmp_path, monkeypatch):
+        """🔴 回合三评审：两张表的文本字段**不是同一份文档**。
+
+        `task_runs.task` 是渲染后的提示词、`subagent_runs.payload_json` 是 spawn
+        载荷 JSON。实测临时号 `-000` 在前者出现 0 次、在后者 3 次。去重永远留
+        `task_runs`（先读）⇒ 「只带临时号」这个分支在真实数据上再也不会亮：
+        数量对、钱对，但读的人被静默送去错误的诊断方向
+        （「无决策号」= 没带号；「只带临时号」= **占号晚于 spawn**，即 L-11）。
+
+        ⇒ 去重是去掉重复的**行**，不该去掉那行携带的**证据**：同一个 run_id 的
+        几行，扫决策号时扫它们文本的**并集**。
+        """
+        from datetime import datetime as _dt
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, task_kind TEXT, task TEXT,"
+                     " created_at INTEGER)")
+        conn.execute("CREATE TABLE subagent_runs (run_id TEXT, child_session_key TEXT,"
+                     " controller_session_key TEXT, requester_session_key TEXT,"
+                     " created_at INTEGER, payload_json TEXT)")
+        lo = int(_dt.strptime("20260921", "%Y%m%d")
+                 .replace(tzinfo=pa.CN_TZ).timestamp() * 1000)
+        rid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+        # 同一次 spawn：task_runs 那份文本**不含**决策号（渲染后的提示词）
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?)", (
+            rid, "sector", "agent:sector:subagent:x", None,
+            "[Subagent Context] You are running as a subagent…", lo + 1000))
+        # 而 subagent_runs 那份载荷里带着临时号
+        conn.execute("INSERT INTO subagent_runs VALUES (?,?,?,?,?,?)", (
+            rid, "agent:sector:subagent:x", "agent:main:card-1", "agent:main:card-1",
+            lo + 1000, '{"runId":"%s","prompt":"…BIGA-20260921-000…"}' % rid))
+        conn.commit(); conn.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+
+        got = pa.orphan_spawns("20260921")
+        assert len(got) == 1, f"同一次 spawn 应该只报一条，得到 {got}"
+        assert got[0][1] == "sector"
+        assert "临时号" in got[0][2], (
+            f"证据在去重时被丢了 —— 分类成了 {got[0][2]!r}。"
+            "「无决策号」与「只带临时号」指向不同根因，后者是 L-11")
