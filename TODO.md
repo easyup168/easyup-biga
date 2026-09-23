@@ -1052,19 +1052,18 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         `expected_roster` 只解决了"这张卡当时期望谁答"，没有解决"这个
         Pipeline 版本本身该不该有独立标识"。留给以后需要多套并行 Pipeline
         版本时再建（现在只有一个 Pipeline，装了就是 L-1 死配置）
-- [ ] 批 L · `cn.trading_calendar` —— P0 六个 dataset 里**今天**唯一有
-      被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
-      定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
-      体量小的数据集把 Provider→Raw→Normalize→Quality→Snapshot 走第二遍
-      （第一遍是已完成的 index_daily）。**设计探活已完成（2026-09-23）**：
-      不接 `SnapshotCoordinator`/`evidence_sets`（那解决的是同一次运行内
-      多个 Specialist 看同一份易变数据，日历是低频参考表，不是这个形状）；
-      会是仓库第一张真正的 `fact_*` 表（现在文档画的三层图里只有 raw 层
-      被真正实例化过）；真实消费方 `market_is_open`/`session_in_progress`
-      目前零测试覆盖，动它们之前必须先补特征测试锁基线。**分发提示词已写好**
-      （`docs/guide/orchestration-kickoff-prompt.md` 批 L 一节），Provider
-      端点选哪个、`session_in_progress` 要不要跟着改，留给建造会话自己判断
-      并在交回时说明理由
+- [x] 批 L · `cn.trading_calendar` —— **已落地（2026-09-23）**。深交所官方
+      monthList Provider（`skills/_sources/szse.py`，探活 5 个免鉴权源后选定：
+      新浪要 JS 引擎解密、东财数据脏、timor 是办公日历≠交易所口径），归一化进
+      新表 `fact_trading_calendar`（schema **v15**，仓库第一张真正的 `fact_*`
+      表）。`market_is_open()` 有日历数据以它为准、查不到回退 weekday（与批 L
+      之前逐一相同，`session_in_progress` 不改）。完整性 fail-closed：解析要求
+      响应覆盖该月每一天。深交所站点从当前 WSL 部署连不通（已验证：TCP 握手
+      后挂死）——本环境 `fact_trading_calendar` 恒为空、`market_is_open` 恒走
+      安全回退；解析层与落库链离线全测，真实抓取留给能连通交易所的运行环境。
+      独立复核：三道探针亲手 sabotage-revert 全部匹配、真实生产卡
+      `BIGA-20260923-004` replay 验证组装一致、全部日期/星期声明逐一核实。
+      教程第 38 章、`CHANGELOG.md`、`architecture.md` §5.3.6。
       🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
       Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
