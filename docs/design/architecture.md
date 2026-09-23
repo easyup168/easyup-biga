@@ -526,6 +526,8 @@ Agent（通过 skill 只读查询）
 | `decision_runs`（v7） | **运行身份头** —— 一次执行尝试的不可变身份，见 §5.3.4 |
 | `run_events`（v7） | **状态转移日志** —— 当前状态 = 最新一行；CAS 靠它，见 §5.3.4 |
 | `evidence_sets`（v7） | **冻结数据切片登记**（批 D 起有生产方，批 B 只建表带触发器） |
+| `notification_outbox`（v11） | **外发通知队列**（批 G-I）—— 与 Card 同事务入队，幂等键 `(event_type, aggregate)`，见 §5.3.5 |
+| `notification_deliveries`（v11） | **投递尝试日志**（批 G-I）—— 「投没投成」是派生查询，不给 outbox 开原地改例外 |
 | `fact_stock_daily` / `fact_index_daily` | 归一化日线 |
 | `d_emotion_daily` | 情绪分 |
 | `d_sector_strength` | 板块强度 |
@@ -617,7 +619,7 @@ Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 
 **落点**：
 
-* `skills/_contract/run.py` —— `RunContext` 值对象（运行身份的唯一定义）+ 13 个状态
+* `skills/_contract/run.py` —— `RunContext` 值对象（运行身份的唯一定义）+ 14 个状态
   `RunState` + 合法转移图 `LEGAL_TRANSITIONS`。状态清单从类属性派生，不手抄第二份。
 * `skills/_store/runs.py` —— `open_run()` 写身份头 + 初始事件；`transition(run_id,
   expected, next)` 做 **compare-and-set**：读到最新 `seq`、断言当前状态 == expected、
@@ -628,19 +630,47 @@ Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
   （`bin/biga-card` 调它开 run / 推状态 / `--status` 复述），并持有
   `STATE_MEANING`：`--status` 的读取知识，也是「每个状态都有消费方」判据的落点。
 
-**13 个状态，一个不多**：评审原文 15 个，去掉 `IDENTITY_RESERVED` /
+**14 个状态，一个不多**：评审原文 15 个，去掉 `IDENTITY_RESERVED` /
 `SNAPSHOT_COLLECTING`（本系统里没有代码能进入、没有消费方会读 —— 多一个就是
-L-1 死配置），`NOTIFICATION_PENDING` 推到批 G（outbox 存在之前它没有消费方）。
-每个状态都要能指出「谁写它」（能从 `RECEIVED` 经合法转移到达）与「谁读它」
-（`--status` 说得清），两条都有结构性测试钉死。
+L-1 死配置）；`NOTIFICATION_PENDING` 原本推到批 G，**批 G-I 加回来** —— 它现在有
+生产方（编排器在 `CARD_PERSISTED` 之后入队 `notification_outbox`）与消费方
+（`STATE_MEANING` + `notify_worker` 投递），不再是「建了没人读」，插在 `CARD_PERSISTED`
+与 `COMPLETED` 之间。每个状态都要能指出「谁写它」（能从 `RECEIVED` 经合法转移到达）
+与「谁读它」（`--status` 说得清），两条都有结构性测试钉死。
 
 🔴 **批 B 建的状态机，批 C-II 已真正启用**：`DecisionOrchestrator`
-（`orchestrator.py`）自己 `open_run` 并驱动全部 8 步转移（`RECEIVED` → `PREFLIGHTED`
+（`orchestrator.py`）自己 `open_run` 并驱动全部 9 步转移（`RECEIVED` → `PREFLIGHTED`
 → `SNAPSHOT_FROZEN` → `STAGE1_RUNNING` → `STAGE1_COMPLETED` → `RISK_RUNNING` →
-`SYNTHESIZING` → `CARD_PERSISTED` → `COMPLETED`），走**细粒度链**而不是批 B 那条
+`SYNTHESIZING` → `CARD_PERSISTED` → `NOTIFICATION_PENDING`（批 G-I）→ `COMPLETED`），
+走**细粒度链**而不是批 B 那条
 legacy 粗边（`PREFLIGHTED → CARD_PERSISTED` 已随 C-II 删除，L-7）。批 B 当时是过渡态
 「新旧并存」：`bin/biga-card` 还走老路径（spawn `main`、LLM 内部编排）、只 best-effort
 记账；C-II 把老路径整段换成程序驱动，记账变成流程本身而不再是旁挂。
+
+#### 5.3.5 外发通知 outbox（确定性编排批 G-I，schema v11）
+
+四类事件（Card 完成 / UNKNOWN / risk 否决 / 运行失败）经一条 outbox 通道推出去，
+让人不必守着终端等一次 170~200s 的同步出卡。**只做「推」**（Outbound Only）——
+不接受任何飞书方向的输入（那是批 G-II）。
+
+* `skills/_contract/notify.py` —— `NOTIFICATION_EVENT_TYPES`（四类白名单）+
+  `card_event_type()`（把一张已产出的卡分到 `risk_block`/`card_unknown`/`card_completed`，
+  否决优先、判据是 `stance==VETO_STANCE` 不是 status 猜）+ `NOTIFY_FAILURE_STATES`。
+* `notification_outbox`（队列，幂等键 `(event_type, aggregate)`）+ `notification_deliveries`
+  （投递尝试日志），**两张都只追加**。「投没投成」= deliveries 里有没有一条
+  `status='delivered'` —— 一条派生查询，**不给 outbox 开 `delivered_at` 原地改的例外**
+  （与 `run_events`/`amends`/`replay_of` 同一条 L-8 先例：状态变更一律追加）。
+* 入队与写库的原子性：`save_card_with_notifications(card, notifications)` 把 Card 与
+  outbox 行放**同一个事务** —— 要么一起进库、要么一起回滚，不会「卡进去了、通知没进去」。
+  `run_failed` 走 `enqueue_run_failed(run_id)`，在失败终态转移**之后**尽力而为地入队
+  （幂等 `aggregate=run_id`）——通知入队失败绝不回滚「这次运行失败了」这条记录。
+* `RunState.NOTIFICATION_PENDING`（`CARD_PERSISTED → NOTIFICATION_PENDING → COMPLETED`）：
+  只代表「已入队」，**不代表「已投递」**。`COMPLETED` 紧接其后、纯 DB，不等 worker ——
+  一次飞书 API 抽风不会把 Run 卡在非终态。
+* `skills/decision-card/scripts/notify_worker.py` —— outbox 的读取方：扫没投成的行、
+  经一个**可替换的投递接口**（`Deliverer` 协议）投出、往 deliveries 追加一条尝试。
+  这一批只有桩实现 `StdoutDeliverer`；真飞书 adapter 是批 G-II 的生产方。挂进 cron
+  调度域也是 Phase 3 / G-II 的事（`tools/cron` 现在是空的）。
 
 ---
 

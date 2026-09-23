@@ -62,19 +62,25 @@ def _open(db, **kw) -> str:
 
 
 class TestStateInventory:
-    def test_恰好13个状态且名字与设计文档一致(self):
+    def test_恰好14个状态且名字与设计文档一致(self):
         """🔴 「照设计文档 §5 那张表，一个不多」。
 
-        写死这 13 个名字，就是不让 `IDENTITY_RESERVED` / `SNAPSHOT_COLLECTING`
-        / `NOTIFICATION_PENDING` 之类凭空多出来的状态混进来 —— 多一个就是一条
-        L-1 死配置。加/删状态要**同时**改这里，逼人回答「它谁写谁读」。
+        写死这些名字，就是不让 `IDENTITY_RESERVED` / `SNAPSHOT_COLLECTING` 之类
+        **凭空多出来（无生产方/消费方）**的状态混进来 —— 多一个就是一条 L-1 死配置。
+        加/删状态要**同时**改这里，逼人回答「它谁写谁读」。
+
+        🔴 `NOTIFICATION_PENDING` 批 G-I 加回来（原本推迟到批 G）：它现在有生产方
+        （编排器在 CARD_PERSISTED 之后入队 notification_outbox）与消费方（run_ledger 的
+        STATE_MEANING + notify_worker 投递），不再是「建了没人读」——不是又一条死配置，
+        而是死配置被消灭的反例。见 deterministic-orchestration.md §6 批 G-I。
         """
         assert RUN_STATES == {
             "RECEIVED", "PREFLIGHTED", "SNAPSHOT_FROZEN", "STAGE1_RUNNING",
             "STAGE1_COMPLETED", "RISK_RUNNING", "SYNTHESIZING", "CARD_PERSISTED",
+            "NOTIFICATION_PENDING",
             "COMPLETED", "FAILED", "TIMEOUT", "CANCELLED", "INPUT_REQUIRED",
         }
-        assert len(RUN_STATES) == 13
+        assert len(RUN_STATES) == 14
 
     def test_五个终态(self):
         assert TERMINAL_STATES == {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED",
@@ -189,7 +195,9 @@ class TestHappyPath:
             (RunState.STAGE1_COMPLETED, RunState.RISK_RUNNING),
             (RunState.RISK_RUNNING, RunState.SYNTHESIZING),
             (RunState.SYNTHESIZING, RunState.CARD_PERSISTED),
-            (RunState.CARD_PERSISTED, RunState.COMPLETED),
+            # 🔴 批 G-I：CARD_PERSISTED 经 NOTIFICATION_PENDING（outbox 入队）才到 COMPLETED。
+            (RunState.CARD_PERSISTED, RunState.NOTIFICATION_PENDING),
+            (RunState.NOTIFICATION_PENDING, RunState.COMPLETED),
         ]
         for frm, to in chain:
             transition(rid, frm, to, path=db)

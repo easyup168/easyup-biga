@@ -24,6 +24,8 @@ from contextlib import contextmanager
 from typing import Any
 
 from _contract import (
+    NOTIFICATION_EVENT_TYPES,
+    RUN_FAILED,
     AgentAssessment,
     AgentOutcome,
     AgentVerdict,
@@ -43,6 +45,11 @@ __all__ = [
     "db_path",
     "init_schema",
     "save_card",
+    "save_card_with_notifications",
+    "enqueue_run_failed",
+    "record_delivery",
+    "undelivered_notifications",
+    "list_deliveries",
     "load_online_card",
     "load_card_by_record_id",
     "load_verdicts",
@@ -181,8 +188,35 @@ def save_card(
     只接受完整的 `DecisionCard` 对象 —— 派生列全部由它生成，
     调用方无法单独指定，因此不可能出现「查询列说 WAIT、card_json 说 BUY」。
 
+    🔴 批 G-I：这是 `save_card_with_notifications(card, ())` 的薄封装 —— 不入队任何
+       通知。要在同一个事务里连带入队外发通知（在线出卡路径），走后者。回放
+       （`replay.py --store`）与其余不推通知的调用方继续用这个。
+
     Args:
         replay_of: 回放时填被回放记录的 `record_id`；在线路径留空。
+    """
+    return save_card_with_notifications(card, (), replay_of=replay_of, path=path)
+
+
+def save_card_with_notifications(
+    card: DecisionCard,
+    notifications: "list | tuple",
+    *,
+    replay_of: int | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """在**同一个事务**里落 Card 并入队外发通知，返回 `record_id`（批 G-I）。
+
+    🔴 **探针 P1（同事务原子性）**：Card 落库与通知入队要么一起成功、要么一起失败。
+       `notifications` 里任一条入队失败（如 `event_type` 非法、payload 非严格 JSON）
+       ⇒ 抛异常 ⇒ `connect()` 回滚整段 ⇒ **Card 也不落库**。不会出现「卡进去了、
+       通知没进去」的中间状态。这正是分发提示词点名的那条：outbox 与 Card 同事务。
+
+    Args:
+        notifications: 形如 `[{"event_type": ..., "aggregate": ..., "payload": {...}}, ...]`。
+            在线出卡路径由 `card_ops.persist` 用 `_contract.card_event_type` 从卡分类得来
+            （通常一条）。回放路径（`replay_of` 非空）**不推通知**（回放不重新执行、也不
+            重推），传空即可 —— `save_card` 就是这么委托的。
     """
     if not isinstance(card, DecisionCard):
         raise TypeError(
@@ -224,7 +258,14 @@ def save_card(
     #    的状态影响，档位判断因此挪出了可被篡改的对象。
     DecisionCard.from_dict(json.loads(payload), from_store=replay_of is not None)
     try:
-        return _insert_card(card, payload, replay_of, path)
+        # 🔴 一个 connect() = 一个事务：卡的 INSERT 与通知的 INSERT 全在里面。
+        #    `connect()` 正常退出才 commit；中途任一 INSERT 抛错 → 它 rollback 整段。
+        with connect(path) as conn:
+            record_id = _insert_card_row(conn, card, payload, replay_of)
+            for n in notifications:
+                _insert_notification(conn, event_type=n["event_type"],
+                                     aggregate=n["aggregate"], payload=n["payload"])
+        return record_id
     except sqlite3.IntegrityError as e:
         if "decision_records.decision_id" not in str(e):
             raise
@@ -236,28 +277,173 @@ def save_card(
         ) from e
 
 
-def _insert_card(card: DecisionCard, payload: str, replay_of: int | None,
-                 path: pathlib.Path | str | None) -> int:
+def _insert_card_row(conn: sqlite3.Connection, card: DecisionCard, payload: str,
+                     replay_of: int | None) -> int:
+    """在**给定连接**（= 调用方的事务）里插一行 decision_records。返回 record_id。
+
+    抽出来是为了让 `save_card_with_notifications` 能把它和通知入队放进同一个事务 ——
+    不各开各的 `connect()`（那就成了两次独立提交，通知失败也拦不住卡已落库）。
+    """
+    cur = conn.execute(
+        """INSERT INTO decision_records
+           (decision_id, replay_of, status, headline, model_ref,
+            missing_count, card_json, generated_at, elapsed_ms, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            card.decision_id,
+            replay_of,
+            card.status,
+            card.headline,
+            card.model_ref,
+            len(card.missing),
+            payload,
+            card.generated_at,
+            card.elapsed_ms,
+            now_cn().isoformat(),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+# ─────────────────────────────────────────────── notification_outbox / deliveries
+#
+# 外发通知（批 G-I，Outbound Only）。设计文档 §6 批 G-I。
+# outbox = 「该推哪件事」的队列（幂等键 (event_type, aggregate)）；deliveries =
+# 「投递尝试」的追加日志。两张都只追加（触发器强制），「投没投成」是派生查询
+# （见 schema.py _V11 的设计裁定）。
+
+
+def _insert_notification(conn: sqlite3.Connection, *, event_type: str,
+                         aggregate: str, payload: Any) -> int | None:
+    """在**给定连接**（= 调用方的事务）里入队一行 notification_outbox。
+
+    返回新 `outbox_id`；若 `(event_type, aggregate)` 已入队（幂等冲突）返回 None。
+
+    🔴 `event_type` 白名单 **fail-closed**：非法值抛 `ValueError`。因为它在调用方的
+       事务里抛，`save_card_with_notifications` 的「Card + 通知同成同败」就靠它 ——
+       非法 event_type ⇒ 这里抛 ⇒ 整段回滚 ⇒ 卡不落库（探针 P1）。未知事件类型当 bug
+       拒绝，不静默入队一条 worker 投不出去的通知（与 `RUN_ORIGINS` 同立场）。
+
+    🔴 幂等走 `ON CONFLICT(event_type, aggregate) DO NOTHING` —— 重复入队是无害 no-op
+       （探针 P2：不会造成同一通知被投两次）。它只吃 UNIQUE 冲突，不碰 append-only
+       触发器（那对触发器管 UPDATE/DELETE，不管 INSERT）。用它而不是「先查再插」：
+       同一招唯一约束仲裁，没有竞态窗口（与 decision_ids 占号同形）。
+    """
+    if event_type not in NOTIFICATION_EVENT_TYPES:
+        raise ValueError(
+            f"event_type={event_type!r} 不在白名单 "
+            f"{sorted(NOTIFICATION_EVENT_TYPES)} —— 未知事件类型当 bug 拒绝"
+            "（fail-closed），不静默入队一条投不出去的通知。")
+    if not isinstance(aggregate, str) or not aggregate.strip():
+        raise ValueError(
+            f"aggregate 必须是非空字符串（幂等键的一半），收到 {aggregate!r}")
+    blob = _canonical_dumps(payload)
+    # 写边界重校验（A3）：只信「序列化之后还能读回来」。非严格 JSON（NaN/Infinity）
+    # 在这里就地抛 —— 与卡在同一事务，于是也会把卡一起回滚（P1）。
+    json.loads(blob)
+    cur = conn.execute(
+        "INSERT INTO notification_outbox (event_type, aggregate, payload_json, created_at) "
+        "VALUES (?,?,?,?) ON CONFLICT(event_type, aggregate) DO NOTHING",
+        (event_type, aggregate, blob, now_cn().isoformat()),
+    )
+    # ON CONFLICT DO NOTHING 命中冲突时 rowcount==0、lastrowid 不可靠 ⇒ 返回 None。
+    return int(cur.lastrowid) if cur.rowcount else None
+
+
+def enqueue_run_failed(
+    run_id: str, *, reason: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int | None:
+    """给一次进入失败终态（FAILED/TIMEOUT/CANCELLED）的运行入队 run_failed 通知。
+
+    幂等（`aggregate=run_id`，一次执行尝试至多失败一次）；返回 `outbox_id` 或 None（已入队）。
+
+    🔴 **自己开事务，不与终态转移强绑**：分发提示词的 P1 同事务原子性只对 Card+outbox
+       要求。运行失败的通知是**尽力而为**——通知入队失败绝不能回滚「这次运行失败了」
+       这条 run_events 记录（那比漏一条通知糟得多）。调用方（`orchestrator._fail`
+       best-effort、`run_ledger.cmd_move` 终态分支）在转移**之后**调它；进程若在中间被杀，
+       顶多漏一条通知（幂等 ⇒ reaper/重跑可安全补），run 的终态已如实落库。
+
+    payload 带 `decision_id`（P4 的「对应决策号」）——可能为 None：legacy 早退在占号
+    之前就失败。run_id 一定有。
+    """
+    with connect(path) as conn:
+        row = conn.execute(
+            "SELECT decision_id, origin FROM decision_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if row is None:
+            # 没 open_run 过就想推它失败 —— 调用方 bug，fail-loud（不静默吞）。
+            raise ValueError(
+                f"run {run_id!r} 不在 decision_runs 里，无法入队 run_failed 通知 —— "
+                "先 open_run()。")
+        payload = {"run_id": run_id, "decision_id": row["decision_id"],
+                   "origin": row["origin"], "reason": reason}
+        return _insert_notification(conn, event_type=RUN_FAILED,
+                                    aggregate=run_id, payload=payload)
+
+
+def record_delivery(
+    *, outbox_id: int, attempt: int, status: str, channel: str,
+    error: str | None = None, path: pathlib.Path | str | None = None,
+) -> int:
+    """追加一条投递尝试记录，返回 `delivery_id`。
+
+    `status` ∈ {'delivered','failed'}（fail-closed 白名单）。「这条 outbox 投没投成」=
+    有没有一条 status='delivered' 的记录（`undelivered_notifications` 就按它过滤）。
+    """
+    if status not in ("delivered", "failed"):
+        raise ValueError(
+            f"delivery status 只能 'delivered' / 'failed'，收到 {status!r}")
     with connect(path) as conn:
         cur = conn.execute(
-            """INSERT INTO decision_records
-               (decision_id, replay_of, status, headline, model_ref,
-                missing_count, card_json, generated_at, elapsed_ms, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (
-                card.decision_id,
-                replay_of,
-                card.status,
-                card.headline,
-                card.model_ref,
-                len(card.missing),
-                payload,
-                card.generated_at,
-                card.elapsed_ms,
-                now_cn().isoformat(),
-            ),
+            "INSERT INTO notification_deliveries "
+            "(outbox_id, attempt, status, channel, error, at) VALUES (?,?,?,?,?,?)",
+            (int(outbox_id), int(attempt), status, channel, error, now_cn().isoformat()),
         )
         return int(cur.lastrowid)
+
+
+def undelivered_notifications(
+    *, limit: int = 100, path: pathlib.Path | str | None = None
+) -> list[dict[str, Any]]:
+    """还没投递成功的 outbox 行 —— **worker 的读取方**（批 G-I 的 L-1 消费方）。
+
+    「没投成」= `notification_deliveries` 里没有这条 outbox 的 status='delivered' 行。
+    附 `attempt_count`（已尝试几次）供 worker 决定第几次投递 / 是否放弃（这一批只投一遍）。
+    `payload` 已从 JSON 解析回 dict。按 outbox_id 升序（先入队先投）。
+    """
+    with connect(path, readonly=True) as conn:
+        rows = conn.execute(
+            """SELECT o.outbox_id, o.event_type, o.aggregate, o.payload_json, o.created_at,
+                      (SELECT COUNT(*) FROM notification_deliveries d
+                       WHERE d.outbox_id = o.outbox_id) AS attempt_count
+                 FROM notification_outbox o
+                WHERE NOT EXISTS (
+                      SELECT 1 FROM notification_deliveries d
+                       WHERE d.outbox_id = o.outbox_id AND d.status = 'delivered')
+                ORDER BY o.outbox_id ASC
+                LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["payload"] = json.loads(d.pop("payload_json"))
+        out.append(d)
+    return out
+
+
+def list_deliveries(
+    outbox_id: int, *, path: pathlib.Path | str | None = None
+) -> list[dict[str, Any]]:
+    """一条 outbox 的全部投递尝试，按 attempt 升序 —— 排查 / 断言用。"""
+    with connect(path, readonly=True) as conn:
+        rows = conn.execute(
+            "SELECT delivery_id, outbox_id, attempt, status, channel, error, at "
+            "FROM notification_deliveries WHERE outbox_id=? ORDER BY attempt ASC",
+            (int(outbox_id),),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def next_decision_id(

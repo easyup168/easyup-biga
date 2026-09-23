@@ -43,11 +43,13 @@ from _contract import (  # noqa: E402
     MissingItem,
     RunContext,
     RunState,
+    card_event_type,
     new_run_context,
 )
 from _runtime import OpenClawRuntimeAdapter, SpawnHandle, SpawnStatus  # noqa: E402
 from _snapshot import SnapshotCoordinator  # noqa: E402
 from _store import (  # noqa: E402
+    enqueue_run_failed,
     latest_verdict_ids,
     open_run,
     reserve_decision_id,
@@ -218,6 +220,15 @@ class DecisionOrchestrator:
                 record_id = card_ops.persist(card, runtime_run_ids=runtime_run_ids)
                 state = self._to(ctx.run_id, state, RunState.CARD_PERSISTED,
                                  detail={"record_id": record_id})
+                # 🔴 批 G-I：persist() 已在 Card 的**同一事务**里入队一条外发通知
+                #    （event_type 由 card_event_type 从卡推出）。这次转移只标记「已入队」，
+                #    **不代表已投递** —— worker 异步补投（notify_worker.py）。入队是纯 DB、
+                #    紧接 COMPLETED；COMPLETED 的达成不依赖投递结果，一次飞书 API 抽风
+                #    不会把 Run 卡在非终态（探针 P5）。event_type 这里重算一次只为写进
+                #    detail 供 --status 看，与 persist 入队的那条同源（card_event_type 纯函数）。
+                state = self._to(ctx.run_id, state, RunState.NOTIFICATION_PENDING,
+                                 detail={"event_type": card_event_type(card),
+                                         "aggregate": did})
                 self._to(ctx.run_id, state, RunState.COMPLETED)
                 return card
         except OrchestratorError:
@@ -284,6 +295,14 @@ class DecisionOrchestrator:
         try:
             transition(run_id, frm, term,
                        detail={"reason": reason} if reason else None)
+        except Exception:  # noqa: BLE001
+            pass
+        # 🔴 批 G-I：进入失败终态后入队一条 run_failed 通知。与转移**分开**、同样
+        #    best-effort、幂等（aggregate=run_id）：通知入队失败绝不能盖掉「这次运行
+        #    失败了」已落库这件事（那比漏一条通知糟得多）。这是 run_failed「在各自
+        #    转移那里写」的编排器一侧；bash 侧的 TIMEOUT/CANCELLED 在 run_ledger 里。
+        try:
+            enqueue_run_failed(run_id, reason=reason)
         except Exception:  # noqa: BLE001
             pass
 
