@@ -1531,18 +1531,18 @@ P5  回归：`card_ops.load_verdicts_and_refs()` 对六个全新形状的 Specia
 
 ## 批 I / F / G / K / L / H · 现在不写分发提示词
 
-| 批 | 为什么现在不写 |
+🔴 **2026-09-23 批 J（J-I + J-II）已双双合并进 orchestration，且都独立复核
++ live 补验过关**——下表里"等批 J"这条依赖，凡是引用它的行，现在都已解除。
+以下逐行重新核对，不是整体照搬旧表。
+
+| 批 | 现状 |
 |---|---|
-| I（RawArtifact） | 要给 raw 加溯源字段，那些字段指向的 `run_id` 得先由批 J 变成没有歧义的（尚不具备） |
-| F（Risk 前移进编排器） | **E 系列已完整落地（2026-09-23，E-III `619d35e`）**，这条依赖已经解除。
-  但 F 要改 `orchestrator.py` 里 risk 的 spawn 方式，J-I 也要改 `orchestrator.py`
-  （加 `--run-id` 参数）——两者都还没开工，谁先开工谁占 `orchestrator.py`，
-  另一个等它合并。**建议 J-I 先**（已经分发提示词就绪、范围更小），F 排在它后面写 |
-| G | 依赖 E 系列完整落地（已解除），但排在 F 之后——飞书 trigger 那部分与 F 的
+| **F（Risk 前移进编排器）** | 依赖已全部解除：E 系列完整落地、J-I 也已合并（`orchestrator.py` 不再有人占着）。**当前判断里最应该先写分发提示词的一批**——建议下一批就是它 |
+| I（RawArtifact） | "`run_id` 得先由批 J 变成没有歧义的"这条已解除（J-I/J-II 双双落地，`agent_verdicts`/`evidence_sets`/`agent_runs` 的 `run_id` 语义都已单一）。**已具备写分发提示词的条件**，但建议排在 F 之后——F 会不会想让 raw 溯源字段指向"relocate 后的" risk 调用点，晚一步看得更清楚 |
+| K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**已具备写分发提示词的条件**。⚠️ 与 F 一样会碰 `orchestrator.py`（K 要把 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 改成从 Registry 派生）——建议 **F 先、K 后**，避免同一批文件二次冲突 |
+| G | 依赖 E 系列完整落地（已解除），仍排在 F 之后——飞书 trigger 那部分与 F 的
   "risk 前移"无直接耦合，只是分发时习惯上一起考虑（同批 E 的排法） |
-| K（Pipeline / Agent Registry） | E 系列没有改过 agent 名单/roster（只改了各 skill 的内部产出形状），
-  这条原始理由不完全准确，但 K 本身还没做过详细设计探活，不建议现在就写分发提示词 |
-| L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
+| L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
 🔴 **现在把它们写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
