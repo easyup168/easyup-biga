@@ -1095,16 +1095,28 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       复核确认并记录的裁定：`easyup_biga.persistence`/`providers` 内部暂时仍是
       `from _contract import ...`（旧写法）、只挂 `src/` 不自足——接受为 Strangler
       Pattern 的中间态，改法留给 H-II（见下）。
-  - [ ] 批 H-II · 留白，不建占位目录（`_runtime`/`_snapshot` 往哪迁 +
-        `application`/`integrations`/`cli` 三个命名空间装什么）——§8 没讨论过这两件事，
-        现在硬做是没有设计依据的猜测，且违反本仓库「不预建空目录」的一贯做法。
-        等真有内容要放时再建。也未引入真打包层（`[project]`/`pip install -e .`）。
-        顺带清理 H-I 独立复核记下的一笔账：`easyup_biga.persistence`/`providers`
-        内部仍是 `from _contract import ...`（旧写法），只挂 `src/` 不挂 `skills/`
-        会 `ModuleNotFoundError`（`domain` 因为不依赖另外两包，反而自足）——真实
-        路径上 `skills/`/`src/` 恒同时在 path 上，不是活 bug，但改成
-        `from easyup_biga.domain import ...` 才算这三个包真正互相独立，是内容
-        改动、不属于 H-I「纯目录搬迁」的范围
+  - [ ] 批 H-II · `_runtime` → `runtime`、`_snapshot` → `application` ——
+        **设计探活已完成（2026-09-24），分发提示词已写好**（`docs/guide/
+        orchestration-kickoff-prompt.md` 同名小节；探活见设计 SSOT §8.1）。
+        H 又拆了一层，理由与上次拆 H-I/H-II 相同：四件事里只有这两件现在有
+        把握——`_runtime`/`_snapshot` 已经是共享包、已有多消费方，跟 H-I 三个
+        包同一形状；零 `__file__`、几乎零直接子模块导入、零硬编码守卫路径，
+        比 H-I 更简单。可达性机制直接照抄 H-I（`pyproject.toml` 已挂好
+        `src/`，两种薄壳写法不用重新设计）
+  - [ ] 批 H-III · 留白，不建 `integrations`/`cli`、不挖
+        `orchestrator.py`/`feishu_deliverer.py`/`notify_worker.py`——探活
+        （§8.1）确认这三样目前都只活在 `skills/decision-card/scripts/` 里，
+        只被 `decision-card` 一个 skill 消费，没有第二个消费方证明"该抽成
+        共享包"（同裁定 15 的同源理由：第二个消费方出现才是抽取的时刻）。
+        `application/` 目前唯一有资格放的是 `SnapshotCoordinator`
+        （H-II 的范围），不是 `orchestrator.py`
+  - [ ] 批 H-II/H-III 都落地后 · 跨包引用清理——`easyup_biga.persistence`/
+        `providers` 内部仍是 `from _contract import ...`（旧写法），只挂
+        `src/` 不挂 `skills/` 会 `ModuleNotFoundError`（`domain` 因为不依赖
+        另外两包，反而自足；H-I 独立复核记下的账）。等 `_runtime`/`_snapshot`
+        也搬完（它们同样会有跨包旧写法），五个包一次性改成
+        `from easyup_biga.xxx import ...`，不要分批改——分批改等于同一件事
+        做两次，且中途状态更难判断"改没改全"
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

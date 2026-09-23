@@ -2,8 +2,8 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / I / L / **H-I**）、
-> 每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / I / L /
+> H-I / **H-II**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -2452,6 +2452,123 @@ P6  隔离自检不受影响：`python3 tools/verify/isolation.py` 迁移前后�
 不要自己宣布通过。把 git diff 摘要（尤其是 21 个 `git mv` 是否真的保留了
 history，用 `git log --follow` 抽查两个）/ 每道探针的红灯输出 / 你自己
 认为最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 H-II · `_runtime` → `runtime`、`_snapshot` → `application`
+
+⚠️ **依赖已清**：批 H-I 已独立复核通过并合并（`4478707`）。开工第一件事
+`git log --oneline -10` 确认这一点，并亲手重新跑一遍下面「先读」提到的
+几处 grep——本提示词写的行号/清单是**这一刻**验证过的。
+
+批 H 本来只拆成 H-I/H-II 两半；批 H-I 落地后做了一轮设计探活（设计
+SSOT §8.1），发现"H-II 该做什么"这四件事（`_runtime`/`_snapshot` 往哪迁 +
+`application`/`integrations`/`cli` 装什么）里只有两件现在有把握，
+⇒ **H 又拆了一层**，理由与上次拆 H-I/H-II 完全一样：耦合面不同。这一批
+（仍叫 H-II）只做**有把握的那两件**：`_runtime` → `runtime`、
+`_snapshot` → `application`。`integrations`/`cli`，以及把
+`orchestrator.py`/`feishu_deliverer.py`/`notify_worker.py` 从
+`decision-card` 挖出来的问题，都留给 H-III——它们目前只有一个消费方
+（`decision-card` 自己），没有第二个消费方证明"该抽成共享包"。
+
+```text
+把 skills/_runtime/、skills/_snapshot/ 两个共享包的真实实现，搬进
+src/easyup_biga/{runtime,application}/；两个旧包原地留薄壳，做法与批
+H-I 完全一样（包级壳自挂 src/ 到 sys.path、子模块壳用
+sys.modules[__name__] = 真实模块）——不要发明新写法，H-I 已经验证过这
+两种形状都对。这一批比 H-I 简单：两个包总共只有 5 个真实文件（比 H-I 的
+21 个少得多），且探活已确认没有 H-I 撞过的三个坑（见下）。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` §8.1（2026-09-24 补的
+  设计探活）——这一批唯一的设计依据，四件事里为什么只做两件、
+  `application/` 为什么只放得下 `SnapshotCoordinator` 不是
+  `orchestrator.py`，都写在那里，不要重新调查一遍
+- `docs/tutorial/39-package-restructure.md` —— 批 H-I 的完整执行记录，
+  两种薄壳写法、`pyproject.toml` 怎么挂 `src/`、探针怎么设计，这一批**直接
+  复用**，不要重新发明。本批做完后，教程按同一个"⏩ 后续变动"指针惯例处理
+  受影响章节（见下），不新开一章——除非做的时候又撞见 H-I 没预料的坑
+- `skills/_runtime/__init__.py`（34 行）、`skills/_runtime/adapter.py`
+  （352 行）、`skills/_runtime/mcp.py`（253 行）——全部搬迁内容
+- `skills/_snapshot/__init__.py`（13 行）、`skills/_snapshot/coordinator.py`
+  （266 行，46-48 行是它 `from _contract`/`from _sources`/`from _store`
+  三个 H-I 已迁移包的导入——这一批**不改**这三行，H-I 留下的薄壳继续让它
+  们工作，跨包引用清理是 H-II/H-III 都落地后的另一件事，见 TODO.md）
+- 🔴 与 H-I 不同的三处（探活已确认，开工请自己重新验证一遍，不要假设它
+  仍然成立）：
+  1. 零 `__file__` 用法——`grep -n "__file__" skills/_runtime/*.py
+     skills/_snapshot/*.py` 应该空手。H-I 的 `db.py`/`tradetime.py` 深度
+     陷阱不会在这一批重演，但**要亲自确认**，不要因为探活说过就跳过
+  2. 只有 1 处按子模块路径直接导入——`test_runtime_adapter.py:29` 的
+     `from _runtime.mcp import`。H-I 有 10+ 处，这一批子模块壳的验证面
+     小得多
+  3. 零处 AST 守卫硬编码 `skills/_runtime`/`skills/_snapshot` 路径——
+     `test_contract_single_impl.py`/`test_no_raw_sqlite.py` 的
+     `CONTRACT_DIR`/`STORE_DIR` 只认 `_contract`/`_store`，跟这两个包
+     无关，这一批**不需要**改任何 AST 守卫常量
+- 教程只有两章提到旧路径：第 23 章（`23-runtime-adapter.md`）、第 25 章
+  （`25-snapshot-coordinator.md`）——`grep -rl "skills/_runtime\|
+  skills/_snapshot" docs/tutorial/*.md` 重新确认
+
+## 做什么
+
+1. 建 `src/easyup_biga/{runtime,application}/`，`__init__.py` 内容 = 今天
+   两份 `skills/_runtime|_snapshot/__init__.py` 的聚合逻辑原样搬过去
+2. `git mv` 3 个真实子模块文件（保留 history）：
+   - `_runtime/{adapter,mcp}.py` → `src/easyup_biga/runtime/`
+   - `_snapshot/coordinator.py` → `src/easyup_biga/application/`
+3. 两个旧包原地留薄壳：包级壳 + 3 个子模块壳，写法照抄 H-I（`sys.modules
+   [__name__] = 真实模块`，不用 `import *`）
+4. 可达性：`pyproject.toml` 的 `pythonpath` **已经**挂了 `src/`（H-I 加的），
+   不需要再改。包级壳自己挂 `sys.path` 的写法也照抄 H-I，同样不需要重新
+   设计
+5. `CHANGELOG.md` + `TODO.md` 收尾：批 H-II 已落地，批 H-III 继续留白
+   （不要把 H-III 的留白理由弄没了）
+6. 教程：第 23、25 两章文末各追加一行「⏩ 后续变动」指针，不回改正文
+   （同 H-I 的做法）
+
+## 不要做
+
+- 不把 `orchestrator.py`/`feishu_deliverer.py`/`notify_worker.py` 从
+  `skills/decision-card/scripts/` 挖出来——那是 H-III 的范围，探活已经
+  确认它们目前只有一个消费方，没有抽成共享包的依据
+- 不建 `integrations/`、`cli/` 两个空目录——同上，没有内容要放
+- 不改 `skills/_snapshot/coordinator.py` 内部 `from _contract`/
+  `from _sources`/`from _store` 三行跨包导入——那是内容改动，属于
+  "H-II/H-III 都落地后"的跨包引用清理批次，不属于这一批的"纯目录搬迁"
+- 不引入真打包层——跟 H-I 一样，`src/` 仍是靠 `sys.path` 手动挂载的普通
+  目录树
+- 不改 `pyproject.toml`——H-I 已经把 `src/` 加进 `pythonpath`，这一批不
+  需要再碰它，如果发现"好像还是需要改一下"，先确认是不是真的需要，而不是
+  假设需要
+
+## 必须做的探针（G-1）
+
+P1  导入兼容：AST 扫全仓收集 `_runtime`/`_snapshot` 相关的全部导入语句
+    （含 `test_runtime_adapter.py:29` 那处子模块路径直接导入），在全新
+    子进程逐条真执行 → 零 ImportError。sabotage：删掉某个子模块壳，确认
+    报红、错误信息精确指向哪条导入语句失败
+P2  非 pytest 路径：`python3 -c "import sys; sys.path.insert(0,'skills');
+    import _runtime, _snapshot"`（不经 pytest 配置）成功，模块解析到
+    `easyup_biga.{runtime,application}.*`
+P3  一致性：`bin/biga-card --check <一个已有决策号>` 迁移前后逐字段相同
+    ——`_snapshot`/`_runtime` 都在真实出卡链路上（orchestrator.py 消费
+    两者），这条探针能测到它们
+P4  测试条数不减：`pytest --collect-only -q` 迁移前后一致
+P5  隔离自检不受影响：`python3 tools/verify/isolation.py` 迁移前后结果
+    一致
+P6  身份等同：`python3 -c "import sys; sys.path.insert(0,'skills');
+    import _runtime.adapter as shim; import easyup_biga.runtime.adapter as
+    real; assert shim is real"`——照抄 H-I 教程第 39 章「验证」一节的
+    第 3 条，确认壳与本体是同一个模块对象，不是拷贝
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要（含 `git log --follow` 抽查至少一个
+文件确认保留了 history）/ 每道探针的红灯输出 / 你自己认为最可能被攻破
+的一处交出来，由另一个会话评审。
 ```
 
 ---

@@ -1231,6 +1231,67 @@ tree` 拒），且 `active[]` 顺序不是 spawn 顺序 —— 详见 `architect
 🔴 **排在最后做。** 结构重组不产生任何可测的改进，而它会让**期间所有其他批次的 diff 变脏**
 —— 一个 diff 里同时有「搬文件」和「改逻辑」，评审就失去意义。
 
+### 8.1 批 H-I 落地后的设计探活：H-II 该做什么（2026-09-24）
+
+批 H-I 只搬了 `_contract`/`_store`/`_sources`——本节自己说得很清楚，`_runtime`/
+`_snapshot` 往哪迁、`application`/`integrations`/`cli` 三个命名空间装什么，
+当时**没讨论过**。轮到 H-II 时先探活这四件事，而不是直接照 §29 的目录骨架
+硬填，结论是：**H-II 本身还要再拆一层**，理由与 H 拆成 H-I/H-II 完全一样——
+四件事里只有两件现在就有把握做，另外两件仍然没有设计依据。
+
+**`_runtime` → `runtime`：有把握，规模比 H-I 任何一个包都小。**
+`adapter.py`（352 行）+ `mcp.py`（253 行），真实消费方确认
+（`market_calc`/`sector_calc`/`technical_calc`/`orchestrator.py`/
+`adapter_spike.py`）。探活确认三处 H-I 撞过的坑，这里**都不存在**：
+零 `__file__` 用法（不会有 `db.py`/`tradetime.py` 那种深度陷阱）；只有 1 处
+按子模块路径直接导入（`test_runtime_adapter.py` 的 `from _runtime.mcp
+import`，H-I 是 10+ 处）；零处 AST 守卫硬编码 `skills/_runtime` 路径（H-I
+有 4 处 `CONTRACT_DIR`/`STORE_DIR` 字面量，这里一个都没有，因为「唯一实现」
+类守卫本来就只盯 `_contract`/`_store`，跟 `_runtime` 无关）。教程只有第 23
+章一处指针要追加（H-I 是 15 章）。`pyproject.toml` 的 `pythonpath` 已经在
+H-I 挂了 `src/`，薄壳写法直接照抄 H-I 定的两种形状（包级壳自挂
+`sys.path`、子模块壳 `sys.modules[__name__] = 真实模块`），**不需要重新
+设计可达性机制**。
+
+**`_snapshot` → `application`：有把握，但要先证明它属于这一层。**
+`coordinator.py`（266 行）同时 `from _contract import`、`from _sources
+import`、`from _store import` 三个 H-I 已迁移的包——它不产生新的域类型、
+不打外部接口、不建新表，**协调另外三层**（先经 providers 抓一次、用 domain
+类型登记、落 persistence）——这正是 §29 骨架里 `application/` 那三个示意
+文件共同的角色：跨层协调，不是某一层本身。
+本仓库**从未存在**过叫 `state_machine.py` 或 `card_builder.py` 的文件，那两个只是 §29 骨架的示意名。
+第三个示意文件 `orchestrator.py` 真实存在，见下段——但它不在 H-II 范围内。
+`SnapshotCoordinator` 本身零 `__file__`、零直接子模块导入、零硬编码守卫路径、只有第 25 章一处教程指针。
+
+**`application/` 目前唯一有资格放进去的是 `SnapshotCoordinator`，不是
+`orchestrator.py`。** §29 的骨架示意稿把 `orchestrator.py` 也画进
+`application/`，但探活发现：真实的 `orchestrator.py`（29597 字节，
+`DecisionOrchestrator`）活在 `skills/decision-card/scripts/` 里，是
+**decision-card 这一个 skill 自己的编排脚本**，从来不是一个被多个 skill
+共同消费的共享包——跟 H-I 的三个包（第二个消费方出现才抽取，裁定 15 的
+同源理由）完全不是一回事。H-I 自己的缓解表已经裁定「skill 目录结构保持
+不动」，`decision-card/scripts/` 整个目录（含 `orchestrator.py` 也含
+`feishu_deliverer.py`/`notify_worker.py`/`budget.py`/`entry_guard.py` 等
+十余个脚本）不在这次搬迁范围内——现在把 `orchestrator.py` 单独挖出来放进
+`application/`，既违反那条已裁定的边界，也没有第二个消费方能证明"这该是
+共享包"。
+
+**`integrations/`（Feishu）与 `cli/` 目前没有设计依据，理由与
+`orchestrator.py` 完全相同。** `feishu_deliverer.py`/`notify_worker.py`
+同样活在 `skills/decision-card/scripts/` 里，只被 `decision-card` 一个
+skill 消费；仓库里也没有独立于各 skill `scripts/` 之外的「cli 层」——
+`bin/biga-card`/`bin/biga-notify` 是 bash 派发脚本，直接调进各 skill 的
+`scripts/*.py`，不是一层可以被搬迁的 Python 包。硬建这两个命名空间，
+放的东西只能是从 `decision-card` 挖出来的孤例——不是「按需创建」，是
+「造一个只有一个消费方的共享包」，跟 L-1 反的是同一条。
+
+⇒ **H-II 收窄成**：只搬 `_runtime` → `runtime`、`_snapshot` →
+`application`（两个已经是共享包、已有多消费方、跟 H-I 三个包同一形状的
+东西）。`integrations`/`cli`，以及把 `orchestrator.py` 之类 skill 内部
+脚本挖出来的问题，继续留白，改称 **H-III**——等 `decision-card` 之外
+真的出现第二个需要飞书投递/需要独立 cli 层的 skill，那一刻才是抽取的
+时刻，现在不是。
+
 ---
 
 ## 9. 兼容策略
