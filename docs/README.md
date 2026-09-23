@@ -107,6 +107,8 @@ Phase 1 的设计原本是 `architecture.md` 的 §11 —— 一段**历史**躺
 | [`guide/usage.md`](guide/usage.md) | 操作 | 怎么用：出卡、读卡、四个「确认它没骗你」的检查 |
 | [`guide/review-prompt.md`](guide/review-prompt.md) | 操作 | 对抗性评审提示词（自包含，粘到新会话） |
 | [`guide/orchestration-kickoff-prompt.md`](guide/orchestration-kickoff-prompt.md) | 操作 | 确定性编排升级的分批开工提示词（自包含，每批一个新会话） |
+| [`guide/license-headers.md`](guide/license-headers.md) | 操作 | 如何给源文件加 Apache-2.0 SPDX 头 |
+| [`guide/open-source-release-checklist.md`](guide/open-source-release-checklist.md) | 操作 | 开源发布前合规核查清单（仓库授权 / 三方软件 / 数据 / 保密 / 金融安全） |
 | [`tutorial/`](tutorial/README.md) | 过程 | 开发教程 13 章，与代码同步推进 |
 | [`external/`](external/) | 只读 | 上游需求文档、外部设计评审 |
 

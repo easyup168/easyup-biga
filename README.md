@@ -8,7 +8,7 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/1083%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/1101%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v8%20%C2%B7%208%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-29%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
@@ -229,7 +229,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v8 —— 决策编号原子分配器 + 只追加保护（v6 起加事实/判断拆分的 `kind` 列） | ✅ |
-| 1083 条测试 | ✅ |
+| 1101 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
 | **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
@@ -329,7 +329,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
 │                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
-├── tests/           1083 条测试
+├── tests/           1101 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
 │   └── tutorial/    开发教程（29 章，与代码同步）
@@ -377,6 +377,45 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 - `bigA01`：横版字标的**透明底白字**版（深色背景 / 视频叠加用）
 
 五张图由 AI 生成，保留了 C2PA 内容凭证（`caBX` 块）未作剥离。
+
+---
+
+## License
+
+BigA is licensed under the **Apache License, Version 2.0**. See
+[`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
+
+Unless explicitly stated otherwise, BigA-owned source code and documentation
+are provided under Apache-2.0. Third-party components remain subject to their
+respective licenses and attribution requirements; see
+[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
+
+### Market data and third-party content
+
+The Apache-2.0 license applies to the **BigA software**, not to third-party
+market data or content accessed through it.
+
+Market data, financial data, news, research reports, regulatory filings,
+web content, and other third-party information may be subject to separate
+provider terms, copyright, licensing, rate limits, access restrictions, and
+redistribution rules. Users are responsible for ensuring that their use of
+each provider complies with the applicable terms.
+
+### Financial disclaimer
+
+BigA is software for research, analysis, automation, and trading-system
+experimentation. It does not provide investment advice, a recommendation,
+or a guarantee of investment performance.
+
+Trading and investing involve risk, including possible loss of principal.
+Users remain responsible for reviewing analyses, configuring risk controls,
+complying with applicable rules and broker requirements, and authorizing any
+live trading activity.
+
+### Trademarks
+
+The Apache License 2.0 does not grant trademark rights. Project names, logos,
+and branding are governed separately from the software license.
 
 ---
 
