@@ -27,8 +27,6 @@ __all__ = [
     "ADHOC_TASK_SEQ",
     "CROSS_CHECK_PAIRS",
     "is_adhoc_task_id",
-    "STAGE1_AGENTS",
-    "STAGE2_AGENTS",
     "SYNTHESIZER_AGENT",
     "STANCE_VOCAB",
     "VETO_STANCE",
@@ -83,15 +81,11 @@ CROSS_CHECK_PAIRS: tuple[tuple[str, str, str, str, str], ...] = (
     ("market", "sh_close", "technical", "close", "上证收盘价"),
 )
 
-#: Stage 拓扑 —— **唯一定义**。
-#:
-#: Stage 1 并行扇出（分析层），Stage 2 读 Stage 1 的**冻结证据**做制衡。
-#: 放在契约层而不是各自的 skill 里：判断「谁该和谁并行」「谁必须在谁之后」
-#: 的地方不止一处（risk-check 算覆盖率、latency_report 判并行），
-#: 各写一份就会漂 —— 而漂开的表现是**并行判据在正确行为上报红**，
-#: 然后那个检查就被忽略了。
-STAGE1_AGENTS = ("market", "sector", "news", "technical", "emotion")
-STAGE2_AGENTS = ("risk", "discipline")
+#: 🔴 Stage 拓扑（`STAGE1_AGENTS` / `STAGE2_AGENTS`）批 K 起从 `_contract/registry.py`
+#:    的 `AGENT_REGISTRY` **派生**，不再在这里手写元组 —— 它俩曾是 roster 散落
+#:    五处里的两处。仍然 `from _contract import STAGE1_AGENTS` 取用，位置换了、
+#:    名字没变。`STANCE_VOCAB`（下面）**保持独立**：它是各 Specialist 的 stance
+#:    词表，不是 roster；批 K 只对 Registry 断言它的 key 集是子集关系。
 
 #: 🔴 综合判官 —— 确定性编排批 C-II 的 Stage 3 判断者（**唯一定义**）。
 #:

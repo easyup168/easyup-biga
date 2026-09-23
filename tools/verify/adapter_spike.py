@@ -30,6 +30,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "skills"))
 
+from _contract import STAGE1_AGENTS  # noqa: E402
 from _runtime import (  # noqa: E402
     Grant,
     MCPClient,
@@ -38,7 +39,12 @@ from _runtime import (  # noqa: E402
     SpawnStatus,
 )
 
-STAGE1 = ("market", "sector", "news", "technical", "emotion")
+#: 🔴 批 K：从 `_contract.AGENT_REGISTRY` 派生，不再手写第五份名单。这个脚本
+#:    普查（2026-09-23）时是 roster 散落的第三处、且**零测试覆盖**——它只 import
+#:    `_runtime`、从不 import `_contract`，`test_roster_matches_config.py` 完全
+#:    看不到它。今天再加一个 Stage 1 agent，旧字面量会静默继续用老名单。现在它
+#:    跟着 Registry 走，且 `tests/test_agent_registry.py` 钉住这条派生（探针 P4）。
+STAGE1 = STAGE1_AGENTS
 #: 给 Specialist 的最小指令 —— 我们要的是「五个真的并行跑起来」这件事，
 #: 不是完整采集结果，所以用最短的真实任务压低成本（仍是真实 agent 会话）。
 _MIN_TASK = "只回复两个字：收到。不要运行任何 skill，不要采集数据。"
