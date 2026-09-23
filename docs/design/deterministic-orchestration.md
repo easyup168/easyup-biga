@@ -775,6 +775,66 @@ raw 层只追加，改形状的代价全在后面。
 真正要变的是**位置** —— 它现在跑在一个被 spawn 的 LLM 会话**内部**。
 搬进编排器之后，身份错误在**付费调用之前**就被拦下，而不是在里面被算一遍再压成 UNKNOWN。
 
+#### 设计探活（2026-09-23）：`build_fact_bundle()` 已经是纯 Python，不用先拆再搬
+
+开工前读了 `skills/risk-check/scripts/risk_check.py` 全文（414 行，只有三个顶层函数）。
+结论比"拆两层"听起来更简单：**`build_fact_bundle(*, verdict_ids, store, task_id)`
+本来就是一个不碰 LLM、不碰 spawn 的纯函数**——`main()` 只是给它套了一层 argparse +
+`save_fact_bundle()`。不需要先把硬规则从 LLM 会话里"拆出来"，因为它压根不在 LLM
+会话里算——**编排器现在就能直接 `import` 它，今天就能调**。
+
+**当前流程的浪费不在"算得慢"，在"为了触发这次算，先花一次 LLM 调用"**：
+编排器 spawn `risk` → LLM 读提示词 → LLM 跑 `exec` 调 `risk_check.py`（这一步本身
+免费、快，是本地子进程）→ LLM 读 JSON 输出、按 `agents/risk/AGENTS.md` 的判断表
+决定 stance → LLM 跑 `amend_verdict.py --stance`。真正花钱、耗时的是那两次 LLM
+turn，不是中间那次脚本调用。
+
+**不是所有 `build_fact_bundle()` 的结果都值得省这次 LLM 调用**——读完函数体，
+返回路径分三种：
+
+| 路径 | 触发条件 | LLM 解读还有没有信息增量 |
+|---|---|---|
+| 提前 return（归属） | `foreign`：上游证据来自别的决策 | **没有**——`verdict=UNKNOWN` 是机械判定，`missing` 里已经写清楚是哪几个决策串了进来，stance 只能是「无法判定」，没有第二种可能 |
+| 提前 return（无上游） | 一条上游判定都没拿到 | **没有**——同上，`无法判定`是唯一合法结论 |
+| 走到底 | 覆盖不足 / 交易日不一致 / 阈值命中 / stance 冲突 / 正常 PASS | **有**——即使最终 stance 已经被 `agents/risk/AGENTS.md` 的判断表钉死成确定值（比如 `覆盖不足 ⇒ 无法判定`），Card 上呈现给人看的解释性文字仍需要 LLM 组织；且这条路径本身在计算意义上就没有"提前退出"的空间可省 |
+
+⇒ **只有前两条提前 return 的路径值得完全跳过 risk 的 spawn**——它们在 `build_fact_bundle()`
+的返回值里就已经是确定的、不需要任何解读的终局结论。第三条路径不省 spawn，
+但仍然全部改成"编排器先算好、risk 只解读"（见下）。
+
+**"present 但没有 stance"不会被误判成"没跑"**：查过 `_store.load_verdict()`
+的多态转换——一行只有 `kind='fact'`、从未被 `save_assessment()` 追加过 assessment
+的 `agent_verdicts` 记录，`load_outcome()`/`to_agent_verdict()` 依然能把它转成一个
+合法的 `AgentVerdict`（`stance=None`），会正常出现在 `card_ops.load_verdicts_and_refs()`
+的结果里、正常计入"present"。⇒ 编排器可以放心地**只写 FactBundle、不追加
+assessment**，卡上呈现的是"risk 给出了事实、判定是 UNKNOWN、没有给 stance"，
+不会被误读成"risk 没有响应"（那是另一个失败模式，`absent_agents` 单独管）。
+
+#### 设计方向
+
+1. **编排器直接 `import build_fact_bundle, save_fact_bundle`**，在原本 `ad.start(RISK_AGENT, ...)`
+   的位置之前，用 Stage 1 的 `verdict_ref` 列表**在本地、免费地**算一遍，`run_id`
+   走批 J-I 已经打通的 capture 路径存进去。
+2. **提前 return 的两种情况 ⇒ 不 spawn risk**，编排器自己把这份 FactBundle 落库
+   （不追加 assessment），直接拿它的 `verdict_ref` 参与合成。
+3. **其余情况 ⇒ 仍然 spawn risk，但提示词整个换掉**：不再让它自己跑
+   `risk_check.py`，改成把编排器已经算好的 `verdict_ref` 直接告诉它：
+   「事实已经算好，编号 verdict_ref=NN，不要重新跑 skill，读它、按判断表给
+   stance、跑 `amend_verdict.py --ref NN --stance <词>`」。
+   ⚠️ **一个未解的边界情况，留给分发提示词的建造会话核实、不预先假设**：
+   如果 risk 没听话、还是自己跑了一遍 `risk_check.py`（提示词失效、或走到某条
+   还没被想到的兜底路径），它会对同一个 `(task_id, agent)` 再产一条 `fact` 行——
+   这会不会撞上 `save_fact_bundle`/线性修订唯一索引，撞上时报的错够不够
+   明确，需要真的跑一次这个场景验证，不能只看代码猜。
+4. **`risk_check.py` 的 CLI 保留、不删**——手工调试/人工复核仍然需要能独立跑它；
+   变的只是编排器现在多了一条不经 CLI 的调用路径，两条路径共用同一个
+   `build_fact_bundle`/`save_fact_bundle`，不发明第二套计算逻辑。
+5. **`agents/risk/AGENTS.md` 必须同步改**——现在的「四条硬约束」第 1 条整段在教
+   risk 怎么跑 `risk_check.py`；改完之后大部分场景下它根本不会跑这个脚本了，
+   契约文本继续这么写就是 L-6（契约与实际行为对不上）。具体怎么改，包括「万一
+   真的还需要它自己跑（比如编排器这次因为某种原因没能算出来）要不要保留一条
+   兜底路径」，留给分发提示词的建造会话定，这里不预先拍板。
+
 ### 批 G · Outbox + 飞书 + 配置进仓库
 
 * `notification_outbox` 与 Card **同事务**写入；worker 投递；幂等键 `(event_type, aggregate)`
