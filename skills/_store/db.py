@@ -19,7 +19,7 @@ import json
 import os
 import pathlib
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from typing import Any
 
@@ -1251,6 +1251,84 @@ def load_raw_snapshot(
     d = dict(row)
     d["payload"] = json.loads(d.pop("payload_json"))
     return d
+
+
+# ─────────────────────────────────────────────────────────── fact_trading_calendar
+
+
+def save_trading_calendar(
+    *,
+    source: str,
+    as_of: str,
+    retrieved_at: str,
+    days: Iterable[tuple[str, bool]],
+    snapshot_id: int | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """把一份**归一化后**的交易日历落进 `fact_trading_calendar`，返回写入行数。
+
+    Args:
+        days: `(trade_date, is_open)` 序列，`trade_date` 是 ``YYYYMMDD``，
+            每个自然日一条（**含休市日** `is_open=False`）。完整性由 Provider 的
+            parse 层保证 —— 缺日在 `parse_trading_calendar` 就抛错，到不了这里。
+        snapshot_id: 这份日历归一化自哪一行 raw（`raw_market_snapshot.snapshot_id`）。
+            让事实能一路溯回数据源原始字节。手工/测试可不传。
+
+    🔴 **只追加，从不 UPDATE 旧行。** 交易所事后补发调整（临时增/删一个交易日），
+       再调一次本函数写入**更晚 `retrieved_at` 的新行**；读的一方
+       （`is_trading_day`）按 `retrieved_at` 取最新一条。覆盖旧行 = 没法回答
+       「我们当时看到的日历是什么」，与 raw 层同一条 L-8 先例。
+    """
+    rows = [(d, bool(o)) for d, o in days]
+    if not rows:
+        raise ValueError(
+            "save_trading_calendar: days 为空 —— 空日历没有意义。\n"
+            "  上游 parse_trading_calendar 应已在「该月缺日/未发布」时抛错，"
+            "不该把一份空日历送到这里。")
+    created = now_cn().isoformat()
+    with connect(path) as conn:
+        conn.executemany(
+            """INSERT INTO fact_trading_calendar
+               (trade_date, is_open, source, as_of, retrieved_at, snapshot_id, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            [(d, 1 if o else 0, source, as_of, retrieved_at, snapshot_id, created)
+             for d, o in rows],
+        )
+    return len(rows)
+
+
+def is_trading_day(
+    trade_date: str, *, path: pathlib.Path | str | None = None
+) -> bool | None:
+    """某个自然日（``YYYYMMDD``）开不开市 —— 查 `fact_trading_calendar`。
+
+    Returns:
+        `True`  已知交易日；
+        `False` 已知休市日（周末或法定节假日）；
+        `None`  **日历没覆盖到这一天**（还没抓、或问的日期超出已抓范围）。
+
+    🔴 `None` ≠ `False`（红线 R-3）。调用方拿到 `None` 必须自己决定回退 ——
+       `market_is_open` 回退到 weekday 判据，绝不把「查不到」当成「休市」：
+       那会在真实交易日里以为休市，是比「多报一条缺失项」危险得多的方向。
+
+    取最新一条：同一天可能有多行（交易所补发调整 ⇒ 更晚 `retrieved_at` 的新行），
+    按 `retrieved_at` 降序取第一条，与 `save_trading_calendar` 的「只追加、不覆盖」配对。
+
+    🔴 库不存在 / 表不存在 ⇒ 返回 `None`（视作「没覆盖到」），**不抛错**：
+       全新 clone 里日历表本就是空的（`data/biga.db` 是 .gitignore'd 的），
+       市场判据该回退而不是崩。
+    """
+    try:
+        with connect(path, readonly=True) as conn:
+            row = conn.execute(
+                """SELECT is_open FROM fact_trading_calendar
+                   WHERE trade_date=?
+                   ORDER BY retrieved_at DESC, fact_id DESC LIMIT 1""",
+                (trade_date,),
+            ).fetchone()
+    except (StoreNotInitialised, sqlite3.OperationalError):
+        return None
+    return bool(row[0]) if row else None
 
 
 # ──────────────────────────────────────────────────────────────── evidence_sets

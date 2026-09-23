@@ -593,7 +593,8 @@ snapshot` 这类单标的小体积数据集会继续留在这里——`raw_*` �
 | `evidence_sets`（v7） | **冻结数据切片登记**（批 D 起有生产方，批 B 只建表带触发器） |
 | `notification_outbox`（v11） | **外发通知队列**（批 G-I）—— 与 Card 同事务入队，幂等键 `(event_type, aggregate)`，见 §5.3.5 |
 | `notification_deliveries`（v11） | **投递尝试日志**（批 G-I）—— 「投没投成」是派生查询，不给 outbox 开原地改例外 |
-| `fact_stock_daily` / `fact_index_daily` | 归一化日线 |
+| `fact_trading_calendar`（v15） | **这个仓库第一张真实的 `fact_*` 表**（批 L）—— 深交所官方交易日历，由 `skills/_sources/szse.py` 抓取＋归一化，`market_is_open()` 查它（查不到回退 weekday）。见 §5.3.6 |
+| `fact_stock_daily` / `fact_index_daily` | 归一化日线（**尚未建** —— 等 §45 的市场数据那一批，形状由选股闭环定） |
 | `d_emotion_daily` | 情绪分 |
 | `d_sector_strength` | 板块强度 |
 | `raw_news` | 带 `published_at` / `source` / `retrieved_at` |
@@ -736,6 +737,34 @@ legacy 粗边（`PREFLIGHTED → CARD_PERSISTED` 已随 C-II 删除，L-7）。�
   经一个**可替换的投递接口**（`Deliverer` 协议）投出、往 deliveries 追加一条尝试。
   这一批只有桩实现 `StdoutDeliverer`；真飞书 adapter 是批 G-II 的生产方。挂进 cron
   调度域也是 Phase 3 / G-II 的事（`tools/cron` 现在是空的）。
+
+#### 5.3.6 交易日历 fact 层（确定性编排批 L，schema v15）
+
+`fact_trading_calendar` 是**这个仓库第一张真正落地的 `fact_*` 表** —— 在它之前，§5.2
+那张 `raw → fact → derived` 分层图里只有 raw 层被实例化过，「归一化事实层」只存在于
+文档。批 L 用一个非行情、体量小、判据清楚的数据集把这一层第一次做成真实 schema，
+既补一个既有缺陷，也给 §45「第一版完整市场数据」那一批打样。
+
+* **Provider**：`skills/_sources/szse.py` —— 深交所官方 monthList（免鉴权），
+  `fetch_trading_calendar`（联网薄函数）+ `parse_trading_calendar`（不联网纯函数，
+  能对已存 raw 重放）+ `refresh_trading_calendar`（抓取→原样落 `raw_market_snapshot`
+  →归一化进 `fact_trading_calendar`）。分层照 `sina.py` 的既定形状，**不接
+  `SnapshotCoordinator`**：那套解决「同一次运行内多消费方看同一份易变数据」，
+  日历是低频只读参考表，不是那个形状。
+* **完整性 fail-closed（R-3）**：`parse` 要求响应覆盖该月每一天，缺日/未发布当场抛错 ——
+  宁可整月拒绝，也不把「没数据」和「休市」混成一谈。
+* **只追加**：交易所补发调整（临时增/删交易日）写更晚 `retrieved_at` 的新行，
+  `is_trading_day()` 按 `retrieved_at` 取最新一条，不覆盖旧行（L-8）。
+* **消费方**：`market_is_open()`（`tradetime.py`）—— 有日历数据以它为准（法定节假日
+  正确判成休市），查不到回退到 weekday 判据，结果与批 L 之前逐一相同。回退是朝安全
+  方向：查不到当「可能开市」，顶多多报一条缺失项，绝不把「查不到」当「休市」。
+  `session_in_progress()` **不改** —— 它回答「这批数据声明的交易日过完了没」（纯时间
+  比较），加节假日感知会把 emotion 推向「把节假日的 0 当成真冰点」的危险方向。
+* 🔴 **已知部署约束**：`www.szse.cn` 从当前 WSL 部署连不通（TCP 握手后挂死）。
+  于是本环境里 `fact_trading_calendar` 保持空表、`market_is_open()` 恒走 weekday 回退
+  （安全方向）。`parse` 由离线 fixture 全测、落库链由注入桩 fetcher 全测；真实抓取会在
+  能连通深交所的运行环境里把日历填进来。消费关系真实且被测，只是数据写入取决于网络
+  可达性 —— 不是 L-1 的「零消费方」。
 
 ---
 
