@@ -961,24 +961,38 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         对 `card_ops` 幂等（已在 `sys.modules` 就复用），或 e3 不覆盖 `card_ops` 这个
         规范名。**本批不修**（不属于批 F 范围）
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
-      (sort_keys=True)`），而建表注释断言「不做任何归一化」。等批 J 的依赖
-      已解除（run_id 已消歧义），建议等批 F 落地——它给 raw 加溯源字段，
-      那些字段指向哪个调用点，等 risk 搬移落定后再定更清楚
+      (sort_keys=True)`），而建表注释断言「不做任何归一化」。批 J 的依赖
+      已解除（run_id 已消歧义），**批 F 已落地（e5b959f，risk 搬移已定型）**，
+      两个前置条件都已满足，可以开始写分发提示词
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 设计探活已完成（2026-09-23），
       按外部材料自己的分阶段建议拆成两批：
-  - [ ] 批 G-I · Outbox（Outbound Only）—— 分发提示词已就绪。只做推送通知
-        （Card 完成/UNKNOWN/Risk BLOCK/失败四类），不接受任何飞书输入，
-        没有新攻击面，不涉及 R-2
-  - [ ] 批 G-II · Inbound Trigger —— 等 G-I 落地再写分发提示词（需要它的
+  - [x] 批 G-I · Outbox（Outbound Only）—— **已落地（2026-09-23）**。四类事件
+        （Card 完成/UNKNOWN/Risk BLOCK/运行失败）经 `_contract/notify.py::
+        card_event_type()` 分类（按 stance 而非 status 判否决，避免误吞非
+        否决的 BLOCK），写入新增 `notification_outbox`/`notification_
+        deliveries` 两张表（纯追加：deliveries 是独立日志表，「是否投递
+        成功」由查询派生，不在 outbox 行上做 UPDATE）。Run 状态机新增
+        `NOTIFICATION_PENDING`（`CARD_PERSISTED → NOTIFICATION_PENDING →
+        COMPLETED`，投递失败不阻塞 Run 进终态）。消费方 `notify_worker.py`
+        已写出并测过（P4，桩 `StdoutDeliverer`）。与批 F 并行开发，merge 时
+        发生 schema v11 撞车（F 先落地保住 v11，G-I 两张新表改记 v12）与
+        教程章节号撞车（批 F 占了「第 33 章」，G-I 改第 34 章）。独立复核
+        已亲手关闭 append-only 触发器验证 P3 会红。教程第 34 章、
+        `CHANGELOG.md`。
+    - [ ] **`notify_worker.py` 尚无调度方**（批 G-I 自己披露的已知缺口，非
+          复核新发现）：判据是「调度命令的字面量」，而不是「有一个能跑的
+          脚本」——现在没有 cron/systemd 实体去调它，outbox 会一直攒行、
+          不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
+  - [ ] 批 G-II · Inbound Trigger —— **G-I 已落地，阻塞已解除**。
         `notification_outbox` 表结构与 `NOTIFICATION_PENDING` 状态转移
-        先定型）。核心交付物：飞书"出卡"从自由对话变成结构化 trigger，
-        main 的 LLM 全程不参与路由决策——这是真正关掉 2026-09-21 那次
-        $0.4 白花事故的地方，风险与 E-III/J-II 同量级
+        已定型，可以开始写分发提示词。核心交付物：飞书"出卡"从自由对话
+        变成结构化 trigger，main 的 LLM 全程不参与路由决策——这是真正关掉
+        2026-09-21 那次 $0.4 白花事故的地方，风险与 E-III/J-II 同量级
 - [ ] 批 K · Pipeline Registry + Agent Registry —— 2026-09-21 `news` 没被
       spawn 那次事故的结构性解法（现在只有对账测试，不是单一源）；
       顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）。
-      设计探活已完成（2026-09-23），但会碰 `orchestrator.py` 里 F 也要动的
-      常量，建议等 F 落地合并之后再写分发提示词
+      设计探活已完成（2026-09-23）。**F 已落地合并（e5b959f）**，阻塞已解除，
+      可以开始写分发提示词
 - [ ] 批 L · `cn.trading_calendar` —— P0 六个 dataset 里**今天**唯一有
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
