@@ -1663,7 +1663,7 @@ RunState 加 NOTIFICATION_PENDING。
   它，但要知道它已经存在，将来批 G-II 会接上，命名上不要撞车）
 - `skills/decision-card/scripts/card_ops.py::persist()`——Card 落库的地方，
   新的 outbox 写入要在**同一个 `connect()` 事务**里，不是两次独立提交
-- `agents/_store/db.py` 里任何一个 `save_*` 函数的写边界重校验写法
+- `skills/_store/db.py` 里任何一个 `save_*` 函数的写边界重校验写法
   （规范序列化 → 严格重建 → 校验 → INSERT）——新表的写入函数照这个模式写，
   不要跳过重校验这一步
 
