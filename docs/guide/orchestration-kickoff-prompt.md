@@ -1079,10 +1079,17 @@ P6  回归：对**还没迁移**的某个 Specialist（比如 `market`），走�
 
 ## 批 J-I · run_id capture 贯穿全链
 
-⚠️ **批 E-II 与 E-III 都合并之后才开这一批。** 这一批要给六个 skill 脚本各加一个
-CLI 参数，而 E-II/E-III 正在改这六个脚本的**产出形状**（AgentVerdict→FactBundle）——
-三批人马抢同一批文件是本文反复避免的事。J-I 与 J-II 谁先开都行，但两批共用
-schema 版本号，**先开的那一批占 v9，后开的占 v10**，不要两批都写 v9。
+✅ **前置条件已满足（2026-09-23）**：批 E-II（`359b97c`）、E-III（`619d35e`）、
+J-II（`933aa6d`）都已合并进 `orchestration`。原来的顾虑是「三批人马抢同一批
+skill 文件」，现在那三批都落定了。
+
+🔴 **schema 取 v10。** J-II 已经占了 v9（`ALTER TABLE agent_runs RENAME COLUMN …`）。
+开工第一件事仍然 `grep -n "(9, _V9)\|(10, _V10)" skills/_store/schema.py` 核一下。
+
+⚠️ **`orchestrator.py` 的争用对象现在换成了批 F。** 这一批要改
+`_specialist_task()`（加 `--run-id`），批 F 要改 risk 的 spawn 方式（前移进编排器）。
+两批都还没开工，谁先开工谁占这个文件。**建议 J-I 先**（范围更小、提示词已就绪），
+F 排在它后面。
 
 🔴 **改名说明**：这一批 2026-09-23 之前叫「批 E-I 收尾 · run_id 贯穿全链」。
 **范围一字未改**，只是连同新增的 J-II 一起并进「批 J · 身份闭环」。
@@ -1109,8 +1116,18 @@ schema 版本号，**先开的那一批占 v9，后开的占 v10**，不要两�
 2. 六个 skill 脚本（market/sector/technical/emotion/news/risk）各加一个
    可选的 `--run-id`（参照 `--evidence-set-id` 已经用的那套 CLI 参数
    模式：可选、默认 None、直接传进落库函数，不是新发明一套传参方式）。
-   ⚠️ E-II/E-III 之后这六个里有五个已经产 FactBundle、走 `save_fact_bundle`，
-   `risk` 走 `save_verdict`——两条落库路径都要能接住 run_id，不要只改一条。
+   ⚠️ **2026-09-23 更新**：E-III 把 `risk` 也迁完了 ⇒ 六个**全部**产 FactBundle、
+   全部走 `save_fact_bundle(fb, *, path)`——**只有一条落库路径**，不是两条。
+   本节的旧版写着「risk 走 save_verdict，两条都要改」，那是 E-III 之前的事实。
+   `save_verdict` 还在（没删），但六个 skill 都不再用它，这一批不用管它。
+
+2b. 🔴 **`save_assessment` 那条路不要再加一个 CLI 参数。** 事实行由 skill 写，
+   **判断行由 Agent 经 `amend_verdict.py --ref <fact_id> --stance …` 写**——
+   它天然带着 `amends`→事实行的指针，而事实行已经有 run_id 了。
+   ⇒ 让 `save_assessment` **从它 amends 的那一行继承 run_id**，不要让 Agent
+   在命令行上再传一遍。理由不是省事：Agent 手传就可能传错，而「继承」
+   在结构上不可能与事实行不一致——这正是本仓库反复说的「判据别建在
+   可被篡改的输入上」。
 3. `orchestrator.py::_specialist_task()`：给**每一个** agent 的任务文本
    都带上 `--run-id {ctx.run_id}`——不是只给读冻结快照的那三个，六个
    都要有，因为六个都在产生落库记录。
