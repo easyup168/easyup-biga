@@ -108,7 +108,7 @@ session-scoped，不 outlive the run），报 `Tool not available`；而 main �
 一个都没进这份 CHANGELOG（公开仓库纪律——描述「不要写 X」的规则时不抄 X）。
 
 **现状**：schema **v14**（仍是十张表；批 I 的 raw_text 列在 v13、本批 decision_ids.trigger_id 列在 v14，都是给既有表加列）、测试 **1254** 条、
-教程 **36** 章。全部在独立 worktree（`wt-g-ii`，不含未跟踪文件干扰）里跑过。
+教程 **37** 章。全部在独立 worktree（`wt-g-ii`，不含未跟踪文件干扰）里跑过。
 ### 变更（批 I）· raw 层真的存 raw —— 新增 `raw_text` 列，`content_sha256` 改基于原始响应文本（schema v13）
 
 **为什么这是证据链最底层的问题**：raw 层此前存的**不是 raw**。链路是
