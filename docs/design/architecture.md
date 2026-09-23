@@ -366,7 +366,13 @@ usage 落 `run_events.detail`（唯一真相源是运行时 trajectory，不在 
 
 ## 四、通信契约
 
-### 4.1 四个数据结构（`skills/_contract/`，唯一实现）
+### 4.1 四个数据结构（`src/easyup_biga/domain/`，唯一实现）
+
+🔴 批 H-I（2026-09-23）：本节及本文档其余处提到的 `skills/_contract/`、
+`skills/_store/`、`skills/_sources/`，真实实现已迁至
+`src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export
+薄壳（`from _contract import ...` 等全仓导入语句一字不改），但本文档描述的是
+**现状**（裁定见 `deterministic-orchestration.md` §13），下面统一改指新位置。
 
 ```python
 class MissingItem(str):
@@ -432,14 +438,14 @@ class DecisionCard:
 今天写「偏强」、明天写「震荡偏强」，三个月后它就是一列自由文本，
 Phase 4 拿它做不了任何相关性检验。**它存在的唯一理由就是能被聚合。**
 
-#### 4.1.2 事实与判断拆开（`skills/_contract/facts.py`，批 E-I 起）
+#### 4.1.2 事实与判断拆开（`src/easyup_biga/domain/facts.py`，批 E-I 起）
 
 `status`/`verdict`/`stance` 是「三个不能混的问题」，但它们还焊在**一个** frozen
 `AgentVerdict` 里 —— 事实（skill 跑完就有）与判断（Agent 事后补的 `stance`）产生方
 不同、时机不同。焊在一起的代价是实测事故：Agent 想只加一个判断，就得把整份事实重打
 一遍（`BIGA-20260920-002` 那次丢了 15 条 evidence 的 `retrieved_at`，L-10）。
 
-批 E-I 起把它拆成三个类型（`skills/_contract/facts.py`）：
+批 E-I 起把它拆成三个类型（`src/easyup_biga/domain/facts.py`）：
 
 | 类型 | 装什么 | 谁产 |
 |---|---|---|
@@ -510,7 +516,7 @@ Specialist → Supervisor：即 `AgentVerdict` 的 JSON 序列化。
 2. 需要**跨机**访问同一份事实层
 3. 单表 > **5000 万行**（作为参照：一套跑了半年的日线库，最大表也只在百万行量级）
 
-为此，所有 DB 访问必须经 `skills/_store/db.py`，**业务代码里不许出现裸
+为此，所有 DB 访问必须经 `src/easyup_biga/persistence/db.py`，**业务代码里不许出现裸
 `sqlite3.connect`** —— 这样切 PG 只改一个文件。由 `tests/test_no_raw_sqlite.py`
 钉住。
 
@@ -593,7 +599,7 @@ snapshot` 这类单标的小体积数据集会继续留在这里——`raw_*` �
 | `evidence_sets`（v7） | **冻结数据切片登记**（批 D 起有生产方，批 B 只建表带触发器） |
 | `notification_outbox`（v11） | **外发通知队列**（批 G-I）—— 与 Card 同事务入队，幂等键 `(event_type, aggregate)`，见 §5.3.5 |
 | `notification_deliveries`（v11） | **投递尝试日志**（批 G-I）—— 「投没投成」是派生查询，不给 outbox 开原地改例外 |
-| `fact_trading_calendar`（v15） | **这个仓库第一张真实的 `fact_*` 表**（批 L）—— 深交所官方交易日历，由 `skills/_sources/szse.py` 抓取＋归一化，`market_is_open()` 查它（查不到回退 weekday）。见 §5.3.6 |
+| `fact_trading_calendar`（v15） | **这个仓库第一张真实的 `fact_*` 表**（批 L）—— 深交所官方交易日历，由 `src/easyup_biga/providers/szse.py` 抓取＋归一化，`market_is_open()` 查它（查不到回退 weekday）。见 §5.3.6 |
 | `fact_stock_daily` / `fact_index_daily` | 归一化日线（**尚未建** —— 等 §45 的市场数据那一批，形状由选股闭环定） |
 | `d_emotion_daily` | 情绪分 |
 | `d_sector_strength` | 板块强度 |
@@ -685,9 +691,9 @@ Specialist 要追加缺失项时写**新行**并用 `amends` 指回原行 ——
 
 **落点**：
 
-* `skills/_contract/run.py` —— `RunContext` 值对象（运行身份的唯一定义）+ 14 个状态
+* `src/easyup_biga/domain/run.py` —— `RunContext` 值对象（运行身份的唯一定义）+ 14 个状态
   `RunState` + 合法转移图 `LEGAL_TRANSITIONS`。状态清单从类属性派生，不手抄第二份。
-* `skills/_store/runs.py` —— `open_run()` 写身份头 + 初始事件；`transition(run_id,
+* `src/easyup_biga/persistence/runs.py` —— `open_run()` 写身份头 + 初始事件；`transition(run_id,
   expected, next)` 做 **compare-and-set**：读到最新 `seq`、断言当前状态 == expected、
   `INSERT seq+1`；`UNIQUE(run_id, seq)` 是真正的并发仲裁（与 `decision_ids`
   用主键冲突占号同一招）。**状态不在 `decision_runs` 上原地 UPDATE** —— 那张表
@@ -719,7 +725,7 @@ legacy 粗边（`PREFLIGHTED → CARD_PERSISTED` 已随 C-II 删除，L-7）。�
 让人不必守着终端等一次 170~200s 的同步出卡。**只做「推」**（Outbound Only）——
 不接受任何飞书方向的输入（那是批 G-II）。
 
-* `skills/_contract/notify.py` —— `NOTIFICATION_EVENT_TYPES`（四类白名单）+
+* `src/easyup_biga/domain/notify.py` —— `NOTIFICATION_EVENT_TYPES`（四类白名单）+
   `card_event_type()`（把一张已产出的卡分到 `risk_block`/`card_unknown`/`card_completed`，
   否决优先、判据是 `stance==VETO_STANCE` 不是 status 猜）+ `NOTIFY_FAILURE_STATES`。
 * `notification_outbox`（队列，幂等键 `(event_type, aggregate)`）+ `notification_deliveries`
@@ -745,7 +751,7 @@ legacy 粗边（`PREFLIGHTED → CARD_PERSISTED` 已随 C-II 删除，L-7）。�
 文档。批 L 用一个非行情、体量小、判据清楚的数据集把这一层第一次做成真实 schema，
 既补一个既有缺陷，也给 §45「第一版完整市场数据」那一批打样。
 
-* **Provider**：`skills/_sources/szse.py` —— 深交所官方 monthList（免鉴权），
+* **Provider**：`src/easyup_biga/providers/szse.py` —— 深交所官方 monthList（免鉴权），
   `fetch_trading_calendar`（联网薄函数）+ `parse_trading_calendar`（不联网纯函数，
   能对已存 raw 重放）+ `refresh_trading_calendar`（抓取→原样落 `raw_market_snapshot`
   →归一化进 `fact_trading_calendar`）。分层照 `sina.py` 的既定形状，**不接
@@ -787,7 +793,7 @@ legacy 粗边（`PREFLIGHTED → CARD_PERSISTED` 已随 C-II 删除，L-7）。�
 skill 返回事实与分数，判断留给 agent。
 理由：判断逻辑散进 skill = 产生第二套口径。见 §9 L-3 —— 同一判据散落多处实现时，错误比例可以高得惊人，且错法全是静默的。
 
-### 6.1 采集层的两条统一接口（`skills/_sources/`）
+### 6.1 采集层的两条统一接口（`src/easyup_biga/providers/`）
 
 它们都不是「工具函数」，是**用结构消灭一类判断**——
 判断一旦分散到各个调用点，必然有某一处判错。
@@ -840,11 +846,11 @@ r.server_as_of or now_cn()      # 调用方统一这么写，不必逐处判断
 
 | 模块 | 为什么单独存在 |
 |---|---|
-| `skills/_contract/missing.py` | `MissingItem` 带**机器可读代码**（`market.turnover.date_mismatch`）—— 缺失项要能统计「哪个源最常缺」，自由文本做不到 |
-| `skills/_contract/verdict_ref.py` | 确定性编排升级批 A-II（A6）新增。`VerdictRef(agent, verdict_id, content_sha256, contract_version)`——Card 记下自己用的每条判定原件指向 `agent_verdicts` 哪一行、当时长什么样，`_store.verify_verdict_refs()` 据此核对「现在还认不认」。核对必须比对**存量 `content_sha256` 列**，不能把 `AgentVerdict` 对象重新序列化再算一遍——`_canonical_dumps` 的格式不是冻结的（A-I 就改过一次分隔符），走后者会让序列化格式一变，之前落库的原件集体核对不上且不报错 |
-| `skills/_contract/registry.py` | 确定性编排升级批 K 新增。`AGENT_REGISTRY`（一个 agent 一条 `AgentDefinition`：`stage`/`spawned`/`reads_snapshot`）是 **Agent 名册的唯一源**——`STAGE1_AGENTS`/`STAGE2_AGENTS`/`RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS`/`EXPECTED_ROSTER` 全部从它派生（照 `run.py::RUN_STATES` 的 `vars()` 内省形状），不再手写平行清单。**它解决的是 2026-09-21 那次静默事故的根**：`news` 进了契约名单、agent 也建好了，但运行时白名单漏了它 ⇒ 只 spawn 四个、无任何报错、Card 照常出只是少一个领域。收编前普查发现 roster 实际散在**五处**（含 `orchestrator.py` 两个独立字面量、`adapter_spike.py` 一处零测试覆盖的字面量）。`discipline` 在册但 `spawned=False`（裁定 13：无输入源、从不 spawn）⇒ 不进 `EXPECTED_ROSTER`（`DecisionCard.absent_agents` 的权威）⇒ 永不被判「缺席」。`STANCE_VOCAB` 保持独立、只对本表断言子集关系 |
-| `skills/_store/schema.py` | 按版本号递增的迁移列表。**已发布的条目不许改动** —— 跑过 v4 的库不会重放它，所以补触发器只能开 v5 |
-| `skills/_store/runtime.py` | 读 OpenClaw 运行时自己的 trajectory。🔴 **UTC → 北京时间的转换只在这里做一次**，消费方拿到的已经是北京时间 —— 这类 bug 的形状是「差 8 小时但仍是个合法时刻」，不报错 |
+| `src/easyup_biga/domain/missing.py` | `MissingItem` 带**机器可读代码**（`market.turnover.date_mismatch`）—— 缺失项要能统计「哪个源最常缺」，自由文本做不到 |
+| `src/easyup_biga/domain/verdict_ref.py` | 确定性编排升级批 A-II（A6）新增。`VerdictRef(agent, verdict_id, content_sha256, contract_version)`——Card 记下自己用的每条判定原件指向 `agent_verdicts` 哪一行、当时长什么样，`_store.verify_verdict_refs()` 据此核对「现在还认不认」。核对必须比对**存量 `content_sha256` 列**，不能把 `AgentVerdict` 对象重新序列化再算一遍——`_canonical_dumps` 的格式不是冻结的（A-I 就改过一次分隔符），走后者会让序列化格式一变，之前落库的原件集体核对不上且不报错 |
+| `src/easyup_biga/domain/registry.py` | 确定性编排升级批 K 新增。`AGENT_REGISTRY`（一个 agent 一条 `AgentDefinition`：`stage`/`spawned`/`reads_snapshot`）是 **Agent 名册的唯一源**——`STAGE1_AGENTS`/`STAGE2_AGENTS`/`RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS`/`EXPECTED_ROSTER` 全部从它派生（照 `run.py::RUN_STATES` 的 `vars()` 内省形状），不再手写平行清单。**它解决的是 2026-09-21 那次静默事故的根**：`news` 进了契约名单、agent 也建好了，但运行时白名单漏了它 ⇒ 只 spawn 四个、无任何报错、Card 照常出只是少一个领域。收编前普查发现 roster 实际散在**五处**（含 `orchestrator.py` 两个独立字面量、`adapter_spike.py` 一处零测试覆盖的字面量）。`discipline` 在册但 `spawned=False`（裁定 13：无输入源、从不 spawn）⇒ 不进 `EXPECTED_ROSTER`（`DecisionCard.absent_agents` 的权威）⇒ 永不被判「缺席」。`STANCE_VOCAB` 保持独立、只对本表断言子集关系 |
+| `src/easyup_biga/persistence/schema.py` | 按版本号递增的迁移列表。**已发布的条目不许改动** —— 跑过 v4 的库不会重放它，所以补触发器只能开 v5 |
+| `src/easyup_biga/persistence/runtime.py` | 读 OpenClaw 运行时自己的 trajectory。🔴 **UTC → 北京时间的转换只在这里做一次**，消费方拿到的已经是北京时间 —— 这类 bug 的形状是「差 8 小时但仍是个合法时刻」，不报错 |
 | `skills/_snapshot/coordinator.py` | 确定性编排升级批 D-I 新增。`SnapshotCoordinator.freeze_index_daily()` 把一次决策要用的指数日线**只真实抓一次**、原样落 `raw_market_snapshot` 并登记一行 `evidence_sets`；`read_index_daily()` 让多个消费者从**同一份**冻结数据切出各自要的根数（sector 2 / market 25 / technical 120），而不是各自联网。它把「所有 Specialist 看同一份数据」从**六个 skill 各自的发现**变成**冻结集的一个可核对属性**（§4 `evidence_set_id`）。`fetch_index_daily` 拆成 `fetch`（网络）+ `parse_index_daily`（纯解析）就是为了让读端能从冻结的 raw 重建 `IndexDaily`，不必第二次实现解析（L-3）。🔴 **批 D-II 已接进生产**：`orchestrator.py` 在 Stage 1 之前冻结一次（sh/sz@**120** 根 —— 取消费者里最大的 technical），market/sector/technical 各带 `--evidence-set-id` 读同一份、不再各自联网抓日线；读端 `Evidence.raw_hash` 取冻结集登记的 `content_sha256`（整份 raw 的指纹，不对切片重算），于是 risk 的 `CROSS_CHECK_PAIRS` 从「比值」改成「比 `raw_hash` 是否相同」——共享后比值恒真（L-7），比 `raw_hash` 才是「谁没读冻结快照」的探照灯。手工单跑某个 skill 不传 `--evidence-set-id` 仍自己抓（调试路径保留，fail-closed：给了坏号直接报错，不静默退回抓取）|
 
 #### `sanity.py` —— 量级围栏，抓垃圾值不抓行情

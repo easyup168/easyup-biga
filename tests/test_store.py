@@ -473,7 +473,11 @@ class TestAgentRunsIsLedgerNotProof:
         callers = set()
         for f in repo_files(".py"):
             rel = str(f.relative_to(REPO))
-            if rel.startswith(("skills/_store/", "tests/")):
+            # 🔴 批 H-I：store 的真实实现已迁至 src/easyup_biga/persistence/，而
+            #    db.py 内部 record_verdict_run → record_agent_run 是**store 自调**，
+            #    不算「业务代码写它」。排除新旧两处（旧路径现为薄壳、无调用）——
+            #    只排旧路径会把 store 自调当成业务调用，守卫的语义就漂了。
+            if rel.startswith(("skills/_store/", "src/easyup_biga/persistence/", "tests/")):
                 continue
             try:
                 tree = ast.parse(f.read_text(encoding="utf-8"))
@@ -489,7 +493,10 @@ class TestAgentRunsIsLedgerNotProof:
 
     def test_源头注释已改正(self):
         """schema 与 db 的注释是权威处 —— 它们说错了，别处再怎么改都会漂回来。"""
-        for rel in ("skills/_store/schema.py", "skills/_store/db.py"):
+        # 🔴 批 H-I：真实源已迁至 src/easyup_biga/persistence/；旧路径现为薄壳，
+        #    薄壳里没有这条注释，读旧路径这条断言会误红。
+        for rel in ("src/easyup_biga/persistence/schema.py",
+                    "src/easyup_biga/persistence/db.py"):
             src = (REPO / rel).read_text(encoding="utf-8")
             assert "subagent_runs" in src, f"{rel} 没有指向真正的 spawn 证明"
 

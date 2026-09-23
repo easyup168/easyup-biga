@@ -212,3 +212,9 @@ PY
 | 7 | D-I 只建地基、不改任何 Specialist（切生产调用点是 D-II）；`freeze` 暂无编排层调用方，是**显式登记**的施工空档，不是孤儿 |
 | 8 | 坑：分发提示词说 technical 取 25 根，实测 120 —— 先看代码字面量，别信转述的数字 |
 | 9 | 坑：计数桩第一版造出 `2026-08-120`，被日期归一化截成 `2026-08-12` —— 探针第一次红先怀疑探针；桩要产出真解析器认的数据 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

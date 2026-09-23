@@ -313,3 +313,9 @@ tools/verify/audit_public.sh --worktree | tail -1
 | 8 | 只有最外层硬限兜着的约束，其实只有一层防线；把它下沉，最外层才回到兜底位 |
 | 9 | 探针不仅要会红，还要因**对的原因**红 —— 加前置断言，钉死「除目标外其它条件都不触发」|
 | 10 | 离线探针能证明「Orchestrator 会调 cancel() 且身份对」，证明不了「真实运行时 N=5/drain 下取消命中对的那一个」—— 后者是 live 补验，别混为一谈 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

@@ -2,8 +2,8 @@
 
 AST 全仓扫描，拦三种「第二套实现」的形状：
 
-  A. 重名类      —— 仓库里除 `skills/_contract/` 外再定义 `Evidence` / `AgentVerdict`
-                     / `DecisionCard`。
+  A. 重名类      —— 仓库里除 `src/easyup_biga/domain/`（批 H-I 前是 `skills/_contract/`）
+                     外再定义 `Evidence` / `AgentVerdict` / `DecisionCard`。
   B. 近名类      —— 定义 `EmotionVerdict` / `MarketEvidence` / `MiniDecisionCard`
                      之类「看起来是自己那一版」的类。这是契约漂移最常见的起点。
   C. 字典版契约  —— 不定义类，直接手搓一个 key 长得和契约一样的 dict。
@@ -27,8 +27,12 @@ import pathlib
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-STORE_DIR = REPO / "skills" / "_store"
-CONTRACT_DIR = REPO / "skills" / "_contract"
+# 🔴 批 H-I：契约/存储的**真实实现**已迁至 src/easyup_biga/。守卫认的是真实类
+#    定义在哪，不是薄壳在哪——旧路径 skills/_contract、skills/_store 迁移后只剩
+#    re-export 薄壳（无类定义）。这两个常量若仍指旧路径，「唯一实现」会在新目录上
+#    **静默失效**：在 src/easyup_biga/domain 里另定义一个 Evidence 不会被抓到。
+STORE_DIR = REPO / "src" / "easyup_biga" / "persistence"
+CONTRACT_DIR = REPO / "src" / "easyup_biga" / "domain"
 
 from _scan import is_external_reference, repo_files  # noqa: E402
 
@@ -150,7 +154,7 @@ def test_B_不许定义近名的自建契约类():
                 offenders.append(f"{p.relative_to(REPO)}:{node.lineno} class {node.name}")
     assert not offenders, (
         "发现自建的近名契约类（铁律 4）：\n  " + "\n  ".join(offenders)
-        + "\n需要扩展契约就改 skills/_contract/，不要在局部另起一个。"
+        + "\n需要扩展契约就改 src/easyup_biga/domain/，不要在局部另起一个。"
     )
 
 

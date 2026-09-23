@@ -478,3 +478,9 @@ Phase 2 的延迟预算要按这条斜率重推，见 `architecture.md` §10.1�
 | 13 | agent 开始给自己写「怎么绕过这个错误」的文档时，那是架构在求救 |
 | 14 | 查延迟问题挖出完整性问题，是常事 —— **慢往往是某处在做本不该做的事** |
 | 15 | 一个会虚报 3 倍的指标比没有指标更糟：它让人去优化不存在的问题 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

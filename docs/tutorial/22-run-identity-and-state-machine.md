@@ -283,3 +283,9 @@ unset BIGA_DB_PATH
 | 6 | 新旧并存时，老路径以它能**诚实观测**的粒度接入，不伪造它没看见的中间态（`decision_id` 宁可留空） |
 | 7 | best-effort 只配给可观测数据，不配给守卫 —— 分不清就问「失效时是少看见一件事，还是放过一件坏事」 |
 | 8 | 三张新表**建表即带只追加触发器**（F1：v4 漏过一次，代价是身份机制建在可撤销的地基上） |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。

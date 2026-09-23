@@ -10,7 +10,7 @@
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
 ![Tests](https://img.shields.io/badge/1330%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v15%20%C2%B7%2011%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-38%20%E7%AB%A0-8957e5)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-39%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
 ![IM](https://img.shields.io/badge/%E9%A3%9E%E4%B9%A6-%E5%B7%B2%E6%8E%A5%E9%80%9A-1f6feb)
 ![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-%E7%8E%B0%E9%98%B6%E6%AE%B5-555)
@@ -332,7 +332,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 ├── tests/           1330 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（38 章，与代码同步）
+│   └── tutorial/    开发教程（39 章，与代码同步）
 └── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 
@@ -349,7 +349,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 | [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md) | 确定性编排升级：为什么、各批范围/判据、评审断言复核 |
 | [`docs/guide/usage.md`](docs/guide/usage.md) | **怎么用**：出卡、读卡、以及四个「确认它没骗你」的检查 |
 | [`docs/guide/install.md`](docs/guide/install.md) | 环境安装：在已有 OpenClaw 实例旁并排装第二套 |
-| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：38 章，真实建造过程 |
+| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：39 章，真实建造过程 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 变更历史（每条写「为什么」，不只是「做了什么」） |
 
 ---

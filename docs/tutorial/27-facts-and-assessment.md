@@ -194,3 +194,9 @@ PY
 | 8 | 顺带还 D-II 的账：`Evidence.evidence_set_id`，CROSS_CHECK 优先比它、缺失才退回 raw_hash |
 | 9 | 坑：DecisionCard 严格收 AgentVerdict → 用 to_agent_verdict() 在加载边界压回；血缘面收在一处 |
 | 10 | 坑：Agent 追加的「限制」缺失项在新形状里还没有落点，明确拒绝并指路 E-II，不静默吞 |
+
+> ⏩ **后续变动（2026-09-23，批 H-I）**：本章出现的 `skills/_contract` / `skills/_store` /
+> `skills/_sources` 三个共享包，其**真实实现**已迁至
+> `src/easyup_biga/{domain,persistence,providers}/`。旧路径原地保留 re-export 薄壳 ⇒
+> 本章正文里的 `from _contract import ...` 等导入语句与位置描述**照旧成立**，只是代码
+> 本体不在那儿了。见 `CHANGELOG.md` 批 H-I。
