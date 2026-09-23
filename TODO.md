@@ -1095,14 +1095,25 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       复核确认并记录的裁定：`easyup_biga.persistence`/`providers` 内部暂时仍是
       `from _contract import ...`（旧写法）、只挂 `src/` 不自足——接受为 Strangler
       Pattern 的中间态，改法留给 H-II（见下）。
-  - [ ] 批 H-II · `_runtime` → `runtime`、`_snapshot` → `application` ——
-        **设计探活已完成（2026-09-24），分发提示词已写好**（`docs/guide/
-        orchestration-kickoff-prompt.md` 同名小节；探活见设计 SSOT §8.1）。
-        H 又拆了一层，理由与上次拆 H-I/H-II 相同：四件事里只有这两件现在有
-        把握——`_runtime`/`_snapshot` 已经是共享包、已有多消费方，跟 H-I 三个
-        包同一形状；零 `__file__`、几乎零直接子模块导入、零硬编码守卫路径，
-        比 H-I 更简单。可达性机制直接照抄 H-I（`pyproject.toml` 已挂好
-        `src/`，两种薄壳写法不用重新设计）
+  - [x] 批 H-II · `_runtime` → `runtime`、`_snapshot` → `application` ——
+        **独立复核通过（2026-09-24）**。`git mv` 5 个真实文件
+        （2 `__init__` + `adapter`/`mcp`/`coordinator`）保 history、内容逐字节不变；
+        旧包留 5 个 re-export 薄壳，写法照抄 H-I（包级壳自挂 `src/`、子模块壳
+        `sys.modules[__name__]=真实模块`）⇒ 全仓 13 处导入一字不改。`pyproject.toml`
+        无需改（H-I 已挂 `src/`），**无测试路径常量要改**（重跑 grep 确认零硬编码
+        `skills/_runtime`/`skills/_snapshot` 守卫路径）。§8.1 预判的「比 H-I 简单」
+        逐条坐实：零 `__file__`（P3 `--check` 前后逐字段相同、无深度陷阱）、仅 1 处
+        直接子模块导入（`test_runtime_adapter.py:29`）。该处正好写着
+        `from _runtime.mcp import ... _extract_first_json_object, _parse_rpc_response,
+        _text_of` 三个下划线名 ⇒ 把 H-I 里「子模块壳必须用身份等同、不能 `import *`」
+        从理论变成实证（`import *` 会漏这三个名）。六道探针
+        （P1 导入+sabotage / P2 非 pytest / P3 一致 / P4 条数 1362 不减 / P5 隔离 /
+        P6 `shim is real` 身份等同）见 `CHANGELOG.md`。教程 23/25 两章各追加
+        「⏩ 批 H-II」指针。⚠️ 未改 `coordinator.py` 内部三行跨包导入（下方清理批次）。
+        独立复核：六道探针逐一亲手重跑（含 sabotage-revert，另外单独验证了
+        idiom B 换成 `import *` 真的会在私有名上炸），批准了报告自己提出的两处
+        请裁定（`application/` 只有一个成员不算过早建层；命名为 `application`
+        合理），详见 `CHANGELOG.md`
   - [ ] 批 H-III · 留白，不建 `integrations`/`cli`、不挖
         `orchestrator.py`/`feishu_deliverer.py`/`notify_worker.py`——探活
         （§8.1）确认这三样目前都只活在 `skills/decision-card/scripts/` 里，
@@ -1110,13 +1121,14 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         共享包"（同裁定 15 的同源理由：第二个消费方出现才是抽取的时刻）。
         `application/` 目前唯一有资格放的是 `SnapshotCoordinator`
         （H-II 的范围），不是 `orchestrator.py`
-  - [ ] 批 H-II/H-III 都落地后 · 跨包引用清理——`easyup_biga.persistence`/
-        `providers` 内部仍是 `from _contract import ...`（旧写法），只挂
-        `src/` 不挂 `skills/` 会 `ModuleNotFoundError`（`domain` 因为不依赖
-        另外两包，反而自足；H-I 独立复核记下的账）。等 `_runtime`/`_snapshot`
-        也搬完（它们同样会有跨包旧写法），五个包一次性改成
-        `from easyup_biga.xxx import ...`，不要分批改——分批改等于同一件事
-        做两次，且中途状态更难判断"改没改全"
+  - [ ] 跨包引用清理（H-II 已落地，前置条件基本满足）——`easyup_biga.persistence`/
+        `providers`/`application`（coordinator）内部仍是 `from _contract import ...`
+        （旧写法），只挂 `src/` 不挂 `skills/` 会 `ModuleNotFoundError`。自足情况实测：
+        `domain` 与 `runtime`（adapter/mcp 无跨包导入）已自足；带跨包旧写法的是
+        **persistence / providers / application 三处**（H-II 复核记下的账，H-I 记的
+        那两处并入）。这三处一次性改成 `from easyup_biga.xxx import ...`，不要分批改
+        ——分批改等于同一件事做两次，且中途状态更难判断"改没改全"。H-III 是留白
+        （不搬新包），不阻塞本清理
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

@@ -216,3 +216,9 @@ python3 tools/verify/adapter_spike.py grant-longevity # grant 撑过 780s（~13 
 | 6 | cancel 只认 tasks[].taskId，靠 active[i]↔tasks[i] 同序对应映射；而 active 顺序≠spawn 顺序，必须按 runId 定位 |
 | 7 | token 用量带出来供 C-II 写 run_events，但这一批不写库 —— 没有消费方就先不建写入路径（L-1） |
 | 8 | 「省钱的默认约束」和「这件事的本质」冲突时，先查那条约束是不是从别处照抄的（A 批不 spawn 对，C 批不 spawn 没法做） |
+
+> ⏩ **后续变动（2026-09-24，批 H-II）**：本章的 `skills/_runtime`（`OpenClawRuntimeAdapter`
+> / `MCPClient`），其**真实实现**已迁至 `src/easyup_biga/runtime/`。旧路径原地保留
+> re-export 薄壳（子模块壳用 `sys.modules[__name__] = 真实模块` 做身份等同）⇒ 本章正文里的
+> `from _runtime import ...` / `from _runtime.mcp import ...` 照旧成立，只是代码本体不在
+> 那儿了。见 `CHANGELOG.md` 批 H-II 与教程第 39 章。
