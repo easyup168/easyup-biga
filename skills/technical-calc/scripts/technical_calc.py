@@ -67,7 +67,7 @@ from _sources import (  # noqa: E402
 )
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
     save_fact_bundle,
     save_raw_snapshot,
 )
@@ -192,14 +192,16 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             # 批 E-I：Evidence 直接声明「我出自哪个冻结集」，比 raw_hash 更硬。
             es_id = evidence_set_id
         else:
-            raw_hash = payload_sha256(daily.raw)
+            # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+            raw_hash = raw_text_sha256(daily.raw_text)
         trade_date = daily.trade_date
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
             warnings.append(as_of_warning)
         if store and coord is None:
             save_raw_snapshot(source=src, as_of=as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(), payload=daily.raw)
+                              retrieved_at=retrieved.isoformat(),
+                              payload=daily.raw, raw_text=daily.raw_text)
 
         closes = [b.close for b in daily.bars]
         add("trade_date", trade_date, "交易日", src)

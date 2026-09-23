@@ -23,6 +23,7 @@ E-I 只迁了 emotion（不读冻结快照、不进 CROSS_CHECK 的那个）。�
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import re
 import sys
@@ -91,7 +92,8 @@ def _rows(symbol: str, n: int) -> list[dict]:
 
 
 def _fake_daily(symbol, *, bars):
-    return parse_index_daily(symbol, _rows(symbol, bars))
+    rows = _rows(symbol, bars)
+    return parse_index_daily(symbol, rows, raw_text=json.dumps(rows))
 
 
 @pytest.fixture()
@@ -217,7 +219,8 @@ class TestP3SkillSelfDetectsLimits:
     def test_market自检涨跌家数0_0_0(self, db, monkeypatch):
         esid = _freeze(db)
         monkeypatch.setattr(market, "fetch_breadth",
-                            lambda: BreadthResult(0, 0, 0, [], {"rc": 0}))
+                            lambda: BreadthResult(0, 0, 0, [], {"rc": 0},
+                                                  raw_text=json.dumps({"rc": 0})))
         mv = market.build_fact_bundle(date=None, break_source={"tencent"},
                                       store=False, task_id=TID, evidence_set_id=esid)
         assert any(m.code == "market.breadth.not_yet_formed" for m in mv.missing)
@@ -240,7 +243,8 @@ class TestP3SkillSelfDetectsLimits:
             from types import SimpleNamespace
             boards = [SimpleNamespace(name=f"板块{i}", pct=0.0, main_inflow=0.0,
                                       leader=None) for i in range(10)]
-            return BoardResult(kind=kind, total=10, raw={"pages": []}, boards=boards)
+            return BoardResult(kind=kind, total=10, raw={"pages": []}, boards=boards,
+                               raw_text=json.dumps({"kind": kind, "pages": []}))
         monkeypatch.setattr(sector, "fetch_boards", _zero_boards)
         sv = sector.build_fact_bundle(break_source=set(), store=False,
                                       task_id=TID, evidence_set_id=esid)
@@ -288,7 +292,7 @@ def _news_feed(now: datetime, *, n: int = 20) -> NewsFeed:
              for i in range(n)]
     items.append(NewsItem(id=1, at=now - timedelta(minutes=300),
                           text="很旧的一条", tags=(), is_quote=False))
-    return NewsFeed(items=tuple(items), raw={"pages": []})
+    return NewsFeed(items=tuple(items), raw={"pages": []}, raw_text="[]")
 
 
 # ─────────────────────────────────── P4 · 回归：六个 agent 聚合不丢

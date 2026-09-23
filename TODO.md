@@ -964,21 +964,32 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         （字母序，e3 在前）不触发，所以 CI/`pytest` 无参跑绿。修法方向：让 `_load`
         对 `card_ops` 幂等（已在 `sys.modules` 就复用），或 e3 不覆盖 `card_ops` 这个
         规范名。**本批不修**（不属于批 F 范围）
-- [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
-      (sort_keys=True)`），而建表注释断言「不做任何归一化」。批 J 的依赖
-      已解除（run_id 已消歧义），批 F 已落地（e5b959f）。
-      ✅ **子问题已解决**：raw 溯源字段该指向哪个 `run_id`——
-      `orchestrator.py:201` 确认 risk 的事实包和其余 Stage 1 六个 skill
-      走同一个 `ctx.run_id`（批 F 复用了 J-I 的 capture 路径），不用再
-      为"risk 有没有独立调用点"纠结。
-      ✅ **§5.1 前置已解除（2026-09-23）**：`architecture.md` §5.1 已按
-      总体设计 §33/数据架构 §22 拆成控制面/历史数据面/分析查询/Provider
-      归档四个平面，各自选型与触发条件写清楚（历史数据面触发于 §45 开工，
-      分析查询跟 §46 选股闭环，Provider 归档按数据集类型——全市场/批量
-      从建那刻就走文件，单标的/小体积留 SQLite；触发条件由用户拍板确认）。
-      设计探活已补完（完整链路、`coordinator.py` 会被静默破坏的消费方、
-      `Evidence.raw_hash` 语义耦合都已查清楚）。**分发提示词已就绪**
-      （`docs/guide/orchestration-kickoff-prompt.md` 「批 I」节）
+- [x] 批 I · RawArtifact —— **已落地（2026-09-23）**。raw 层曾经存的不是
+      raw：`get_json()` 内部 `json.loads` 之后原始文本就地丢弃，落盘时
+      `json.dumps(sort_keys=True)` 重新序列化，`content_sha256` 因此是
+      我们自己重排后的指纹。现在 `raw_market_snapshot` 新增 `raw_text`
+      列（schema v13）存原始响应文本，`content_sha256` 改基于它算
+      （`raw_text_sha256`）。**新增字段，不替换 `payload_json`**——
+      `load_raw_snapshot().payload` 继续是解析后对象，`coordinator.py`
+      的 `len()`/切片消费方不受影响（独立复核亲手验证：破坏这条时
+      `test_snapshot.py`/`test_snapshot_wiring.py` 两个覆盖真实生产路径
+      的测试文件一并翻红，不止合成探针）。旧行不回填、`payload_sha256`
+      保留为旧口径。独立复核用真实生产库验证了 v11→v13 迁移干净应用
+      （321 条既有行 `raw_text` 正确留 NULL）且 `--check` 对历史卡仍
+      逐字段相同。教程第 36 章（与批 K 撞车"第 35 章"，K 先落地保住 35，
+      本批改记 36）、`CHANGELOG.md`。
+  - [ ] **`raw_text` 与 `payload` 的关系因源而异，没有守卫钉住这条**
+        （批 I 自己披露的最锋利处，独立复核认可、暂不要求补测）：单响应
+        源（sina 日线）`json.loads(raw_text)` 约等于 `payload`；腾讯源
+        `raw_text` 根本不是 JSON（是 `v_code="..."` 文本）；多页源
+        （快讯/板块榜）`raw_text` 是 `payload` 的一个不同形状的序列化
+        （数组套页 vs `{"pages": [...]}`）。只有四处注释点明，没有
+        消费侧守卫拦住"未来有人假设 `json.loads(row["raw_text"])==
+        payload`"这个误用。留给以后真的出现这类消费方时再判断要不要补
+  - [ ] **批 I 与批 G-II 的 schema v13 撞车**：两批各自独立 worktree 都把
+        新迁移记成 v13，批 I 先落地保住 v13。**G-II 合回 orchestration
+        时需要把自己的迁移重编号为 v14**（迁移 SQL 本体不动，只改版本
+        标签），按 J-I/J-II、F/G-I 已验证过的既定协议处理
 - [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 设计探活已完成（2026-09-23），
       按外部材料自己的分阶段建议拆成两批：
   - [x] 批 G-I · Outbox（Outbound Only）—— **已落地（2026-09-23）**。四类事件
@@ -1027,7 +1038,10 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
       体量小的数据集把 Provider→Raw→Normalize→Quality→Snapshot 走第二遍
-      （第一遍是已完成的 index_daily）。
+      （第一遍是已完成的 index_daily）。**批 I 已落地**，raw 层的形状
+      （`raw_text` 新增列 + `content_sha256` 口径）现在有真实先例可抄，
+      但还没针对批 L 做过设计探活——按批 I/K 的先例，写分发提示词前应先
+      跑一次设计探活确认没有新的坑，不要假设"依赖解除"就等于"可以直接写"
       🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
       Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
