@@ -847,14 +847,19 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         不做 enforce（`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等
         真正的重试批次。
         ⚠️ 等批 E-II **与** E-III 都合并之后开工（三批都要碰同一批 skill 脚本）
-  - [ ] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
-        —— 分发提示词已就绪
-        两处同名清掉。`agent_runs.run_id` 是 `INTEGER PRIMARY KEY
-        AUTOINCREMENT` 账本行号，**实测全仓没有任何代码读它** ⇒ 现在改免费；
-        `SpawnHandle.run_id` 其实是 `runtime_run_id`，落库之后
-        `spawn_check.py` 能从 `payload_json LIKE '%决策号%'` 文本匹配
-        升级成结构化 join（F3 残留，§4 早就记着）。
-        两半合一批做：动的是同一张只追加表，拆开=对它连开两次刀
+  - [x] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
+        —— ✅ 评审复核通过（2026-09-23）。schema v9；live 实测
+        `SpawnHandle.runtime_run_id` 与运行时 `subagent_runs.run_id` **确为同一
+        命名空间**（这是结构化 join 的前提，线下只能靠「两边都长得像 UUID」猜）。
+        教程第 31 章（原写作 30，与批 E-III 撞号——两批并行各取下一个空号）。
+        🔴 **评审留下一条缺口，根因在分发提示词不在实现**：强绑定是 per-agent、
+        按数据有无启用的（`rr_by_agent.get(agent)` 为空就静默退回弱判据）。
+        今天对（历史行全 NULL），但**等六个 agent 都走上新路径之后，`NULL` 的
+        含义会从「迁移前的老行」悄悄变成「可能是手写的行」，而没有任何东西会
+        注意到这个转变** —— review-prompt §3「静默 fail-open」的形状。
+        修法便宜：加一条 **per-decision 一致性检查**（同一个 decision 里只要有
+        一行带 `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理，
+        R-3，不是退回弱判据）。⇒ 留给批 J-I 之后第一个「六个都带上了」的批次。
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。排在批 J 之后、
       批 F 之前：它给 raw 加溯源字段，那些字段要指向一个不含歧义的 `run_id`

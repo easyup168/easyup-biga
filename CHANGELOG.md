@@ -15,6 +15,93 @@
 
 ## [未发布]
 
+### 🔴 变更 · 批 J-II：收敛 `run_id` 三同名（`agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库）
+
+设计文档 §4「`run_id` 这个名字现在指三个互不相同的东西」。**✅ 评审复核通过**
+（2026-09-23，独立会话）：五道探针 P1–P5 外加红灯演练全见过红并已还原，一处 live
+命名空间补验实测通过。schema v8→**v9**。
+
+评审独立复现了两道（不看交接里贴的输出，自己弄坏）：关掉强绑定 ⇒ 伪造经文本匹配
+蒙混过关（stdout 实打实印出「1 个 agent 两份独立记录都齐」）；把命名空间守卫的表
+扫描改成空 ⇒ 三条全红，包括那条「必须真的扫到 decision_runs/run_events」的非平凡
+覆盖断言 —— 「全绿是因为什么都没查」这个模式确实被堵住了。
+
+**为什么现在做**：`run_id` 这个字面量在仓库里同时指三个东西，同住一个库、一份代码：
+编排的一次执行尝试（`decision_runs.run_id`，32 位 hex）、`agent_runs` 的账本行号
+（INTEGER 自增）、`SpawnHandle` 里运行时返回的 spawn id（UUID，且**从不落库**）。危害不是
+「某处算错」，而是**任何一条 join / 报表都会拿到语义正确但指向错误的数字，且不报错** ——
+与 §4 开头「decision_id 被迫承担五件事」是同一个病的反面。三处必须一起改：改一半留下的
+半新半旧命名空间比现在更难读（读者无法判断手上这个 `run_id` 属于已改还是未改的那半）。
+批 E 系列正在同一层（`_store`/契约）做迁移，**现在是最便宜的时机**。
+
+**做了什么**：
+
+- **J2-1 `agent_runs.run_id` → `ledger_id`**（迁移 `_V9`：`RENAME COLUMN`）。它从 Phase 1
+  起就是 INTEGER 自增账本行号，与编排 `run_id` 毫无关系。🔴 **实测全仓没有任何代码读这一列的
+  值** —— 唯一的引用是 `list_agent_runs` 的 `ORDER BY`，随迁移一并改名。⇒ 现在改是**免费**的，
+  等它有了第一个真实读取方就不是。不改 `_V1` 建表语句：全新库先按 v1 建出 `run_id`、再由这条
+  改名，是对的。
+- **J2-2 `SpawnHandle.run_id` → `runtime_run_id`，并落库**。它取自 `sessions_spawn` 的
+  `runId`（运行时 `subagent_runs.run_id` 那个 UUID）；在 adapter 内部叫 `run_id` 本来对
+  （忠实照抄运行时列名），一出 adapter 就和编排 `run_id` 撞名。同一条 `_V9` 给 `agent_runs`
+  加 `runtime_run_id TEXT`（nullable）；`record_agent_run`/`record_verdict_run` 加可选参数接住；
+  `card_ops.persist()` 加 **keyword-only、默认 None** 的 `runtime_run_ids: Mapping`（🔴 必须有
+  默认值：`synthesize.py` 与几条测试也在调它，签名不兼容会把不相干的东西一起弄红）；
+  `orchestrator.py` 从每个 Stage 1/risk 的 `SpawnResult.handle.runtime_run_id` 收成映射传进去
+  （**Stage 3 判官不产 verdict、不进映射**）。回放路径不记账本 ⇒ 也不写 `runtime_run_id`
+  （回放不重新执行 agent，给它记真实 spawn id 是假账）。
+- **J2-3 让 `spawn_check` 用上它（这才是 J2-2 的消费方）**。`spawn_proof()` 原先靠
+  `payload_json LIKE '%<决策号>%'` 文本匹配认 spawn（F3 残留）。改成：`runtime_run_id` 非空
+  时直接与运行时 `subagent_runs.run_id` 做**结构化 join**，为 NULL（历史行）时退回现有 LIKE。
+  🔴 形状**照抄 `risk_check.py::CROSS_CHECK_PAIRS`**（有 `evidence_set_id` 用它、缺失退回
+  `raw_hash`）逐字同形，不发明第二种兼容写法。退回分支的三态（`readable=False`⇒UNKNOWN /
+  `rows==0` 有行⇒伪造 / 逐 agent 伪造）一条没塌（R-3）。**不新增 SQL** —— join 的右表复用
+  已按决策号过滤的记录，因此「id 存在」同时蕴含「记录属于本决策」，比对全表存在性更硬。
+- **J2-4 一道新守卫**（`tests/test_store.py::TestRunIdNamespace`，判据**可派生不是清单**）：
+  BigA 自己 schema 里任何名为 `run_id` 的列必须是 `TEXT`，且其非 NULL 值必须能在
+  `decision_runs.run_id` 里找到。语义不同的第四个同名几乎必然过不了这两关（`agent_runs.run_id`
+  当年是 INTEGER，第一关就红）。**不碰运行时的 `subagent_runs`**（第四个同名，但那是运行时命名
+  空间，不归我们管；我们叫 `runtime_run_id` 正是为了在边界上认出它）。
+
+**🔴 一处 live 补验（线下无法替代，正文明确授权的付费例外）**：`SpawnHandle.runtime_run_id`
+与 `subagent_runs.run_id` 是不是同一命名空间 —— 这是 J2-3 整个结构化 join 的前提，线下只能
+靠「两边都像 UUID」猜，猜错的后果是 spawn 核验**静默退化**（join 永不匹配 ⇒ 每次走退回分支 ⇒
+看起来一切正常）。一个最小 spawn（任务只让 agent 回「收到」，成本远低于 $0.05 上限，不出卡、
+不走 `bin/biga-card`）：`start()` 返回 `runtime_run_id='e5c00e01-…'`，直接查运行时库
+`subagent_runs WHERE run_id='e5c00e01-…'` **查得到**、`child_session_key` 一致、spawn 正常
+完成。⇒ **同一命名空间，J2-3 成立。**
+
+**探针记录（G-1：每道守卫先弄坏、见红、还原）**：
+
+- **P1 · 改名后无人读旧名**：① 全仓 grep `\.run_id`，SpawnHandle 使用点已全部改到
+  `.runtime_run_id`，无残留；剩余的 `run_id` 都是 `subagent_runs.run_id`（运行时表，该留）
+  与迁移语句本身。② 把迁移目标名从 `ledger_id` 改成第三个名字（`xledger_id`）跑测试 ——
+  `list_agent_runs` 当场 `sqlite3.OperationalError: no such column: ledger_id`，6 条 TestAgentRuns
+  变红（**证明确有测试盯着列名，不是「反正没人读所以改什么都绿」**），已还原。
+- **P2 · 迁移后只追加触发器仍有效**🔴：`RENAME COLUMN` 会自动改写触发器体，名字还在而体被改坏
+  **不报错**，所以判据是真跑 SQL 不是看名字。对迁移后的 `agent_runs` 真跑 `UPDATE` 和 `DELETE`,
+  两者都被 `AppendOnlyViolation` 拒；非平凡演示：`DROP TRIGGER` 后同一条 `UPDATE` 影响 1 行成功
+  （证明「被拒」不是平凡通过）。已固化为 `test_迁移后agent_runs仍拒绝UPDATE和DELETE`。
+- **P3 · 结构化 join 真的比文本匹配硬**🔴：构造一条 `agent_runs` 行，其 `runtime_run_id` 在
+  `subagent_runs` 里不存在，但决策号出现在某条 `payload_json` 里（蹭上别人记录那个旧洞）。
+  弄坏：把 join 分支关掉（永远走弱路径）⇒ `spawn_check` 返回 0 放过、stdout 显示「1 个 agent
+  两份记录都齐」（伪造经文本匹配蒙混过关），测试翻红。还原后新判据报伪造（返回 1），旧 LIKE
+  判据放过它（同场景返回 0）—— 两条判据在同一份数据上给出相反结论。
+- **P4 · 退回分支不塌**：现有 10 条三态/绑定/覆盖用例（`wire` fixture 的 mock 行只有 `agent`
+  键 ⇒ `runtime_run_id` 缺失 ⇒ 走退回分支）逐条不变，全绿。
+- **P5 · J2-4 守卫见红**：临时往真实表 `raw_market_snapshot` 加 `run_id INTEGER` 列 ⇒ 守卫报
+  「声明为 'INTEGER'，应为 TEXT」，已还原。另有常驻自证：用临时表分别证明类型子句与值子句
+  各自会红（守卫函数本身非平凡通过）。
+
+**最可能被攻破的一处（交评审重点看）**：J2-3 的强绑定把「id 存在」限定在**按决策号过滤后的
+记录**里（`runtime_ids = {r.run_id for r in spawns}`，而 `spawns` 已按 `payload_json LIKE 决策号`
+过滤）。这依赖一条隐含前提：**真实 spawn 的 `subagent_runs.payload_json` 一定包含决策号**
+（`orchestrator._specialist_task` 把 `did` 写进任务文本）。若将来某条编排路径 spawn 时**不把
+决策号写进 payload**，那条真实记录会落在 `spawns` 之外 ⇒ 它的 `run_id` 不在 `runtime_ids` ⇒
+即便 `agent_runs.runtime_run_id` 存了正确的 id，强绑定也会**误报伪造**（fail-closed，方向安全，
+但会把真卡判失败）。live 补验只证了「同一命名空间」，没证「所有 spawn 路径都把决策号写进
+payload」——后者目前只有 orchestrator 一条路且确实写了，但这是评审该盯的假设。
+
 ### 🔴 变更 · 批 E-III：迁 `risk` + 退役 `amend_verdict.py` 旧路径（Facts/Assessment 拆分收官）
 
 设计文档 §6 批 E 的最后一段。**实现完成、离线全绿（1068→1079 条），五道探针（P1–P5）

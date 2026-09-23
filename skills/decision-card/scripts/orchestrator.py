@@ -204,11 +204,17 @@ class DecisionOrchestrator:
                 card = card_ops.synthesize(
                     decision_id=did, verdicts=verdicts, judgment=judgment,
                     model_ref=self._model_ref, verdict_refs=refs)
+                # 🔴 批 J-II：把每个 Stage 1/risk spawn 的运行时 id 收成
+                #    agent → runtime_run_id，随 persist 落进 agent_runs.runtime_run_id
+                #    （spawn_check 据此做结构化 join，比按决策号的文本匹配硬）。
+                #    Stage 3 的判官（synthesizer）不产 verdict、不进账本，故不进映射。
+                runtime_run_ids = {r.handle.agent: r.handle.runtime_run_id
+                                   for r in (*r1, *r2)}
                 # 🔴 批 C-III（§2 追加 5 §17-18）：先 persist()、成功拿到 record_id，
                 #    再转移到 CARD_PERSISTED。反过来写的话，persist() 抛错会在
                 #    run_events 里留一条「已落库」的假记录，而库里其实没有这张卡 ——
                 #    一个可修复的失败被记成不可修复的谎。detail 带真实 record_id。
-                record_id = card_ops.persist(card)
+                record_id = card_ops.persist(card, runtime_run_ids=runtime_run_ids)
                 state = self._to(ctx.run_id, state, RunState.CARD_PERSISTED,
                                  detail={"record_id": record_id})
                 self._to(ctx.run_id, state, RunState.COMPLETED)
