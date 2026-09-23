@@ -842,18 +842,24 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       互不相同的东西，另外两处必须与第一处一起改，名字再叫「E-I 收尾」
       会让开工会话按扫尾活的体量安排验证）
   - [x] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
-        —— ✅ 评审复核通过（2026-09-23）。schema v9；live 实测
-        `SpawnHandle.runtime_run_id` 与运行时 `subagent_runs.run_id` **确为同一
-        命名空间**（这是结构化 join 的前提，线下只能靠「两边都长得像 UUID」猜）。
-        教程第 31 章（原写作 30，与批 E-III 撞号——两批并行各取下一个空号）。
-        🔴 **评审留下一条缺口，根因在分发提示词不在实现**：强绑定是 per-agent、
-        按数据有无启用的（`rr_by_agent.get(agent)` 为空就静默退回弱判据）。
-        今天对（历史行全 NULL），但**等六个 agent 都走上新路径之后，`NULL` 的
-        含义会从「迁移前的老行」悄悄变成「可能是手写的行」，而没有任何东西会
-        注意到这个转变** —— review-prompt §3「静默 fail-open」的形状。
-        修法便宜：加一条 **per-decision 一致性检查**（同一个 decision 里只要有
-        一行带 `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理，
-        R-3，不是退回弱判据）。⇒ 见下方「两条 enforce 欠账」。
+        —— 已合并（933aa6d）。机制经**独立复核**（2026-09-23，另开会话，未参与
+        建造）确认成立：亲手在 shipped 代码里关掉结构化强绑定，复现了 P3 描述的
+        确切症状（stdout 印出「1 个 agent 两份独立记录都齐」），还原后绿；亲手对
+        迁移后的 `agent_runs` 真跑 UPDATE/DELETE，只追加触发器仍拦得住；干净
+        `git clone` 全量跑绿。schema v9。教程第 31 章（原写作 30，与批 E-III
+        撞号——两批并行各取下一个空号）。
+        ✅ **「live 补验」一度复核复现不出来，已重新补验并确认成立**（详见
+        CHANGELOG 两条相邻条目）：原断言称查 `subagent_runs` 能查到某个
+        `run_id`，独立复核原样重跑返回 0 行；用户授权后改为**直接走
+        `OpenClawRuntimeAdapter.attach()`/`start()`**（与 `orchestrator.py`
+        起 Specialist 同一条代码路径，非绕开 Adapter 的裸 MCP 调用）重新 spawn
+        一次（123 input/5 output tokens），`subagent_runs` 这次命中 1 行、
+        `child_session_key` 逐字一致。⇒ **命名空间共享结论成立，J2-3 的结构化
+        join 前提得到真实、可复现的实测支持**。最合理的解释：上一次的验证走的
+        不是 Adapter 路径（`task_runs` 行形状与真实历史生产行不同），不是结论
+        本身有问题。批 J-II 至此没有未决项。
+        （另一条与此无关的既有缺口：强绑定 per-agent 启用、`NULL` 含义会漂移 ——
+        正文见下方「两条 enforce 欠账」第 1 条，不在这里重复。）
   - [x] 批 J-I · `run_id` capture 贯穿全链 —— ✅ 评审复核通过（2026-09-23）
         schema v10（`agent_verdicts` / `evidence_sets` 各加 `run_id`）；六个 skill
         各加 `--run-id`；`VerdictRef`/`DecisionCard` 各加字段；`comparable()` 把
