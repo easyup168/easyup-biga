@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# biga-notify —— 投递 notification_outbox 里积压的通知（对齐 minimal-feishu-design §6/§13）。
+#
+# 为什么要有这个脚本
+# ------------------
+# `notify_worker.py` 本身早就能干这件事（批 G-I），但它默认走 stdout 桩
+# （离线/测试安全），真投递要记住 `--deliverer feishu`——记不住这个约定，就是
+# 「本该推给你的通知一直攒在 outbox 里」这类事故的形状（P6 live 就撞过一次）。
+#
+# ⇒ 固化默认值：这条命令默认就是真投递，不用每次都敲那个参数。
+#   仍然可以 `bin/biga-notify --deliverer stdout` 覆盖回桩，排查用。
+#
+# 这个脚本本身不联网、不认证——投递逻辑与凭据全在 `bin/biga message send`
+# 那一层（`FeishuDeliverer`），这里只是把「定期跑一次」变成一条固定命令，
+# 供人手动调用，也供 `notify-worker-biga.timer` 调用（见 deploy/openclaw/）。
+#
+# 用法
+#   bin/biga-notify                   投递待发通知（真飞书）
+#   bin/biga-notify --deliverer stdout 只打印，不真发（排查用）
+#   bin/biga-notify --limit 20        单次最多投递 20 条（默认 100）
+
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+PY=python3
+
+# 除非调用方自己传了 --deliverer，否则默认真投递（feishu）——
+# 这正是这条命令存在的唯一理由：把默认值从「安全但什么都不发」
+# 换成「这条命令的调用者显然是想真的发」。
+ARGS=()
+has_deliverer=0
+for a in "$@"; do
+  [ "$a" = "--deliverer" ] && has_deliverer=1
+  ARGS+=("$a")
+done
+[ "$has_deliverer" = 0 ] && ARGS=(--deliverer feishu "${ARGS[@]}")
+
+exec $PY skills/decision-card/scripts/notify_worker.py "${ARGS[@]}"
