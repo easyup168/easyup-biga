@@ -1,0 +1,7 @@
+[Unit]
+Description=BigA notify-worker —— 投递 notification_outbox 里积压的通知（profile: biga）
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw-biga/workspace
+ExecStart=%h/.openclaw-biga/workspace/bin/biga-notify
