@@ -41,6 +41,9 @@ sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 sys.path.insert(0, str(_HERE.parent.parent.parent / "risk-check" / "scripts"))
 
 from _contract import (  # noqa: E402
+    EXPECTED_ROSTER,
+    RISK_AGENT,
+    SNAPSHOT_INDEX_AGENTS,
     STAGE1_AGENTS,
     SYNTHESIZER_AGENT,
     MissingItem,
@@ -63,8 +66,9 @@ from risk_check import build_fact_bundle  # noqa: E402
 import card_ops  # noqa: E402
 import entry_guard  # noqa: E402
 
-#: Stage 2 的制衡层。这一批只有 risk（discipline 按裁定 13 不建）。
-RISK_AGENT = "risk"
+# 🔴 批 K：RISK_AGENT / SNAPSHOT_INDEX_AGENTS 从 `_contract.AGENT_REGISTRY` 派生
+#    （见上面的 import），不再在这里各写一份独立字面量 —— 它俩曾是 roster 散落
+#    五处里的两处。EXPECTED_ROSTER 是「生成时冻结进 Card」的期望名单（见 run()）。
 
 #: 🔴 冻结数据切片（批 D-II）。Stage 1 之前冻结这两个指数的日线一次，
 #: market/sector/technical 都从这一份读，不各自联网。
@@ -74,12 +78,6 @@ SNAPSHOT_SYMBOLS = ("sh000001", "sz399106")
 #: （`technical_calc.py::BAR_COUNT`），不是 market 的 25。取小了 technical 读 120
 #: 会撞 read 端的 fail-closed（见 `_snapshot` 教程第 25/26 章、`TODO.md` 批 D-II 输入）。
 SNAPSHOT_BARS = 120
-
-#: 会读冻结日线的 Specialist —— 只有这三个消费 `fetch_index_daily`。
-#: 只给它们的任务文本加 `--evidence-set-id`；emotion/news 的 skill 没有这个参数。
-#: 谁给某个 skill 接了 `--evidence-set-id`，谁把它加进这里 —— 漂了探针 P1 会抓到
-#: （三条 Evidence 反查不到同一个冻结集）。
-SNAPSHOT_INDEX_AGENTS = frozenset({"market", "sector", "technical"})
 
 #: 判官的结构化输出契约 —— 靠 `outputSchema` 拿到干净的 {status, headline, synthesis}，
 #: 不去解析它的自然语言回复（那是 F3/L-13 的形状）。
@@ -237,7 +235,10 @@ class DecisionOrchestrator:
 
                 card = card_ops.synthesize(
                     decision_id=did, verdicts=verdicts, judgment=judgment,
-                    model_ref=self._model_ref, verdict_refs=refs, run_id=ctx.run_id)
+                    model_ref=self._model_ref, verdict_refs=refs, run_id=ctx.run_id,
+                    # 🔴 批 K：把**当下** AGENT_REGISTRY 算出的期望 roster 冻进卡，
+                    #    让 absent_agents 读「生成时期望谁」而非「今天期望谁」。
+                    expected_roster=EXPECTED_ROSTER)
                 # 🔴 批 J-II：把每个 Stage 1/risk spawn 的运行时 id 收成
                 #    agent → runtime_run_id，随 persist 落进 agent_runs.runtime_run_id
                 #    （spawn_check 据此做结构化 join，比按决策号的文本匹配硬）。

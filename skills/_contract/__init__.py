@@ -35,12 +35,19 @@ from .run import (
     new_run_id,
     new_trigger_id,
 )
+from .registry import (
+    AGENT_REGISTRY,
+    EXPECTED_ROSTER,
+    RISK_AGENT,
+    SNAPSHOT_INDEX_AGENTS,
+    STAGE1_AGENTS,
+    STAGE2_AGENTS,
+    AgentDefinition,
+)
 from .verdict_ref import CONTRACT_VERSION, VerdictRef
 from .verdict import (
     ADHOC_TASK_SEQ,
     CROSS_CHECK_PAIRS,
-    STAGE1_AGENTS,
-    STAGE2_AGENTS,
     SYNTHESIZER_AGENT,
     STANCE_VOCAB,
     TASK_ID_RE,
@@ -89,8 +96,13 @@ __all__ = [
     "new_trigger_id",
     "ADHOC_TASK_SEQ",
     "CROSS_CHECK_PAIRS",
+    "AgentDefinition",
+    "AGENT_REGISTRY",
     "STAGE1_AGENTS",
     "STAGE2_AGENTS",
+    "RISK_AGENT",
+    "SNAPSHOT_INDEX_AGENTS",
+    "EXPECTED_ROSTER",
     "SYNTHESIZER_AGENT",
     "STANCE_VOCAB",
     "VETO_STANCE",
