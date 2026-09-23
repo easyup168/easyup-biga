@@ -15,6 +15,25 @@
 
 ## [未发布]
 
+### 🐛 修复 · AST 纯度守卫在无 git 退化模式下误判 `docs/external` 参考代码为第二份实现
+
+写批 H 分发提示词时跑 `test_scan_fallback.py`（模拟"没有 `.git`"场景，
+给外部深度评审发现的"发布包里没有 git 元数据、守卫集体报错"这条真事故
+兜底）附带发现：`docs/external/` 下一份外部评审自带的示意代码
+（示范 `Evidence`/`DecisionCard` 长什么样的 `domain_models.py`、示范
+`Repository` 直接 `import sqlite3` 的 `repository.py`）触发了两条 AST
+纯度守卫——「契约只有一份实现」「DB 唯一入口」。根子：这两条守卫走
+`_scan.repo_files()`，正常路径用 `git ls-files -co --exclude-standard`，
+被 `.gitignore` 挡住的未跟踪参考材料天然不可见；但 fallback 测试故意
+模拟"没有 git"退化成纯文件系统遍历，这时 gitignore 完全不生效，参考
+材料第一次进入扫描范围，两条路径对同一批文件给出不同判断——是 L-13 的
+形状，守卫在自己的降级模式下悄悄看见了更多东西，而没人告诉它这些不该算。
+`test_orchestration_single_source.py` 早就为它自己的扫描器加过同样的
+排除（`docs/external/` 在它的 `_EXEMPT_PREFIX` 里），这次把同一个判断
+补进 `_scan.py` 的共享判据 `is_external_reference()`，避免每处各写一份
+（那正是 `_scan.py` 自己存在的理由），两处改动各自 sabotage-revert 验证
+独立生效，并各补一条不靠子进程/fallback 模式就能发现回归的直接单测。
+
 ### ✨ 新增 · 批 L —— `cn.trading_calendar`：第一张真实的 `fact_*` 表，`market_is_open` 认节假日了
 
 `skills/_sources/tradetime.py` 长期白纸黑字写着「已知边界：不认节假日」——
