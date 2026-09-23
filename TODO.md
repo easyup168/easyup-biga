@@ -1046,10 +1046,15 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
       体量小的数据集把 Provider→Raw→Normalize→Quality→Snapshot 走第二遍
-      （第一遍是已完成的 index_daily）。**批 I 已落地**，raw 层的形状
-      （`raw_text` 新增列 + `content_sha256` 口径）现在有真实先例可抄，
-      但还没针对批 L 做过设计探活——按批 I/K 的先例，写分发提示词前应先
-      跑一次设计探活确认没有新的坑，不要假设"依赖解除"就等于"可以直接写"
+      （第一遍是已完成的 index_daily）。**设计探活已完成（2026-09-23）**：
+      不接 `SnapshotCoordinator`/`evidence_sets`（那解决的是同一次运行内
+      多个 Specialist 看同一份易变数据，日历是低频参考表，不是这个形状）；
+      会是仓库第一张真正的 `fact_*` 表（现在文档画的三层图里只有 raw 层
+      被真正实例化过）；真实消费方 `market_is_open`/`session_in_progress`
+      目前零测试覆盖，动它们之前必须先补特征测试锁基线。**分发提示词已写好**
+      （`docs/guide/orchestration-kickoff-prompt.md` 批 L 一节），Provider
+      端点选哪个、`session_in_progress` 要不要跟着改，留给建造会话自己判断
+      并在交回时说明理由
       🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
       Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）

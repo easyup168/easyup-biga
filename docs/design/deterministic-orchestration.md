@@ -844,6 +844,56 @@ raw 层只追加，改形状的代价全在后面。
 `index_daily`），用来验证「Provider → Raw → Normalize → Quality → Snapshot」
 这条链在一个**非行情**数据集上是否同样成立。
 
+#### 设计探活（2026-09-23）：不能照抄 `SnapshotCoordinator`，且真实消费方零测试覆盖
+
+开工前查了三件事：现有 raw 层批 I 之后长什么样、`market_is_open()` 真实
+被谁用、`SnapshotCoordinator`（D-I/D-II 那套）这次能不能直接复用。
+
+**raw 层不用改，批 I 已经把它铺好了**：`save_raw_snapshot(payload=, raw_text=)`
+（schema v13）对任意来源都成立，日历这类数据源不需要新的 raw 层字段。
+`content_sha256` 已经基于原始响应文本算，不用再操心批 I 之前那套"重排后
+指纹"的问题。
+
+🔴 **`SnapshotCoordinator`（D-I/D-II）解决的是另一个问题，不该照抄**：它的
+存在理由是"一次决策运行内，多个 Specialist 必须看到同一份网络抓取结果"
+（同一个 `evidence_set_id` 冻一次、大家从冻结的切片读）——这解决的是
+**同一次 Run 内的一致性**。交易日历完全不是这个形状：它不是每次决策运行
+都要重新抓一次的东西（一年抓一次、按需刷新即可），"两个 Specialist 会不会
+看到不同版本的日历"根本不是这批要防的风险。⇒ 批 L **不建 EvidenceSet /
+不接 SnapshotCoordinator**，那是给"同一次运行内、易变、多消费方"的数据设计
+的，日历是"低频更新、只读查表"的形状，硬套会引入一套不必要的每次-运行
+开销。
+
+**"归一化事实层"（`fact_*`）目前只存在于文档，schema 里一张都没有**——
+`grep CREATE TABLE skills/_store/schema.py` 十张表，命名都是
+`decision_records`/`agent_verdicts`/`raw_market_snapshot`/`evidence_sets`/
+`notification_outbox` 这类，`architecture.md` §5.2 画的"raw → fact → derived"
+三层分层图里，**只有 raw 层真的被实例化过**。批 L 如果按这个数据集的形状
+（归一化后是"某天开不开市"这种简单查表事实）建一张真正的 `fact_trading_
+calendar` 表，会是这个仓库**第一次**把文档描述的分层图落成真实 schema——
+这本身就是"打样"这个定位的一部分，不只是加一个数据集。
+
+🔴 **真实消费方 `market_is_open()` 现在零测试覆盖**（普查发现，不是这一批
+造成的既有缺口）：`grep -rl market_is_open tests/` 零命中，没有
+`test_tradetime.py`（**未建**），`skills/_sources/tradetime.py` 自己也没有内嵌测试。
+它被 `news-scan` 用来判定 `market_open` 这个派生 evidence（喂给"此刻是否
+连续竞价"这条判据），`emotion-calc` 的 `session_in_progress` 用同一个
+模块判定"这个数是真零还是还没产生"——**两个真实生产路径**依赖这个模块，
+但改坏它今天不会有任何测试报红。⇒ 批 L 必须先给现状（纯 weekday 判据）
+补一批特征测试（characterization tests：固定几个已知的历史交易日/周末，
+断言现在的行为），再改，否则"改完之后行为变了没变"没有基线可比。
+
+**Provider 选型是开放问题，留给建造会话，但方向已经查过**：现有四个
+`_sources/` 适配器（sina/eastmoney/tencent/sina_news）全部是**免鉴权**的
+公开端点抓取，没有一个走 token/API key。数据架构材料 §8 点名的
+`a-stock-data`（`github.com/t4ol1n/a-stock-data`）在这个仓库的定位一直是
+"Provider Catalog / 接口实现参考"（架构文档 §7、数据架构材料同名小节），
+不是拿来直接 import——WebSearch 核实过它确实在维护一份交易日历实现，可以
+作为参考去找免鉴权端点，但具体端点、字段形状都还没选，留给建造会话按
+同一条"免鉴权优先"的既有惯例去挑。Tushare 的 `trade_cal` 需要 token，这类
+需要凭据管理的源如果最终选了它，是一次**新增复杂度**（批 G-II 刚踩过
+凭据管理的坑），要在正文里写清楚为什么值得，不要静默引入。
+
 ---
 
 ### 批 F · Risk 拆两层
