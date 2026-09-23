@@ -878,12 +878,19 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         两条行为证明测试当场翻红（值对不上 / None 场景也对不上），还原后绿——
         commit 信息里那句"关掉继承当场报红"复现成立，不是转述。干净 `git clone`
         全量 1118 条绿，`audit_public.sh` 十一项绿。
-        ⚠️ **一个仍未被live验证的假设**：`--run-id` 走的是提示词指令（同 `--task-id`
-        的机制），LLM 是否真的会在真实 spawn 里带上它，本批和这次复核都**没有**
-        像 J-II 那样做一次真实 spawn 去确认——`data/biga.db` 目前仍是 v9（自 J-I
-        合并以来没有真实卡跑过），线下无法验证。风险比 J-II 那次低（不带就是
-        `None`，看得见、不是静默错值，且复用的是`--task-id`已经在生产路径上验证
-        过的同一种机制），是否要照 J-II 的先例花一次小成本真跑一次，留给用户定。
+        ✅ **live 补验已做（2026-09-23）**：走真正的 `OpenClawRuntimeAdapter`
+        （非绕开的裸 MCP 调用）真实 spawn 了一次 `emotion`，任务文本一字不差用
+        `_specialist_task()` 的真实文案（`--task-id BIGA-VERIFYNOOP-001 --run-id
+        b7c1a2e9d3f4a5b6c7d8e9f0a1b2c3d4`，末尾加 `--no-store` 避免落库）。
+        查该 session 的原始 transcript（`~/.openclaw-biga/agents/emotion/agent/
+        openclaw-agent.sqlite` 的 `transcript_events`，不是会脱敏的 `sessions
+        tail`），**逐字节看到 LLM 真实执行的命令**：
+        `python3 skills/emotion-calc/scripts/emotion_calc.py --task-id
+        BIGA-VERIFYNOOP-001 --run-id b7c1a2e9d3f4a5b6c7d8e9f0a1b2c3d4 --no-store`
+        ——`--run-id` 确实被带上了，与 `--task-id` 同一种提示词机制同样可靠。
+        （命令本身因故意造的不合法 `task_id` 格式报错退出——这是预期内、跟
+        `--run-id` 无关的副作用，`FactBundle` 的契约校验按设计正常拦截，未落库。）
+        成本 $0.097（123 input / 200 output tokens）。批 J-I 至此没有未决项。
 
 ### 🔴 两条 enforce 欠账（都归「引入同 decision_id 重试」的那一批）
 

@@ -15,6 +15,33 @@
 
 ## [未发布]
 
+### ✅ 复核补验 · 批 J-I 的 `--run-id` 提示词机制，live 确认可靠
+
+下面这条修正记录了"`--run-id` 靠提示词指令传递、LLM 是否真的会带上它未被 live
+验证"。授权后（"跑吧"）做了一次真实 spawn 去确认。
+
+走真正的 `OpenClawRuntimeAdapter.attach()`/`start()`（与 `orchestrator.py` 起
+Specialist 同一条代码路径），任务文本**一字不差**照抄 `_specialist_task()` 的
+真实文案，只在末尾加一句要求 `--no-store`（避免真的写进生产账本，这是唯一
+刻意偏离）。
+
+不满足于 `sessions tail` 那种会脱敏 exec 参数的人类可读视图，直接查
+`~/.openclaw-biga/agents/emotion/agent/openclaw-agent.sqlite` 的
+`transcript_events` 原始表，拿到 LLM 真实发出的 `exec` 工具调用逐字内容：
+
+```
+python3 skills/emotion-calc/scripts/emotion_calc.py --task-id BIGA-VERIFYNOOP-001
+  --run-id b7c1a2e9d3f4a5b6c7d8e9f0a1b2c3d4 --no-store
+```
+
+`--run-id` 确实被带上了，值与提示词里给的完全一致——与 `--task-id` 同一种
+机制同样可靠，不是假设。命令本身因为验证用的 `task_id` 故意不合法
+（`BIGA-VERIFYNOOP-001` 不满足 `BIGA-YYYYMMDD-NNN`）而报错退出，这是预期内、
+与 `--run-id` 无关的副作用——`FactBundle` 的契约校验正常拦截，没有任何数据
+落库。成本 $0.097（123 input / 200 output tokens）。
+
+批 J-I 至此没有未决项。
+
 ### ✅ 复核 · 批 J-I 独立复核 —— 机制成立，一条假设未 live 验证
 
 下面这条批 J-I 的条目自称"评审复核通过"。独立复核（2026-09-23，另开会话，
