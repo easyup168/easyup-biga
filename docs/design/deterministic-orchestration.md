@@ -819,6 +819,15 @@ agent 也建好了，但 `agents.entries.main.subagents.allowAgents` 白名单�
 
 ### 批 L · `cn.trading_calendar`（数据架构 §29 P0 唯一有消费方的那个）
 
+> ✅ **已落地（2026-09-23）。** Provider `skills/_sources/szse.py`（深交所官方 monthList，
+> 探活后综合选出：新浪日历要 JS 引擎、东财脏、timor 是办公日历≠交易所口径）+ 第一张真实
+> `fact_*` 表 `fact_trading_calendar`（schema **v15**）+ `market_is_open()` 认节假日
+> （查表、查不到回退 weekday）。`session_in_progress()` **未改**（理由见下）。
+> 🔴 **已知约束**：深交所站点从本项目 WSL 部署连不通 ⇒ 本环境 `fact_trading_calendar`
+> 空表、`market_is_open` 恒走安全回退；解析层由离线 fixture 全测、落库链由注入桩 fetcher
+> 全测，真实抓取留给能连通交易所的运行环境。落地细节冻结在教程第 38 章；当前状态见
+> `architecture.md` §5.3.6。下面是开工前的设计与探活，保留作历史。
+
 `skills/_sources/tradetime.py` 自己写着「已知边界：不认节假日」，
 后果是节假日会被当成交易日（朝安全方向，但要靠调用方在缺失项文案里
 把「也可能是休市日」一并说出来）。这是 P0 六个 dataset 里**今天**唯一通过

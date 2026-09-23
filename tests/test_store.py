@@ -41,6 +41,7 @@ from _store import (
     reserve_decision_id,
     save_card,
     save_raw_snapshot,
+    save_trading_calendar,
 )
 
 TID = new_task_id(1, day="20260919")
@@ -126,6 +127,7 @@ class TestAppendOnly:
             ("decision_records", "UPDATE decision_records SET status='BUY'"),
             ("agent_runs", "UPDATE agent_runs SET verdict='PASS'"),
             ("raw_market_snapshot", "UPDATE raw_market_snapshot SET source='x'"),
+            ("fact_trading_calendar", "UPDATE fact_trading_calendar SET is_open=0"),
         ],
     )
     def test_UPDATE被数据库拒绝(self, db, table, sql):
@@ -134,6 +136,8 @@ class TestAppendOnly:
                          started_at="t0", finished_at="t1", elapsed_ms=1, path=db)
         save_raw_snapshot(source="em:api", as_of="a", retrieved_at="b",
                           payload={"k": 1}, raw_text=json.dumps({"k": 1}), path=db)
+        save_trading_calendar(source="szse:calendar/2026-09", as_of="a",
+                              retrieved_at="b", days=[("20260901", True)], path=db)
         with pytest.raises(AppendOnlyViolation, match="只追加"):
             with connect(db) as c:
                 c.execute(sql)

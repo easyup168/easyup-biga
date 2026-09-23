@@ -50,7 +50,7 @@ MARKET_CLOSE = dtime(15, 0, 0)
 _SESSIONS = ((dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0)))
 
 
-def market_is_open(now: datetime) -> bool:
+def market_is_open(now: datetime, *, path: pathlib.Path | str | None = None) -> bool:
     """此刻**真的**在连续竞价时段内吗。
 
     与 `session_in_progress` 的区别 —— 两者回答的不是同一个问题：
@@ -63,18 +63,38 @@ def market_is_open(now: datetime) -> bool:
     前者在周六上午也会是 True（那天的数据确实还没「过完」），
     所以不能拿它当后者用。
 
-    ⚠️ **已知边界：不认节假日。** 本系统还没有交易日历
-    （Phase 3 的数据层加厚才会有）。
+    节假日感知（批 L）
+    ------------------
+    有交易日历数据时以它为准，没有时回退到纯 weekday 判据：
 
-    后果是可控的、且朝安全方向：节假日这里会返回 True，
-    依赖它的静默判据可能多报一条缺失项 ——
-    **多一条缺失项只会让 Card 更保守，不会让它更激进**（红线 R-3）。
-    调用方在写缺失项文案时要把「也可能是休市日」一并说出来，
-    否则读的人会去查一个不存在的故障。
+    * `fact_trading_calendar` 里查得到今天 ⇒ 直接用它的「开/休」标志
+      （法定节假日会被正确判成休市 ⇒ 返回 False）；
+    * 查不到（日历还没抓到、或超出已抓月份）⇒ 回退到「非周末即可能开市」，
+      **结果与批 L 之前逐一相同**（探针 P5）。
+
+    🔴 **回退是朝安全方向的**（红线 R-3）：查不到就当「可能开市」，依赖它的静默
+    判据顶多**多报**一条缺失项，让 Card 更保守 —— 绝不把「查不到」当成「休市」，
+    那会在真实交易日里以为休市，是危险得多的方向。调用方写缺失项文案时，若日历
+    没覆盖到，仍要把「也可能是休市日」一并说出来。
+
+    ⚠️ 关于 `path`：默认读默认库。日历数据由 `szse.refresh_trading_calendar` 在**能
+    连通深交所的环境**里填入；本项目当前 WSL 部署连不通深交所（见 `szse.py` 模块头），
+    在那里 `fact_trading_calendar` 为空 ⇒ 恒走回退分支。这不是缺陷，是网络可达性事实，
+    退化方向安全。
     """
     n = now.astimezone(CN_TZ)
-    if n.weekday() >= 5:            # 周六 / 周日
-        return False
+    # 🔴 惰性 import：让本模块的 import 图保持纯（时间数学层不在导入期拉起存储层），
+    #    只有真的要查日历时才碰 _store。
+    from _store import is_trading_day
+
+    known = is_trading_day(n.strftime("%Y%m%d"), path=path)   # True / False / None
+    if known is None:
+        # 没有日历数据 —— 回退到「非周末即可能开市」（与批 L 之前逐一相同）。
+        if n.weekday() >= 5:            # 周六 / 周日
+            return False
+    elif not known:
+        return False                    # 日历明确说这天休市（法定节假日或周末）
+    # known is True（确认交易日），或 known is None 且是工作日 —— 再看是否落在竞价时段。
     return any(a <= n.time() < b for a, b in _SESSIONS)
 
 
