@@ -592,8 +592,12 @@ verdict 从 1 条变 6 条，它的输入量翻 6 倍 —— 而 Stage 1 是并�
       当前 config 里两个 entry 的 `model` 全是 `null`（跑 defaults 的 sonnet），
       而 §3.1 roster 写的是 `main=Opus` / `emotion=Haiku`。
       §3.1 自己标明那是**初始假设不是结论** —— 用同一批问题做 A/B 再定档
-- [ ] `announceTimeoutMs: 120000` 在 §3.2 的配置骨架里，实际 config **没有** ——
-      Stage 1 扇出到 5 个之前补上
+- [x] `announceTimeoutMs: 120000` —— **2026-09-23 核对：已经在实际 config 里**
+      （`agents.defaults.subagents.announceTimeoutMs`），与 §3.2 骨架一致。
+      这条曾经是真的缺口，但在仓库外用 `biga config patch` 补过之后没人回来
+      勾掉——config 本身不进 git（裁定 6），所以这类修复不会留下 commit
+      提醒你更新这里。核对方式：直接读 `~/.openclaw-biga/openclaw.json`，
+      不要只看这行字面描述
 
 ### Phase 2 明确不做
 
