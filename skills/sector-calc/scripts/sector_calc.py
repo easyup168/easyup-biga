@@ -355,6 +355,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--break-source", action="append", default=[], metavar="NAME",
                     help="演练：人为中断 (industry|concept|date)")
     ap.add_argument("--task-id")
+    ap.add_argument("--run-id", default=None,
+                    help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
+                         "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
     ap.add_argument("--evidence-set-id", default=None,
                     help="给了就读这份冻结快照的日线（编排出卡时传）；缺省自己联网抓")
     ap.add_argument("--no-store", action="store_true")
@@ -368,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                            task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
                            evidence_set_id=args.evidence_set_id)
     # 🔴 批 E-II：事实原件（FactBundle，不含 stance）直接落库；stance 由 agent 事后追加。
-    ref = save_fact_bundle(fb) if store else None
+    ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
 
     print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:

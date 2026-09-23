@@ -666,12 +666,76 @@ agent 也建好了，但 `agents.entries.main.subagents.allowAgents` 白名单�
 那是对的，但它是对账，不是单一源。Pipeline Registry 才是结构性解法：
 名单只有一处，配置由它派生。
 
-Registry 还带来一个对账测试给不了的能力：**Pipeline 版本化**。
-现在 `decision_records` 无法回答「这张历史卡当时用了哪几个 agent」——
-加一个 `macro` 之后，旧卡和新卡在库里长得一模一样。
-
 🔴 **只做 Pipeline + Agent 两个 Registry，不做 Dataset / Provider Registry** ——
 见 §0 的裁定表。
+
+#### 设计探活（2026-09-23）：现状比"两处会漂"更碎
+
+开工前对代码库做了一次全量普查（roster 到底在几处、`decision_records` 现在
+是否真的答不出"当时用了哪几个 agent"、`orchestrator.py` 读的是不是
+`STAGE1_AGENTS`），结论比原始事故描述更细：
+
+**roster 不是"两处"，是至少五处，其中一处完全没人管**：
+
+| 位置 | 是否派生自 `_contract` | 备注 |
+|---|---|---|
+| `skills/_contract/verdict.py` `STAGE1_AGENTS`/`STAGE2_AGENTS` | （它自己就是源） | 唯一被普遍视为权威的一份，但含从不 spawn 的 `discipline`（裁定 13） |
+| `skills/decision-card/scripts/orchestrator.py` `RISK_AGENT`、`SNAPSHOT_INDEX_AGENTS` | ❌ 独立字面量 | 前者是"Stage 2 里真正会被 spawn 的那个"，后者是"消费冻结快照的子集"——两个都是 `AgentDefinition` 该有的字段，现在各自单独硬编码 |
+| `skills/_contract/verdict.py` `STANCE_VOCAB` 的 key 集 | 只靠一条测试钉住 | `docs/tutorial/21-value-objects-and-invariants.md` 记录过：`DecisionCard.absent_agents` 的权威**特意选了它**而不是 `STAGE1_AGENTS`，因为后者含 `discipline`——这条裁定 K 必须继续尊重，不能被 Registry 的引入意外推翻 |
+| `tools/verify/adapter_spike.py` `STAGE1 = (...)` | ❌ 独立字面量，**零测试覆盖** | 它只 import `_runtime`，从不 import `_contract`；不在 pytest 下跑，`test_roster_matches_config.py` 完全看不到它。今天再加一个 Stage 1 agent，这个文件会静默继续用旧名单——这是普查找到的、原始事故描述里没有的**第三处真实漂移风险** |
+| `~/.openclaw-biga/openclaw.json`（仓库外，不进 git） | 人工维护 | 唯一的真配置文件；由人跑 `biga config patch` / `biga agents add` 改，**没有任何仓内脚本生成它**。Registry 没法"变成"这个文件——它是外部系统的配置，只能是patch 的生成源，不能替代人工执行 `biga config patch` 这一步（R-1：仍然只走 `bin/biga`）|
+
+**`test_roster_matches_config.py` 本身还有一条静默口子**：整组检查
+`@pytest.mark.skipif(not CONFIG.exists(), ...)`——机器上没有那份运行时配置
+（比如全新 clone、CI）⇒ **不报红，直接跳过**。这正是 R-3 想防的形状：算不出来
+不该悄悄变成"没查出问题"。
+
+**"Pipeline 版本化"这个诉求，普查之后要拆成两半**：
+
+1. 「这张卡**实际**用了哪几个 agent 回答」——**已经能查，冗余三份**：
+   `card_json.verdicts[].agent`、`agent_verdicts.agent`（按 `task_id` 分组）、
+   `agent_runs.agent`（按 `decision_id` 分组）。这一半**不需要新表**，
+   TODO.md 原描述"现在无法回答"不准确，普查已订正。
+2. 「这张卡**当时被期望**用哪几个 agent 回答」——**真的没有被记录**，
+   这才是需要动手的那一半：`DecisionCard.absent_agents`（`card.py`）是
+   `@property`，现算现取**当下**的 `STANCE_VOCAB` key 集，不是卡生成那一刻
+   冻结的名单。⇒ 一张三个月前的卡，今天用 `bin/biga-card --show` 重新加载，
+   `absent_agents` 用的是**今天**的 roster，不是当时的——如果这期间 roster
+   变过（加了 agent，或者哪个 agent 一度下线），**同一张历史卡的这个字段会
+   在不同时间点给出不同答案，而 `card_json` 本身没变**。这是普查中发现的、
+   比原始事故更隐蔽的一处潜在静默漂移，还没有实例发生过，但机制上成立，
+   应当在 K 里一并堵上。
+
+#### 设计方向（不是最终实现，留给分发提示词细化）
+
+1. **`AGENT_REGISTRY`**：`_contract` 新增一份结构（一个 agent 一条
+   `AgentDefinition`：`agent_id` / `stage` / 是否真的会被 spawn / 是否消费
+   `SnapshotCoordinator` 冻结的快照），只装**已经在生产路径上有消费方**的字段
+   ——不装 `required_datasets` 之类外部材料示意稿里的字段（那些绑定 Dataset
+   Registry，裁定表已明确推迟，装了就是 L-1 的死配置）。
+   `STAGE1_AGENTS` / `STAGE2_AGENTS` / `RISK_AGENT` / `SNAPSHOT_INDEX_AGENTS`
+   全部改成**从它派生**的模块级常量，不再手写字面量——照抄
+   `skills/_contract/run.py` `RunState` 已经验证过的形状：`frozenset(v for k, v in vars(...) ...)`
+   内省派生，不手抄第二份（那个文件的docstring 原话就是"两处各写一份状态
+   清单必然漂"，跟 K 要治的是同一个病）。`STANCE_VOCAB` 的 key 集**保持
+   独立**，但改成对 Registry 断言子集关系（不能因为 Registry 存在就把
+   `discipline` 意外带回 `absent_agents` 的权威里）。
+2. **`tools/verify/adapter_spike.py` 必须迁到 Registry**——这不是顺手，
+   是 K 结束时"是否还有消费方在读独立字面量"的验收判据之一，普查已经点名
+   这一处。
+3. **卡级冻结名单**：`orchestrator.py` 构建 Card 时，把当时的 `AGENT_REGISTRY`
+   算出的期望 roster 写进 `card_json`（新字段，回放路径照旧不重算）；
+   `DecisionCard.absent_agents` 优先读这个冻结字段，只有老卡（字段不存在）
+   才回退到读**今天**的 Registry——同一个"有就用、缺就退回"形状，`E-I` 的
+   `LegacyAdapter`、`J-II` 的 `spawn_check` 结构化 join 都是这个模式，
+   不发明第四种写法。
+4. **`test_roster_matches_config.py` 的 `skipif` 缺口**——是否在 K 里一并
+   修（改成 R-3 式的"报 UNKNOWN/missing"而不是静默跳过），还是记成独立的
+   已知缺口留给分发提示词自己判断范围，**由建造那批的会话在开工时定**，
+   这里不预先拍板范围。
+5. 明确不做：不生成/不写 `~/.openclaw-biga/openclaw.json`——Registry 最多
+   提供"照 Registry 应该长什么样的 `allowAgents`/`agentToAgent.allow` patch"
+   给人工核对着跑 `biga config patch`，不越过 R-1 自己去改外部配置文件。
 
 ### 批 L · `cn.trading_calendar`（数据架构 §29 P0 唯一有消费方的那个）
 

@@ -147,7 +147,7 @@ class DecisionOrchestrator:
                 #    freeze 失败（抓不到）⇒ 异常上抛 ⇒ 整体 FAILED（fail-closed：宁可
                 #    不出卡，也不退回各自抓一份、悄悄丢掉共享保证）。
                 esid = self._snapshot.freeze_index_daily(
-                    did, SNAPSHOT_SYMBOLS, bars=SNAPSHOT_BARS)
+                    did, SNAPSHOT_SYMBOLS, bars=SNAPSHOT_BARS, run_id=ctx.run_id)
                 # evidence_set_id 从批 B 起就在 RunContext 里、一直是 None ——
                 # 这一批第一次真的填它（in-memory；decision_runs 是只追加、RECEIVED
                 # 时已写入 None，所以持久记录落在这次转移的 detail + evidence_sets 表）。
@@ -169,7 +169,8 @@ class DecisionOrchestrator:
                 try:
                     for a in STAGE1_AGENTS:
                         handles.append(
-                            ad.start(a, did, self._specialist_task(a, did, esid),
+                            ad.start(a, did,
+                                     self._specialist_task(a, did, esid, ctx.run_id),
                                      group_id=gid, run_timeout_sec=run_timeout))
                 except Exception:
                     for h in handles:
@@ -185,7 +186,7 @@ class DecisionOrchestrator:
                 s1_refs = [stage1_ids[a] for a in STAGE1_AGENTS if a in stage1_ids]
                 state = self._to(ctx.run_id, state, RunState.RISK_RUNNING)
                 gid_r = f"g-{ctx.run_id[:8]}-risk"
-                rh = ad.start(RISK_AGENT, did, self._risk_task(did, s1_refs),
+                rh = ad.start(RISK_AGENT, did, self._risk_task(did, s1_refs, ctx.run_id),
                               group_id=gid_r, run_timeout_sec=max(30, self.risk_sec))
                 r2 = ad.wait([rh], self._stage_timeout(deadline, self.risk_sec))
 
@@ -203,7 +204,7 @@ class DecisionOrchestrator:
 
                 card = card_ops.synthesize(
                     decision_id=did, verdicts=verdicts, judgment=judgment,
-                    model_ref=self._model_ref, verdict_refs=refs)
+                    model_ref=self._model_ref, verdict_refs=refs, run_id=ctx.run_id)
                 # 🔴 批 J-II：把每个 Stage 1/risk spawn 的运行时 id 收成
                 #    agent → runtime_run_id，随 persist 落进 agent_runs.runtime_run_id
                 #    （spawn_check 据此做结构化 join，比按决策号的文本匹配硬）。
@@ -287,14 +288,17 @@ class DecisionOrchestrator:
             pass
 
     # ── 任务文本（给 Specialist / risk / 判官的指令）──────────────────────
-    def _specialist_task(self, agent: str, did: str, evidence_set_id: str) -> str:
+    def _specialist_task(self, agent: str, did: str, evidence_set_id: str,
+                         run_id: str) -> str:
         # 🔴 绝不在指令里出现日期（ORCHESTRATION.md 反复踩过）——走宽松模式，
         #    取数据源最近一个交易日，并让它写出是哪天。
+        # 🔴 批 J-I：--run-id 给**每一个** agent（六个都产落库记录），与 --task-id 同一
+        #    机制（提示词说要加，跑完靠探针核实真加了）。只 capture 不 enforce。
         base = (
             f"本次决策编号 {did}。请给出当前市场状态/情绪的事实与判断。\n"
             f"不要指定日期，走宽松模式，取数据源给出的最近一个交易日，"
             f"并在回答里明确写出那是哪一天。\n"
-            f"跑你的 skill 时必须加 --task-id {did}。")
+            f"跑你的 skill 时必须加 --task-id {did} --run-id {run_id}。")
         # 🔴 读冻结日线的三个 Specialist 必须再带 --evidence-set-id —— 与 --task-id
         #    同一种机制（提示词说要做什么，跑完靠代码/探针核实真做了）。emotion/news
         #    的 skill 没有这个参数，不加（加了它们也不认）。
@@ -305,11 +309,12 @@ class DecisionOrchestrator:
                 f"读这份冻结快照，不要自己联网抓日线，这样所有 Specialist 看的是同一份。")
         return base
 
-    def _risk_task(self, did: str, s1_ids: list[int]) -> str:
+    def _risk_task(self, did: str, s1_ids: list[int], run_id: str) -> str:
         ids = ",".join(str(i) for i in s1_ids)
+        # 🔴 批 J-I：risk 是第六个产落库记录的 agent，同样带 --run-id。
         return (
             f"请依据 Stage 1 的冻结证据做风险审查。\n"
-            f"本次决策编号 {did}，跑 skill 时必须加 --task-id {did}。\n"
+            f"本次决策编号 {did}，跑 skill 时必须加 --task-id {did} --run-id {run_id}。\n"
             f"Stage 1 的 verdict_ref：{ids}\n"
             f"不要自己重新采集数据。")
 
