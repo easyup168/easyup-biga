@@ -103,7 +103,11 @@ G-3  仓库 Public，push 即发布。commit 前跑 tools/verify/audit_public.sh
 
 ## 🔴 这一批明确不做
 
-- 不改任何 Agent 的提示词 / AGENTS.md
+- 不改任何 Agent 的提示词 / AGENTS.md —— **这也是默认值，不是绝对禁令**，
+  同上一条「不出新卡」的道理：正文明确写出要改哪个 AGENTS.md、改哪一节、
+  为什么，就以正文为准（批 F 撞到这条：它要求改 `agents/risk/AGENTS.md`
+  的「约束 1」，因为 risk 不再自己跑 `risk_check.py` 了，契约文本不跟着改
+  就是 L-6 契约与实际行为对不上）
 - 不动 bin/biga-card 的五道守卫顺序（熔断 → ownership → 锁 → 预算 → 第一次付费）
 - 不出新卡、不调用任何付费模型 —— **这是默认值，不是绝对禁令**。如果这一批的正文
   明确写出「需要真实调用，理由是什么，预算上限多少」，以正文为准，不要拿这条默认值
