@@ -104,6 +104,10 @@ class DecisionCard:
     #: 历史卡没有这份数据（`from_dict` 缺省成空 tuple）——它是可追加的证据，
     #: 不是必需品；核对逻辑见 `_store.verify_verdict_refs()`。
     input_verdict_refs: tuple[VerdictRef, ...] = dc_field(default_factory=tuple)
+    #: 🔴 批 J-I（可选、默认 None）：这张卡是哪次编排执行尝试（`RunContext.run_id`）
+    #: 合成出来的。在线路径由 `card_ops.synthesize(run_id=ctx.run_id)` 填；历史卡与手工
+    #: 合成没有 ctx，为 None（capture 不 enforce）。回放**不**给历史卡凭空捏一个 run_id。
+    run_id: str | None = None
 
     def __post_init__(self) -> None:
         # 🔴 A2：frozen 之后不能再 `self.x = ...`，改用 object.__setattr__。
@@ -142,6 +146,10 @@ class DecisionCard:
             raise ValueError("headline 不能为空 —— Card 必须给出一句话的核心矛盾")
         if not self.model_ref.strip():
             raise ValueError("model_ref 不能为空 —— 回放对比要靠它标定这次是谁合成的")
+        # 批 J-I：run_id 可空（capture 不 enforce）；给了就必须是非空字符串。
+        if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id.strip()):
+            raise ValueError(
+                f"run_id 要么是 None，要么是非空字符串，收到 {self.run_id!r}")
 
         if not self.generated_at:
             from .evidence import now_cn
@@ -475,6 +483,7 @@ class DecisionCard:
             "generated_at": self.generated_at,
             "elapsed_ms": self.elapsed_ms,
             "input_verdict_refs": [r.to_dict() for r in self.input_verdict_refs],
+            "run_id": self.run_id,
         }
 
     @classmethod
@@ -505,4 +514,7 @@ class DecisionCard:
             # 历史卡没有这个字段 —— 缺省成空 tuple，不是缺失的证据引用。
             input_verdict_refs=[VerdictRef.from_dict(x)
                                  for x in d.get("input_verdict_refs", [])],
+            # 🔴 批 J-I：历史卡的 JSON 里没有这个键 —— `.get` 缺省 None，
+            #    回放据此**不给历史卡凭空捏一个 run_id**（P4）。
+            run_id=d.get("run_id"),
         )

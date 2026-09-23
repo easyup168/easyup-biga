@@ -70,7 +70,9 @@ def _read_by_ids(spec: str) -> tuple[list[AgentVerdict], list[VerdictRef]]:
         meta = load_verdict_meta(vid)
         refs.append(VerdictRef(agent=v.agent, verdict_id=vid,
                                content_sha256=meta["content_sha256"],
-                               contract_version=CONTRACT_VERSION))
+                               contract_version=CONTRACT_VERSION,
+                               # 🔴 批 J-I：从存量行的 run_id 列直接搬（历史行是 None）。
+                               run_id=meta.get("run_id")))
     return verdicts, refs
 
 

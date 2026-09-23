@@ -530,11 +530,16 @@ def load_verdict(
 def load_verdict_meta(
     verdict_id: int, *, path: pathlib.Path | str | None = None
 ) -> dict[str, Any] | None:
-    """取回一行的元信息（含修订链 + `kind`），不构造契约对象。"""
+    """取回一行的元信息（含修订链 + `kind` + `run_id`），不构造契约对象。
+
+    🔴 批 J-I：`run_id` 列一并取回 —— 两个消费方都靠它：`save_assessment` 从被 amends
+    的 fact 行继承 run_id，`card_ops` / `synthesize.py` 从存量行搬进 `VerdictRef.run_id`。
+    历史行没有这一列时读回来是 None（nullable，不回填）。
+    """
     with connect(path, readonly=True) as conn:
         row = conn.execute(
             "SELECT verdict_id, task_id, agent, amends, amend_reason, "
-            "content_sha256, created_at, kind FROM agent_verdicts WHERE verdict_id=?",
+            "content_sha256, created_at, kind, run_id FROM agent_verdicts WHERE verdict_id=?",
             (int(verdict_id),),
         ).fetchone()
     return dict(row) if row else None
@@ -604,12 +609,17 @@ def _verdict_kind(verdict_id: int, *, path: pathlib.Path | str | None = None):
 
 
 def save_fact_bundle(
-    fb: FactBundle, *, path: pathlib.Path | str | None = None
+    fb: FactBundle, *, run_id: str | None = None,
+    path: pathlib.Path | str | None = None
 ) -> int:
     """落一份 `FactBundle`（skill 产出的事实，无 stance），返回行号。
 
     🔴 **写路径严**（§9）：只收 `FactBundle`。旧 `AgentVerdict` 走 `save_verdict`——
     新落库路径不接受旧形状，旧格式才会随时间自然清零，不变成第二套要跟着演进的口径。
+
+    `run_id`（批 J-I，可选、默认 None）：这条事实是哪次编排执行尝试产生的
+    （`RunContext.run_id`），由 skill 经 `--run-id` 带下来。只 capture 不 enforce ——
+    不传就是 None（历史行 / 手工跑 skill），读路径不因此报错。
     """
     if not isinstance(fb, FactBundle):
         raise TypeError(
@@ -626,10 +636,10 @@ def save_fact_bundle(
         cur = conn.execute(
             "INSERT INTO agent_verdicts "
             "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
-            " created_at, kind) VALUES (?,?,?,?,?,?,?,?)",
+            " created_at, kind, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
             (fb.task_id, fb.agent, None, None, blob,
              hashlib.sha256(blob.encode("utf-8")).hexdigest(),
-             now_cn().isoformat(), "fact"),
+             now_cn().isoformat(), "fact", run_id),
         )
         return int(cur.lastrowid)
 
@@ -681,15 +691,20 @@ def save_assessment(
     a = dataclasses.replace(a, fact_ref=fact_id)  # 自描述：json 里也带上它指的 fact 行
     blob = _canonical_dumps(a.to_dict())
     AgentAssessment.from_dict(json.loads(blob))  # 写边界重校验
+    # 🔴 批 J-I（2b）：assessment 的 run_id **从被 amends 的 fact 行继承**，不由 Agent
+    #    在命令行上传。理由不是省事：Agent 手传就可能传错，而「从 meta 直接搬」在结构上
+    #    不可能与事实行不一致 —— 判据别建在可篡改的输入上。meta 就是上面按 fact_id 取的
+    #    那一行（已校验 kind=='fact' 且同 (task_id, agent)），run_id 直接取它的。
+    inherited_run_id = meta["run_id"]
     try:
         with connect(path) as conn:
             cur = conn.execute(
                 "INSERT INTO agent_verdicts "
                 "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
-                " created_at, kind) VALUES (?,?,?,?,?,?,?,?)",
+                " created_at, kind, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
                 (a.task_id, a.agent, fact_id, f"assessment stance={a.stance}", blob,
                  hashlib.sha256(blob.encode("utf-8")).hexdigest(),
-                 now_cn().isoformat(), "assessment"),
+                 now_cn().isoformat(), "assessment", inherited_run_id),
             )
             return int(cur.lastrowid)
     except sqlite3.IntegrityError as e:
@@ -925,6 +940,7 @@ def save_evidence_set(
     evidence_set_id: str,
     decision_id: str | None,
     manifest: dict[str, Any],
+    run_id: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> str:
     """登记一次数据冻结（`SnapshotCoordinator` 冻结完调它），返回 `evidence_set_id`。
@@ -953,9 +969,9 @@ def save_evidence_set(
         with connect(path) as conn:
             conn.execute(
                 "INSERT INTO evidence_sets "
-                "(evidence_set_id, decision_id, frozen_at, manifest_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (evidence_set_id, decision_id, now, blob, now),
+                "(evidence_set_id, decision_id, frozen_at, manifest_json, created_at, run_id) "
+                "VALUES (?,?,?,?,?,?)",
+                (evidence_set_id, decision_id, now, blob, now, run_id),
             )
     except sqlite3.IntegrityError as e:
         if "evidence_sets.evidence_set_id" not in str(e) and "evidence_set_id" not in str(e):

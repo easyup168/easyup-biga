@@ -102,7 +102,8 @@ class SnapshotCoordinator:
     # ── 冻结 ────────────────────────────────────────────────────────────────
 
     def freeze_index_daily(
-        self, decision_id: str | None, symbols: Iterable[str], *, bars: int
+        self, decision_id: str | None, symbols: Iterable[str], *, bars: int,
+        run_id: str | None = None,
     ) -> str:
         """把这次决策要用到的指数日线**冻结一次**，返回 `evidence_set_id`。
 
@@ -111,6 +112,9 @@ class SnapshotCoordinator:
 
         Args:
             symbols: 指数代码序列，如 ``["sh000001", "sz399106"]``。
+            run_id: 🔴 批 J-I（可选、默认 None）：这次冻结属于哪次编排执行尝试
+                （`RunContext.run_id`）。编排器直接把 `ctx.run_id` 传进来（Python 内部
+                调用，不经 CLI），登记进 `evidence_sets.run_id`。手工调用不传就是 None。
             bars: 取多少根 —— 调用方（D-II 的编排器）传**所有消费者里最大的
                 那个**，这样每个读取方都能从这一份里切出自己要的根数。
                 🔴 今天 `sh000001` 的最大消费者是 **technical（120 根）**，
@@ -161,6 +165,7 @@ class SnapshotCoordinator:
             evidence_set_id=evidence_set_id,
             decision_id=decision_id,
             manifest=manifest,
+            run_id=run_id,
             path=self._path,
         )
         return evidence_set_id

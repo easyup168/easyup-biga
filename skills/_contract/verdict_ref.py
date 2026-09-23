@@ -53,12 +53,16 @@ class VerdictRef:
             即 `hashlib.sha256(当时写入的 verdict_json 文本)`，不是
             「把 AgentVerdict 对象重新序列化再算一遍」。
         contract_version: 合成这条引用时契约层的 `CONTRACT_VERSION`。
+        run_id: 🔴 批 J-I（可选、默认 None）：被引用那条原件是哪次编排执行尝试产生的，
+            从 `agent_verdicts.run_id` 那一列**直接搬过来**，不重新推导。历史行没有这个
+            值时为 None（capture 不 enforce，缺了不算不一致）。
     """
 
     agent: str
     verdict_id: int
     content_sha256: str
     contract_version: str
+    run_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent, str) or not self.agent.strip():
@@ -74,6 +78,10 @@ class VerdictRef:
         if not isinstance(self.contract_version, str) or not self.contract_version.strip():
             raise ValueError(
                 f"VerdictRef.contract_version 必须是非空字符串，收到 {self.contract_version!r}")
+        # run_id 可空（capture 不 enforce）；给了就必须是非空字符串，不接受空串冒充。
+        if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id.strip()):
+            raise ValueError(
+                f"VerdictRef.run_id 要么是 None，要么是非空字符串，收到 {self.run_id!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +89,7 @@ class VerdictRef:
             "verdict_id": self.verdict_id,
             "content_sha256": self.content_sha256,
             "contract_version": self.contract_version,
+            "run_id": self.run_id,
         }
 
     @classmethod
@@ -90,4 +99,7 @@ class VerdictRef:
             verdict_id=d["verdict_id"],
             content_sha256=d["content_sha256"],
             contract_version=d["contract_version"],
+            # 🔴 历史卡的 JSON 里没有这个键 —— `.get` 缺省 None，不是必填，
+            #    否则旧卡一律读不回来（P4/P2 要防的正是这个）。
+            run_id=d.get("run_id"),
         )

@@ -367,6 +367,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verdict-ids", required=True,
                     help="Stage 1 各 Specialist 的 verdict_id，逗号或空格分隔")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--run-id", default=None,
+                    help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
+                         "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
     ap.add_argument("--no-store", action="store_true", help="不落判定原件")
     ap.add_argument("--render", action="store_true", help="附带人类可读摘要")
     args = ap.parse_args(argv)
@@ -387,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     fb = build_fact_bundle(verdict_ids=ids, store=store,
                            task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
     # 🔴 批 E-III：事实原件（FactBundle，不含 stance）直接落库；stance 由 Risk Agent 事后追加。
-    ref = save_fact_bundle(fb) if store else None
+    ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
 
     print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
