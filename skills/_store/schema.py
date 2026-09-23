@@ -488,6 +488,93 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_fact_per_task_agent
 """
 
 
+_V12 = """
+-- ───────────────────────────────────────────────────────────────
+-- v12：外发通知 outbox + 投递日志（批 G-I，第 9/10 张表）
+--
+-- 🔴 它解决的是「人得守着终端等卡跑完」——出卡是一次 170~200 秒的同步调用，
+--    Card 完成 / UNKNOWN / risk 否决 / 运行失败这四类事件此前没有任何外发通道。
+--    这一批只做**推**（Outbound Only）：与 Card 同事务入队一行，另一个 worker
+--    异步投递。**不接受任何飞书方向的输入**（那是批 G-II）。
+--
+-- 两张表，为什么不是一张：
+--   notification_outbox      —— 「该推哪件事」的队列。一件事一行。
+--   notification_deliveries  —— 「投递尝试」的追加日志。一次尝试一行。
+--
+-- 🔴 **纯只追加，不给 outbox 开 delivered_at 的 UPDATE 例外**（分发提示词点名要
+--    答的设计问题）。两条路都想过：
+--
+--    (A) 采用 · outbox 只追加，投递状态另开 deliveries 追加日志，「投没投成」
+--        变成一条派生查询（deliveries 里有没有这条 outbox 的 status='delivered' 行）。
+--    (B) 放弃 · 给 outbox 开 delivered_at 一列、投递成功 UPDATE 它一次。
+--
+--    选 (A)。理由不是「少写一张表更麻烦也要忍」，是本仓库的**投递状态本来就该
+--    这么记**：
+--      · run_events 就是这个先例 —— run 的「当前状态」不在 decision_runs 上原地
+--        UPDATE，而是 run_events 追加一行、当前状态 = 最新一行。投递状态是同一
+--        形状的小状态机（pending → delivered/failed → 重试再 failed…），append 日志
+--        天然记得下「第几次、结果如何、什么时候」，UPDATE 一列只留得下终值。
+--      · agent_verdicts 的修订用 amends 指回原件、decision_records 的回放用
+--        replay_of 指回原卡 —— 本仓库**从不原地改状态**（L-8：状态一 UPDATE，
+--        「当时看到的」就永久重建不出来了）。给 outbox 破这个例，就得同时给
+--        `tests/test_store.py::test_每张表都有只追加触发器` 开一个它看不见的口子
+--        （schema.py 顶部原话：「例外必须自己举手」）——拿一道有用的守卫换一列
+--        方便，不划算。
+--    ⇒ (A) 与既有先例一致，(B) 会引入本仓库第一处「被允许 UPDATE 的业务表」。
+--
+-- 幂等键 UNIQUE(event_type, aggregate)：同一个决策的同一类事件只能入队一次。
+--   aggregate 对 card_* 是 decision_id（一个决策一张卡 ⇒ 一类事件一次），对
+--   run_failed 是 run_id（一次执行尝试至多失败一次，终态 CAS 保证）。幂等在
+--   **BigA 自己的库里**就成立，不依赖「飞书那边也会去重」（分发提示词的硬约束）。
+--   入队走 INSERT ... ON CONFLICT DO NOTHING（见 db.enqueue_notification）——
+--   重复入队是无害的 no-op，不会撞 append-only 触发器（那对触发器管的是
+--   UPDATE/DELETE，不管 INSERT 的 UNIQUE 冲突）。
+--
+-- 🔴 建表时**就**带只追加触发器 —— v4 建 decision_ids 时漏过一次（F1），
+--    代价是整套身份机制建在可撤销的地基上。两张新表都进 _append_only。
+--
+-- ⚠️ **schema 版本号撞车，已解决（2026-09-23）**：本迁移开工时（HEAD=1824361）
+--    v11 是下一个空号，但并行的批 F（当时未合并、在另一棵工作树上）也占用了
+--    v11（`ux_fact_per_task_agent`）。批 F 先合并（`e5b959f`）落地 v11 —— 合并
+--    orchestration 进本批工作树时按 J-I/J-II 的先例重新编号：本迁移改占 v12，
+--    迁移体本身一字未动。
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    outbox_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- card_completed / card_unknown / risk_block / run_failed（白名单在
+    -- _contract.NOTIFICATION_EVENT_TYPES；db.enqueue_notification 落库前校验）。
+    event_type   TEXT    NOT NULL,
+    -- 幂等范围：card_* 是 decision_id，run_failed 是 run_id。
+    aggregate    TEXT    NOT NULL,
+    -- 投递载荷（严格 JSON，_canonical_dumps）。含决策号/run_id 等，worker 原样投出。
+    payload_json TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    -- 🔴 幂等键：同一个决策的同一类事件只能入队一次。
+    UNIQUE(event_type, aggregate)
+);
+
+CREATE INDEX IF NOT EXISTS ix_outbox_event ON notification_outbox(event_type, aggregate);
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    outbox_id   INTEGER NOT NULL REFERENCES notification_outbox(outbox_id),
+    -- 第几次投递（从 1 起）。= 这条 outbox 已有的 deliveries 行数 + 1。
+    attempt     INTEGER NOT NULL,
+    -- 'delivered' / 'failed'。「投没投成」= 有没有一条 status='delivered' 的行（派生）。
+    status      TEXT    NOT NULL,
+    -- 投递接口名（桩实现是 'stdout'；批 G-II 才有真飞书 adapter）。
+    channel     TEXT    NOT NULL,
+    -- 失败时的错误文本；成功为 NULL。
+    error       TEXT,
+    at          TEXT    NOT NULL,
+    UNIQUE(outbox_id, attempt)
+);
+
+CREATE INDEX IF NOT EXISTS ix_deliveries_outbox ON notification_deliveries(outbox_id);
+""" + _append_only("notification_outbox", "外发事件入队即事实，改了就说不清到底该不该推") \
+    + _append_only("notification_deliveries", "投递日志改了，就没法复述这条通知投了几次、结果如何")
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -501,6 +588,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (9, _V9),
     (10, _V10),
     (11, _V11),
+    (12, _V12),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

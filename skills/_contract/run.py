@@ -48,17 +48,19 @@ __all__ = [
 
 
 class RunState:
-    """一次运行可能处在的 13 个状态 —— **照设计文档 §5 那张表，一个不多**。
+    """一次运行可能处在的 14 个状态 —— **照设计文档 §5 那张表，一个不多**。
 
-    🔴 评审 §13 原文列了 15 个。这里少两个，是有意的：
+    🔴 评审 §13 原文列了 15 个。这里去掉两个、批 G-I 加回一个：
 
       · 去掉 `IDENTITY_RESERVED` —— 与 `PREFLIGHTED` 在本系统里是同一瞬间
         （Stage 0 占号在预检里），没有代码能单独进入它、也没有消费方读它。
       · 去掉 `SNAPSHOT_COLLECTING` —— 并入 `PREFLIGHTED → SNAPSHOT_FROZEN`
         的转移，中间态无人读。
 
-    凭空多一个状态就是一条 L-1 死配置。`NOTIFICATION_PENDING` 同理**推迟到
-    批 G**（outbox 存在之前它没有消费方）。
+    凭空多一个状态就是一条 L-1 死配置。`NOTIFICATION_PENDING` 原本**推迟到批 G**
+    （outbox 存在之前它没有消费方）—— 批 G-I 建了 `notification_outbox` 与 worker，
+    它现在有了生产方（编排器在 CARD_PERSISTED 之后入队）与消费方（`--status`
+    的 `STATE_MEANING` + worker 投递），于是加回来，插在 CARD_PERSISTED 与 COMPLETED 之间。
 
     `RUN_STATES` 从这个类的属性**派生**，不手抄第二份 —— 加/删状态只改这里。
     """
@@ -79,6 +81,11 @@ class RunState:
     SYNTHESIZING = "SYNTHESIZING"
     #: Card 已写进 `decision_records`（Repository）。
     CARD_PERSISTED = "CARD_PERSISTED"
+    #: 外发通知已入队（`notification_outbox` 行已与 Card 同事务落库，批 G-I）。
+    #: 🔴 只代表「入队」，**不代表「已投递成功」** —— worker 投递是异步的，
+    #:    一次飞书 API 抽风不能把 Run 卡在非终态。入队是纯 DB 操作，与其余转移一样快；
+    #:    `COMPLETED` 的达成**不依赖**投递结果（worker 事后补投，见 notify_worker.py）。
+    NOTIFICATION_PENDING = "NOTIFICATION_PENDING"
     #: 整条链路正常收尾。
     COMPLETED = "COMPLETED"
     #: 执行失败（守卫拒绝 / spawn 核验未过 / 采集异常）。
@@ -131,7 +138,12 @@ _ORCHESTRATED = [
     (RunState.STAGE1_COMPLETED, RunState.RISK_RUNNING),
     (RunState.RISK_RUNNING, RunState.SYNTHESIZING),
     (RunState.SYNTHESIZING, RunState.CARD_PERSISTED),
-    (RunState.CARD_PERSISTED, RunState.COMPLETED),
+    # 🔴 批 G-I：CARD_PERSISTED 不再直达 COMPLETED —— 中间必经 NOTIFICATION_PENDING
+    #    （outbox 入队）。跳过它直达 COMPLETED 现在是非法转移（探针 P5）：让「卡落库
+    #    了但通知没入队」在状态机层面就不可能悄悄发生。COMPLETED 仍紧跟其后、纯 DB、
+    #    不等 worker 投递 —— NOTIFICATION_PENDING 只保证「入队」，不保证「已送达」。
+    (RunState.CARD_PERSISTED, RunState.NOTIFICATION_PENDING),
+    (RunState.NOTIFICATION_PENDING, RunState.COMPLETED),
 ]
 
 # 🔴 批 B 曾有一条 legacy 粗边 `PREFLIGHTED → CARD_PERSISTED`，专给「编排整个交给
@@ -141,10 +153,12 @@ _ORCHESTRATED = [
 #    （`tools/verify/` 无引用、`bin/biga-card` 已收缩、grep 全仓无残留 —— 见批 C-II 探针 P4。）
 
 #: 在途状态（非终态）—— 失败/超时/取消可以从其中任何一个发生。
+#: NOTIFICATION_PENDING 也在其中：入队与 COMPLETED 之间进程若被杀，reaper 仍能把它
+#: 收成终态（与 CARD_PERSISTED 同理）——但正常路径下它一闪而过（纯 DB，紧接 COMPLETED）。
 _IN_FLIGHT = tuple(s for s in (
     RunState.RECEIVED, RunState.PREFLIGHTED, RunState.SNAPSHOT_FROZEN,
     RunState.STAGE1_RUNNING, RunState.STAGE1_COMPLETED, RunState.RISK_RUNNING,
-    RunState.SYNTHESIZING, RunState.CARD_PERSISTED,
+    RunState.SYNTHESIZING, RunState.CARD_PERSISTED, RunState.NOTIFICATION_PENDING,
 ))
 
 _FAILURE = [

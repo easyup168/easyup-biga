@@ -847,6 +847,24 @@ assessment**，卡上呈现的是"risk 给出了事实、判定是 UNKNOWN、没
 
 ### 批 G · Outbox + 飞书 + 配置进仓库
 
+> ✅ **批 G-I（Outbound Only）已落地（2026-09-23）。** 只做「推」，不接受任何飞书方向
+> 的输入。建的东西：
+> * `skills/_contract/notify.py` —— 事件类型词表（`NOTIFICATION_EVENT_TYPES` 四类）
+>   + `card_event_type()` 分类判据（否决 / UNKNOWN·缺失 / 正常）+ `NOTIFY_FAILURE_STATES`。
+> * schema **v11** 两张只追加表：`notification_outbox`（幂等键 `(event_type, aggregate)`）
+>   + `notification_deliveries`（投递尝试日志）。「投没投成」是派生查询，不给 outbox 开
+>   `delivered_at` 的 UPDATE 例外 —— 与 `run_events`/`amends`/`replay_of` 同一条「状态变更
+>   一律追加」的先例（理由见 `schema.py` `_V11` 注释与 `CHANGELOG`）。
+> * `_store.db` 的 `save_card_with_notifications`（Card + outbox **同事务**）/
+>   `enqueue_run_failed` / `record_delivery` / `undelivered_notifications`。
+> * `RunState.NOTIFICATION_PENDING`（插在 `CARD_PERSISTED` 与 `COMPLETED` 之间，只代表
+>   「已入队」不代表「已投递」）；跳过它直达 `COMPLETED` 现在是非法转移。
+> * `skills/decision-card/scripts/notify_worker.py` —— outbox 的读取方，桩投递
+>   `StdoutDeliverer`（真飞书 adapter 是 G-II 的生产方）。
+>
+> 落地细节冻结在教程第 33 章；探针记录见 `CHANGELOG`。**批 G-II（Inbound Trigger）
+> 未开工** —— 异步执行、飞书 trigger、`deploy/openclaw/` + R-2、`main` 移出路由，都在那批。
+
 * `notification_outbox` 与 Card **同事务**写入；worker 投递；幂等键 `(event_type, aggregate)`
 * 飞书从「自由对话要卡」变成 **trigger**（`trigger_id` = 飞书 event id ⇒ 天然幂等）
   —— 这条直接关掉 `TODO.md` 待裁定里那项（实测 4 spawn + yield + 占号在后，\$0.4 白花）

@@ -35,6 +35,7 @@ from _contract import (  # noqa: E402
     DecisionCard,
     MissingItem,
     VerdictRef,
+    card_event_type,
 )
 from _store import (  # noqa: E402
     load_online_card,
@@ -42,6 +43,7 @@ from _store import (  # noqa: E402
     load_verdict_meta,
     record_verdict_run,
     save_card,
+    save_card_with_notifications,
 )
 
 __all__ = ["Judgment", "synthesize", "persist", "load_verdicts_and_refs",
@@ -200,6 +202,24 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
                                finished_at=card.generated_at,
                                model=card.model_ref,
                                runtime_run_id=(runtime_run_ids or {}).get(v.agent))
+        # 🔴 批 G-I：在线路径出卡后，把这张卡分到一类外发通知并入队 —— **与 Card 落库
+        #    同一个事务**（save_card_with_notifications）。要么卡和通知一起进库，要么
+        #    一起回滚（探针 P1）。event_type 由 `_contract.card_event_type` 从卡本身推
+        #    （risk 否决 / UNKNOWN·缺失 / 正常），幂等键 aggregate=decision_id（一个决策
+        #    一张卡 ⇒ 一类事件至多入队一次）。payload 带决策号供 worker 投递（P4）。
+        #    回放路径不入队：回放不重新执行、也不该重推一遍通知。
+        notification = {
+            "event_type": card_event_type(card),
+            "aggregate": card.decision_id,
+            "payload": {
+                "decision_id": card.decision_id,
+                "status": card.status,
+                "headline": card.headline,
+                "missing_count": len(card.missing),
+                "run_id": card.run_id,
+            },
+        }
+        return save_card_with_notifications(card, [notification], replay_of=replay_of)
     return save_card(card, replay_of=replay_of)
 
 

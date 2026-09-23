@@ -178,7 +178,7 @@ _GOOD_JUDGMENT = {"status": "WAIT", "headline": "核心矛盾一句话",
 
 
 class TestHappyPath:
-    def test_走细粒度8步链到COMPLETED(self, db):
+    def test_走细粒度9步链到COMPLETED(self, db):
         orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
         ctx = new_run_context(origin="cli", non_interactive=True)
         card = orch.run(ctx)
@@ -193,7 +193,9 @@ class TestHappyPath:
             (RunState.STAGE1_COMPLETED, RunState.RISK_RUNNING),
             (RunState.RISK_RUNNING, RunState.SYNTHESIZING),
             (RunState.SYNTHESIZING, RunState.CARD_PERSISTED),
-            (RunState.CARD_PERSISTED, RunState.COMPLETED),
+            # 🔴 批 G-I：CARD_PERSISTED → NOTIFICATION_PENDING（outbox 入队）→ COMPLETED。
+            (RunState.CARD_PERSISTED, RunState.NOTIFICATION_PENDING),
+            (RunState.NOTIFICATION_PENDING, RunState.COMPLETED),
         ]
 
     def test_不走legacy粗边(self, db):
