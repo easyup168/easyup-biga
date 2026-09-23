@@ -212,6 +212,35 @@ class TestSharedNamespace:
         assert got[0] == isolation.FAIL, got
         assert "openclaw-gateway.service" in got[2]
 
+    def test_h展开路径的单元也算引用了BigA(self, tmp_path, monkeypatch):
+        """🔴 2026-09-23 装 notify-worker 定时器时撞到：BigA 自己写的单元模板要
+        进公开仓库，不能硬编码真实家目录，只能用 systemd 的 `%h` 写法——
+        只认字面展开路径的话，这类单元会被判成"与我们无关"而漏计。"""
+        got = self._units(tmp_path, monkeypatch, {
+            "notify-worker-biga.service":
+                "[Service]\nExecStart=%h/.openclaw-biga/workspace/bin/biga-notify\n"})
+        assert got[0] == isolation.PASS, got
+
+    def test_h展开路径不带biga后缀也判成覆写(self, tmp_path, monkeypatch):
+        got = self._units(tmp_path, monkeypatch, {
+            "notify-worker.service":
+                "[Service]\nExecStart=%h/.openclaw-biga/workspace/bin/biga-notify\n"})
+        assert got[0] == isolation.FAIL, got
+        assert "notify-worker.service" in got[2]
+
+    def test_timer单元也会被扫到(self, tmp_path, monkeypatch):
+        """守卫原来只 glob `*.service`——`notify-worker-biga.timer` 这类定时器
+        单元同样落在这个共享命名空间里，漏扫 `.timer` 是另一个盲点。"""
+        got = self._units(tmp_path, monkeypatch, {
+            "notify-worker-biga.timer": self._body(str(isolation.BIGA))})
+        assert got[0] == isolation.PASS, got
+
+    def test_timer占了默认名也算覆写(self, tmp_path, monkeypatch):
+        got = self._units(tmp_path, monkeypatch, {
+            "notify-worker.timer": self._body(str(isolation.BIGA))})
+        assert got[0] == isolation.FAIL, got
+        assert "notify-worker.timer" in got[2]
+
     def test_别人的单元不受影响(self, tmp_path, monkeypatch):
         """同机已有实例的单元不引用 BigA ⇒ 与我们无关，不该被算进来。"""
         # ⚠️ 假路径故意不写成家目录形态 —— 公开审查会抓 `/home/...`

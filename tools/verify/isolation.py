@@ -269,9 +269,6 @@ def check_ports(res: Result) -> None:
 #: systemd 用户单元目录 —— 两套实例共用的命名空间之一。
 SYSTEMD_USER = HOME / ".config/systemd/user"
 
-#: BigA 的单元必须带这个后缀（openclaw 按 profile 推导）。
-BIGA_UNIT_SUFFIX = "-biga.service"
-
 
 def check_namespaces(res: Result) -> None:
     """R-2 第 2 处：systemd 用户单元名。
@@ -294,21 +291,42 @@ def check_namespaces(res: Result) -> None:
 
     ⚠️ 没有任何单元引用 BigA ⇒ 服务没装 ⇒ **判不了**，不是通过
     （什么都没装的时候「没占别人名字」是平凡成立的）。
+
+    🔴 「引用 BigA 路径」认两种写法，不是只认字面展开路径（2026-09-23 装
+    `notify-worker-biga.timer` 时亲手撞到）：网关那个单元是 OpenClaw 自己
+    在装机时**生成**的，写的是真实展开路径（`/home/<user>/.openclaw-biga`）；
+    但 BigA 自己写的单元模板要进公开仓库，不能把真实家目录路径提交进去
+    （公开仓库纪律），只能用 systemd 的可移植写法 `%h/.openclaw-biga`。
+    只认字面路径的话，`%h` 写的单元会被判成"不引用 BigA、与我们无关"——
+    **不会报红，但也不会被数进「共享命名空间不重叠」那句话里**，等于这道
+    守卫对这一类单元完全失明，而不是"确认了它没事"。两种写法都要认。
     """
     if not SYSTEMD_USER.is_dir():
         res.unknown("共享命名空间 · 判不了 —— 没有 systemd 用户单元目录",
                     str(SYSTEMD_USER))
         return
 
+    #: BigA 自己写的、要进公开仓库的单元模板不能硬编码真实家目录，只能用
+    #: systemd 的可移植写法 `%h`——两种写法都算「引用了 BigA 路径」。
+    portable_ref = "%h/.openclaw-biga"
+
+    #: 单元不止 `.service`——`notify-worker-biga.timer` 这类定时器单元同样
+    #: 落在这个共享命名空间里，漏扫 `.timer` 就是这道守卫的另一个盲点
+    #: （2026-09-23 装 notify-worker 定时器时一并发现）。
+    candidates = sorted(list(SYSTEMD_USER.glob("*.service")) +
+                        list(SYSTEMD_USER.glob("*.timer")))
+
     ours, stolen = [], []
-    for f in sorted(SYSTEMD_USER.glob("*.service")):
+    for f in candidates:
         try:
             body = f.read_text(errors="replace")
         except OSError:
             continue
-        if str(BIGA) not in body:
+        if str(BIGA) not in body and portable_ref not in body:
             continue                       # 不引用 BigA，与我们无关
-        (ours if f.name.endswith(BIGA_UNIT_SUFFIX) else stolen).append(f.name)
+        # 判据看 stem（去掉 .service/.timer 后）是否以 -biga 收尾——
+        # 同一条规则要同时管两种后缀，不能各写一份字面量后缀。
+        (ours if f.stem.endswith("-biga") else stolen).append(f.name)
 
     leak = os.environ.get("OPENCLAW_SYSTEMD_UNIT", "").strip()
     hint = (f"\n⚠️ 当前环境里 OPENCLAW_SYSTEMD_UNIT={leak!r} —— "
@@ -316,7 +334,7 @@ def check_namespaces(res: Result) -> None:
 
     if stolen:
         res.fail("共享命名空间 · BigA 占用了不属于它的单元名",
-                 f"这些单元引用 BigA 路径却不叫 *{BIGA_UNIT_SUFFIX}：{stolen}\n"
+                 f"这些单元引用 BigA 路径却不以 `-biga` 收尾：{stolen}\n"
                  f"多半是 `gateway install` 写到了默认名上，"
                  f"而默认名正被同机已有实例用着。" + hint)
     elif ours:
