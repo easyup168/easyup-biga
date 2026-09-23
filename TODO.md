@@ -1073,7 +1073,16 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       教程第 38 章、`CHANGELOG.md`、`architecture.md` §5.3.6。
       🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
       Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
-- [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
+- [ ] 批 H-I · 三个基础设施包迁移（`_contract`/`_store`/`_sources` →
+      `src/easyup_biga/{domain,persistence,providers}/`）——**A 到 L 全部
+      落地，轮到它了，分发提示词已写好**（`docs/guide/
+      orchestration-kickoff-prompt.md` 同名小节）。拆成 H-I/H-II（同
+      A/C/D/E/J 的理由）：H-I 只搬设计文档 §8 讨论过、给了具体缓解方案的
+      三个包，纯目录搬迁，行为不变靠 `replay --check` + 测试条数不减验证；
+      H-II（`_runtime`/`_snapshot` 往哪迁 + `application`/`integrations`/
+      `cli` 三个命名空间装什么）留白——§8 没讨论过这两件事，现在硬做是
+      没有设计依据的猜测，且违反本仓库「不预建空目录」的一贯做法
+  - [ ] 批 H-II · 留白，不建占位目录（见上）
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

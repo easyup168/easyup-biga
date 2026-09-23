@@ -2,7 +2,8 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / I / **L**）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / I / L / **H-I**）、
+> 每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -2275,16 +2276,183 @@ P6  新 Provider 的选型站得住：如果最终选了免鉴权源，断言测
 
 ---
 
-## 批 H · 现在不写分发提示词
+## 批 H-I · 三个基础设施包迁移（`_contract`/`_store`/`_sources` → `src/easyup_biga/`）
 
-批 F、批 G-I、批 G-II、批 K、批 I、批 L 的分发提示词都已经写好（见前面
-各节）。只剩批 H（包结构重组，§29）——排在最后，因为它会让期间所有其他
-批次的 diff 变脏，故意等其余批次都落地才动。
+⚠️ **依赖已清**：A 到 L 全部批次（含 J-I/J-II、K、I、L）都已评审复核通过、
+合并进 `orchestration`。批 H 原计划「排在最后」，理由是结构重组会让期间
+所有其他批次的 diff 变脏——现在没有更晚的批次了，轮到它。开工第一件事
+`git log --oneline -10` 确认这一点，并亲手重新跑一遍下面「先读」第 4 条
+提到的几处 grep——本提示词写的行号/清单是**这一刻**验证过的，你开工时
+可能已经不是这一刻。
 
-🔴 **现在把它写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
-而本仓库已经因为「两份清单各自过期」吃过亏（`TODO.md` 与设计文档的出口条件漂了一次）。
+🔴 **批 H 拆成 H-I（这一批）/ H-II（留白）**，理由与 A/C/D/E/J 拆分完全
+一致——耦合面不同：
 
-⇒ 其余批次落地之后，回来补写。
+- **H-I（这一批）**：只搬设计文档 §8 自己讨论过、给出了具体缓解方案的
+  三个包——`_contract`/`_store`/`_sources`。纯**目录搬迁**，文件内容
+  与内部相对导入**原样不动**，行为不变靠 `replay --check` 与「测试条数
+  不减」验证，不靠新增业务判断。
+- **H-II（留白，不是这一批做）**：`_runtime`/`_snapshot` 两个包往哪迁，
+  以及 `application`/`integrations`/`cli` 三个命名空间该装什么——设计
+  文档 §8 的缓解方案表**没有讨论过这两件事**，说明当时也还没想清楚。
+  现在硬做，得到的是没有设计依据的猜测性目录，还违反本仓库自己的
+  「按需创建，不预建空目录」——`agents/` 子目录已经吃过这个教训
+  （CLAUDE.md「Agent」一节）。⇒ 留白，等真的有内容要往那三个空命名空间
+  放的时候再建，不要现在造占位组件。
+
+```text
+把 skills/_contract/、skills/_store/、skills/_sources/ 三个共享基础设施包
+的真实实现，搬进 src/easyup_biga/{domain,persistence,providers}/；三个旧
+包原地留一份"薄壳"，把新位置的东西照原样重新导出，让全仓 71 处
+`sys.path.insert(0, "skills")` 之后写的 `from _contract import ...` /
+`from _sources.sina_news import ...` 之类的导入语句，一个字符都不用改。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` §8～§11（1218-1287 行）——
+  这一批唯一的设计依据。§8 是"采纳、但代价写在明处"（教程路径作废怎么办、
+  `sys.path.insert(0, "skills")` 为什么是承重墙、结构重组没有行为判据怎么
+  验收）；§9 兼容策略（读宽写严，旧格式自然清零）这一批不适用（没有新旧
+  两种数据格式，只有新旧两个导入路径，但"旧路径只读、不再新增依赖"的精神
+  一致）；§10 迁移闸门、§11 出口条件是收尾判据的来源
+- `docs/external/easyup-biga-architecture-upgrade/docs/design/
+  biga-architecture-upgrade-guide.md` 第 29 节（1112-1150 行）——目标形状
+  的**原始出处**，`easyup_biga` 这个包名就是从这里来的，不要另起名字。
+  🔴 但它给的 `domain/{models.py,contracts.py,registry.py}` 是三个文件，
+  这一批要搬的 `_contract/` 有 9 个文件——**这一批只搬目录，不做这一层
+  的文件合并**，见下方「不要做」。它自己也说了"不要一次全搬，通过
+  Strangler Pattern 逐步迁移"——H-I 就是那个"逐步"里的第一步，不是终局
+- `skills/_contract/__init__.py`、`skills/_store/__init__.py`、
+  `skills/_sources/__init__.py` 三份全文——这就是"薄壳该导出什么"的完整
+  规格，一个 `__all__` 名字都不能在迁移后消失。三份加起来 9+4+8=21 个真实
+  子模块文件（`_contract`: card/evidence/facts/missing/notify/registry/
+  run/verdict/verdict_ref；`_store`: db/runs/runtime/schema；`_sources`:
+  eastmoney/http/sanity/sina/sina_news/szse/tencent/tradetime）
+- 🔴 直接按子模块路径导入、绕过上面三份 `__init__.py` 聚合的地方——这些
+  只留包级薄壳**不够**，个别子模块文件本身也必须留一份薄壳，否则
+  `from _sources.sina_news import NewsFeed` 这类语句在真实实现搬走后
+  直接 `ImportError`。已用
+  `grep -rEon "from _(contract|store|sources)\.[a-z_]+ import|import _(contract|store|sources)\.[a-z_]+" --include="*.py" .`
+  核实过一遍（写这份提示词时的结果，开工请自己重跑）：
+  `_contract.{registry,card,evidence}`、`_store.{db,runtime}`、
+  `_sources.{eastmoney,http,sanity,sina,sina_news,szse,tradetime}`。
+  ⇒ 不要只shim 命中过这份清单的子模块——**21 个子模块文件全部留薄壳**，
+  没被直接 import 过不代表将来不会有人这么写，逐个判断比统一处理更容易漂
+- `tests/test_contract_single_impl.py` 29-31 行（`CONTRACT_DIR`/
+  `STORE_DIR` 两个常量）与 84-85 行（`_in_contract`）；
+  `tests/test_no_raw_sqlite.py` 25 行（`STORE_DIR`）与 46-47 行
+  （`_in_store`）——**这两份文件是这一批风险最集中的地方**。它们的判据
+  是"契约类 / DB 访问只能定义在这个目录下"，字面认的是 `skills/_contract`
+  `skills/_store` 这两个旧路径。迁移后真实定义搬到新路径，旧路径只剩薄壳
+  （薄壳里没有类定义，只有 re-export）——如果这两个常量不跟着改，"唯一
+  实现"这道守卫会在新目录上**静默失效**：在新目录里另定义一个 `Evidence`
+  不会被抓到，因为守卫压根没在看那个目录。这正是设计文档 §8 自己点名的
+  风险，也是 L-13 的标准形状——**这一批必须把它变成一道会红的探针**（见
+  下方 P2），不能只是改完常量就假设它还管用
+- `pyproject.toml` 第 3 行 `pythonpath = ["skills", "."]`——pytest 专用的
+  路径挂载，`src/` 要不要挂进这里、还是让薄壳自己在 `__file__` 相对路径上
+  挂载 `src/`（`skills/decision-card/scripts/replay.py` 30-31 行、
+  `skills/card/scripts/inbound.py` 55 行是这一手法的现成范例——每个脚本
+  在自己开头算出仓库根、手动 `sys.path.insert`，不依赖 pytest 配置），
+  你自己判断，但**两条路径都要**——pytest 内外都得能 import，只验证 pytest
+  内的那一条会漏掉真实运行路径（`bin/biga-card` 拉起的子进程、
+  `systemd-run` 脱树跑的那些，都不经过 pytest 的 `pythonpath`）
+
+## 做什么
+
+1. 建 `src/easyup_biga/{domain,persistence,providers}/`，每个目录一份
+   `__init__.py`——内容是今天 `skills/_contract/__init__.py` 等三份文件
+   的**真实聚合逻辑**（原样搬过去，包内相对导入 `.card`/`.db` 等不用改，
+   因为相对导入只认包内相对位置，整包搬动不影响它们互相怎么找对方）。
+2. `git mv` 21 个真实子模块文件到对应新目录（用 `git mv` 不是删了重建，
+   保留 blame/history）：
+   - `_contract/*.py`（9 个）→ `src/easyup_biga/domain/`
+   - `_store/*.py`（4 个）→ `src/easyup_biga/persistence/`
+   - `_sources/*.py`（8 个）→ `src/easyup_biga/providers/`
+3. 三个旧包目录原地留下：包级薄壳（`__init__.py`，内容是从新位置
+   re-export，保持 `__all__` 逐字不变）+ **21 个子模块级薄壳**（每个旧
+   文件路径都留一份，内容是从新位置对应文件 re-export）——"先读"已经
+   说了为什么子模块级也不能省。
+4. 解决 `src/` 的可达性（pytest 内 + 真实运行路径外，两条都要，见上）。
+5. 改 `tests/test_contract_single_impl.py` 的 `CONTRACT_DIR`/`STORE_DIR`
+   与 `tests/test_no_raw_sqlite.py` 的 `STORE_DIR`，指向新位置
+   （`src/easyup_biga/domain`、`src/easyup_biga/persistence`）——判据要
+   看真实定义在哪，不是看薄壳在哪。
+6. 教程冻结指针：`grep -rl "skills/_contract\|skills/_store\|skills/_sources" docs/tutorial/*.md`
+   （写这份提示词时命中 15 章，自己重跑确认），逐章在文末追加一行
+   「⏩ 后续变动：这一层挪到 `src/easyup_biga/...`，见批 H-I」，**不回改
+   正文**——设计文档 §8 的原话，正文是历史记录，不是活文档。
+7. `CHANGELOG.md` + `TODO.md` 收尾，把批 H 从「排在最后」改成「H-I 已
+   落地、H-II 留白」，H-II 的留白理由（没有设计依据、不预建空目录）写
+   进去，不要悄悄消失。
+
+## 不要做
+
+- 不把 `_contract/` 的 9 个文件合并成外部文档 §29 示意的
+  `models.py`/`contracts.py`/`registry.py` 三个文件——那是**文件内容
+  重组**，这一批只做**目录搬迁**，两件事混在一个 diff 里，「结构改动没有
+  行为判据」这条验收方式就失效了（设计文档 §8 自己的话）。文件名、文件
+  内部结构，这一批原样不动
+- 不动 `skills/<skill 名>/`（`card`/`decision-card`/`emotion-calc`/
+  `market-calc`/`news-scan`/`risk-check`/`sector-calc`/`technical-calc`）
+  ——OpenClaw 的 skill 加载约定认的就是这个目录形状，这一批不碰任何真正
+  的 skill 目录，只碰下划线开头的共享基础设施包
+- 不动 `_runtime/`、`_snapshot/`——留给 H-II，理由见上面的拆分说明
+- 不建 `application/`、`integrations/`、`cli/` 三个空目录占位——没有内容
+  要放，先建目录就是造一个「建了但无消费方」的组件（L-1 的同一个道理，
+  用在包结构上）
+- 不引入真正的 Python 打包层（`[build-system]`/`[project]` 表、
+  `pip install -e .`）——`src/easyup_biga` 这一批仍然是靠 `sys.path` 手动
+  挂载的普通目录树，跟今天 `skills/` 的挂载方式一致，不是一个可安装的
+  发行包。引入真打包是一个更大、更没设计过的决定，不要在这一批顺手做掉
+- 不改 `schema.py` 的任何 SQL 内容、不建新 schema 版本——这一批只搬文件
+  位置，`_store/schema.py` 的内容原样不动，没有新表新列，不触发 v16
+- 不出新卡、不调用付费模型（通用前置已说明，这里重申：这一批的收尾验证
+  用 `bin/biga-card --check <已有决策号>`，不需要新出一张卡）
+
+## 必须做的探针（G-1）
+
+P1  🔴 **导入兼容性，全仓扫出来的，不是手数的**：写一个脚本，AST 或正则
+    扫全仓 `.py`，收集每一条 `from _contract... import`/`from _store...
+    import`/`from _sources... import`/`import _contract`/`import _store`/
+    `import _sources`（含子模块路径）语句，在一个全新的 Python 进程里
+    逐条真的执行一遍，断言零 `ImportError`。这条比"跑一遍全部测试"更硬——
+    测试套件本身也是通过这些语句才导入到被测代码的，"测试全绿"不能证明
+    "导入语句本身没问题"，只能证明"没问题的那些语句背后的代码也对"。
+    sabotage：删掉一个子模块薄壳（比如 `skills/_sources/sina_news.py`），
+    确认这条探针红、错误信息指向具体是哪条导入语句失败，而不是笼统的
+    测试失败；还原
+P2  🔴 **"唯一实现"守卫真的在新位置生效**：迁移完成后，在
+    `src/easyup_biga/domain/` 里临时定义第二个 `Evidence` 类（或近名类，
+    比如 `EvidenceV2`），断言 `test_contract_single_impl.py` 真的报红——
+    不是"改了 CONTRACT_DIR 就假设它管用"，是真的验证过。再把 `CONTRACT_DIR`
+    临时改回旧路径 `skills/_contract`，确认同一个"第二个 Evidence"这次
+    **不会**被抓到（因为守卫在看错的目录）——这一步是在证明"改常量"这个
+    动作本身是必要的，不是可选的装饰。两步都做完，还原成迁移后的正确状态
+P3  一致性：`bin/biga-card --check <一个已有决策号>` 在迁移前跑一次，
+    迁移后再跑一次，输出逐字段相同（设计文档 §8 指定的验收方式——纯结构
+    改动没有新行为可测，只能测"没引入行为差异"）
+P4  测试条数不减：`pytest --collect-only -q` 的收集条数，迁移前后必须
+    相等，不是"测试全绿"——数字变少而测试仍然全绿，说明某个测试文件在
+    collection 阶段就被导入错误静默排除了，不会以失败的形式出现，只会以
+    "少几条"的形式出现
+P5  🔴 **非 pytest 路径也要能 import**：pytest 有自己的 `pythonpath` 配置
+    （`pyproject.toml` 第 3 行），会掩盖"其实只有 pytest 内能 import，真实
+    运行时不能"这类问题。单独起一个**不经过 pytest** 的 Python 子进程
+    （比如 `python3 -c "import sys; sys.path.insert(0,'skills'); import
+    _contract; print(_contract.Evidence)"`，模拟 `bin/biga-card` 真实
+    拉起子进程时的路径挂载方式），断言它同样成功——两条路径都要单独证明，
+    一条green 不能代表另一条也 green
+P6  隔离自检不受影响：`python3 tools/verify/isolation.py` 迁移前后结果
+    一致（这一批不碰任何 systemd 单元/端口/nvm 路径，理论上不该有任何
+    变化，但这类"理论上不该变"的东西恰恰值得一次真跑确认，而不是假设）
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要（尤其是 21 个 `git mv` 是否真的保留了
+history，用 `git log --follow` 抽查两个）/ 每道探针的红灯输出 / 你自己
+认为最可能被攻破的一处交出来，由另一个会话评审。
+```
 
 ---
 
