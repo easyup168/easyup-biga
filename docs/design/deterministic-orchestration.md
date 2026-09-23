@@ -1075,6 +1075,19 @@ Verify → Dedup → Allowlist → Preflight → Cost/Lock Guards → **Pipeline
 但与批 C-II 已经采用的、比 §18 更严格的立场（`main` 移出转发路径）一致，
 不是新裁定，是同一条已有裁定的延伸应用。
 
+> 🔴 **落地修正（G-II 实施时，2026-09-23）**：上面「main 压根不会看到这类请求」
+> 这个激进形态**没能落地**，如实记在此。原计划用 `command-dispatch: tool` 让 `/card`
+> 绕过 model 直达一个 MCP 工具——但 `command-dispatch` 在建 `toolSchema` 时**够不到
+> 会话内才连接**的 MCP stdio 工具（live 报 `Tool not available`；main 在会话里反而
+> 调得到）。加上运营者的部署现实（**一个飞书机器人**，`bindings` 按 peer 路由、单个
+> 私聊无法按内容分流；**LLM 可用、不追求 0 LLM**），最终落地形态是：**main 认出出卡
+> 请求 → 用 shell 跑 `skills/card/scripts/inbound.py`（发起）**。
+> ⇒ 这一批真正钉住的不变式**下沉**成更本质的一条：**出卡编排绝不在 agent 会话进程树
+> 里跑**（谁按按钮次要，编排在哪跑才是命门）。它靠 `inbound.py` 用 `systemd-run` 把
+> `bin/biga-card` 脱离进程树拉起来兑现（entry_guard 判 HUMAN）——与「谁发起」解耦，
+> 因此即便 main 的 LLM 发起，19:31/21:03 那种「会话自己拼 ad-hoc spawn 递归出卡」
+> 也到不了。全过程与死路的诊断见教程第 37 章 §三/§四。
+
 **`apply_config.py`（未建）要过的 R-2 关卡，机关本身已经在，且已经测过**：
 `tools/verify/isolation.py::check_namespaces()` 已经实现"systemd 单元名必须
 带 `-biga`"这条判据，`bin/biga`（本仓库内，`~/.openclaw-biga/bin/biga` 软链
@@ -1110,10 +1123,11 @@ Inbound Trigger → 可选的 Question Bridge，风险依次升高。这与本�
   价值（人不用再守着终端等卡跑完）。
 * **批 G-II（Inbound Trigger，高风险）**：真正关掉 `TODO.md` 那条待裁定——
   异步执行模型（快速 ACK + 后台完成，`bin/biga-card` 今天没有这个半成品，
-  是这一批要新建的基础设施）、`decision_runs.trigger_id` 真正接上生产方、
-  `main` 的 LLM 结构性移出这条路径的路由决策、`deploy/openclaw/` 四个文件
-  + R-2 合规、`tools.deny` 那条测试。**这是这一批的核心交付物，风险与批
-  E-III/J-II 同一量级**（动的是"钱怎么被花掉"这条链的入口，不是内部实现）。
+  是这一批要新建的基础设施）、`decision_ids.trigger_id` 真正接上生产方、
+  **出卡编排脱离 main 进程树**（`inbound.py` 用 `systemd-run`，main 只发起——
+  见上「落地修正」）、`deploy/openclaw/` 配置即代码 + R-2 合规、`tools.deny`
+  那条测试。**这是这一批的核心交付物，风险与批 E-III/J-II 同一量级**（动的是
+  "钱怎么被花掉"这条链的入口，不是内部实现）。
 
 **明确不做**：Preflight Interaction（阶段二）与 Question Bridge（阶段四）
 都推迟——外部材料自己说阶段四"只有出现真实需求后才实现"，阶段二在没有

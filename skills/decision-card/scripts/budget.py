@@ -69,11 +69,26 @@ INFLIGHT_SEC = _envint("BIGA_INFLIGHT_SEC", 600)
 
 
 def check_budget(*, day: str | None = None,
-                 path: pathlib.Path | str | None = None) -> list[str]:
+                 path: pathlib.Path | str | None = None,
+                 exclude_decision_id: str | None = None) -> list[str]:
     """返回拒绝理由（空列表 = 放行）。
 
     🔴 **只读，不写。** 它不占号、不落库 —— 否则「检查一下能不能跑」
     本身就会消耗配额，而那正是这类闸门最常见的设计错误。
+
+    Args:
+        exclude_decision_id: 🔴 批 G-II P6 live 真跑暴露的坑（2026-09-23）：
+            飞书 inbound 路径在拉起 `bin/biga-card` **之前**就已经占了号
+            （`accept_trigger` 靠占号拿幂等键），CLI 路径正好反过来——orchestrator
+            自己现占号，这个闸门跑的时候号还不存在。于是同一个闸门对两条路径的
+            "最近一次占号"意味着不同的东西：CLI 路径上它指向一次**更早的、别的**
+            尝试；飞书路径上它**就是自己刚占的那个号**——gap 恒为 0s，"还在跑"
+            的清单也恒含自己。第一次真飞书 `/card` 实测：`accepted: true` 之后
+            `bin/biga-card` 自己的预算闸门反而拒了它自己那个号，报「距上次占号
+            只有 0s」——两个字段裸标都指向刚刚这次。传这个参数排除自己那个号，
+            闸门比的就是"跟别的尝试比"，不是"跟自己比"；不传（CLI 默认）行为
+            不变——那条路径上传了反而是错的（此时号确实还不存在，传了也排不掉
+            什么）。
     """
     now = now_cn()
     today = day or now.strftime("%Y%m%d")
@@ -104,8 +119,13 @@ def check_budget(*, day: str | None = None,
             f"当日已占 {len(reserved)} 个号，达到上限 {DAILY_CAP}。"
             f"（当日已出卡 {len(carded)} 张）")
 
-    if reserved:
-        last = reserved[0]
+    # 🔴 「上次占号」「还在跑」两条都要和**别的**尝试比，不是和自己比
+    #    （见 check_budget 文档字符串 exclude_decision_id 一节）。DAILY_CAP
+    #    用的是上面完整的 reserved——今天总共占了几个号，这次自己确实算一个。
+    others = [r for r in reserved if r["decision_id"] != exclude_decision_id]
+
+    if others:
+        last = others[0]
         try:
             gap = (now - _parse(last["reserved_at"])).total_seconds()
         except ValueError:
@@ -117,7 +137,7 @@ def check_budget(*, day: str | None = None,
                 f"一次出卡实测要 170~200s —— 这么快再来一次，多半是误触")
 
     # 「还在跑」：占了号、没出卡、且在窗口内
-    inflight = [r for r in reserved
+    inflight = [r for r in others
                 if r["decision_id"] not in carded
                 and _age(r["reserved_at"], now) < INFLIGHT_SEC]
     if inflight:

@@ -200,11 +200,15 @@ fi
 #   `check_budget()`，阈值只有一份（L-3）。这里拒绝的代价是 $0。
 if [ "${BIGA_CARD_FORCE:-0}" != "1" ]; then
   GATE=$($PY - <<'EOF' 2>&1
-import sys
+import os, sys
 sys.path.insert(0, "skills")
 sys.path.insert(0, "skills/decision-card/scripts")
 from budget import check_budget, explain
-r = check_budget()
+# 🔴 飞书 inbound 路径在拉起本脚本之前已经占了号（accept_trigger 的幂等占号）——
+# 排除掉这个号自己，闸门比的才是「跟别的尝试比」，不是「跟自己刚占的号比」
+# （P6 live 实测过：不排除时每一次飞书触发都会被这里拒，见 budget.py 文档字符串）。
+# CLI 路径没有这个 env（此时号也确实还不存在），传 None 就是原来的行为。
+r = check_budget(exclude_decision_id=os.environ.get("BIGA_CARD_DECISION_ID") or None)
 if r:
     print(explain(r)); sys.exit(3)
 EOF

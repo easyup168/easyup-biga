@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""入站触发适配器 —— 把一次外部「出卡」请求变成一次幂等、异步、绕开 main 的运行（批 G-II）。
+"""入站触发适配器 —— 把一次外部「出卡」请求变成一次幂等、异步、脱离进程树的运行（批 G-II）。
 
-它是「gateway/adapter 层」那一层（设计文档 §3 目标架构 `Trigger Gateway`）：飞书的
-`/card` 命令经 OpenClaw 的 **command-dispatch: tool**（`skills/card/SKILL.md`）**直接**
-派发到一个工具、**不经过 main 的 LLM**（slash-commands 文档：命令消息绕过 queue + model），
-那个工具调 `accept_trigger()`。人工 CLI 的 `bin/biga-card` 走的是同一个 orchestrator ——
+它是「gateway/adapter 层」那一层（设计文档 §3 目标架构 `Trigger Gateway`）：飞书里
+main 认出一次出卡请求 → 调 `biga_card_trigger` 工具（`skills/card/SKILL.md`）→ 那个
+工具调 `accept_trigger()`。人工 CLI 的 `bin/biga-card` 走的是同一个 orchestrator ——
 这里只负责「受理 + 去重 + 异步拉起」，不复制任何决策逻辑。
 
 它解决三件事，都是 2026-09-21 两次事故（§9 L-14 / 19:31 四孤儿 spawn）的根子：
@@ -12,11 +11,14 @@
   1. **幂等**：飞书事件会重投。`trigger_id`（= 飞书 event id）经
      `reserve_decision_for_trigger` 原子占号 —— 同一个 event 重投第二次拿到
      `created=False`，**不起新决策**（探针 P1）。
-  2. **异步**：一次出卡要跑 170~200 秒，塞不进一次 webhook/命令的 ACK 窗口。
+  2. **异步**：一次出卡要跑 170~200 秒，塞不进一次对话/命令的 ACK 窗口。
      这里拉起后台运行、**立刻**返回一句 ACK，不等它跑完（探针 P3）。
-  3. **main 结构性出局**：这条路径没有一步经过 main 的 LLM。派发是 OpenClaw 的
-     命令层（config，不是模型）做的；这个适配器是纯 Python。把 main 的 system
-     prompt 整个清空，这条路照样出卡（探针 P2 的反事实检验）。
+  3. **编排脱离 main 的会话进程树**：main 可以**发起**这次调用（LLM 允许），但出卡的
+     编排绝不在 main 的进程树里跑。`detached_biga_card_launcher` 用 `systemd-run`
+     把 `bin/biga-card` 拉成一个瞬态单元、脱离进程树 —— `entry_guard` 因此判成
+     HUMAN、不是 AGENT，2026-09-21 那种「会话自己拼 sessions_spawn 递归出卡」的路
+     根本到不了（探针 P2：launcher 必须脱树 / 清 service env）。**入口可经过 main，
+     编排绝不经过 main。**
 
 🔴 为什么拉起的是 `bin/biga-card` 而不是直接 `orchestrator.py`
 ------------------------------------------------------------------
@@ -203,8 +205,8 @@ def accept_trigger(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """薄 CLI —— 供 command-dispatch 工具 / 排查手动触发。真出卡由它异步拉起的
-    `bin/biga-card` 完成，本命令**立刻返回**（打印 ACK）。"""
+    """薄 CLI —— 出卡触发入口（`skills/card/SKILL.md` 指引 main 用 shell 跑它）。
+    真出卡由它异步拉起的 `bin/biga-card` 完成，本命令**立刻返回**（打印 ACK）。"""
     ap = argparse.ArgumentParser(
         description="受理一次外部出卡请求（幂等 + 异步，批 G-II 入站适配器）")
     ap.add_argument("--origin", default="feishu", choices=sorted(_DEDUP_ORIGINS))
