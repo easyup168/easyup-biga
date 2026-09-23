@@ -15,6 +15,69 @@
 
 ## [未发布]
 
+### 🐛 修复 · Card 从来没有被推送过 —— 一个没有任何人注入的「必填环境变量」
+
+接着上一条查出来的**第二个、也是真正让人收不到 Card 的**故障。上一条把
+`streaming.mode` 关掉之后，`journalctl` 里的 HTTP 400 确实消失了、聊天回复也
+恢复正常，但用户仍然说"没收到"——他自己把话说准了：**「关心的不是内容，是刚才
+为什么没有直接推送给我」**。聊天回复与 Card 主动推送是**两条独立的链路**，上一条
+只修好了前者，而后者从批 G-II 上线起就**一次都没成功过**。
+
+真实原因在 `notification_deliveries` 里写得清清楚楚，只是从来没人去看：每一行都是
+`status='failed'`，`error` 是 `飞书投递缺收件人：环境变量 BIGA_FEISHU_OWNER_ID
+没设`。积压最久的一条重试了 **39 次**。`FeishuDeliverer` 只从这个环境变量取收件人，
+而它的调度方 `notify-worker-biga.service` 的 `[Service]` 段里**没有一行
+`Environment=`**——从装上那天起就没有任何东西负责注入它。
+
+🔴 **为什么这是设计缺陷、不是配错**：`feishu_deliverer.py` 的 docstring 里早就
+写着正确答案——appId/appSecret 当初正是因为"没有任何东西会给 `notify_worker.py`
+注入这三个环境变量"而改成了「问网关自己」（`bin/biga message send`），文档甚至
+点名了收件人「本来就有处可去（`channels.feishu.allowFrom[0]`）」。**但那一半没做。**
+收件人被留在原地，于是同一个根因换了个马甲又咬了一次。
+
+⇒ 收件人改成三级解析（`_resolve_receive_id()`）：显式传值 > `BIGA_FEISHU_OWNER_ID`
+> `bin/biga config get channels.feishu.allowFrom` 取 `[0]`。正常情况走第三级，
+**不需要任何人记得注入什么**；环境变量降级成排查用的逃生口。解析结果缓存，一次
+worker 运行只问网关一次。三级全落空才抛 `FeishuError`，且报错直接给出可粘贴的
+排查命令——绝不把 `--target` 传成空字符串让 `bin/biga` 去报一个八竿子打不着的错
+（R-3）。仓库里仍然一个可识别 id 都不落：只有配置**路径**常量 `OWNER_CONFIG_PATH`。
+
+> 通用原则：一个「由运行环境注入」的必填值，如果没有任何代码负责注入它，
+> 那它不是配置项，是一颗定时炸弹。要么让程序自己去有权威答案的地方取，
+> 要么让装调度方的那段代码负责写进去 —— 不能两边都指望对方。
+
+**为什么没有早点发现**：投递失败**只写进库表**，不产生任何告警，而库表没有消费方。
+Run 照常进终态、Card 照常落库、`journalctl` 里一个 `error` 都没有——唯一的信号是
+飞书那头一直安静。这正是 `architecture.md` §9 反复讲的静默 fail-open 的形状，
+只不过这次栽在**投递**而不是**计算**上。
+
+**验证**：探针法——把 live 配置那一级摘掉，新加的两条测试当场变红。修复后手动
+`bin/biga-notify --limit 1` 投出第一条（`投出 1 失败 0`），随后 systemd 定时器
+在**它自己那套没有 `BIGA_FEISHU_OWNER_ID` 的最小环境里**把剩下 3 条也投出
+（`待投 3 投出 3 失败 0`）——积压的 5 条全部 `delivered`。
+
+- `skills/decision-card/scripts/feishu_deliverer.py`：三级解析 + 缓存 + 报错指路；
+  同步改掉 docstring 里已经过时的"收件人从环境变量读"那段
+- `tests/test_feishu_deliverer.py`：11 → 18 条。新增回退路径、优先级、只解析一次、
+  以及四种"配置读不到"（非 JSON / 空数组 / 键没配 / `bin/biga` 失败）都必须报错
+  而不是发给空目标
+
+### 🐛 修复 · `test_没有歧义的目录名` 在本地常红、在干净 checkout 上绿
+
+顺带修掉的，与飞书那两条无关。这条守卫用 `DOCS.rglob("*")` 扫目录名找重复，
+但没有像条数检查那样排除**本地专属目录**：解包在 `docs/external/` 下的外部材料
+自带 `docs/`、`docs/design/` 这类子目录，于是它在本地稳定报红，而任何人 clone
+下来跑都是绿的。
+
+这与 `cee4045` 给条数检查做的修正是**同一件事**（守卫只该描述被提交的那棵树，
+裁定 14），那次只改了条数那一条、漏了这条。⇒ 补 `_is_untracked_local_only_dir()`，
+判据复用既有的 `_LOCAL_ONLY_DIRS` + `_tracked_docs()`，不新写一套。判据是"里面
+有没有被跟踪的文件"而非"目录在不在 git 里"——git 不跟踪空目录。
+
+🔴 一条**稳定报红且改不掉**的守卫，实际效果等于没有守卫：它训练所有人忽略这个
+红字，连带把它某天真的抓到的东西一起忽略掉。探针确认修完仍然抓得住真的重名
+（临时建 `docs/design/guide/` 当场变红）。
+
 ### 🐛 修复 · 飞书流式卡片 HTTP 400 —— 网关自认为发出去了，用户其实没收到
 
 真实生产故障（2026-09-24，`docs/troubleshooting/feishu-streaming-card-400.md`，

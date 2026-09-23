@@ -26,12 +26,28 @@ adapter」。`notify_worker.py --deliverer feishu` 用它把 Card 完成 / UNKNO
 的那个值同源）。这与本仓库其余所有技能的形态一致（R-1：一切经 `bin/biga`，绝不
 裸 `openclaw`；`apply_config.py`/`inbound.py` 都是同一个 `_run_biga` idiom）。
 
+🔴 收尾修正（2026-09-24）：收件人也改成「问网关」，不再等人注入环境变量
+--------------------------------------------------------------------------
+上面那段留了半个尾巴：appId/appSecret 从环境变量改成了「问网关」，收件人却还
+停在 `BIGA_FEISHU_OWNER_ID` 上——而**同一个理由**在它身上一样成立，当时只是没
+一并改掉。代价随后就到了：`notify-worker-biga.service`（批 G-II 之后才装的调度
+方）从来没注入过这个变量 ⇒ 每一次投递都栽在 `_require_config()` 上，Card 全部
+积压在 `notification_outbox` 里，人在飞书端只看到「没收到」。
+
+⇒ 收件人现在按 显式传值 > `BIGA_FEISHU_OWNER_ID` > `channels.feishu.allowFrom[0]`
+  三级解析（`_resolve_receive_id`）。正常情况走第三级——**不需要任何人记得注入
+  什么**。环境变量降级成排查/覆盖用的逃生口，不再是唯一来源。
+
+> 通用原则：一个「由运行环境注入」的必填值，如果没有任何代码负责注入它，
+> 那它不是配置项，是一颗定时炸弹。要么让程序自己去有权威答案的地方取，
+> 要么让装调度方的那段代码负责写进去——不能两边都指望对方。
+
 🔴 凭据与密钥纪律（公开仓库）
 ------------------------------
-仓库里**一个凭据都不落**。收件人 `open_id` 从**环境变量**读
-（`BIGA_FEISHU_OWNER_ID`），由运行环境注入——与 CLAUDE.md「凭据记在仓库外」一致
-（真实飞书接入 `channels.feishu` 那块本就在仓库外的 `openclaw.json` 里，且这个类
-现在完全不碰 appId/appSecret，那两个值只存在于网关自己的配置里，这个脚本从头到尾
+仓库里**一个凭据都不落**。收件人 `open_id` 仓库里只有它的**位置**
+（`OWNER_CONFIG_PATH`），值在仓库外的 `openclaw.json` 里——与 CLAUDE.md
+「凭据记在仓库外」一致（真实飞书接入 `channels.feishu` 那块本就在那里，且这个类
+完全不碰 appId/appSecret，那两个值只存在于网关自己的配置里，这个脚本从头到尾
 看不到）。
 
 🔴 可测：子进程调用是注入点
@@ -51,6 +67,7 @@ adapter」。`notify_worker.py --deliverer feishu` 用它把 Card 完成 / UNKNO
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import subprocess
@@ -62,6 +79,11 @@ __all__ = ["FeishuDeliverer", "FeishuError"]
 #: 让「真 subprocess.run」和「测试假实现」是同一个形状（与 http/fetcher/launcher
 #: 那几处依赖注入同一套做法）。
 Runner = Callable[[list], "subprocess.CompletedProcess"]
+
+#: 收件人在 live 配置里的**位置**（不是值）。值在仓库外的 `openclaw.json` 里，
+#: 与判定「谁能给这个机器人发消息」的白名单同源 —— 仓库里只落这条路径字符串，
+#: 一个可识别 id 都不落（公开仓库纪律）。
+OWNER_CONFIG_PATH = "channels.feishu.allowFrom"
 
 
 def _run_biga(cmd: list) -> subprocess.CompletedProcess:
@@ -81,6 +103,7 @@ class FeishuDeliverer:
 
     走网关自己已认证的飞书通道（`bin/biga message send`），不持有、不需要
     appId/appSecret ——那两个值只存在于网关自己的 `openclaw.json` 里。
+    收件人同理：默认也向网关要（`_resolve_receive_id`），不依赖任何人注入环境变量。
     """
 
     channel = "feishu"
@@ -92,25 +115,75 @@ class FeishuDeliverer:
         biga_bin: str | None = None,
         runner: Runner = _run_biga,
     ) -> None:
-        # 🔴 唯一还需要的输入：发给谁。这是个标识符，不是凭据 —— 与判定「谁能给
-        #    这个机器人发消息」的 channels.feishu.allowFrom[0] 同源（仓库外，不落库）。
-        self._receive_id = receive_id or os.environ.get("BIGA_FEISHU_OWNER_ID", "")
+        # 🔴 唯一还需要的输入：发给谁。这是个标识符，不是凭据。显式传值 > 环境变量
+        #    > live 配置（见 `_resolve_receive_id`）—— 三级都落空才报错。
+        self._explicit_receive_id = receive_id or ""
+        self._resolved_receive_id: str | None = None
         # 🔴 R-1：一切经 bin/biga，绝不裸 openclaw —— 与 apply_config.py 同一个
         #    _BIGA 取值 idiom（env 覆盖只为测试）。
         self._biga = biga_bin or os.environ.get(
             "BIGA", str(pathlib.Path.home() / ".openclaw-biga" / "bin" / "biga"))
         self._runner = runner
 
+    # ── 收件人解析 ────────────────────────────────────────────────────────
+    def _receive_id_from_config(self) -> str:
+        """从 live 配置读收件人（`channels.feishu.allowFrom[0]`）。读不到返回 ""。
+
+        🔴 为什么要有这条回退（2026-09-24，docs/troubleshooting/
+        feishu-streaming-card-400.md 的**第二个**故障）：原来只认
+        `BIGA_FEISHU_OWNER_ID` 这个环境变量，而 `notify-worker-biga.service`
+        从来没有注入过它 ⇒ **每一次**投递都栽在 `_require_config()` 上，
+        Card 全部积压在 outbox 里，人在飞书端只看到"没收到"。
+
+        这正是这个类的 docstring 早就写下、却只做了一半的那个修正：appId/appSecret
+        当初就是这样从「三个谁也不负责注入的环境变量」改成「问网关自己」的，
+        收件人被留在了原地。⇒ 补齐——它本来就有处可去，就是这条路径。
+
+        读不到不抛：「没配飞书」与「配了但读失败」对调用方是同一件事（没人可发），
+        统一由 `_require_config()` 报那条指路的错，不在这里分两种口径。
+        """
+        r = self._runner([self._biga, "config", "get", OWNER_CONFIG_PATH])
+        if r.returncode != 0:
+            return ""
+        try:
+            val = json.loads((r.stdout or "").strip() or "null")
+        except json.JSONDecodeError:
+            return ""
+        # allowFrom 正常是数组；容忍写成裸字符串的配置，不为这点差异报错。
+        if isinstance(val, str):
+            return val.strip()
+        if isinstance(val, list) and val and isinstance(val[0], str):
+            return val[0].strip()
+        return ""
+
+    def _resolve_receive_id(self) -> str:
+        """显式传值 > `BIGA_FEISHU_OWNER_ID` > live 配置。解析一次后缓存。
+
+        缓存的理由：一次 worker 运行会投多条通知，没必要为每条都 shell 出去问一遍
+        同一个值；而这个值在一次进程生命周期内不会变。
+        """
+        if self._resolved_receive_id is None:
+            self._resolved_receive_id = (
+                self._explicit_receive_id
+                or os.environ.get("BIGA_FEISHU_OWNER_ID", "").strip()
+                or self._receive_id_from_config())
+        return self._resolved_receive_id
+
     # ── 配置自检 ──────────────────────────────────────────────────────────
-    def _require_config(self) -> None:
-        if not self._receive_id:
+    def _require_config(self) -> str:
+        receive_id = self._resolve_receive_id()
+        if not receive_id:
             # 🔴 报错指路（dev-workflow §8）：缺什么、去哪配，而不是一句裸异常。
             raise FeishuError(
-                "飞书投递缺收件人：环境变量 BIGA_FEISHU_OWNER_ID 没设。\n"
-                "  它不放仓库（公开仓库纪律）——由运行环境注入。\n"
-                "  真实值见仓库外 ~/.openclaw-biga 的飞书接入配置\n"
-                "  （channels.feishu.allowFrom[0]，与出卡触发的 owner 白名单同源）；\n"
-                "  本地排查可临时 export 后再跑 notify_worker --deliverer feishu。")
+                "飞书投递缺收件人：三个来源都没给出值。\n"
+                f"  ① 显式 receive_id ② 环境变量 BIGA_FEISHU_OWNER_ID\n"
+                f"  ③ live 配置 {OWNER_CONFIG_PATH}[0]（正常情况下走这条）\n"
+                "  值不放仓库（公开仓库纪律），它在仓库外的 openclaw.json 里，\n"
+                "  与出卡触发的 owner 白名单同源。先查第 ③ 条读不读得到：\n"
+                f"    bin/biga config get {OWNER_CONFIG_PATH}\n"
+                "  读不到说明飞书压根没接上（网关侧配置缺失），补它，而不是绕过去\n"
+                "  export 一个环境变量——那样两处会各有一份收件人，早晚对不上。")
+        return receive_id
 
     # ── Deliverer 协议 ───────────────────────────────────────────────────
     def deliver(self, *, event_type: str, aggregate: str,
@@ -120,10 +193,10 @@ class FeishuDeliverer:
         worker 约定：投递成功返回 None、失败抛异常（据此记一条 status='failed'，
         不连累其余、也不重跑决策）——所以这里所有失败路径都抛，绝不静默吞。
         """
-        self._require_config()
+        receive_id = self._require_config()
         text = self._render(event_type, aggregate, payload)
         cmd = [self._biga, "message", "send", "--channel", "feishu",
-               "--target", self._receive_id, "--message", text]
+               "--target", receive_id, "--message", text]
         r = self._runner(cmd)
         if r.returncode != 0:
             raise FeishuError(

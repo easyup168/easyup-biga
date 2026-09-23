@@ -123,8 +123,20 @@ def test_外部材料带日期前缀():
 
 
 def test_没有歧义的目录名():
-    """曾经同时存在 docs/reference/ 与 docs/design/reference/。"""
-    names = [d.name for d in DOCS.rglob("*") if d.is_dir()]
+    """曾经同时存在 docs/reference/ 与 docs/design/reference/。
+
+    本地专属目录（`_LOCAL_ONLY_DIRS`）下未跟踪的子目录不算数 —— 与
+    `_is_untracked_local_only()` 同一条理由，只是判据是目录版
+    （`_is_untracked_local_only_dir()`）。
+
+    🔴 2026-09-24 实测：解包在 `docs/external/` 下的外部材料自带
+    `docs/`、`docs/design/` 这类子目录，于是这条检查在本地**常红**，而在干净
+    checkout 上是绿的 —— 守卫只该描述**被提交的那棵树**（裁定 14），
+    否则它报的红与任何人 clone 下来看到的都对不上，最后只会被当噪音忽略。
+    这与 `cee4045` 给条数检查做的修正是同一件事，那次漏了这条。
+    """
+    names = [d.name for d in DOCS.rglob("*")
+             if d.is_dir() and not _is_untracked_local_only_dir(d)]
     assert len(names) == len(set(names)), f"存在同名目录：{names}"
     assert "reference" not in names, \
         "`reference` 说不出生命周期 —— 外部只读材料放 docs/external/"
@@ -290,6 +302,22 @@ def _is_untracked_local_only(path: pathlib.Path) -> bool:
     if not any(path.is_relative_to(d) for d in _LOCAL_ONLY_DIRS):
         return False
     return path not in tracked
+
+
+def _is_untracked_local_only_dir(path: pathlib.Path) -> bool:
+    """目录版的 `_is_untracked_local_only`：本地专属目录下、且**不含任何被跟踪
+    文件**的子目录。
+
+    判据是"里面有没有被跟踪的东西"而不是"目录自己在不在 git 里" —— git 不跟踪
+    空目录，没有"目录被跟踪"这回事。`docs/external/` 自己因此仍然算数
+    （它下面有 3 份早就提交的只读材料），被豁免掉的只是解包出来的那些子目录。
+    """
+    tracked = _tracked_docs()
+    if tracked is None:
+        return False            # 拿不到跟踪清单就不豁免，按老规则查（R-3 方向）
+    if not any(path.is_relative_to(d) for d in _LOCAL_ONLY_DIRS):
+        return False
+    return not any(t.is_relative_to(path) for t in tracked)
 
 
 def _is_untracked_doc_case(item, tracked: set[pathlib.Path]) -> bool:
