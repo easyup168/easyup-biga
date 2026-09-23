@@ -115,7 +115,13 @@ CREATE INDEX IF NOT EXISTS ix_runs_agent    ON agent_runs(agent, finished_at);
 -- ───────────────────────────────────────────────────────────────
 -- raw_market_snapshot —— 采集原样落盘，永不改写
 --
--- 这里存的是「当时从数据源拿到的字节」，不做任何归一化。
+-- 🔴 哪一列才是「原始字节」（批 I，见 v13 迁移）：
+--   · payload_json —— 解析后再 `json.dumps(sort_keys=True)` 的**规范表示**，给消费方
+--     回读用（load_raw_snapshot 反序列化回对象）。它是**归一化过的**，不是源字节。
+--     （原注释曾写「这里存的是从数据源拿到的字节，不做任何归一化」——sort_keys 就是
+--      归一化，那句话对 payload_json 是假的。L-3：注释断言了一件没发生的事。）
+--   · raw_text（v13 起）—— 数据源发来的**原始响应文本**，不做归一化。content_sha256
+--     基于**这一列**算。v13 之前的行没有它（留 NULL），其 sha 是旧口径，别拿新旧直接比。
 -- 上层算错了可以重算；raw 丢了就永远重算不了。
 -- ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS raw_market_snapshot (
@@ -575,6 +581,37 @@ CREATE INDEX IF NOT EXISTS ix_deliveries_outbox ON notification_deliveries(outbo
     + _append_only("notification_deliveries", "投递日志改了，就没法复述这条通知投了几次、结果如何")
 
 
+_V13 = """
+-- ───────────────────────────────────────────────────────────────
+-- v13：raw_market_snapshot 加 raw_text —— 让 raw 层真的存 raw（批 I / 数据架构 §9）
+--
+-- 🔴 它修的是证据链**最底层**的一个谎：raw 层此前存的不是 raw。链路是
+--    get_json() → json.loads → json.dumps(sort_keys=True) 落盘，content_sha256
+--    因此是**我们自己重排后**的指纹，证明不了数据源发来的字节 —— 键序 / 空白 /
+--    浮点表示 / 原始编码全丢，上游改序列化而没改数据也看不见。对一个卖点是
+--    「证据可追溯、可回放」的系统，这是最不能含糊的一处。
+--
+-- 🔴 **新增列，不是替换 payload_json**（这条边界是设计探活点名的坑）：
+--    load_raw_snapshot() 返回的 payload 必须继续是**解析后的对象** ——
+--    _snapshot/coordinator.py 的 read_index_daily 对它做 len()/切片。若把
+--    payload_json 的语义直接换成原始文本，那个消费方会拿到 str，len() 数的是
+--    字符数不是 K 线根数，且不报错 —— 正是本仓库最想防的「看起来正常、其实错了」。
+--    ⇒ payload_json 原样保留（回读用），原始文本另存 raw_text，content_sha256
+--    改成基于 raw_text 算（db.raw_text_sha256）。
+--
+-- 为什么可空、为什么不回填：raw 层只追加（L-8）。v13 之前落的行本来就没有原始
+--    文本可填（那段文本在 get_json 内部早被丢弃了，重建不出来），硬回填只能编。
+--    所以 raw_text 可空，旧行留 NULL、其 content_sha256 保持旧口径（payload_sha256）
+--    —— 新行语义变了、旧行不受影响，是 schema 演进的标准形状。新行由
+--    save_raw_snapshot 强制非空（漏传当场报错），不给「静默存个空值」留缝（探针 P4）。
+--
+-- ⚠️ ADD COLUMN 不触发行 UPDATE，也不动 raw_market_snapshot 已有的只追加触发器
+--    —— 加完这一列，UPDATE/DELETE 仍然被拒（探针 P5）。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE raw_market_snapshot ADD COLUMN raw_text TEXT;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -589,6 +626,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (10, _V10),
     (11, _V11),
     (12, _V12),
+    (13, _V13),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

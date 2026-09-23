@@ -33,7 +33,7 @@ from .eastmoney import (
     fetch_breadth,
     fetch_pool,
 )
-from .http import SourceError, get_json, get_text
+from .http import SourceError, get_json, get_json_and_text, get_text
 from .sina import SINA_SYMBOLS, DailyBar, IndexDaily, fetch_index_daily, parse_index_daily
 from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import (
@@ -80,5 +80,6 @@ __all__ = [
     "market_is_open",
     "session_in_progress",
     "get_json",
+    "get_json_and_text",
     "get_text",
 ]

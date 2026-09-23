@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -42,11 +43,12 @@ QDATE = "20260918"
 
 
 def pool(name: str, total: int, rows: list[dict] | None = None, qdate: str = QDATE):
+    raw = {"rc": 0, "data": {"tc": total,
+                             "qdate": int(qdate) if qdate else None}}
     return sources.PoolResult(
         pool=name, requested_date=QDATE, qdate=qdate, total=total,
         rows=rows if rows is not None else [{"lbc": 1, "zbc": 0}] * total,
-        raw={"rc": 0, "data": {"tc": total,
-                               "qdate": int(qdate) if qdate else None}},
+        raw=raw, raw_text=json.dumps({"pool": name, **raw}),
     )
 
 

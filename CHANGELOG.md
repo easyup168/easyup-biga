@@ -15,6 +15,92 @@
 
 ## [未发布]
 
+### 变更（批 I）· raw 层真的存 raw —— 新增 `raw_text` 列，`content_sha256` 改基于原始响应文本（schema v13）
+
+**为什么这是证据链最底层的问题**：raw 层此前存的**不是 raw**。链路是
+`get_json()` → `json.loads` → 落盘时 `json.dumps(sort_keys=True)`。于是
+`content_sha256`（`Evidence.raw_hash` 指向的那个指纹）算的是**我们自己重排后**
+的字节，不是数据源发来的字节 —— 键序 / 空白 / 浮点表示 / 原始编码全部丢失，
+上游改了序列化而没改数据，指纹看不出来。对一个卖点是「证据可追溯、可回放」
+的系统，这是最不能含糊的一处。而 `schema.py` 的建表注释当时还写着「这里存的是
+从数据源拿到的字节，**不做任何归一化**」——`sort_keys` 就是归一化，那句注释是假的
+（L-3 的标准形状：注释断言了一件没发生的事）。
+
+**做了什么**：
+
+- `_sources/http.py` 加 `get_json_and_text()`，**同时**交出解析结果与原始响应
+  文本；`get_json()` 收敛成它的薄封装。原文不再在 `json.loads` 之后就地丢弃。
+- 四个适配器把原文一路带出来：`sina.IndexDaily` / `eastmoney.{Pool,Breadth,Board}Result`
+  / `sina_news.NewsFeed` 各加 `raw_text` 字段；`tencent.fetch_index_quote` 改成
+  返回 `(quotes, 原始响应体)`（它一次请求拿回所有代码，body 只此一份，而 raw 层
+  里那份 `{code: 片段}` 是从 body 抠出再组装的**派生物**）。多页聚合的源（板块榜 /
+  快讯）的 `raw_text` 是各页响应体的 **JSON 数组**，每个元素逐字节等于对应那次的
+  响应体。
+- `_store` schema **v13**：`raw_market_snapshot` 加 `raw_text` 列（`ALTER TABLE
+  ADD COLUMN`，可空）。`db.raw_text_sha256()` 是 `content_sha256` 的新口径
+  （`sha256(原文)`）。`save_raw_snapshot(raw_text=...)` 必填非空；六个采集调用方
+  的 `Evidence.raw_hash` 一并改走 `raw_text_sha256`，与 raw 层同口径。
+- **建表注释改回真话**：点名 `payload_json` 是解析后再 `sort_keys` 的规范表示
+  （给回读用、归一化过的），`raw_text` 才是未归一化的原始文本、`content_sha256`
+  基于它算。
+
+**🔴 新增列、不替换 `payload_json` —— 设计探活救下的一处静默破坏**：普查发现
+`_snapshot/coordinator.py` 的 `read_index_daily` 把 `load_raw_snapshot()["payload"]`
+当**已解析对象**用（`len(raw)` / 切片）。如果把 `payload_json` 的语义直接换成原始
+文本，这个消费方会拿到一个 `str`，`len()` 数的是字符数不是 K 线根数，**且不报错**
+——正是本仓库最想防的「看起来正常、其实错了」。所以本批是**新增字段**：
+`load_raw_snapshot()` 返回的 `payload` 继续是解析后的对象（coordinator 不用改），
+原文另存 `raw_text`。这与 E-I 的 LegacyAdapter、K 的卡级冻结名单回退是同一个
+「新增字段、旧读法继续成立」模式，不发明第四种写法。
+
+**为什么旧行不迁移**：raw 层只追加（L-8）。v13 之前的行没有原文可填（那段文本在
+`get_json` 内部早被丢弃、重建不出来），硬回填只能编。所以 `raw_text` 可空、旧行留
+`NULL`、其 `content_sha256` 保持旧口径（`payload_sha256`，函数保留未删、由
+`tests/fixtures/payload-sha256-vectors.json` 钉住）。**新行语义变了、旧行不受影响**
+是 schema 演进的标准形状。`Evidence.raw_hash` 的文档补了一句：别拿跨 v13 的两个
+`content_sha256` 直接比。
+
+**探针（G-1）—— 每道守卫都亲手弄坏、见过红、再还原**（`tests/test_raw_artifact.py`）：
+
+- **P1/P6 原始性**：把 `save_raw_snapshot` 的 INSERT 改成往 `raw_text` 列写重排后的
+  `blob`。红：存下来的是 `[{"close":...}]`（sort_keys、无空白），与构造的带乱序
+  key、多余空白的原始响应体逐字节不符（diff 直接把 bug 摆出来）。还原后绿。
+- **P2 哈希基于原文**：把 `content_sha256` 改回 `payload_sha256(payload)`。红：两次
+  「数据相同、键序不同」的响应产出**同一个** sha（`d8497d…` == `d8497d…`），
+  `assert ha != hb` 失败。还原后绿。
+- **P3 消费方不被破坏**：把 `load_raw_snapshot` 里的 `json.loads` 去掉，让 `payload`
+  变成 `str`。红：探针 `isinstance(payload, list)` 失败，**且真实消费方**
+  `test_snapshot` / `test_snapshot_wiring` 的冻结读取（`len`/切片）一并翻红 ——
+  证明这条守的不是我自己写的断言，是 coordinator 那条真实路径。还原后绿。
+- **P4 漏传即报错**：删掉 `raw_text` 非空校验。红：`raw_text=""` 时 `DID NOT RAISE`
+  ——一个漏改的 collector 就能静默往新列塞空值。还原后绿。
+- **P5 加列后仍只追加**：从 schema `_V1` 拿掉 `raw_market_snapshot` 的只追加触发器。
+  红：`UPDATE ... SET raw_text=...` `DID NOT RAISE AppendOnlyViolation`。还原后绿
+  ——确认 `ADD COLUMN` 没有意外绕开触发器，连新列本身的 UPDATE 也被拦。
+- **P7 多页源按页保真**（自补，堵设计探活外我自己最担心的一处）：P1/P6 走的是**单次
+  请求**的源；多页聚合的源（快讯 / 板块榜）`raw_text` 是各页 body 的 JSON 数组。把
+  `fetch_feed` 的 `raw_text` 改成 `json.dumps(raw_pages)`（**解析后**的页而非原文页）。
+  红：`json.loads(raw_text)` 取回的是 `{'result': {...}}` 解析对象，不是原始 body 字符串。
+  还原后绿 —— 证明每一页的响应体都逐字节进了那个数组。
+
+### 新增（批 I）· `tests/test_raw_artifact.py` —— raw 原始性的七道探针（+10 条）
+
+对应上面 P1–P7，10 条测试。加上新教程章节带来的 4 条 `test_docs_convention`
+参数化用例，批 I 自身的全量条数 **1170 → 1184**。
+
+⚠️ **合回 orchestration 时的两处台账笔误，复核时改正**：CHANGELOG/教程原写测试
+数 **1194**，worktree 干净跑出来的实际是 **1198**；三张验证用真卡引用的日期前缀
+写错了两个（应为 `BIGA-20260921-025`/`-024`，不是 `-0922-`）。都已在复核合并时改正。
+
+⚠️ **教程章节号与批 I 撞车**：批 I 与批 K 各自独立选中「第 35 章」，按落地先后
+顺序处理——K 先落地保住 35（`35-agent-registry.md`），批 I 改记 **第 36 章**
+（`36-raw-artifact.md`）。
+
+⚠️ **schema 版本号与批 G-II 撞车（待 G-II 合回时处理）**：批 I 与批 G-II 都在各自
+独立 worktree 里把新迁移记成 `_V13`——批 I 先合回 orchestration，保住 v13；
+G-II 合回时需要把自己的迁移重编号为 v14（迁移 SQL 本体不动，只改版本标签），
+按 J-I/J-II、F/G-I 已验证过的既定协议处理，这里先记一笔。
+
 ### 🔴 新增 · 批 K：Agent Registry —— roster 从五处收成一处（确定性编排设计文档 §6 批 K）
 
 **为什么**：有一次真实的静默事故（2026-09-21）——`news` 进了契约的 Stage 1 名单、agent

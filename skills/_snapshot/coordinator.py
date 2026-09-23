@@ -48,7 +48,7 @@ from _sources import IndexDaily, fetch_index_daily, parse_index_daily
 from _store import (
     load_evidence_set,
     load_raw_snapshot,
-    payload_sha256,
+    raw_text_sha256,
     save_evidence_set,
     save_raw_snapshot,
 )
@@ -141,14 +141,16 @@ class SnapshotCoordinator:
                 as_of=as_of.isoformat(),
                 retrieved_at=retrieved.isoformat(),
                 payload=d.raw,
+                raw_text=d.raw_text,
                 path=self._path,
             )
             entries[symbol] = {
                 "snapshot_id": snapshot_id,
                 "source": source,
-                # 与 Evidence.raw_hash 同一个函数（唯一实现），冻结集因此能声明
-                # 「我这份 raw 的指纹是这个」，将来核对用得上。
-                "content_sha256": payload_sha256(d.raw),
+                # 与 Evidence.raw_hash / raw 层 content_sha256 同一个口径（批 I：
+                # raw_text_sha256，基于原始响应文本），冻结集因此能声明「我这份 raw 的
+                # 指纹是这个」，且必然等于 raw_market_snapshot 那一行的 content_sha256。
+                "content_sha256": raw_text_sha256(d.raw_text),
                 "bar_count": len(d.bars),
                 "trade_date": d.trade_date,
             }
