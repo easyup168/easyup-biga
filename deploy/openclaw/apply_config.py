@@ -18,9 +18,18 @@ live `openclaw.json`；装服务经 `bin/biga daemon install`。
 🔴 只增量合并自己管的键，绝不覆盖 live 值
 ------------------------------------------
 `config patch` 递归合并：对象并、数组/标量替换、null 删。本脚本的 patch 只含
-`agents.entries.<pipeline>.tools.deny` / `commands.text`。它**不碰**飞书 appSecret、
-网关鉴权 token、owner 白名单这几个 live-only 的凭据与可识别 id
-（patch 里没提到的键原样保留）。⇒ 仓库里一个凭据都不落。
+`agents.entries.<pipeline>.tools.deny` / `commands.text` / `channels.feishu.streaming`。
+它**不碰**飞书 appSecret、网关鉴权 token、owner 白名单这几个 live-only 的凭据与
+可识别 id（patch 里没提到的键原样保留）。⇒ 仓库里一个凭据都不落。
+
+🔴 `channels.feishu.streaming.mode` 钉死 "off"（2026-09-24，docs/troubleshooting/
+feishu-streaming-card-400.md）：默认 "partial" 时创建流式卡片被飞书服务端拒绝
+（HTTP 400），插件的非流式 fallback 在这套环境里也没能把消息真的送达，而网关
+日志把它记成 `replies=1`（发出成功）—— 故障是**静默**的，只能靠用户反馈"没收到"
+才会被发现。钉进配置即代码，不是靠一次性 `config patch` 关掉：那样重装/迁移到
+新环境会原样复现同一个 400。⚠️ `streaming` 是 object 不是 bool——live schema
+校验拒绝过一次布尔值写法（真实报错：`must be object`），bool 是旧版 OpenClaw
+的写法，现在只在 `openclaw doctor --fix` 的迁移路径里认。
 
 出卡触发不注册任何 MCP server：BigA 的技能一律「SKILL.md + shell 跑脚本」
 （main 认出出卡请求 → 跑 skills/card/scripts/inbound.py），与全仓形态一致。
@@ -94,10 +103,12 @@ def render_patch(
     """渲染要 patch 进 live 配置的**增量**（纯函数，离线可测）。
 
     只含本脚本管的键：非交互流水线 agent 的 `tools.deny` + `commands.text` + 显式
-    清掉曾经写过的那个 MCP server 注册。**不含**任何凭据/可识别 id（那些 live-only，
-    patch 不提及 ⇒ 原样保留）。出卡触发是纯 skill（main 用 shell 跑 inbound.py），
-    不再注册任何 MCP server —— `mcp.servers.biga-card-trigger` 显式 null（删），
-    不是靠"不再提它"让它自然消失（省略 ≠ 删，见模块 docstring）。
+    清掉曾经写过的那个 MCP server 注册 + 关掉飞书流式卡片。**不含**任何凭据/可识别
+    id（那些 live-only，patch 不提及 ⇒ 原样保留）。出卡触发是纯 skill（main 用 shell
+    跑 inbound.py），不再注册任何 MCP server —— `mcp.servers.biga-card-trigger`
+    显式 null（删），不是靠"不再提它"让它自然消失（省略 ≠ 删，见模块 docstring）。
+    `channels.feishu.streaming.mode` 钉死 "off" —— 默认 "partial" 会撞 HTTP 400
+    （见模块 docstring），且故障是静默的（网关日志记成发出成功）。
     """
     policy = yaml.safe_load((deploy_root / "agents.yaml").read_text("utf-8"))
     toolpol = yaml.safe_load((deploy_root / "tool-policy.yaml").read_text("utf-8"))
@@ -113,6 +124,17 @@ def render_patch(
         "commands": {"text": bool(toolpol["commands"]["text"])},
         # 只删本脚本自己曾经写过的那一个键，不动 mcp.servers 下可能存在的别的条目。
         "mcp": {"servers": {"biga-card-trigger": None}},
+        # 🔴 关掉飞书流式卡片（2026-09-24 排查记录，docs/troubleshooting/
+        # feishu-streaming-card-400.md）：`streaming.mode` 默认 "partial"，创建
+        # 流式卡片的请求被飞书服务端拒绝（HTTP 400），插件的非流式 fallback 在
+        # 这套环境里也没能真的把消息送到用户手机上——但网关日志把它记成
+        # `replies=1`（发出成功），故障是**静默**的，只有用户自己反馈"没收到"才
+        # 会被发现。显式钉死 "off"，不是留给某次手动 `config patch` 去关——手动
+        # 改的东西不会写进这份"配置即代码"，重装/迁移到新环境会原样复现。
+        # ⚠️ `streaming` 必须是 object（`{"mode": ...}`），不是 bool——live 的
+        # schema 校验拒绝过一次布尔值写法（`must be object`）；bool 是旧版
+        # OpenClaw 的写法，现在只在 `openclaw doctor --fix` 的迁移路径里认。
+        "channels": {"feishu": {"streaming": {"mode": "off"}}},
     }
 
 
