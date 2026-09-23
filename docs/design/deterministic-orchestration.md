@@ -854,6 +854,104 @@ assessment**，卡上呈现的是"risk 给出了事实、判定是 UNKNOWN、没
 它的 §17（两种工作模式彻底分开）与 §25（Outbound Only → Preflight → Inbound Trigger）
 与本批是同一件事，**不另开台账**。
 
+#### 设计探活（2026-09-23）：比原始 bullet list 里的东西更多，也更少
+
+开工前普查了代码库现状，结论有几处纠正了原始 bullet list 的隐含假设。
+
+**仓库里现在一行飞书代码都没有**——`grep` 全仓 `lark_oapi`/`larksuite`/
+`open.feishu.cn` 零命中。所有真实的飞书接入（`channels.feishu` 配置块、
+credential、装好的插件包）都在仓库外的 `~/.openclaw-biga/openclaw.json`
+与 OpenClaw 运行时里。`skills/_contract/run.py` 的 `RUN_ORIGINS` 已经预留了
+`"feishu"` 这个值，但**没有任何生产方**在用它——批 G 要做的第一件事是
+**造出第一个把 `origin="feishu"` 真正填上的调用点**，不是接一个已有半成品。
+
+**入站幂等的地基已经在 v7 建好了，只是没人用**：`decision_runs.trigger_id`
+（`schema.py` v7）的建表注释原话就是"一次外部请求的幂等键（飞书 event id /
+CLI 每次一个 / cron）"——跟 bullet list 里"trigger_id = 飞书 event id ⇒
+天然幂等"这句话**逐字对应**，只是至今没有生产方填过这一列。⇒ 不要另造一个
+入站幂等表，这一列已经在等着被用。
+
+**出站的 `notification_outbox` 确实是全新的（第 9 张表）**——当前 schema
+（v10，8 张表）里没有任何东西承担这个角色，且这一点项目自己已经预料到了：
+`skills/_contract/run.py` 的 `RunState`（13 个状态）**故意没有** `NOTIFICATION_PENDING`，
+文档字符串原话是"同理推迟到批 G（outbox 存在之前它没有消费方）"——也就是说
+批 G 不只是"加一张表"，还要**给状态机加一个新状态**，这是原始 bullet list
+没提到、但已经被项目自己提前留好位置的一块。
+
+🔴 **`bin/biga-card` 今天是完全同步的——没有任何"快速 ACK、稍后完成"的
+半成品可以复用。** 全文一次 `wait "$_ORCH_PID"`，`RunState` 里也没有任何
+"已确认、后台跑着"性质的状态。这意味着 Phase 3（Inbound Trigger）里"Event
+Verify → Dedup → Allowlist → Preflight → Cost/Lock Guards → **Pipeline**"
+这条链，最后一步接的是一次要跑 170-200 秒的同步调用——**批 G 真正要发明的
+基础设施是异步执行本身**，不是把已有的异步机制接上飞书。这是这一批最大的
+一块新增复杂度，原始 bullet list 用一个词（"worker 投递"）轻描淡写带过了。
+
+**真正的根因修复点不是"让 main 更听话"，是"飞书触发根本不该经过 main 的
+自由判断"**。2026-09-21 的两次事故（19:31 的 4 个孤儿 spawn 与 21:03 的
+出卡递归 L-14）根子相同：**入口在 prompt 层面，不在代码层面**。L-14 已经
+用代码守卫堵上了一半——`entry_guard.py::classify_caller()` 挡住了「入口
+脚本被递归调用」，批 C-II 更进一步，把 `main` **整个移出了转发路径**
+（"不是守卫拦住它，是够不到"）。但这道守卫只保护 `bin/biga-card`/
+`orchestrator.py` 这两个**脚本入口**，挡不住 `main` 直接调用通用的
+`sessions_spawn` 工具去 ad hoc 拼一整套 Stage 1 spawn——而这**正是** 19:31
+那次事故的真实形状（4 次独立 spawn + `sessions_yield`，全程没有 orchestrator
+参与，占号在 spawn 之后）。今天唯一挡着这条路的，是根 `AGENTS.md` 里的
+文字指示——跟 L-14 修复前的防护是**同一个量级**，而 L-14 自己的事后总结
+已经明确说过这个量级不够。
+⇒ 结构性修法：飞书的"出卡"事件必须**直接**从 gateway/adapter 层调用
+`bin/biga-card` 等价的入口，`main` 的 LLM 全程不参与这条路径的路由决策——
+不是"教 main 认出这是出卡请求再转发"，是"main 压根不会看到这类请求"。
+这比外部材料 §18 自己的推荐拓扑（`External Trigger → Pipeline Entrypoint
+→ Main Agent → Specialists`，仍然让 Main Agent 留在转发链路上）更保守——
+但与批 C-II 已经采用的、比 §18 更严格的立场（`main` 移出转发路径）一致，
+不是新裁定，是同一条已有裁定的延伸应用。
+
+**`apply_config.py`（未建）要过的 R-2 关卡，机关本身已经在，且已经测过**：
+`tools/verify/isolation.py::check_namespaces()` 已经实现"systemd 单元名必须
+带 `-biga`"这条判据，`bin/biga`（本仓库内，`~/.openclaw-biga/bin/biga` 软链
+到它）已经强制 `--profile biga`。批 G 要做的是**让 `apply_config.py`（未建）
+走这条已有的路**，不是新发明一套 R-2 检查。
+
+**六个指纹只有一个是真的**：`contract_version`（`CONTRACT_VERSION =
+"contract/1"`，`verdict_ref.py`）已经存在，但落在**每条 `VerdictRef`** 的
+粒度上，不是一条独立的按次运行记录。其余五个（`git_commit`/
+`openclaw_version`/`agent_config_hash`/`tool_policy_hash`/`prompt_hash`）
+在代码里零出现，纯粹是这条 bullet 的愿望，没有任何列或表在等着它们。
+
+**`tools.deny:[ask_user]` 这条今天可以做了，半年前不行**：`stall_watchdog.py`
+的注释显式记录过一次已经做过的调查——配置级 `tools.deny` 的粒度是按 agent，
+当时 `main` **同时是**交互入口和出卡入口，禁了 `ask_user` 会连累飞书/TUI
+的正常交互，所以否决了这个方案。批 C-II 之后 `main` 已经不再是出卡入口
+（`DecisionOrchestrator` 直接驱动 Stage 1-3），这条否决的前提已经不成立——
+但这只是从两个独立事实推出来的，仓库里没有地方明说，也没有测试钉住
+"main 确实不会被这条配置误伤"。⇒ 批 G 落地时**必须补一条测试**验证这一点，
+不能只凭推理就认为安全。
+
+#### 设计方向：按外部材料自己的分阶段建议拆批，不要一次把四个阶段都做完
+
+外部材料自己的建议（§25）是 Outbound Only → Preflight Interaction →
+Inbound Trigger → 可选的 Question Bridge，风险依次升高。这与本项目一贯的
+"低风险基础批 + 高风险切换批"分批法（C/D/E/J 都这么拆过）吻合，建议照此
+拆成两批，**不要在一批里从零建到 Inbound Trigger**：
+
+* **批 G-I（Outbound Only，低风险）**：`notification_outbox` 新表 + `RunState`
+  加 `NOTIFICATION_PENDING`、worker 投递、幂等键 `(event_type, aggregate)`。
+  只做"Card 完成/UNKNOWN/Risk BLOCK/运行失败"四类通知**推送**出去，**不接受
+  任何飞书方向的输入**——没有新的攻击面，也不涉及 R-2。这一批单独就有交付
+  价值（人不用再守着终端等卡跑完）。
+* **批 G-II（Inbound Trigger，高风险）**：真正关掉 `TODO.md` 那条待裁定——
+  异步执行模型（快速 ACK + 后台完成，`bin/biga-card` 今天没有这个半成品，
+  是这一批要新建的基础设施）、`decision_runs.trigger_id` 真正接上生产方、
+  `main` 的 LLM 结构性移出这条路径的路由决策、`deploy/openclaw/` 四个文件
+  + R-2 合规、`tools.deny` 那条测试。**这是这一批的核心交付物，风险与批
+  E-III/J-II 同一量级**（动的是"钱怎么被花掉"这条链的入口，不是内部实现）。
+
+**明确不做**：Preflight Interaction（阶段二）与 Question Bridge（阶段四）
+都推迟——外部材料自己说阶段四"只有出现真实需求后才实现"，阶段二在没有
+阶段三之前没有意义。六个指纹里剩下的五个（`contract_version` 之外）不在
+这两批的范围内，它们没有已证明的消费方（L-1），留给以后真正需要审计这些
+维度的时候再建。
+
 ---
 
 ## 7. 全案的单点风险 —— ✅ 已 spike 通过（2026-09-22）
