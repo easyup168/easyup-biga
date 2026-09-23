@@ -115,6 +115,10 @@ Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附
 | 09 | [隔离演练](docs/tutorial/09-isolation-drill.md) | `kill -9` 自己，逐项核对已有实例毫发无伤 |
 | 10 | [延迟与成本](docs/tutorial/10-latency-and-cost.md) | 216s→75s；延迟其实是正确性 bug 的症状 |
 
+这十章是 Phase 1（Walking Skeleton）的建造过程。第 11 章起是「确定性编排升级」
+系列（把工作流从提示词搬进程序，见下方同名小节），现在已经写到第 **39 章**——
+完整索引在 [`docs/tutorial/README.md`](docs/tutorial/README.md)。
+
 配套抖音系列同步更新 · **关注 易涨EasyUp** 不迷路
 
 ---
@@ -180,10 +184,15 @@ journalctl --user -u openclaw-gateway-biga.service -f
 | 群里能不能触发 | `groupPolicy: allowlist` + 空名单 ⇒ **任何群都不响应** |
 | 一次出卡的代价 | 约 3 分钟 / $1.2~1.4 ⇒ 预算闸门在 **Stage 0 占号**处拦 |
 
-🔴 **别用自然语言在飞书里要卡** —— 通道把消息直接交给 Supervisor，
-它会**自己编排**，而实测那么做会出错（4/5 个 agent、顺序反了、$0.4 白花）。
-编排现在只有一份实现（[`ORCHESTRATION.md`](skills/decision-card/ORCHESTRATION.md)），
-契约只说一句「跑 `bin/biga-card`」—— 这条路径的实测收口还没做。
+✅ **飞书里发 `/card` 是安全的**——已完整端到端实测（真实飞书触发、真实收到结论）。
+`main` 认出这是显式引用的技能后，只跑一个脚本把请求转成结构化 trigger、
+脱树拉起真正的出卡管线（`systemd-run`）——**`main` 自己的会话进程树里完全
+不跑编排**，这正是堵死 2026-09-21 那次事故（4/5 个 agent、顺序反了、
+$0.4 白花）的根本修法，不是加一道检查。
+
+🔴 **别用裸自然语言描述意图去要卡**（比如直接说"帮我出一张卡"而不发
+`/card`）——那种消息不会被 OpenClaw 识别成"引用了 card 技能"，还是会
+交给 `main` 自己临场理解，跟上面这条安全路径不是同一条。
 
 ⚠️ **盘中会一直是 `WAIT`**，这是对的行为不是 bug ——
 实时源说「此刻」、日线源说「上一交易日」，风控拒绝把两者当同一天审。
@@ -205,9 +214,9 @@ emotion/news             20260921     ← 实时源
 > 通用原则：**「应该会……」和「实测是……」之间隔着一次运行。**
 > 而这类推断特别危险，因为它听起来太合理了 —— 谁会怀疑「收盘后日线就有了」。
 
-⇒ 正确的说法是：**要等当天日线真正发布之后**。
-具体时刻正在实测（见 `TODO.md` 的待测项），在测出来之前，
-判断方法是直接看：
+⇒ 正确的说法是：**要等当天日线真正发布之后**。已经测出具体时刻
+（2026-09-21 实测）：**15:32:47–15:37:50 之间，收盘后约 33~38 分钟**。
+不想等这么久或想自己确认今天的情况，直接看：
 
 ```bash
 python3 -c "
@@ -220,7 +229,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 
 ---
 
-## Phase 2 · Specialists（进行中——`phase2` 分支已并入，后续在 `orchestration` 分支）
+## Phase 2 · Specialists（进行中——两条出口条件仍未达成，见下）
 
 | 项 | 状态 |
 |---|---|
@@ -235,7 +244,8 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
 | **飞书接入** —— 官方通道 + 长连接 + 私聊/群双白名单 | ✅ 聊天已通 |
 | **出卡预算闸门** —— 最小间隔 / 当日上限 / 上一次还在跑 | ✅ |
-| 飞书里用自然语言要卡 | 🔶 会走错编排，**实测收口未做**（见待裁定）|
+| 飞书 `/card` 出卡（Inbound Trigger，`main` 全程不参与编排） | ✅ P6 live 端到端已确认 |
+| 飞书里用裸自然语言要卡（不发 `/card`） | 🔶 仍会走错编排，别这么用 |
 | 两份外部对抗性评审共 29 条发现 | 🔶 15 模式级 / 7 **实例级（模式还在）** / 1 修不干净 |
 | 第三轮深度评审 6 条 —— **全是同一个形状**（守卫不会红，§9 L-13） | ✅ 每条都有探针红灯 |
 | 至少 1 次真实「否决」端到端落库 | ⬜ |
@@ -257,7 +267,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 
 ---
 
-## 确定性编排升级（进行中，在 `orchestration` 分支）
+## 确定性编排升级（主体批次已落地，收尾中）
 
 Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错误的决策号上、
 出卡递归成 187 个会话烧掉 \$8.99、飞书路径 4 spawn 缺一个 agent 却没有任何报错。
@@ -269,13 +279,28 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 证据意味着什么"这类**判断**，仍然是 Agent 的事。完整推导、每一批做了什么、
 每次评审怎么复核，见 [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
 
+🔴 每一批都经过**独立复核**——不是提出方自己宣布通过：读全部 diff、亲自
+重跑每一道探针（含 sabotage-revert，故意弄坏一遍确认它真的会报红）、
+跑真实数据验证，再决定合并。
+
 | 批 | 内容 | 状态 |
 |---|---|---|
 | A – D | 契约收紧、运行身份、Runtime Adapter、Orchestrator 主干、冻结快照 | ✅ 已落地 |
-| E-I / E-II | 把 `AgentVerdict` 拆成事实（`FactBundle`）与判断（`AgentAssessment`）；六个 skill 里五个已迁 | ✅ 已落地 |
-| E-III | 迁最后一个（`risk`，带否决权）+ 退役旧的事后修订路径 | ⬜ 分发提示词已就绪 |
-| J | 收敛 `run_id` 这个名字在库里同时指三个不同东西的历史遗留 | 🔶 进行中 |
-| F – L | Risk 拆两层 / Outbox+飞书 trigger / RawArtifact / Registry / 交易日历 | ⬜ 排期见设计文档 §6 |
+| E-I / E-II / E-III | 把 `AgentVerdict` 拆成事实（`FactBundle`）与判断（`AgentAssessment`）；六个 skill 全部迁完，退役旧的事后修订路径 | ✅ 已落地 |
+| F | Risk 拆两层——硬规则挪进编排器，省掉注定白花的 LLM 调用 | ✅ 已落地 |
+| G-I / G-II | 外发通知 Outbox + 飞书出卡变结构化 Trigger（`main` 全程不参与编排） | ✅ 已落地 |
+| I | RawArtifact——raw 层第一次真正存 raw | ✅ 已落地 |
+| J-I / J-II | 收敛 `run_id` 这个名字在库里同时指三个不同东西的历史遗留 | ✅ 已落地 |
+| K | Agent Registry——roster 从散落五处收成一处 | ✅ 已落地 |
+| L | `cn.trading_calendar`——第一张真实的 `fact_*` 表，认节假日了 | ✅ 已落地 |
+| H-I / H-II | 外部评审建议的包结构重组：`_contract`/`_store`/`_sources`/`_runtime`/`_snapshot` 迁进 `src/easyup_biga/`，旧路径留兼容薄壳 | ✅ 已落地 |
+| H-III | `integrations`/`cli` 命名空间、把 `orchestrator.py` 等从 skill 里挖出来单独建包 | ⬜ **主动留白**——目前只有一个消费方，没有抽成共享包的依据 |
+
+剩一项收尾：H-I/H-II 迁移时旧写法的跨包引用（`from _contract import ...`）
+还没换成新命名空间，留给一个专门的清理批次一次性做，不分批改。
+
+Phase 2 本身那两条出口条件（真实否决端到端落库、缺失项跨天累积）与这次
+升级并行、互不阻塞——见上方 Phase 2 状态表。
 
 ### 关于「徽章全绿」的说明
 
@@ -319,12 +344,17 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 ```
 .
 ├── agents/          各 Agent 的 workspace（AGENTS.md = 角色契约唯一载体）
+├── src/easyup_biga/ 五个共享基础设施包的真实实现（批 H-I/H-II 迁入，见「确定性编排升级」）
+│   ├── domain/      Evidence / AgentVerdict / DecisionCard（唯一实现）；
+│   │               facts.py：事实（FactBundle）与判断（AgentAssessment）已全部拆开
+│   ├── providers/   采集层：五个数据源（新浪日线/快讯、腾讯行情、东财、深交所官方
+│   │               交易日历）+ 重试 + 量级围栏
+│   ├── persistence/ 数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
+│   ├── runtime/     OpenClaw 运行时适配层（Specialist 生命周期唯一入口）
+│   └── application/ SnapshotCoordinator（冻结一次、多处读，跨层协调）
 ├── skills/
-│   ├── _contract/   Evidence / AgentVerdict / DecisionCard（唯一实现）；
-│   │               facts.py：事实（FactBundle）与判断（AgentAssessment）拆开，
-│   │               六个 skill 迁移中（见「确定性编排升级」）
-│   ├── _sources/    采集层：四个数据源 + 重试 + 交易日 + 量级围栏
-│   ├── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
+│   ├── _contract/ _sources/ _store/ _runtime/ _snapshot/
+│   │               旧包路径，原地留兼容薄壳（一个字符不改地转发到 src/ 之下）
 │   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
