@@ -15,6 +15,44 @@
 
 ## [未发布]
 
+### 🔴 修正 · 批 J-II「live 补验」的具体断言，独立复核复现不出来
+
+下面这条批 J-II 的条目写着「查运行时库 `subagent_runs WHERE run_id='e5c00e01-…'`
+查得到」，作为「`runtime_run_id` 与 `subagent_runs.run_id` 同一命名空间」这条
+结论的现场证据。
+
+**独立复核**（2026-09-23，另开会话，未参与 J-II 建造）原样重跑了同一条查询——
+`~/.openclaw-biga/state/openclaw.sqlite`（`BIGA_RUNTIME_DB` 的默认路径，与
+`phase1_acceptance.py::_runtime_spawn_records()` 用的是同一个文件）：
+
+```sql
+SELECT * FROM subagent_runs WHERE run_id = 'e5c00e01-4992-4634-9d2b-18346ff464b0'
+```
+
+返回 **0 行**。按 run_id 精确匹配、按 `child_session_key` 里的 `a4ee178b` 片段、
+按 `payload_json` 子串三种方式都搜不到；该表在这次 spawn 之后完全没有新行
+（最新一行仍是 2026-09-21 19:35，此后 66 行没变过，而这次复核发生在
+2026-09-23，其间数据库其他表一直在正常写入，不是库被闲置或轮转过）。
+
+同时能确认这次 spawn **真的发生过**——`task_runs` 表里有一条完全匹配的记录
+（`agent_id=emotion`，`requester_session_key` 带 `orchestrator-jii-nscheck`
+字样，任务文本正是「只回复两个字：收到。不要运行任何 skill，不要采集数据」），
+只是它没有在 `subagent_runs` 里留下对应行。
+
+不确定这是「当时查的是另一个库 / 另一个 profile」，还是「这一类 spawn 本来就
+不会被 `subagent_runs` 记下」——两条真实历史行（BIGA-20260921-021 的 Stage 1/2
+spawn）都带 `requesterOrigin.channel=feishu` 与完整的 `completion`/`delivery`
+结构，而这次验证 spawn 的 `task_runs` 行是 `delivery_status: not_applicable`，
+明显走的是不同的调用路径。**无论哪种解释成立**，现状是：J2-3 的结构化 join
+在真实生产 spawn 路径下是否真的命中，目前**没有一次成功复现的实测**——而这
+恰好是 J2-3 提交信息自己点名的风险：「猜错的后果是核验静默退化（join 永远
+匹配不上 ⇒ 每次走退回分支 ⇒ 看起来一切正常）」。
+
+不撤回已合并的迁移与 join 逻辑本身——P1/P2/P4/P5 与 P3「文本匹配更容易被
+蒙混」都已被独立复核亲手复现，逻辑本身站得住，问题只在这一条 live 断言。
+需要重新确认的是「这条 join 在真实 production spawn 上到底有没有命中」，
+不是重写代码。
+
 ### 🔴 变更 · 批 J-II：收敛 `run_id` 三同名（`agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库）
 
 设计文档 §4「`run_id` 这个名字现在指三个互不相同的东西」。**✅ 评审复核通过**
