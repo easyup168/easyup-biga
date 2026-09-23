@@ -1,11 +1,11 @@
-# Contributing to BigA
+# Contributing to EasyUp for BigA 2.0
 
-Thank you for contributing to BigA.
+Thank you for contributing to EasyUp for BigA 2.0.
 
 ## License of contributions
 
 Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in BigA is submitted under the Apache License,
+submitted for inclusion in EasyUp for BigA 2.0 is submitted under the Apache License,
 Version 2.0, without additional terms or conditions.
 
 By submitting a contribution, you represent that you have the right to submit
@@ -19,9 +19,9 @@ intended use and all required notices are included.
 
 1. Keep business workflow deterministic: Agents may make assessments, but
    orchestration, state transitions, risk gates, and persistence rules belong
-   to BigA code.
+   to EasyUp for BigA 2.0 code.
 2. Do not add direct provider access to automated Agents. Data should pass
-   through BigA provider/data/snapshot contracts.
+   through EasyUp for BigA 2.0 provider/data/snapshot contracts.
 3. Do not add secrets, API keys, account identifiers, broker credentials, or
    private market-data files to the repository.
 4. Add or update tests for behavioral changes.
@@ -42,7 +42,9 @@ Copyright 2026 BigA contributors
 SPDX-License-Identifier: Apache-2.0
 ```
 
-Use the appropriate comment syntax for the file type.
+Use the appropriate comment syntax for the file type. See
+[`docs/guide/license-headers.md`](docs/guide/license-headers.md) for
+per-language examples.
 
 Do not add the BigA Apache header to third-party source files. Preserve the
 third party's own notices and license terms.
