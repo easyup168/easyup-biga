@@ -35,6 +35,14 @@ from .eastmoney import (
 )
 from .http import SourceError, get_json, get_json_and_text, get_text
 from .sina import SINA_SYMBOLS, DailyBar, IndexDaily, fetch_index_daily, parse_index_daily
+from .szse import (
+    SZSE_CALENDAR_URL,
+    CalendarDay,
+    TradingCalendar,
+    fetch_trading_calendar,
+    parse_trading_calendar,
+    refresh_trading_calendar,
+)
 from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import (
     MARKET_CLOSE,
@@ -63,13 +71,16 @@ __all__ = [
     "MARKET_CLOSE",
     "POOL_ENDPOINTS",
     "SINA_SYMBOLS",
+    "SZSE_CALENDAR_URL",
     "TENCENT_SYMBOLS",
     "BreadthResult",
+    "CalendarDay",
     "DailyBar",
     "IndexDaily",
     "IndexQuote",
     "PoolResult",
     "SourceError",
+    "TradingCalendar",
     "as_of_for_trade_date",
     "fetch_boards",
     "fetch_breadth",
@@ -77,6 +88,9 @@ __all__ = [
     "parse_index_daily",
     "fetch_index_quote",
     "fetch_pool",
+    "fetch_trading_calendar",
+    "parse_trading_calendar",
+    "refresh_trading_calendar",
     "market_is_open",
     "session_in_progress",
     "get_json",

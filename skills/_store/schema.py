@@ -656,6 +656,49 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_ids_trigger
 """
 
 
+_V15 = """
+-- v15：fact_trading_calendar —— 这个仓库**第一张真正的 fact_* 表**（批 L）
+--
+-- 🔴 它落地的是 architecture.md §5.2 画了很久的「raw → fact → derived」分层图里
+--    的**中间那层**：在此之前十四张表里，raw 层（raw_market_snapshot）是唯一被真正
+--    实例化过的一层，「归一化事实层」只存在于文档。批 L 用一个**非行情、体量小、
+--    判据清楚**的数据集（交易日历）把这一层第一次做成真实 schema —— 既补上
+--    market_is_open() 长期「不认节假日」的缺陷，也给 §45「第一版完整市场数据」那一批
+--    打样（那一批的 security_master / adjustment_factors / EOD bars 都要走同一条
+--    Provider → Raw → Normalize → Quality → Snapshot 链）。
+--
+-- 一行 = 某个自然日开不开市。归一化自深交所官方 monthList（jyrq/jybz），每月每天
+--    一行（含休市日 is_open=0），所以「某日有没有行」= 「这个月抓没抓过」——
+--    读的一方据此区分「已知休市」(is_open=0) 与「日历没覆盖到」(查无此行 ⇒ 回退
+--    weekday 判据)。
+--
+-- 🔴 只追加，历史事实一旦落地不 UPDATE：交易所若事后补发调整（临时增/删一个交易
+--    日），用**更晚 retrieved_at 的新行**表达修正，读的一方按 retrieved_at 取最新一条
+--    （is_trading_day 的 ORDER BY retrieved_at DESC）。覆盖旧行就没法回答「我们当时
+--    看到的日历是什么」—— 与 raw 层同一条 L-8 先例。接 _append_only()，且
+--    test_每张表都有只追加触发器 会自动把这张新表也扫进去（新表默认受保护）。
+--
+-- snapshot_id 指回它归一化自哪一份 raw（raw_market_snapshot.snapshot_id）：事实能
+--    一路溯回数据源发来的原始字节，正是「证据可追溯」这条卖点在 fact 层的体现。
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS fact_trading_calendar (
+    fact_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date    TEXT    NOT NULL,   -- YYYYMMDD（与 DailyBar.day 同口径）
+    is_open       INTEGER NOT NULL,   -- 1 开市 / 0 休市
+    source        TEXT    NOT NULL,   -- 归一化自哪个源，如 szse:calendar/2026-09
+    as_of         TEXT    NOT NULL,   -- 这份日历描述的时刻
+    retrieved_at  TEXT    NOT NULL,   -- 取回时刻 —— 读最新一条按它排序
+    snapshot_id   INTEGER REFERENCES raw_market_snapshot(snapshot_id),  -- 溯源到 raw
+    created_at    TEXT    NOT NULL,
+    CHECK (is_open IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS ix_cal_date ON fact_trading_calendar(trade_date);
+""" + _append_only(
+    "fact_trading_calendar",
+    "历史日历一旦落地不覆盖；交易所补发调整用更晚 retrieved_at 的新行表达")
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -672,6 +715,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (12, _V12),
     (13, _V13),
     (14, _V14),
+    (15, _V15),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]
