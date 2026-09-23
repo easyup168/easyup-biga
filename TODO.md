@@ -847,19 +847,27 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         不做 enforce（`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等
         真正的重试批次。
         ⚠️ 等批 E-II **与** E-III 都合并之后开工（三批都要碰同一批 skill 脚本）
-  - [x] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
-        —— ✅ 评审复核通过（2026-09-23）。schema v9；live 实测
-        `SpawnHandle.runtime_run_id` 与运行时 `subagent_runs.run_id` **确为同一
-        命名空间**（这是结构化 join 的前提，线下只能靠「两边都长得像 UUID」猜）。
-        教程第 31 章（原写作 30，与批 E-III 撞号——两批并行各取下一个空号）。
-        🔴 **评审留下一条缺口，根因在分发提示词不在实现**：强绑定是 per-agent、
-        按数据有无启用的（`rr_by_agent.get(agent)` 为空就静默退回弱判据）。
-        今天对（历史行全 NULL），但**等六个 agent 都走上新路径之后，`NULL` 的
-        含义会从「迁移前的老行」悄悄变成「可能是手写的行」，而没有任何东西会
-        注意到这个转变** —— review-prompt §3「静默 fail-open」的形状。
-        修法便宜：加一条 **per-decision 一致性检查**（同一个 decision 里只要有
-        一行带 `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理，
-        R-3，不是退回弱判据）。⇒ 留给批 J-I 之后第一个「六个都带上了」的批次。
+  - [~] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
+        —— 已合并（933aa6d）。机制经**独立复核**（2026-09-23，另开会话，未参与
+        建造）确认成立：亲手在 shipped 代码里关掉结构化强绑定，复现了 P3 描述的
+        确切症状（stdout 印出「1 个 agent 两份独立记录都齐」），还原后绿；亲手对
+        迁移后的 `agent_runs` 真跑 UPDATE/DELETE，只追加触发器仍拦得住；干净
+        `git clone` 全量跑绿。schema v9。教程第 31 章（原写作 30，与批 E-III
+        撞号——两批并行各取下一个空号）。
+        🔴 **但「live 补验」那条具体断言复核复现不出来**——详见 CHANGELOG 同名
+        修正条目：CHANGELOG 称查 `subagent_runs WHERE run_id='e5c00e01-…'`
+        「查得到」，独立复核原样重跑同一条查询（代码默认路径
+        `~/.openclaw-biga/state/openclaw.sqlite`），**返回 0 行**，且该表在这次
+        spawn 之后再没有新行。这次 spawn 本身确实发生过（`task_runs` 里有完全
+        匹配的记录），只是没有在 `subagent_runs` 留下对应行——原因未定（查的是
+        别的库/别的 profile？还是这类 spawn 本来就不写这张表？两条真实历史行都
+        带飞书投递语境，这次验证 spawn 没有）。⇒ **结构化 join 在真实生产 spawn
+        路径下是否真的命中，目前没有一次成功复现的实测**——这正是 J2-3 提交信息
+        自己点名要防的「静默退化」。不影响已合并的迁移与 join 逻辑本身（离线部分
+        都已独立复现），但这一条真实性断言在查清楚之前不能当作已证实。
+        （另一条与此无关的既有缺口：强绑定 per-agent 启用，历史行 NULL 的含义
+        将来会从「老行」漂移成「也可能是漏填的新行」，未加 per-decision 一致性
+        检查前不报错——见 review-prompt §3，留给 J-I 之后处理。）
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。排在批 J 之后、
       批 F 之前：它给 raw 加溯源字段，那些字段要指向一个不含歧义的 `run_id`
