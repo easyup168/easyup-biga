@@ -15,6 +15,43 @@
 
 ## [未发布]
 
+### 🐛 修复 · 飞书流式卡片 HTTP 400 —— 网关自认为发出去了，用户其实没收到
+
+真实生产故障（2026-09-24，`docs/troubleshooting/feishu-streaming-card-400.md`，
+本地留存不进仓库）：用户在飞书私聊反复反馈"没收到回复"，网关日志却每次都是
+`dispatch complete (queuedFinal=true, replies=1)`——从日志看是成功的。根因在
+`journalctl` 里：`streaming start failed...HTTP 400`。`channels.feishu.streaming.mode`
+默认 `"partial"`，创建流式卡片的请求被飞书服务端拒绝；插件退回非流式发送的
+fallback 路径在这套环境里也没能把消息真的送达，但网关照样把它记成发出成功。
+**故障是静默的**——不是消息发送链路整体坏了（`message(action=send)` 直发对照
+测试正常收到），只有这一条特定路径会丢，只能靠用户自己反馈才能发现。
+
+修复钉进 `deploy/openclaw/apply_config.py::render_patch()`（新增
+`channels.feishu.streaming.mode: "off"`），不是走一次性 `bin/biga config patch`——
+一次性改动不会被下次 `--apply` 重放，重装/迁移到新环境会原样复现同一个 400。
+🔴 第一版实现写成了布尔值 `"streaming": false`，被 `bin/biga config patch
+--dry-run` 的 live schema 校验当场拒绝（`must be object`）——`streaming` 在当前
+OpenClaw 版本是一个 object，布尔值是旧版写法，只在 `openclaw doctor --fix` 的
+迁移路径里被认。排查文档里"另一个环境已经这样配"的对照描述只反映那个环境的
+历史状态，不等于当前版本的正确写法——查了 `docs/channels/feishu/
+configuration-reference.md` 才发现要写 `streaming.mode`。同步更新 `deploy/
+openclaw/profile.template.json` 展示这个新键；顺带清理了该模板里一处随出卡机制
+改造（main 认出请求后跑 shell 脚本，不再注册 MCP server）已经过时、指向已删脚本
+`card_trigger_mcp.py` 的 `mcp.servers.biga-card-trigger` 残留——`render_patch()`
+自己一直在显式 null 掉 live 配置里的这个键，模板却还在示范"新装机应该配上它"，
+自相矛盾；这处发现与本次 400 修复无关，一并记录。新增 `tests/test_apply_config.py::
+test_patch关掉飞书流式卡片`，独立复核时先反向删掉这行改动确认测试真的会红，再恢复。
+
+另：`docs/troubleshooting/` 目录（这次故障记录所在处）比照 `docs/external/` 的
+既有决策同样归为本地专属材料——装的是从真实使用场景现场记录的排查笔记，含
+私聊往来细节，不该进公开仓库历史。`.gitignore` 补一条规则；`tests/
+test_docs_convention.py` 里原本硬编码只认 `docs/external/` 的未跟踪豁免判据
+（`_is_untracked_external`）随之推广为 `_is_untracked_local_only`，认一个可扩展
+的目录列表 —— 避免将来再出现第三个同性质目录时又要在多处调用点各写一份判据。
+测试条数因新增这一条测试从 1334 变成 1335，同步更新 README.md / CLAUDE.md /
+docs/guide/review-prompt.md 三处徽章（`tools/verify/sync_test_count.sh` 的同步
+范围）。
+
 ### 📝 变更 · README.md 全面梳理最新化
 
 PR #1（批 A 到 L + H-I/H-II 全部合并进 `main`）之后重新核对了一遍，发现几处

@@ -30,17 +30,13 @@
       "appId": "<飞书 appId，live only，不落仓库>",
       "appSecret": { "__ref__": "<解析自密钥库，不落仓库明文>" },
       "dmPolicy": "allowlist",
-      "allowFrom": ["<OWNER_OPEN_ID — live only>"]
+      "allowFrom": ["<OWNER_OPEN_ID — live only>"],
+      "streaming": { "mode": "off" }
     }
   },
 
   "mcp": {
-    "servers": {
-      "biga-card-trigger": {
-        "command": "python3",
-        "args": ["<DEPLOY_ROOT>/skills/card/scripts/card_trigger_mcp.py"]
-      }
-    }
+    "servers": {}
   },
 
   "__r2_note__": [
@@ -49,5 +45,22 @@
     "openclaw-gateway-biga.service。apply_config.py 装服务前拒绝任何非 -biga 单元名，",
     "装后由 tools/verify/isolation.py::check_namespaces() 核对。端口 19789 与同机另一套",
     "实例的 18789 间距 1000（≥ 官方 120）。"
+  ],
+
+  "__feishu_note__": [
+    "streaming.mode: \"off\"（2026-09-24，docs/troubleshooting/feishu-streaming-card-400.md）：",
+    "默认 \"partial\" 时创建流式卡片被飞书服务端拒绝（HTTP 400），非流式 fallback 在这套",
+    "环境里也没能把消息真的送达，而网关日志把它记成发出成功 —— 故障是静默的。",
+    "streaming 必须是 object，不是 bool —— live schema 校验拒绝过一次布尔值写法",
+    "（真实报错：must be object）；bool 是旧版 OpenClaw 的写法，现在只在",
+    "`openclaw doctor --fix` 的迁移路径里认。",
+    "apply_config.py::render_patch() 把这个键钉进配置即代码，新装机照这份模板配置即可，",
+    "不需要再手动 patch 一次。",
+    "",
+    "mcp.servers 留空：出卡触发是纯 skill（main 认出请求后用 shell 跑",
+    "skills/card/scripts/inbound.py），不注册任何 MCP server。曾经写过",
+    "biga-card-trigger 一项，指向的 card_trigger_mcp.py 已随出卡机制改造删除 ——",
+    "render_patch() 会显式 null 掉 live 配置里的这个键（省略 ≠ 删，见 apply_config.py",
+    "模块 docstring），本模板同步展示目标状态，不再示范一个会被下一次 apply 删掉的键。"
   ]
 }
