@@ -54,7 +54,9 @@ def main(argv: list[str] | None = None) -> int:
 
     proof = spawn_proof(decision_id)
     if not proof.readable:
-        print("🔶 spawn 核验判不了 —— 读不到运行时的 subagent_runs。", file=sys.stderr)
+        print("🔶 spawn 核验判不了 —— 读不到运行时的 spawn 记录"
+              "（subagent_runs / task_runs 两张都不在，或在却读不了）。",
+              file=sys.stderr)
         print("   这**不算通过**：无法区分「真 spawn」与「手工跑脚本」。",
               file=sys.stderr)
         return _v.UNKNOWN
@@ -73,8 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     #    而机器当天确实跑过别的真实决策，伪造的号**蹭上了别人的记录**。
     #    ⚠️ `bin/biga-card` 正常使用就会反复运行 ⇒ 这个条件几乎总成立。
     if proof.rows == 0 and ours:
-        print(f"🔴 spawn 核验失败：{decision_id} 在运行时 subagent_runs 里"
-              f"**一条记录都没有**，而 agent_runs 里有 {ours}。", file=sys.stderr)
+        print(f"🔴 spawn 核验失败：{decision_id} 在运行时的 spawn 记录里"
+              f"**一条都没有**（读到的来源：{proof.by_source or '两张表都是空的'}），"
+              f"而 agent_runs 里有 {ours}。", file=sys.stderr)
         print("   那些行是凭空写进去的，这个决策号从未被 spawn 过。", file=sys.stderr)
         return _v.FAIL
 

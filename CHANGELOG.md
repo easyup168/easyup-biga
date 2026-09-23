@@ -15,6 +15,108 @@
 
 ## [未发布]
 
+### 🔴 修复（评审回合二）· 上一条的判据被实证绕过；同一个根还漏了第二个消费方
+
+独立评审对下面那条做了三件事，两件推翻了它的判据：
+
+**① 「排除 `task_kind='exec'`」是排除列表，实测能绕过。** 评审去读了已安装的
+运行时源码（不是数据库）：`taskKind` 是**自由文本开放列**（无枚举无校验），
+已发货的取值不止三个（`exec` / `automation_run` /
+`context_engine_turn_maintenance` / `<label>_generation`）。更要命的是
+`resolveTaskAgentId()` 会回退到**发起者自己的会话** ⇒ 任何在 agent X 会话里
+建出来的 task 行，缺省就带 `agent_id = X`。
+
+⇒ 造六行 `task_kind='image_generation'`、`agent_id` 是 specialist 本人、决策号
+写在它自己可控的文本里，`check_1_spawned` 报 **PASS「6 个 agent 两份记录都齐」**，
+而真实 spawn **零次** —— 正是外部评审 F3 要抓的形状，核验放行了它。
+（本次复核独立复现过这个伪造，不是转述。）
+
+⇒ 改成**肯定式**判据（`_REAL_SPAWN_SQL`），不枚举 kind：子会话的 agent 段必须
+等于 `agent_id`，且 `run_id` 必须是**裸 UUID**（真 spawn 没有命名空间前缀，
+工具/定时/后台执行都带 `tool:` / `cron:` / `exec:`）。实测全表三种已知 kind 被
+run_id 命名空间完整分开；对 `BIGA-20260922-001` 新旧判据都是 12 行，零回归。
+
+⚠️ **上一轮的探针钉不住这件事**：仿件里 `task_kind` 与 `run_id` 绑死，把实现换成
+`run_id NOT LIKE 'exec:%'` 也全绿 —— 它钉的是实例不是判据。新探针专门造了一个
+**第四种 kind**，退回排除列表当场报红。
+
+**② per-table 的 `except sqlite3.Error: pass` 把「表不存在」和「读失败」混成一种。**
+评审实测：上游把 `task` 列改名之后，真卡的结论不是「判不了」而是
+**FAIL「这个号从未被 spawn 过」** —— 一次读失败变成**对一张真卡的指控**，
+比退化成 UNKNOWN 坏一档，且与函数自己的 docstring 冲突。
+⇒ 三态分清：两张都不在 ⇒ 判不了；在的那张读炸 ⇒ 判不了；只有一张在 ⇒ 正常用它。
+口径照 `skills/_store/runtime.py::read_task_runs()`（先查 `sqlite_master`）——
+同一个仓库里早就有正确写法，只是没被复用。
+
+**③ 「通过是因为什么都没查」——同一个根上漏了第二个消费方。**
+`orphan_spawns()` 仍然只读 `subagent_runs`。实测三天对照：
+
+```
+20260921  subagent_runs 51 行 | task_runs 真 spawn 100 行
+20260922  subagent_runs  0 行 | task_runs 真 spawn  27 行
+20260923  subagent_runs  1 行 | task_runs 真 spawn   1 行
+```
+
+09-22 那天 `budget_report.py` 打出「✅ 无孤儿 spawn」—— **那个 ✅ 是读一张空表
+读出来的**，当天有 27 次真 spawn。而且它返回 `[]`（干净）不是 `None`（判不了），
+连 R-3 都没保护到。
+⇒ 改成与 `_runtime_spawn_records()` **同源**，共用同一份 `_REAL_SPAWN_SQL`。
+修完之后 09-22 从「无孤儿」变成 **15 条**（都是验证/spike 会话的 spawn：
+真花了钱、真没进卡，按这个检查的定义就是孤儿）。
+
+⚠️ 这条不是上一版引入的，但上一版的**全部论证**就是「运行时记在哪张表不是
+恒定的」—— 证完之后只修了两个消费方里的一个，正是 L-3：同一个事实两套口径，
+而其中一套已经被自己证明是错的。
+
+**④ 顺带**：`SpawnProof` 加 `by_source`（给 `source` 字段一个真消费方，L-1），
+报错从只说 `subagent_runs` 改成说出实际读到的来源分布；仿件那句「字段形状照抄
+真库」改准（只建查询用得到的 7 列，真库 33 列）。
+
+### 🔴 修复 · `spawn_check` 对编排器产出的真卡「判不了」—— 运行时记录不只在一张表
+
+**症状**：`BIGA-20260922-001`（至今唯一一张编排器真实产出的卡）跑 `spawn_check.py`
+报「判不了」(exit 2)。一张真卡、七次真 spawn，核验却给不出结论。
+
+**根因**：`spawn_proof()` 只读运行时的 `subagent_runs`。实测对照同一个决策号：
+
+```
+subagent_runs                      0 行
+task_runs（排除 task_kind='exec'） 12 行   ← market/sector/news/technical/emotion + risk + synthesizer
+```
+
+运行时把一次 spawn 记在哪张表**不是恒定的**。另一个会话 2026-09-23 走同一条
+Adapter 代码路径重新 spawn 时，`subagent_runs` 确实进了行 —— 两张表都可能是
+落点，只读一张就在另一张那侧变成盲区。
+
+⚠️ 这条**也是批 J-II 结构化 join 的地基**：join 的右表取自这份记录，地基是空的
+时候，join 再硬也命中不了。J-II 的实现没问题，它忠实地接在了一条本就断掉的判据上。
+
+**修法**：两张表都读，归一成 `{run_id, agent, source}`。
+- `subagent_runs` 的 agent 从 `child_session_key` 第二段抠；`task_runs` 有现成的
+  `agent_id` 列。归一化**只在取数处做一次**，消费端只比 `rec["agent"]`（不各解析
+  一遍，那是第二套口径 L-3）。
+- 🔴 排除 `task_kind='exec'`：那是 Specialist 自己在会话里跑 shell（`run_id` 形如
+  `exec:<名>`、requester 是它自己的子会话），不是「被 spawn 起来」。不排掉的话，
+  一个只跑过 exec、从未被 spawn 的 agent 会被判成 spawn 过 —— 正是这套核验要抓的
+  伪造形状。
+- 🔴 两张表**各自**容错：少一张不等于读不到。第一版把两条查询写在同一个 `try`
+  里，结果运行时库缺 `task_runs` 就整个 `return None` ⇒ 退化成「判不了」，而
+  「判不了」是会被忽略的。**现有测试当场抓到了这个**（仿件库只建了 `subagent_runs`，
+  四条老测试翻红）。只有两张都取不到才是真的读不到（R-3）。
+
+**探针**（弄坏→红→还原，G-1）：
+- P1 去掉 `task_runs` 这个来源 ⇒ 「只有 task_runs 时也认得出 spawn」与
+  「exec 行不算被 spawn」双红。
+- P2 去掉 exec 过滤 ⇒ 只有 exec 行的 agent 被判成 spawn 过，报红。
+- P3 把「两张都取不到才 None」改成永远返回列表 ⇒ 「零条记录」会被判成伪造而不是
+  判不了，报红。
+- 真实数据验证：修复前 `_runtime_spawn_records('BIGA-20260922-001')` 拿到 **0 条**，
+  修复后 **12 条**、7 个 agent 全认出、0 条 exec 混入。
+
+⚠️ **端到端仍未闭环**：那张卡的 `agent_runs` 侧是空的（它早于「persist 补记账本」
+那次修复），所以 `spawn_check` 现在仍报「判不了」——但运行时侧已经从 0 条变成 12 条。
+**下一张真实卡会免费给出完整结论**，不需要为此单独花钱 spawn。
+
 ### 🔴 新增 · 批 J-I：`run_id` capture 贯穿全链（EvidenceSet / Verdict / Card 绑定 Run）
 
 设计文档 §2 追加 5.1；总体设计 §43 短期重点第 2、3 条。**实现完成、离线全绿
