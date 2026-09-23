@@ -96,6 +96,35 @@
   `Failed: DID NOT RAISE SourceError`（残月/串月被静默放行）。还原 → 绿。
 - 三次探针跑完 `grep -rn PROBE skills/` 确认工作区无残留。
 
+### 🐛 修复 · 隔离自检漏认 `%h` 写法与 `.timer` 单元 —— 装 notify-worker 定时器时亲手撞到
+
+`isolation.py::check_namespaces()` 判据是「引用了 BigA 路径的单元，名字必须带
+`-biga`」，但实现只认字面绝对路径、只 glob `*.service`。装
+`notify-worker-biga.{service,timer}`（见下一条）后拿它自查，报告只数到网关
+那一个单元——查下去发现两处盲点：① 单元文件要进公开仓库，不能把真实家目录
+硬编码进去，只能用 systemd 的 `%h` 写法，而检查只认 `str(BIGA)` 那个字面展开
+路径；② 检查从不 glob `*.timer`，定时器单元完全不在扫描范围内。两处叠加的
+后果不是报红，是**这道守卫对这一类单元完全失明**——不确认它没事，是根本
+没看见它。改成 body 里出现字面路径或 `%h/.openclaw-biga` 任一即算引用，
+候选文件同时 glob 两种后缀；新增 4 条测试，sabotage-revert 验证过两处
+改动各自都会被抓到（错误信息与真实报告行为一致：判不了，不是通过）。
+写下来是因为这正是 R-2 反复出现的那个模式——不是新红线，是同一条红线
+第 N 次在新地方被撞到，见 CLAUDE.md 那张表。
+
+### ✨ 新增 · `bin/biga-notify` + systemd 定时器 —— 给 `notify_worker.py` 接上调度方
+
+对齐 `docs/external/2026-09-23-biga-minimal-feishu-design.md` §6/§13：投递
+脚本本身（批 G-I）与真投递凭据（`FeishuDeliverer`，P6 live 修的那批）早就
+都有了，缺的只是「谁、多久调一次它」——这个缺口在 TODO 里挂了很久，且
+真会咬人：忘记 `--deliverer feishu` 就是「通知一直攒在 outbox 里」，P6 live
+真跑时就撞过一次。`bin/biga-notify` 把默认值固化成真投递（仍可显式传参
+覆盖回 stdout 桩排查），systemd timer 每 2 分钟跑一次（`Type=oneshot` +
+`OnBootSec`/`OnUnitActiveSec`），已用配套的 `install_notify_timer.py --apply`
+真实装上并 `enable --now`。装/卸载脚本不经 `bin/biga`（R-1 例外——纯 BigA
+自己的 systemd 定时器，跟 OpenClaw 的 profile/gateway 完全无关，不存在可
+转发的子命令）；单元名装前用 `check_r2()` 先查一遍 `-biga` 后缀，不等隔离
+自检才发现（该守卫本身随即也在这批里补上了两处盲点，见上一条）。
+
 ### 🔧 变更 · 文档规约放过 `docs/external/` 下未跟踪的文件
 
 `.gitignore` 已把 `/docs/external/*` 整体挡住（运营者的决策，2026-09-23：那目录
