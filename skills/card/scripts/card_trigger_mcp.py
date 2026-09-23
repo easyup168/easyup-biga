@@ -112,10 +112,24 @@ def build_server():
 
     server = FastMCP("biga-card-trigger")
 
+    # 🔴 P6 live 排查线索（2026-09-23，未完全confirm，先按最可能的方向试）：
+    #    `biga mcp probe` 提示"没有安全标注的工具在 prompting session posture 下
+    #    需要 approval"——而 command-dispatch 这条路径设计上就是不经过人在环的
+    #    交互式 approval（它的整个存在理由就是免掉这一步：owner 白名单
+    #    + bin/biga-card 自己的五道守卫已经是这个动作的授权机制，不该再在
+    #    MCP 层加一道无法满足的交互式 approval）。补上标注，看是否是
+    #    "Tool not available" 的真正原因。
+    from mcp.types import ToolAnnotations
+
     @server.tool(
         name="biga_card_trigger",
         description=("触发一次 A 股决策出卡（幂等 + 异步）。飞书 /card 命令直达此工具，"
-                     "不经过 main 的判断。重复的同一请求不会重复出卡。"))
+                     "不经过 main 的判断。重复的同一请求不会重复出卡。"),
+        annotations=ToolAnnotations(
+            readOnlyHint=False,      # 真有副作用：占号 + 异步拉起 bin/biga-card
+            destructiveHint=False,   # 不删除/不覆盖任何东西
+            idempotentHint=True,     # 核心保证：同一 trigger_id 重复调用不重跑
+            openWorldHint=False))    # 范围封闭：只碰自己的 decision_ids/一次后台拉起
     def biga_card_trigger(command: str = "", commandName: str = "/card",
                           skillName: str = "card", **context) -> str:
         # command-arg-mode: raw ⇒ OpenClaw 传 {command, commandName, skillName}，
