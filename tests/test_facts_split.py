@@ -241,7 +241,7 @@ class TestCrossCheckEvidenceSet:
     def test_P4_都有evidence_set_id就比它_不同则报(self, wired):
         wired[1] = _up("market", "sh_close", evidence_set_id="es-AAA")
         wired[2] = _up("technical", "close", evidence_set_id="es-BBB")
-        v = risk.build_verdict(verdict_ids=[1, 2], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
         xconf = v.result["cross_check_conflict"]
         assert xconf, "不同 evidence_set_id 却没报冲突"
         # 🔴 冲突必须由 **evidence_set_id 判据本身**报出，不能是 raw_hash 兜底凑巧也报。
@@ -257,14 +257,14 @@ class TestCrossCheckEvidenceSet:
     def test_同一个evidence_set_id不报(self, wired):
         wired[1] = _up("market", "sh_close", evidence_set_id="es-SAME")
         wired[2] = _up("technical", "close", evidence_set_id="es-SAME")
-        v = risk.build_verdict(verdict_ids=[1, 2], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
         assert v.result["cross_check_conflict"] == []
 
     def test_P4_一条没有evidence_set_id则退回raw_hash_不跳过(self, wired):
         # market 有 es-id、technical 没有（老 Specialist）→ 退回比 raw_hash
         wired[1] = _up("market", "sh_close", evidence_set_id="es-X", raw_hash="HASH_A")
         wired[2] = _up("technical", "close", raw_hash="HASH_B")  # 无 es-id
-        v = risk.build_verdict(verdict_ids=[1, 2], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
         # 不是「因为缺字段就跳过」——退回 raw_hash 比较，HASH_A≠HASH_B ⇒ 报冲突
         assert v.result["cross_check_conflict"]
 
@@ -298,24 +298,21 @@ class TestCrossTypeInvariant:
 # ───────────────────────────────────── P6 · 老路径回归
 
 
-class TestLegacyAmendUnchanged:
-    def test_P6_未迁移的market走amend老路径照常(self, db, capsys):
-        # market 仍产合体 AgentVerdict（未迁移）
+class TestLegacyAmendRetired:
+    def test_旧合体行的修订路径已退役(self, db, capsys):
+        """🔴 批 E-III：六个 skill 全迁完之后，操作合体 AgentVerdict 的旧修订路径退役。
+        `save_verdict` 仍保留（LegacyAdapter 读路径宽的测试还靠它造老形状），所以历史
+        合体行仍能造出来；但对它跑 amend 会**明确报错退役**，不是静默改库。"""
         vid = save_verdict(AgentVerdict(
             task_id=TID, agent="market", status="completed", verdict="PASS",
             result={"sh_close": 3911.0}, data_completeness=1.0,
             evidence=[_ev("sh_close", 3911.0)], elapsed_ms=50), path=db)
-        # 走 amend_verdict.py 老路径：加缺失项 + 降级 + stance —— 与这一批之前一样
         rc = amend.main(["--ref", str(vid), "--add-missing",
                          "market.trend.no_history", "只有单日，无法判断趋势",
                          "--verdict", "WARNING", "--stance", "放量上涨"])
-        assert rc == 0
-        new_ref = latest_verdict_ids(TID, path=db)["market"]
-        amended = load_verdict(new_ref, path=db)
-        # 老路径：复制原件 + 改字段，仍是一条合体 AgentVerdict（有 stance 有 missing）
-        assert amended.verdict == "WARNING" and amended.stance == "放量上涨"
-        assert any(m.code == "market.trend.no_history" for m in amended.missing)
-        assert amended.result["sh_close"] == 3911.0  # 事实还在（没被丢）
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "退役" in err and "只读" in err
 
     def test_amend给fact行加stance_走新路径不重打(self, db):
         fb = FactBundle(task_id=TID, agent="emotion", status="completed", verdict="PASS",

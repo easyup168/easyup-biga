@@ -123,7 +123,7 @@ skill 会给你这些**事实**（它不给结论）：
 | `放行` | 证据齐备，没有碰到阈值 |
 | `警示` | 证据齐备，碰了阈值但不足以否决 |
 | `否决` | 🔴 证据齐备且风险明确。**Card 会被强制拒绝 BUY，并且必须显示为 AVOID 或 BLOCK** |
-| `无法判定` | 覆盖不足 / 上游矛盾 / 交易日不一致（此时 `--verdict` 必须是 `UNKNOWN`） |
+| `无法判定` | 覆盖不足 / 上游矛盾 / 交易日不一致（skill 已按缺失把 verdict 报成 WARNING/UNKNOWN，你只管给这个 stance） |
 
 ### 照抄这条命令
 
@@ -149,22 +149,26 @@ risk.coverage.insufficient          Stage 1 缺席:news,…
 
 契约层现在会**直接拒绝**这种卡（同一命名空间、同一句话报两遍）。
 
-⇒ 覆盖不足时只改结论，不加缺失项：
+⇒ 覆盖不足时只给判断，**不加缺失项、也不改 verdict**（skill 已经按缺失报好了完整度）：
 
 ```bash
 cd ~/.openclaw-biga/workspace && \
 python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
-  --verdict UNKNOWN \
   --stance 无法判定
 ```
 
-⚠️ 真有 skill 没覆盖到的事（比如你从上游 stance 里看出的矛盾），
-才追加缺失项 —— 那是**你的判断**，不是复述。
+⚠️ 你从上游 stance 里看出、而 skill 没点名的矛盾，写进下面输出格式的
+「依据 / 未被审阅的面」自由文本 —— 那是**你的判断**，不是数据缺失项。
+
+> 🔴 批 E-III：fact 行**不接受** `--add-missing` / `--verdict`（批 E 把事实与判断拆开
+> 之后，事后改事实这条路关了 —— 它当年就是 agent 拿 `--verdict` 把 skill 算的完整度
+> 事后降级的 fail-open 入口）。你唯一要提交的是 `--stance`；照抄旧的组合命令会被
+> `amend_verdict.py` 报错指路。
 
 🔴 **不要为了确认参数去 `--help`、去 grep 源码、去 find。**
 实测有 Agent 为此花了 62 秒、12 次工具调用，还跑了被明令禁止的 `find /` ——
 而运行时会把那些命令的输出吞掉，**你搜不到东西，只会越搜越远**。
-上面两条命令是完整的，照抄即可。
+上面两条命令是完整的（都只有 `--stance`），照抄即可。
 
 ---
 

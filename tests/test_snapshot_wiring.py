@@ -168,7 +168,7 @@ class TestCrossCheckJudge:
     def test_共享同一份则不报冲突(self, wired):
         wired[1] = _up("market", "sh_close", "HASH_SHARED")
         wired[2] = _up("technical", "close", "HASH_SHARED")
-        v = risk.build_verdict(verdict_ids=[1, 2], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
         assert v.result["cross_check_conflict"] == []
 
     def test_P2_退回独立抓取_raw_hash不同_报红(self, wired):
@@ -178,7 +178,7 @@ class TestCrossCheckJudge:
         """
         wired[1] = _up("market", "sh_close", "HASH_FROZEN")
         wired[2] = _up("technical", "close", "HASH_INDEPENDENT_FETCH")
-        v = risk.build_verdict(verdict_ids=[1, 2], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
         assert v.result["cross_check_conflict"], "raw_hash 不同却没报冲突"
         assert any(m.code == "risk.upstream.cross_check_conflict" for m in v.missing)
 
@@ -187,7 +187,7 @@ class TestCrossCheckJudge:
         （比值）会放过，新判据（比 raw_hash）报红。这是「不再是恒真」的正面证据。"""
         wired[1] = _up("market", "sh_close", "HASH_A")
         wired[2] = _up("technical", "close", "HASH_B")  # value 相同、hash 不同
-        v = risk.build_verdict(verdict_ids=[1, 2], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
         assert v.result["cross_check_conflict"]
 
 

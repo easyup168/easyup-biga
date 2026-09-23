@@ -771,11 +771,15 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `Evidence` 加 `evidence_set_id`（还 D-II 的账，CROSS_CHECK 升级为优先
         比它）；试点迁 `emotion`（`build_fact_bundle`）。市场/板块/技术/新闻/
         风险五个未动，`amend_verdict.py` 未退役。教程 ch 27。
-  - [~] 批 E-II · 迁 market/sector/technical/news 四个 —— **实现完成、离线全绿
-        （1039→1062），六道探针（P1–P6）+ 四道红灯演练全见过红并已还原，
-        `biga-card --check` 回放一致、`audit --worktree` 十一项全绿，待独立评审**
-        （不自宣通过）。四个 skill `build_verdict→build_fact_bundle`、产 `FactBundle`；
+  - [x] 批 E-II · 迁 market/sector/technical/news 四个 —— **评审复核通过、已合并
+        （`359b97c`）**。四个 skill `build_verdict→build_fact_bundle`、产 `FactBundle`；
         消费方零改动。教程 ch 29。
+        评审复核：独立查库验证了 `market.trend.no_history` 的历史修订（4 条，
+        2 条原件确认是 PASS/completed 且 `volume_ratio` 均完整，与报告结论一致）；
+        亲手 sabotage 了「skill 源码不该出现 trend 概念」这条守卫；核对 sector/
+        technical/news 的历史 amend 记录，确认下面「后续文档收敛」那条的风险
+        评估准确（technical 19 条修订从未用过 `--add-missing`，sector/news 用的
+        都是 skill 自己的码，模板占位码从未被字面照抄过）。
         **①的裁定落地查了真实数据库**（不照抄例子）：四个 skill 历史 `--add-missing`
         限制全部已由 skill 自检（`market.breadth.*`、`sector.board.pre_session`），
         ①不新增检测代码。唯一例外 `market.trend.no_history` 命中 escape hatch ——
@@ -790,12 +794,28 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         **可选**的 `--add-missing X.partial` 示例命令。它们对应 genuine 数据缺口、skill
         已自检，agent 正常只需 `--stance` 转述、不会撞上，破坏概率远低于 market；但示例
         本身迁移后同样会被 fact 行拒 ⇒ 建议随 E-III 或一次文档 pass 一并清掉。
-  - [ ] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py`（等 E-II 评审通过、
-        四个新形状稳定之后再写分发提示词）
-        `risk` 单独一批：它也有 `stance`（`VETO_STANCE` = 制衡层最安全关键的
-        判断），且消费其余五个的产出，等它们形状稳定更安全；退役
-        `amend_verdict.py` 的前提是全部六个都迁完，天然只能跟最后一个绑一起。
-- [ ] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— **实现完成（分支 `c-iii`，
+  - [x] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py` —— **评审复核通过、已合并
+        （`619d35e`）**。VETO 穿透独立复现：评审自己写脚本，从数据库落库开始走完整
+        链路（FactBundle→AgentAssessment(否决)→`load_verdict`→`DecisionCard`），
+        不经过报告贴的探针。**Facts/Assessment 拆分至此收官：六个 Specialist 全部产
+        `FactBundle`。** 教程 ch 30。
+        · risk 机械迁移（三个 return 点，含两条 `status='failed'` 早退），读上游仍用
+          `load_verdict`（多态），`AgentVerdict` 仍在 import（它是上游的消费方）。
+        · 🔴 **VETO 穿透验证（核心）**：查明拦截链（`load_verdict` 多态 →
+          `to_agent_verdict` → `DecisionCard` 读 `.stance`）是前几批建好的，**这一批一行
+          拦截代码不改**——P2 因此断到 `DecisionCard` 真拦 BUY 的那一层（不是断
+          `stance==否决`），红灯把 `to_agent_verdict` 的 stance 丢成 None → BUY 不被拦
+          （`DID NOT RAISE`）证明链是真的。
+        · 退役 `amend_verdict.py` 旧路径（删 74 行），`_assess_fact` 保留并扩成也拒
+          `--verdict`。🔴 `save_verdict()` **不删**（七个测试 + `phase1_acceptance.py`
+          还靠它造老形状测 `LegacyAdapter` 读路径宽）——amend 不再 import 它，函数留 `_store`。
+        · risk AGENTS.md：**先查了库**（risk 历史 `--add-missing` 两个码都已被 skill 自报，
+          不是 market 那种范围外边界）→ 删 `--verdict` 组合命令；`无法判定` 可挂 WARNING
+          （`check_stance_vs_verdict` 只禁 UNKNOWN 上的方向判断）⇒ 不需要事后降级。
+        ⏭ **随之解决的后续项**：E-II 交接里记的「sector/technical/news 的 AGENTS.md 仍留
+          可选 `--add-missing X.partial` 示例」—— 本批未一并清（它们不涉 risk），仍留作
+          一次文档 pass 的候选；退役后那些示例照抄同样会被 fact 行拒。
+- [x] 批 C-III · Orchestrator 健壮性收尾（外部评审）—— **实现完成（分支 `c-iii`，
       基于 `2e5e8ea`）：离线全绿 1005→1016、四道探针 P1–P4 全见过红并已还原、
       `biga-card --check` 回放一致、`audit --worktree` 十一项全绿；评审复核通过，
       已合并。** 在独立 git worktree 上做，因为批 E-I 的未提交 WIP 同时在主工作区
@@ -827,14 +847,19 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         不做 enforce（`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等
         真正的重试批次。
         ⚠️ 等批 E-II **与** E-III 都合并之后开工（三批都要碰同一批 skill 脚本）
-  - [ ] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
-        —— 分发提示词已就绪
-        两处同名清掉。`agent_runs.run_id` 是 `INTEGER PRIMARY KEY
-        AUTOINCREMENT` 账本行号，**实测全仓没有任何代码读它** ⇒ 现在改免费；
-        `SpawnHandle.run_id` 其实是 `runtime_run_id`，落库之后
-        `spawn_check.py` 能从 `payload_json LIKE '%决策号%'` 文本匹配
-        升级成结构化 join（F3 残留，§4 早就记着）。
-        两半合一批做：动的是同一张只追加表，拆开=对它连开两次刀
+  - [x] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
+        —— ✅ 评审复核通过（2026-09-23）。schema v9；live 实测
+        `SpawnHandle.runtime_run_id` 与运行时 `subagent_runs.run_id` **确为同一
+        命名空间**（这是结构化 join 的前提，线下只能靠「两边都长得像 UUID」猜）。
+        教程第 31 章（原写作 30，与批 E-III 撞号——两批并行各取下一个空号）。
+        🔴 **评审留下一条缺口，根因在分发提示词不在实现**：强绑定是 per-agent、
+        按数据有无启用的（`rr_by_agent.get(agent)` 为空就静默退回弱判据）。
+        今天对（历史行全 NULL），但**等六个 agent 都走上新路径之后，`NULL` 的
+        含义会从「迁移前的老行」悄悄变成「可能是手写的行」，而没有任何东西会
+        注意到这个转变** —— review-prompt §3「静默 fail-open」的形状。
+        修法便宜：加一条 **per-decision 一致性检查**（同一个 decision 里只要有
+        一行带 `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理，
+        R-3，不是退回弱判据）。⇒ 留给批 J-I 之后第一个「六个都带上了」的批次。
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。排在批 J 之后、
       批 F 之前：它给 raw 加溯源字段，那些字段要指向一个不含歧义的 `run_id`

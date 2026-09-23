@@ -4,16 +4,16 @@
 
 # EasyUp for BigA 2.0
 
-### 基于 OpenClaw 的 Multi-Agent A 股短线决策辅助系统
+### 基于 OpenClaw 的 Multi-Agent 个人 A 股智能交易平台
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/1083%20TESTS-PASSING-2ea043)
-![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v5%20%C2%B7%205%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-18%20%E7%AB%A0-8957e5)
+![Tests](https://img.shields.io/badge/1096%20TESTS-PASSING-2ea043)
+![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v9%20%C2%B7%208%20tables-555)
+![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-31%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
 ![IM](https://img.shields.io/badge/%E9%A3%9E%E4%B9%A6-%E5%B7%B2%E6%8E%A5%E9%80%9A-1f6feb)
-![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-by%20design-555)
+![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-%E7%8E%B0%E9%98%B6%E6%AE%B5-555)
 
 ***发现共识，锁定核心，让每一笔交易都有逻辑***
 
@@ -21,7 +21,9 @@
 
 ---
 
-**不自动执行交易。** 产出是一张证据可追溯、可回放的 Decision Card，最终决策由人做。
+**当前阶段：Multi-Agent 决策辅助，不自动执行交易。** 产出一张证据可追溯、可回放的
+Decision Card，最终决策由人做——这是通往自动化交易平台的第一个 Kernel，
+不是这个项目的终态（见下方「为什么重新做一套」）。
 
 ---
 
@@ -38,6 +40,11 @@
 所以 BigA 2.0 是一次**全程公开的重建过程** ——
 架构决策、踩过的坑、放弃的方案，全部记录在 [`docs/tutorial/`](docs/tutorial/README.md)。
 
+**现在这个多 Agent DecisionCard 闭环不是终点。** 它是一个更长期的个人交易平台的
+第一块 Kernel——后续如果有选股 / 计划 / 风控 / 组合 / 复盘 / 回测这类能力，
+设想中是围着这个 Kernel 长出来，不是另起一套系统。当前阶段的施工范围仍然只是
+Decision Card 闭环本身，见下方「确定性编排升级」。
+
 ---
 
 ## 架构
@@ -52,9 +59,9 @@
          ├──► Technical（技术）┤
          └──► Market（市场）  ─┘
          │
-         │ Stage 2：并行 2 个制衡 Agent（输入 = Stage 1 的冻结证据）
-         ├──► Risk（风险）      ──┐   BLOCK / WARNING / PASS
-         └──► Discipline（纪律）──┘
+         │ Stage 2：制衡 Agent（输入 = Stage 1 的冻结证据）
+         └──► Risk（风险）——BLOCK / WARNING / PASS
+              （Discipline·纪律 设计上也在这一层，Phase 3 才建——见下方状态表）
          │
          │ Stage 3：Supervisor 合成
          ▼
@@ -213,7 +220,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 
 ---
 
-## Phase 2 · Specialists（进行中，在 `phase2` 分支）
+## Phase 2 · Specialists（进行中——`phase2` 分支已并入，后续在 `orchestration` 分支）
 
 | 项 | 状态 |
 |---|---|
@@ -221,8 +228,8 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | 第 8 个 `discipline` —— **故意不建**（没有输入源，见裁定 13） | — |
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
-| schema v5 —— 决策编号原子分配器 + 只追加保护 | ✅ |
-| 1083 条测试 | ✅ |
+| schema v9 —— 决策编号原子分配器 + 只追加保护（v6 起加事实/判断拆分的 `kind` 列） | ✅ |
+| 1096 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
 | **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
@@ -247,6 +254,28 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 跨天累积同样要等下一个交易日。**别把前置条件当成达成。**
 
 详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11。
+
+---
+
+## 确定性编排升级（进行中，在 `orchestration` 分支）
+
+Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错误的决策号上、
+出卡递归成 187 个会话烧掉 \$8.99、飞书路径 4 spawn 缺一个 agent 却没有任何报错。
+共同点是**工作流一直靠 Supervisor 读提示词临场决定**——提示词表达意图，
+表达不了不变量，下一条缝总会从别处长出来。
+
+⇒ 把"下一步跑什么、谁被调用、超时多久、什么算失败"这些**程序说了算**的东西，
+从提示词里搬进一个显式状态机（`DecisionOrchestrator`）；"当前市场是什么状态、
+证据意味着什么"这类**判断**，仍然是 Agent 的事。完整推导、每一批做了什么、
+每次评审怎么复核，见 [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
+
+| 批 | 内容 | 状态 |
+|---|---|---|
+| A – D | 契约收紧、运行身份、Runtime Adapter、Orchestrator 主干、冻结快照 | ✅ 已落地 |
+| E-I / E-II | 把 `AgentVerdict` 拆成事实（`FactBundle`）与判断（`AgentAssessment`）；六个 skill 里五个已迁 | ✅ 已落地 |
+| E-III | 迁最后一个（`risk`，带否决权）+ 退役旧的事后修订路径 | ⬜ 分发提示词已就绪 |
+| J | 收敛 `run_id` 这个名字在库里同时指三个不同东西的历史遗留 | 🔶 进行中 |
+| F – L | Risk 拆两层 / Outbox+飞书 trigger / RawArtifact / Registry / 交易日历 | ⬜ 排期见设计文档 §6 |
 
 ### 关于「徽章全绿」的说明
 
@@ -291,17 +320,19 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 .
 ├── agents/          各 Agent 的 workspace（AGENTS.md = 角色契约唯一载体）
 ├── skills/
-│   ├── _contract/   Evidence / AgentVerdict / DecisionCard（唯一实现）
+│   ├── _contract/   Evidence / AgentVerdict / DecisionCard（唯一实现）；
+│   │               facts.py：事实（FactBundle）与判断（AgentAssessment）拆开，
+│   │               六个 skill 迁移中（见「确定性编排升级」）
 │   ├── _sources/    采集层：四个数据源 + 重试 + 交易日 + 量级围栏
 │   ├── _store/      数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
 │   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
 │                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
-├── tests/           1083 条测试
+├── tests/           1096 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（19 章，与代码同步）
+│   └── tutorial/    开发教程（29 章，与代码同步）
 └── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
 ```
 
@@ -315,9 +346,10 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 | [`docs/design/architecture.md`](docs/design/architecture.md) | 架构 SSOT：Agent 拓扑、通信契约、数据架构、失败模式清单 |
 | [`docs/design/phase-1-walking-skeleton.md`](docs/design/phase-1-walking-skeleton.md) | Phase 1 设计与验收结果（已冻结） |
 | [`docs/design/phase-2-specialists.md`](docs/design/phase-2-specialists.md) | Phase 2 设计：范围、步骤、关键取舍、出口条件 |
+| [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md) | 确定性编排升级：为什么、各批范围/判据、评审断言复核 |
 | [`docs/guide/usage.md`](docs/guide/usage.md) | **怎么用**：出卡、读卡、以及四个「确认它没骗你」的检查 |
 | [`docs/guide/install.md`](docs/guide/install.md) | 环境安装：在已有 OpenClaw 实例旁并排装第二套 |
-| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：13 章，真实建造过程 |
+| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：29 章，真实建造过程 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 变更历史（每条写「为什么」，不只是「做了什么」） |
 
 ---
@@ -350,6 +382,6 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 
 <div align="center">
 
-⚠️ **本系统不构成投资建议 · 不自动下单 · 最终决策由人做**
+⚠️ **本系统不构成投资建议 · 当前阶段不自动下单 · 最终决策由人做**
 
 </div>
