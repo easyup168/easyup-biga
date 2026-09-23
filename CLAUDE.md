@@ -408,7 +408,7 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 |---|---|
 | Agent | **7 / 8**。`main` + Stage 1 五个（market/sector/technical/emotion/news）+ Stage 2 `risk`。<br>第 8 个 `discipline` **故意不建**（裁定 13：没有输入源） |
 | 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v9**，八张表，只追加由触发器强制（v4 时这句话是**假的** —— 分配器没有触发器，五取四；v6 起 `agent_verdicts` 加 `kind` 列区分事实/判断/合体；v9 收敛 `run_id` 三同名） |
-| 测试 | 1116 条 |
+| 测试 | 1100 条 |
 | 端到端 | 盘中 172.6s / $1.20（预算 **180s**）；**盘后 198s / $1.37 —— 超预算**，因为收盘后一小时快讯量翻倍（184 vs ~70 条）|
 | 隔离 | `tools/verify/isolation.py` **三态**（`UNKNOWN` 不计入通过）；判据由 `tests/test_isolation.py` 钉住 |
 | 外部评审 | 两份，共 29 条，**全部处理完**（见 `TODO.md` 的合并台账）|
