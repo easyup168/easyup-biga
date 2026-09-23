@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import datetime
@@ -174,10 +175,12 @@ class TestSkillsEmitTraceableEvidence:
         import test_market_calc as tmc  # 复用那边的桩
         for name, fn in (("fetch_index_daily", lambda symbol, **k: tmc.bars(
                               symbol, 25, 3911.871, 3875.6, 48571250700)),
-                         ("fetch_index_quote", lambda codes: {
-                              c: tmc.quote(c, 99416945.0, 485712507) for c in codes}),
+                         ("fetch_index_quote", lambda codes: (
+                              {c: tmc.quote(c, 99416945.0, 485712507) for c in codes},
+                              "v_sh000001=\"...\";")),
                          ("fetch_breadth", lambda: __import__("_sources").BreadthResult(
-                              4277, 1173, 180, [], {"rc": 0}))):
+                              4277, 1173, 180, [], {"rc": 0},
+                              raw_text=json.dumps({"rc": 0})))):
             monkeypatch.setattr(mc, name, fn)
         monkeypatch.setattr(mc, "now_cn",
                             lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))

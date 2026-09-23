@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import pathlib
 import sys
 import time
@@ -147,7 +148,7 @@ def _fake_daily(symbol, *, bars):
     rows = [{"day": (date(2026, 3, 2) + timedelta(days=i)).strftime("%Y-%m-%d"),
              "open": 3000.0 + i, "high": 3010.0 + i, "low": 2990.0 + i,
              "close": 3000.0 + i, "volume": 10_000_000 + i} for i in range(bars)]
-    return parse_index_daily(symbol, rows)
+    return parse_index_daily(symbol, rows, raw_text=json.dumps(rows))
 
 
 def _make_orch(db, **fake_kw):

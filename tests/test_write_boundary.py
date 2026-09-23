@@ -175,7 +175,7 @@ class TestP4StrictJSON:
         with pytest.raises(ValueError):
             save_raw_snapshot(source="test:probe", as_of="2026-09-22T10:00:00+08:00",
                               retrieved_at="2026-09-22T10:00:01+08:00",
-                              payload={"x": bad}, path=db)
+                              payload={"x": bad}, raw_text="[]", path=db)
 
 
 class TestP5HistoricalHashVectorsUnchanged:

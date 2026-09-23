@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import datetime
@@ -56,7 +57,8 @@ def bars(symbol: str, n: int, last_close: float, prev_close: float, last_vol: in
     out[-2] = dataclasses.replace(out[-2], close=prev_close)
     out[-1] = dataclasses.replace(out[-1], day=TRADE_DATE, close=last_close,
                                   volume=last_vol)
-    return sources.IndexDaily(symbol=symbol, bars=out, raw=[{}] * n)
+    return sources.IndexDaily(symbol=symbol, bars=out, raw=[{}] * n,
+                              raw_text=json.dumps([{"sym": symbol}] * n))
 
 
 def quote(code: str, amount_wan: float, vol_hand: int, at: str = TRADE_DATE + "161402"):
@@ -76,7 +78,8 @@ def wired(monkeypatch):
             "sz399106": quote("sz399106", SZ_AMOUNT_WAN, SZ_VOL // 100),
         },
         "breadth": sources.BreadthResult(advance=4277, decline=1173, flat=180,
-                                         per_market=[], raw={"rc": 0}),
+                                         per_market=[], raw={"rc": 0},
+                                         raw_text=json.dumps({"rc": 0})),
     }
 
     def fake_daily(symbol, **kw):
@@ -89,7 +92,8 @@ def wired(monkeypatch):
         v = plan["quotes"]
         if isinstance(v, Exception):
             raise v
-        return {c: v[c] for c in codes if c in v}
+        # 批 I：fetch_index_quote 现在返回 (quotes, 原始响应体)。
+        return {c: v[c] for c in codes if c in v}, "v_sh000001=\"...\";"
 
     def fake_breadth():
         v = plan["breadth"]
@@ -237,7 +241,8 @@ class TestGuard5BreadthHasNoDate:
         （上一交易日）—— 于是 Card 上出现「9-18 上涨家数 0」，
         而那天真实是 4277。比「算不出来」更糟：它是一个**有日期的错值**。
         """
-        wired["breadth"] = sources.BreadthResult(0, 0, 0, [], {"rc": 0})
+        wired["breadth"] = sources.BreadthResult(0, 0, 0, [], {"rc": 0},
+                                                 raw_text=json.dumps({"rc": 0}))
         v = build()
         for f in ("advance_count", "decline_count", "flat_count", "advance_ratio"):
             assert f not in v.result, f"{f} 不该作为事实产出"
