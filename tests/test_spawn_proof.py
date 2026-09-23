@@ -88,8 +88,11 @@ def fake_runtime_db_task_runs(path: pathlib.Path,
     `execs = [(agent, decision_id), …]`  Specialist 自己在会话里跑 shell
                                           （`task_kind='exec'`，run_id 形如 `exec:<名>`）
 
-    字段形状照抄真库 —— 实测 `BIGA-20260922-001` 在 `task_runs` 里有 12 行真 spawn
-    与 5 行 exec，而 `subagent_runs` 里一行都没有。
+    ⚠️ **只建查询用得到的 7 列**，真库那张表有 33 列（含 `task_id` 等）——
+    仿件不是真库的复制品，只保证被查的那几列形状一致。说成「照抄真库」会让
+    读者以为它能替真库回答别的问题。
+    实测 `BIGA-20260922-001` 在 `task_runs` 里有 12 行真 spawn 与 5 行 exec，
+    而 `subagent_runs` 里一行都没有。
     """
     conn = sqlite3.connect(path)  # store-exempt: 外部运行时库的仿件
     conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
@@ -892,3 +895,107 @@ class TestTaskRunsSource:
         assert proof.readable and proof.rows == 1
         assert proof.per_agent["emotion"] == (True, True)
 
+
+class TestRealSpawnPredicate:
+    """🔴 2026-09-23 评审实证：`task_kind` 是运行时里的**自由文本开放列**，
+    而 `agent_id` 的缺省解析会回退到发起者**自己的会话** ⇒ 任何 agent 在自己
+    会话里建出来的 task 行，缺省就带 `agent_id = 它自己`。
+
+    原来的「排除 task_kind='exec'」是排除列表，实测能被第四种 kind 绕过：
+    六行 `image_generation`、agent_id 是 specialist 自己、决策号写在它自己可控
+    的文本里 ⇒ 核验报「两份记录都齐」，而真实 spawn 零次。那正是 F3 要抓的。
+    """
+
+    def _wire(self, tmp_path, monkeypatch, ours, rows):
+        """rows = [(run_id, agent_id, child_session_key, task_kind, task), …]"""
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, requester_session_key TEXT,"
+                     " task_kind TEXT, task TEXT, created_at INTEGER)")
+        for i, (rid, aid, child, kind, task) in enumerate(rows):
+            conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+                         (rid, aid, child, child, kind, task, 5000 + i))
+        conn.commit(); conn.close()
+        r = [{"agent": a} for a in ours]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: r, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: r)
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+
+    def test_第四种task_kind且agent_id是自己_不算spawn(self, tmp_path, monkeypatch):
+        """P1（评审要求补的那道）：换一种没见过的 `task_kind`，判据仍要挡住。
+
+        这正是排除列表挡不住、肯定式判据能挡住的差别 —— 探针不能只钉
+        `exec` 这一个字面量，否则它钉的是实例不是判据。
+        """
+        did = "BIGA-20260922-777"
+        self._wire(tmp_path, monkeypatch, ["market"], [
+            # agent 在自己会话里调工具建的行：run_id 带命名空间前缀
+            (f"tool:image_generate:1", "market", "agent:market:subagent:self-1",
+             "image_generation", f"画一张图，参考本次决策编号 {did}")])
+        proof = pa.spawn_proof(did)
+        assert proof.per_agent["market"] == (True, False), (
+            "agent 在自己会话里建的 task 行被当成了 spawn —— "
+            "判据退回排除列表了？")
+
+    def test_真spawn仍然算(self, tmp_path, monkeypatch):
+        """非平凡：上一条不能靠「什么都不算 spawn」通过。"""
+        did = "BIGA-20260922-778"
+        self._wire(tmp_path, monkeypatch, ["market"], [
+            ("11111111-2222-3333-4444-555555555555", "market",
+             "agent:market:subagent:abc", None, f"本次决策编号 {did}。请…")])
+        assert pa.spawn_proof(did).per_agent["market"] == (True, True)
+
+    def test_child段名与agent_id不符_不算spawn(self, tmp_path, monkeypatch):
+        """伪造者把 agent_id 写成别人：两个字段对不上就不算。"""
+        did = "BIGA-20260922-779"
+        self._wire(tmp_path, monkeypatch, ["market"], [
+            ("11111111-2222-3333-4444-666666666666", "market",
+             "agent:emotion:subagent:abc", None, f"本次决策编号 {did}。请…")])
+        assert pa.spawn_proof(did).per_agent["market"] == (True, False)
+
+    def test_表在却读不了是判不了_不是零记录(self, tmp_path, monkeypatch):
+        """P2（评审要求补的那道）：一张表读失败 ≠ 这个号没有记录。
+
+        评审实测：上游把 `task` 列改名之后，真卡的结论不是「判不了」而是
+        FAIL「这个号从未被 spawn 过」—— 一次读失败变成对真卡的指控。
+        """
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        # 表在，但列名被上游改了 ⇒ 查询会炸
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, task_text TEXT, created_at INTEGER)")
+        conn.commit(); conn.close()
+        r = [{"agent": "market"}]
+        monkeypatch.setattr(pa, "list_agent_runs", lambda **kw: r, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", lambda **kw: r)
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+        assert pa.spawn_proof("BIGA-20260922-780").readable is False, (
+            "表在却读不了被当成了「零条记录」—— 那会让调用方判伪造")
+
+
+class TestOrphanSpawnsSameSource:
+    """🔴 评审抓到的「通过是因为什么都没查」：`orphan_spawns()` 落在只读
+    `subagent_runs` 的旧口径上。实测 2026-09-22 那天它打出「✅ 无孤儿 spawn」，
+    而当天 `subagent_runs` 0 行、`task_runs` 里有 27 次真 spawn。
+    """
+
+    def test_只有task_runs时也能发现孤儿(self, tmp_path, monkeypatch):
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, task_kind TEXT, task TEXT,"
+                     " created_at INTEGER)")
+        from datetime import datetime as _dt
+        lo = int(_dt.strptime("20260922", "%Y%m%d")
+                 .replace(tzinfo=pa.CN_TZ).timestamp() * 1000)
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?)", (
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "market",
+            "agent:market:subagent:x", None, "采集数据（没有决策号）", lo + 1000))
+        conn.commit(); conn.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+        got = pa.orphan_spawns("20260922")
+        assert got is not None, "两张表只有一张在，不该报判不了"
+        assert [(a, why) for _, a, why in got] == [("market", "无决策号")], got

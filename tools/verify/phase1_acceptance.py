@@ -25,7 +25,7 @@ import pathlib
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dc_field, field
 from datetime import datetime
 from typing import Literal
 
@@ -65,6 +65,39 @@ class Check:
 
 
 # ──────────────────────────────────────────────────────────── 需要跑过一次的项
+
+
+#: 🔴 「这一行是不是一次**真 spawn**」—— 肯定式判据，不枚举 task_kind。
+#:
+#: 2026-09-23 评审实证：`task_kind` 在运行时里是**自由文本开放列**
+#: （`taskKind: normalizeOptionalString(params.taskKind)`，无枚举无校验），
+#: 已发货的取值就不止三个（`exec` / `automation_run` /
+#: `context_engine_turn_maintenance` / `<label>_generation`）。
+#: 更要命的是 `agent_id` 的缺省解析会回退到**发起者自己的会话**
+#: （`resolveTaskAgentId`：explicitAgentId → childSessionKey → ownerKey →
+#: requesterSessionKey），于是**任何在 agent X 会话里建出来的 task 行，
+#: 缺省就带 `agent_id = X`**。
+#:
+#: ⇒ 原来的「排除 `task_kind='exec'`」是**排除列表**：实测能被绕过 ——
+#:    造六行 `task_kind='image_generation'`、agent_id 是 specialist 自己、
+#:    决策号写在它自己可控的文本里，核验报「两份记录都齐」，而真实 spawn 零次。
+#:    那正是 F3 要抓的形状。
+#:
+#: 改成肯定式：一次真 spawn 必然同时满足三件事 ——
+#:   ① 有子会话，且子会话的 agent 段与 `agent_id` **相等**
+#:      （agent 自己建的行：child 指向它自己的会话，段名碰巧也等于自己
+#:       —— 所以这条单独不够，要配 ②）
+#:   ② `run_id` 是**裸 UUID**：真 spawn 没有命名空间前缀，而工具/定时/后台
+#:      执行都带（`exec:…` / `cron:…` / `tool:…:…`）。这一条挡住的正是
+#:      「agent 在自己会话里调工具」那一整类。
+#: 实测全表：NULL/bare-uuid 496 行、exec/`exec:` 340 行、automation_run/`cron:` 61 行
+#: —— 三种已知 kind 被 run_id 命名空间完整分开；对 BIGA-20260922-001 新旧判据
+#: 都是 12 行，零回归。
+_REAL_SPAWN_SQL = (
+    " AND child_session_key IS NOT NULL AND agent_id IS NOT NULL"
+    " AND child_session_key LIKE 'agent:'||agent_id||':subagent:%'"
+    " AND run_id NOT LIKE '%:%'"
+)
 
 
 def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
@@ -126,49 +159,64 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         out: list[dict] = []
-        # 🔴 每张表**各自**容错：少一张不等于读不到。
-        #    第一版把两条查询写在同一个 try 里 —— 运行时库里没有 `task_runs`
-        #    （或反过来）就整个 return None ⇒ 核验退化成「判不了」，而
-        #    「判不了」是会被忽略的。只有**两张都取不到**才是真的读不到。
+        # 🔴 每张表各自容错，且**「表不存在」与「读失败」必须分开**。
+        #    第一版两条查询写在同一个 try 里，少一张表就整个 return None；
+        #    第二版改成 per-table `except: pass`，但把两种情况混成了一种 ——
+        #    2026-09-23 评审实测：上游把 `task` 列改名（查询炸）之后，真卡的
+        #    结论不是「判不了」，而是 **FAIL「这个号从未被 spawn 过」**——
+        #    一次读失败变成对真卡的指控。这比退化成 UNKNOWN 坏一档。
+        #    ⇒ 表不在 = 这个来源没有记录（正常，老库就没有 task_runs）；
+        #      表在但读炸 = 算不出来，整条报「判不了」（R-3）。
+        #    取数口径照 `_store/runtime.py::read_task_runs()`（先查 sqlite_master）。
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
         got_any = False
 
+        # 🔴 三种情况必须分开，混任意两种都会把结论带偏：
+        #    a) 两张表**都不在** ⇒ 这压根不是我们认识的那个库 ⇒ 判不了（R-3）
+        #    b) 在的那张读炸了   ⇒ 算不出来 ⇒ 判不了
+        #    c) 只有一张在       ⇒ 正常，用它（老库本来就没有 task_runs）
+        #    评审实测：把 (b) 当成 (c) 处理时，真卡的结论不是「判不了」而是
+        #    **FAIL「这个号从未被 spawn 过」**——一次读失败变成对真卡的指控。
+        present = tables & {"subagent_runs", "task_runs"}
+        if not present:
+            return None               # (a)
+
+        def _pull(table: str, sql: str, to_agent) -> bool:
+            """返回「这个来源可用吗」。不可用 ⇒ 调用方据此报判不了。"""
+            if table not in present:
+                return True           # (c) 表不在不算失败，只是没有记录
+            try:
+                for r in conn.execute(sql, (f"%{decision_id}%",)):
+                    d = dict(r)
+                    d["agent"] = to_agent(d)
+                    d["source"] = table
+                    out.append(d)
+                return True
+            except sqlite3.Error:
+                return False          # 表在却读不了 ⇒ 这就是「算不出来」
+
         # ① subagent_runs —— agent 名字藏在 child_session_key 的第二段里
-        try:
-            for r in conn.execute(
-                    "SELECT run_id, child_session_key, created_at "
-                    "FROM subagent_runs WHERE payload_json LIKE ? "
-                    "ORDER BY created_at DESC", (f"%{decision_id}%",)):
-                d = dict(r)
-                seg = (d.get("child_session_key") or "").split(":")[1:2]
-                d["agent"] = seg[0] if seg else None
-                d["source"] = "subagent_runs"
-                out.append(d)
-            got_any = True
-        except sqlite3.Error:
-            pass
+        ok1 = _pull(
+            "subagent_runs",
+            "SELECT run_id, child_session_key, created_at FROM subagent_runs"
+            " WHERE payload_json LIKE ? ORDER BY created_at DESC",
+            lambda d: (seg[0] if (seg := (d.get("child_session_key") or "")
+                                  .split(":")[1:2]) else None))
 
-        # ② task_runs —— agent 名字有独立的 agent_id 列，不用从 session key 里抠
-        #
-        # 🔴 排除 task_kind='exec'：那是 **Specialist 自己在会话里跑 shell**
-        #    （`run_id` 形如 `exec:<名字>`、requester 是它自己的子会话），
-        #    不是「被 spawn 起来」。不排掉的话，一个只跑过 exec、从未被 spawn
-        #    的 agent 会被判成「spawn 过」—— 正是这套核验要抓的那种伪造。
-        try:
-            for r in conn.execute(
-                    "SELECT run_id, agent_id, child_session_key, created_at "
-                    "FROM task_runs WHERE task LIKE ? "
-                    "  AND (task_kind IS NULL OR task_kind <> 'exec') "
-                    "ORDER BY created_at DESC", (f"%{decision_id}%",)):
-                d = dict(r)
-                d["agent"] = d.get("agent_id")
-                d["source"] = "task_runs"
-                out.append(d)
-            got_any = True
-        except sqlite3.Error:
-            pass
+        # ② task_runs —— agent 名字有独立的 agent_id 列，不用从 session key 里抠。
+        #    判据见 `_REAL_SPAWN_SQL`：肯定式，不枚举 task_kind。
+        ok2 = _pull(
+            "task_runs",
+            "SELECT run_id, agent_id, child_session_key, created_at FROM task_runs"
+            " WHERE task LIKE ?" + _REAL_SPAWN_SQL + " ORDER BY created_at DESC",
+            lambda d: d.get("agent_id"))
 
-        # R-3：两张都读不到 ⇒ 说「判不了」，不说「零条记录」。
-        # 这两者在调用方那里是**完全不同的结论**（后者会被判成伪造）。
+        got_any = ok1 and ok2
+
+        # R-3：任何一个来源「表在却读不了」⇒ 说「判不了」，不说「零条记录」。
+        # 这两者在调用方那里是**完全不同的结论**：后者会被判成**伪造**，
+        # 也就是把一次读失败变成对一张真卡的指控（评审实测过这条路径）。
         return out if got_any else None
     except sqlite3.Error:
         return None
@@ -211,14 +259,50 @@ def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
     lo = int(datetime.strptime(day, "%Y%m%d").replace(tzinfo=CN_TZ).timestamp() * 1000)
     hi = lo + 86_400_000
     out: list[tuple[str, str, str]] = []
+    rows: list[dict] = []
     try:
         # store-exempt: 同上 —— 外部运行时状态库，只读
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT child_session_key, created_at, payload_json FROM subagent_runs"
-            " WHERE created_at >= ? AND created_at < ? ORDER BY created_at",
-            (lo, hi)).fetchall()
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        # 🔴 与 `_runtime_spawn_records()` 同源：两张表都读，判据同一份
+        #    （`_REAL_SPAWN_SQL`）。
+        #
+        #    2026-09-23 评审抓到的就是这里：那一版只读 `subagent_runs`。
+        #    实测三天对照 ——
+        #        20260921  subagent_runs 51 行 | task_runs 真 spawn 100 行
+        #        20260922  subagent_runs  0 行 | task_runs 真 spawn  27 行
+        #        20260923  subagent_runs  1 行 | task_runs 真 spawn   1 行
+        #    09-22 那天 `budget_report.py` 打出「✅ 无孤儿 spawn」——
+        #    **那个 ✅ 是读一张空表读出来的**，而当天有 27 次真 spawn。
+        #    而且它返回的是 `[]`（干净）不是 `None`（判不了），连 R-3 都没保护到。
+        #
+        #    ⚠️ 这不是那一批引入的，但那一批的全部论证就是「运行时记在哪张表
+        #    不是恒定的」—— 证完之后只修了两个消费方里的一个，就是 L-3：
+        #    同一个事实两套口径，且其中一套已被自己证明是错的。
+        if "subagent_runs" not in tables and "task_runs" not in tables:
+            return None
+        if "subagent_runs" in tables:
+            for r in conn.execute(
+                    "SELECT child_session_key, created_at, payload_json"
+                    " FROM subagent_runs WHERE created_at >= ? AND created_at < ?",
+                    (lo, hi)):
+                d = dict(r)
+                seg = (d.get("child_session_key") or "").split(":")[1:2]
+                d["agent"] = seg[0] if seg else ""
+                d["text"] = d.get("payload_json") or ""
+                rows.append(d)
+        if "task_runs" in tables:
+            for r in conn.execute(
+                    "SELECT agent_id, child_session_key, created_at, task"
+                    " FROM task_runs WHERE created_at >= ? AND created_at < ?"
+                    + _REAL_SPAWN_SQL, (lo, hi)):
+                d = dict(r)
+                d["agent"] = d.get("agent_id") or ""
+                d["text"] = d.get("task") or ""
+                rows.append(d)
+        rows.sort(key=lambda d: d["created_at"])
     except sqlite3.Error:
         return None
     finally:
@@ -229,11 +313,10 @@ def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
 
     known = set(STAGE1_AGENTS) | set(STAGE2_AGENTS)
     for r in rows:
-        parts = (r["child_session_key"] or "").split(":")
-        agent = parts[1] if len(parts) > 1 else ""
+        agent = r["agent"]
         if agent not in known:
             continue                      # 不是 specialist，不在本检查范围
-        seqs = pat.findall(r["payload_json"] or "")
+        seqs = pat.findall(r["text"])
         when = datetime.fromtimestamp(r["created_at"] / 1000, CN_TZ).strftime("%H:%M:%S")
         if not seqs:
             out.append((when, agent, "无决策号"))
@@ -249,6 +332,11 @@ class SpawnProof:
     readable: bool
     rows: int
     per_agent: dict[str, tuple[bool, bool]]
+    #: 这次的记录分别来自哪张运行时表，`{表名: 条数}`。
+    #: 🔴 它是 `_runtime_spawn_records()` 里 `source` 字段的**消费方**（L-1）——
+    #:    没有它，那个字段写了没人读；有了它，报错才说得出「刚才到底读到了哪张表」。
+    #:    两张表同时存在而只有一张有记录，正是 2026-09-23 那次盲区的形状。
+    by_source: dict[str, int] = dc_field(default_factory=dict)
 
 
 def spawn_proof(decision_id: str) -> SpawnProof:
@@ -330,7 +418,11 @@ def spawn_proof(decision_id: str) -> SpawnProof:
             #    `newsflash`，而这类误判从来不会报错）。
             spawned = any(r.get("agent") == agent for r in spawns)
         out[agent] = (agent in ours, spawned)
-    return SpawnProof(readable=True, rows=len(spawns), per_agent=out)
+    by_source: dict[str, int] = {}
+    for r in spawns:
+        by_source[r.get("source", "?")] = by_source.get(r.get("source", "?"), 0) + 1
+    return SpawnProof(readable=True, rows=len(spawns), per_agent=out,
+                      by_source=by_source)
 
 
 def check_1_spawned(decision_id: str | None) -> Check:
