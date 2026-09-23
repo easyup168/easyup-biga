@@ -13,6 +13,7 @@ D-I 建了「冻结一次、多处读」的机制；这一批把 market/sector/t
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 from datetime import date, timedelta
@@ -54,7 +55,8 @@ def _rows(symbol: str, n: int) -> list[dict]:
 
 
 def _fake_daily(symbol, *, bars):
-    return parse_index_daily(symbol, _rows(symbol, bars))
+    rows = _rows(symbol, bars)
+    return parse_index_daily(symbol, rows, raw_text=json.dumps(rows))
 
 
 def _rh(v: AgentVerdict, field: str) -> str | None:

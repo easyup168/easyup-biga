@@ -89,7 +89,7 @@ from _sources import (  # noqa: E402
 )
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
     save_fact_bundle,
     save_raw_snapshot,
 )
@@ -145,7 +145,8 @@ class Collector:
         self.breadth: BreadthResult | None = None
         self.missing: list[str] = []
         self.warnings: list[str] = []
-        self.raw: list[tuple[str, Any]] = []
+        #: (source, 解析后 payload, 该源自己的 as_of, 原始响应文本)。批 I：原文一并累积。
+        self.raw: list[tuple[str, Any, datetime, str]] = []
         #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
         self.hashes: dict[str, str] = {}
         #: source → 冻结集 id（只有读冻结快照的 source 有）。Evidence.evidence_set_id 用它。
@@ -159,7 +160,8 @@ class Collector:
             if warning:
                 self.warnings.append(warning)
 
-    def _keep_raw(self, source: str, payload: Any, as_of: datetime) -> None:
+    def _keep_raw(self, source: str, payload: Any, as_of: datetime,
+                  raw_text: str) -> None:
         """记一份原始响应。**`as_of` 必须是这个源自己的时刻。**
 
         🔴 外部评审 F4：原来这里不收 `as_of`，落库时统一用一个全局变量
@@ -177,8 +179,10 @@ class Collector:
         **bug 正好落在两者之间从未被同时检查过的缝隙里**。
         """
         with self._lock:
-            self.raw.append((source, payload, as_of))
-            self.hashes[source] = payload_sha256(payload)
+            self.raw.append((source, payload, as_of, raw_text))
+            # 批 I：hash 基于**原始响应文本**算，与 save_raw_snapshot 的 content_sha256
+            # 同一口径（raw_text_sha256），Evidence.raw_hash 才对得上 raw 层。
+            self.hashes[source] = raw_text_sha256(raw_text)
 
     # -- 采集 --------------------------------------------------------------
 
@@ -220,7 +224,8 @@ class Collector:
                 # 批 E-I：Evidence 直接声明冻结集 id —— 比 raw_hash 更硬的结构核对。
                 self.es_ids[f"sina:kline/{symbol}"] = self.evidence_set_id
         else:
-            self._keep_raw(f"sina:kline/{symbol}", d.raw, d.server_as_of or now_cn())
+            self._keep_raw(f"sina:kline/{symbol}", d.raw,
+                           d.server_as_of or now_cn(), d.raw_text)
 
     def collect_quotes(self) -> None:
         if "tencent" in self.break_source:
@@ -228,16 +233,19 @@ class Collector:
                                           "market.turnover.source_broken"))
             return
         try:
-            q = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+            q, quote_body = fetch_index_quote([sym for sym, _ in MARKETS.values()])
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"成交额 —— 数据源不可用: {e}",
                                           "market.turnover.unavailable"))
             return
         with self._lock:
             self.quotes = q
-        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它
+        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它。
+        # raw_text 用整段响应体 `quote_body`（批 I）：raw 层里那份 {code: 片段} 是从
+        # body 抠出来重排的派生物，content_sha256 要证明源字节只能用 body 本身。
         self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
-                       max(v.server_as_of or now_cn() for v in q.values()))
+                       max(v.server_as_of or now_cn() for v in q.values()),
+                       quote_body)
 
     def collect_breadth(self) -> None:
         if "breadth" in self.break_source:
@@ -254,7 +262,8 @@ class Collector:
             self.breadth = b
         # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
         # 套上日线的交易日，就是把实时数写成上一个交易日的事实。
-        self._keep_raw("em:push2delay/ulist.np", b.raw, b.server_as_of or now_cn())
+        self._keep_raw("em:push2delay/ulist.np", b.raw,
+                       b.server_as_of or now_cn(), b.raw_text)
         # ⚠️ 不在这里发 as_of 警告：它依赖交易日，而交易日要等日线回来才知道。
         #    并行采集下在这里读是竞态，统一放到全部完成后做。
 
@@ -492,9 +501,10 @@ def build_fact_bundle(
                 "derived:em:push2delay/ulist.np")
 
     if store:
-        for source, payload, src_as_of in c.raw:
+        for source, payload, src_as_of, raw_text in c.raw:
             save_raw_snapshot(source=source, as_of=src_as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(), payload=payload)
+                              retrieved_at=retrieved.isoformat(),
+                              payload=payload, raw_text=raw_text)
 
     # verdict 表达的是**数据完整度**，不是市场判断。
     # 「这算不算放量上涨」由 Market Agent 依据 AGENTS.md 里的口径来说。

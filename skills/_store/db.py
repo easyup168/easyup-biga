@@ -1141,27 +1141,44 @@ def list_agent_runs(
 
 
 def payload_sha256(payload: Any) -> str:
-    """原始响应的内容哈希 —— **唯一实现**。
+    """解析后 payload 的内容哈希 —— raw 层 `content_sha256` 的**旧口径**（schema < v13）。
 
-    `save_raw_snapshot` 用它算入库的 `content_sha256`，
-    采集层用它给 `Evidence.raw_hash` 赋值。两边必须是同一个函数：
-    各算各的，某天序列化参数改了一处，`raw_hash` 就再也对不上 raw 层 ——
-    而那种失效是静默的（两串 sha 都「看起来正常」）。
+    🔴 **批 I（schema v13）起，`content_sha256` 不再基于它算**，改用
+    `raw_text_sha256`（见下）。原因：这个函数把 payload 先 `json.dumps(sort_keys=True)`
+    再哈希 —— 那是我们**自己重排后**的字节，证明不了数据源发来的是什么（键序 / 空白 /
+    浮点表示全丢了，上游改序列化而没改数据也看不见）。
 
-    🔴 **不加 `separators`。** 这个函数早于 `_canonical_dumps` 存在，
-    历史哈希已经建立在它当前的输出格式上 —— 改格式会静默改变所有历史哈希
-    （两串 sha 都「看起来正常」，只是再也对不上当时存的那个）。
-    `tests/fixtures/payload-sha256-vectors.json` 钉死这一点：那份向量
-    是在本次改动**之前**用当时的实现生成的，任何时候都必须能重新对上。
+    为什么留着（没删）：raw 层只追加，**v13 之前落的行**其 `content_sha256` 就是用这个
+    函数算的；要重新核对那些历史行，只能继续用它。`tests/fixtures/payload-sha256-vectors.json`
+    钉死它的输出格式（那份向量在本次改动之前生成，任何时候都必须能重新对上）。
 
-    只加 `allow_nan=False`：对不含 NaN/Infinity 的历史数据，输出逐字节不变；
-    只有本来就不该写进去的值，才会从「静默写入一个 Python 能读、
-    RFC 8259 不认的裸 NaN」变成「在写入前就报错」。
+    🔴 **不加 `separators`。** 历史哈希已经建立在它当前的输出格式上 —— 改格式会静默
+    改变所有历史哈希（两串 sha 都「看起来正常」，只是再也对不上当时存的那个）。
+    只加 `allow_nan=False`：对不含 NaN/Infinity 的历史数据输出逐字节不变。
     """
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True,
                    allow_nan=False).encode("utf-8")
     ).hexdigest()
+
+
+def raw_text_sha256(raw_text: str) -> str:
+    """数据源**原始响应文本**的内容哈希 —— raw 层 `content_sha256` 的口径（schema v13 起）。
+
+    `save_raw_snapshot` 用它算入库的 `content_sha256`，采集层用它给 `Evidence.raw_hash`
+    赋值。两边必须是同一个函数：各算各的、某天口径改了一处，`raw_hash` 就再也对不上
+    raw 层 —— 而那种失效是静默的（两串 sha 都「看起来正常」）。
+
+    🔴 与 `payload_sha256` 的根本区别：这里哈希的是**数据源发来的字节**（`get_text`
+    解码后的那段文本），不是我们 `json.dumps` 重排后的对象。于是两次采到「数据相同
+    但序列化不同」（键序 / 空白不同）的响应，会得到**不同**的 `content_sha256` ——
+    这正是批 I 要的：指纹能证明源字节，也能分辨上游改了序列化而没改数据。
+
+    ⚠️ 「文本级」而非「字节级」：`raw_text` 已是 `get_text` 按 `encoding` 解码后的
+    `str`。这里对它的 utf-8 编码取 sha256 —— 编码假设是否正确是上游 `get_text` 的
+    独立问题，不在这一层解决（批 I 明确排除）。
+    """
+    return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
 
 
 def save_raw_snapshot(
@@ -1170,31 +1187,47 @@ def save_raw_snapshot(
     as_of: str,
     retrieved_at: str,
     payload: Any,
+    raw_text: str,
     path: pathlib.Path | str | None = None,
 ) -> int:
     """原样落盘一份采集结果，返回 `snapshot_id`。
 
     不做去重 —— 采了两次就是两个事实，都留着。
 
-    ⚠️ `content_sha256` 是**整个响应体**的哈希，不是「市场数据」的哈希。
-    很多接口的响应里带易变字段（服务器编号、请求序号等），
-    因此内容相同的两次采集，sha 通常也不同。
-    它能回答「这两条记录的原始字节是否完全一样」，
-    **不能**回答「这两次采到的市场数据是否一致」—— 后者需要先归一化，
-    而归一化规则是各数据源特有的，不属于通用存储层。
+    两列各存什么（批 I）：
+      · `payload_json` —— 解析后的**规范表示**（`json.dumps(sort_keys=True)`）。给消费
+        方回读用（`load_raw_snapshot()["payload"]` 反序列化回对象）。它是**归一化过的**，
+        不是数据源的原始字节。
+      · `raw_text` —— 数据源发来的**原始响应文本**（`get_json_and_text` / `get_text`
+        交出的那段）。`content_sha256` 基于**它**算（`raw_text_sha256`），指纹因此证明
+        的是源字节，不是我们 `sort_keys` 重排后的字节。
+
+    🔴 `raw_text` 必填且非空：一个 collector 漏传（None / 空串）必须当场报错，不能静默
+    往新列里塞个空值再照常出卡 —— 那正是批 I 探针 P4 要防的静默破坏。
+
+    ⚠️ `content_sha256` 是**整段响应文本**的哈希，不是「市场数据」的哈希。很多接口的
+    响应里带易变字段（服务器编号、请求序号等），因此内容相同的两次采集 sha 通常也不同。
+    它能回答「这两条记录的原始文本是否完全一样」，**不能**回答「这两次采到的市场数据
+    是否一致」—— 后者需要先归一化，而归一化规则各源特有，不属于通用存储层。
     """
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    # 🔴 严格 JSON（设计文档 §6 A4）：raw payload 没有契约对象、没有不变量，
-    #    这里能查的只有「是不是合法 JSON」——`payload_sha256` 已经
-    #    `allow_nan=False`，且这行**在 `connect()` 之前**执行，
-    #    NaN/Infinity 会在任何 DB IO 发生之前就地抛错，不需要再加一道。
-    sha = payload_sha256(payload)
+    if not isinstance(raw_text, str) or not raw_text:
+        raise ValueError(
+            f"save_raw_snapshot(raw_text=...) 必须是非空字符串，收到 {raw_text!r}。\n"
+            "  它是数据源发来的原始响应文本，content_sha256 基于它算（批 I）——\n"
+            "  漏传 = raw 层的指纹又退回「我们自己重排后的对象」，正是这一批要修的问题。\n"
+            "  采集路径应从 get_json_and_text / get_text 一路把原文带到这里。")
+    # 🔴 严格 JSON（设计文档 §6 A4）：payload 没有契约对象、没有不变量，能查的只有
+    #    「是不是合法 JSON」。`allow_nan=False` 让 NaN/Infinity 在这行（**早于
+    #    `connect()`**）就地抛错 —— 批 I 之前这道 NaN 守卫由 `payload_sha256(payload)`
+    #    顺带做，现在 content_sha256 改走 `raw_text_sha256`，就得由这行自己带上。
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    sha = raw_text_sha256(raw_text)
     with connect(path) as conn:
         cur = conn.execute(
             """INSERT INTO raw_market_snapshot
-               (source, as_of, retrieved_at, payload_json, content_sha256, created_at)
-               VALUES (?,?,?,?,?,?)""",
-            (source, as_of, retrieved_at, blob, sha, now_cn().isoformat()),
+               (source, as_of, retrieved_at, payload_json, raw_text, content_sha256, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (source, as_of, retrieved_at, blob, raw_text, sha, now_cn().isoformat()),
         )
         return int(cur.lastrowid)
 
@@ -1202,6 +1235,13 @@ def save_raw_snapshot(
 def load_raw_snapshot(
     snapshot_id: int, *, path: pathlib.Path | str | None = None
 ) -> dict[str, Any] | None:
+    """读回一行 raw 快照。返回的 dict 含解析后的 `payload` 与原始 `raw_text`。
+
+    🔴 `payload` 字段**始终是解析后的对象**（`json.loads(payload_json)`），不是字符串
+    —— `_snapshot.coordinator.read_index_daily` 对它做 `len()` / 切片，批 I 加了原始
+    文本列之后这条语义必须不变（探针 P3）。原始响应文本单独走 `raw_text` 字段
+    （v13 之前落的行该字段为 `None`：那时还没这一列，raw 层只追加、不回填）。
+    """
     with connect(path, readonly=True) as conn:
         row = conn.execute(
             "SELECT * FROM raw_market_snapshot WHERE snapshot_id=?", (snapshot_id,)

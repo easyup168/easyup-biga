@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import date, timedelta
@@ -84,7 +85,8 @@ def env(tmp_path, monkeypatch) -> _Coord:
     def fake_fetch(symbol, *, bars):
         calls["n"] += 1
         calls["log"].append((symbol, bars))
-        return parse_index_daily(symbol, _rows(symbol, bars))
+        rows = _rows(symbol, bars)
+        return parse_index_daily(symbol, rows, raw_text=json.dumps(rows))
 
     coord = SnapshotCoordinator(fetcher=fake_fetch, path=db)
     return _Coord(coord, calls, db)
@@ -115,7 +117,9 @@ class TestParseExtraction:
         所以这里显式钉住「fetch 拿到响应后交给 parse」这条边。
         """
         from _sources import sina as sina_mod
-        monkeypatch.setattr(sina_mod, "get_json", lambda url, **kw: _rows("sh000001", 4))
+        rows = _rows("sh000001", 4)
+        monkeypatch.setattr(sina_mod, "get_json_and_text",
+                            lambda url, **kw: (rows, json.dumps(rows)))
         d = sina_mod.fetch_index_daily("sh000001", bars=4)
         assert len(d.bars) == 4 and d.trade_date == "20260305"
 

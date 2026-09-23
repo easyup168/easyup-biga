@@ -77,7 +77,7 @@ from _sources import (  # noqa: E402
 )
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
     save_fact_bundle,
     save_raw_snapshot,
 )
@@ -123,7 +123,8 @@ class Collector:
         self.daily: IndexDaily | None = None
         self.missing: list[MissingItem] = []
         self.warnings: list[str] = []
-        self.raw: list[tuple[str, Any]] = []
+        #: (source, 解析后 payload, 该源自己的 as_of, 原始响应文本)。批 I：原文一并累积。
+        self.raw: list[tuple[str, Any, datetime, str]] = []
         self.hashes: dict[str, str] = {}
         #: source → 冻结集 id（只有读冻结的 source 有）。Evidence.evidence_set_id 用它（批 E-I）。
         self.es_ids: dict[str, str] = {}
@@ -136,11 +137,13 @@ class Collector:
             if warning:
                 self.warnings.append(warning)
 
-    def _keep_raw(self, source: str, payload: Any, as_of: datetime) -> None:
+    def _keep_raw(self, source: str, payload: Any, as_of: datetime,
+                  raw_text: str) -> None:
         """记一份原始响应。**`as_of` 必须是这个源自己的时刻**（F4，同 market）。"""
         with self._lock:
-            self.raw.append((source, payload, as_of))
-            self.hashes[source] = payload_sha256(payload)
+            self.raw.append((source, payload, as_of, raw_text))
+            # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+            self.hashes[source] = raw_text_sha256(raw_text)
 
     def collect_board(self, kind: str, label: str) -> None:
         if kind in self.break_source:
@@ -175,7 +178,8 @@ class Collector:
         with self._lock:
             self.boards[kind] = r
         # `server_as_of is None` ⇒ 板块榜不带日期，它说的就是「此刻」
-        self._keep_raw(f"em:clist/{kind}", r.raw, r.server_as_of or now_cn())
+        self._keep_raw(f"em:clist/{kind}", r.raw,
+                       r.server_as_of or now_cn(), r.raw_text)
 
     def collect_date(self) -> None:
         if "date" in self.break_source:
@@ -203,7 +207,7 @@ class Collector:
                 "sector.trade_date.unavailable"))
             return
         self._keep_raw(f"sina:kline/{_DATE_SYMBOL}", self.daily.raw,
-                       self.daily.server_as_of or now_cn())
+                       self.daily.server_as_of or now_cn(), self.daily.raw_text)
 
 
 def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
@@ -329,9 +333,10 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))
 
     if store:
-        for source, payload, src_as_of in c.raw:
+        for source, payload, src_as_of, raw_text in c.raw:
             save_raw_snapshot(source=source, as_of=src_as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(), payload=payload)
+                              retrieved_at=retrieved.isoformat(),
+                              payload=payload, raw_text=raw_text)
 
     core = {"trade_date", "industry_top", "industry_advance_ratio"}
     if not c.missing:
