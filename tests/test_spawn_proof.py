@@ -999,3 +999,45 @@ class TestOrphanSpawnsSameSource:
         got = pa.orphan_spawns("20260922")
         assert got is not None, "两张表只有一张在，不该报判不了"
         assert [(a, why) for _, a, why in got] == [("market", "无决策号")], got
+
+    def test_去重不能丢掉重复行携带的证据(self, tmp_path, monkeypatch):
+        """🔴 回合三评审：两张表的文本字段**不是同一份文档**。
+
+        `task_runs.task` 是渲染后的提示词、`subagent_runs.payload_json` 是 spawn
+        载荷 JSON。实测临时号 `-000` 在前者出现 0 次、在后者 3 次。去重永远留
+        `task_runs`（先读）⇒ 「只带临时号」这个分支在真实数据上再也不会亮：
+        数量对、钱对，但读的人被静默送去错误的诊断方向
+        （「无决策号」= 没带号；「只带临时号」= **占号晚于 spawn**，即 L-11）。
+
+        ⇒ 去重是去掉重复的**行**，不该去掉那行携带的**证据**：同一个 run_id 的
+        几行，扫决策号时扫它们文本的**并集**。
+        """
+        from datetime import datetime as _dt
+        db = tmp_path / "rt.db"
+        conn = sqlite3.connect(db)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, task_kind TEXT, task TEXT,"
+                     " created_at INTEGER)")
+        conn.execute("CREATE TABLE subagent_runs (run_id TEXT, child_session_key TEXT,"
+                     " controller_session_key TEXT, requester_session_key TEXT,"
+                     " created_at INTEGER, payload_json TEXT)")
+        lo = int(_dt.strptime("20260921", "%Y%m%d")
+                 .replace(tzinfo=pa.CN_TZ).timestamp() * 1000)
+        rid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+        # 同一次 spawn：task_runs 那份文本**不含**决策号（渲染后的提示词）
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?)", (
+            rid, "sector", "agent:sector:subagent:x", None,
+            "[Subagent Context] You are running as a subagent…", lo + 1000))
+        # 而 subagent_runs 那份载荷里带着临时号
+        conn.execute("INSERT INTO subagent_runs VALUES (?,?,?,?,?,?)", (
+            rid, "agent:sector:subagent:x", "agent:main:card-1", "agent:main:card-1",
+            lo + 1000, '{"runId":"%s","prompt":"…BIGA-20260921-000…"}' % rid))
+        conn.commit(); conn.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(db))
+
+        got = pa.orphan_spawns("20260921")
+        assert len(got) == 1, f"同一次 spawn 应该只报一条，得到 {got}"
+        assert got[0][1] == "sector"
+        assert "临时号" in got[0][2], (
+            f"证据在去重时被丢了 —— 分类成了 {got[0][2]!r}。"
+            "「无决策号」与「只带临时号」指向不同根因，后者是 L-11")

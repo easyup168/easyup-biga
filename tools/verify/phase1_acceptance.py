@@ -122,6 +122,48 @@ def _dedupe_by_run_id(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _merge_text_by_run_id(rows: list[dict]) -> list[dict]:
+    """按 `run_id` 合并，**文本取并集**，保留先到那条的其余字段。
+
+    🔴 与 `_dedupe_by_run_id()` 的区别，以及为什么两个调用点不能共用一个
+    -------------------------------------------------------------------
+    两张表的文本字段**不是同一份文档**：
+
+        task_runs.task              「[Subagent Context] You are running as…」渲染后的提示词
+        subagent_runs.payload_json  「{"runId":…,"taskRunId":…}」spawn 载荷 JSON
+
+    实测：临时号 `-000` 在 `task_runs.task` 里出现 **0 次**，在
+    `subagent_runs.payload_json` 里出现 **3 次**。
+
+    `orphan_spawns()` 是**按天取 → 去重 → 再分类**。直接丢掉重复行，就连同那行
+    携带的证据一起丢了 —— 去重永远留 `task_runs`（先读），于是
+    「只带临时号 -000」这个分支在真实数据上**再也不会亮**：09-21 那批
+    实测 28 条全被归成「无决策号」，而其中有一条本该是「临时号」。
+    数量对、钱对，但读的人被静默送去了错误的诊断方向：
+    「无决策号」= 压根没带号；「只带临时号」= **占号晚于 spawn**，
+    也就是 L-11「身份晚于证据」，schema v4 那整套机制专门要防的东西。
+
+    ⚠️ `_runtime_spawn_records()` 用 `_dedupe_by_run_id()` 是**安全的**：
+    它两条查询都**先按决策号过滤、再去重**，只在某一张表命中的行不会被丢。
+    同一段逻辑在一个调用点正确、在另一个调用点有损 —— 差别不在代码，
+    在**调用点的输入处于什么状态**。列消费方清单查不出这一类，
+    得问「这段代码在每个调用点拿到的是什么」。
+    """
+    merged: dict[str, dict] = {}
+    out: list[dict] = []
+    for r in rows:
+        rid = r.get("run_id")
+        if not rid:                       # 无 run_id 不参与合并
+            out.append(r)
+            continue
+        if rid in merged:
+            merged[rid]["text"] = f'{merged[rid]["text"]}\n{r.get("text") or ""}'
+        else:
+            merged[rid] = dict(r)
+            out.append(merged[rid])
+    return out
+
+
 def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
     """读 OpenClaw 运行时自己记的子会话表，**只取属于这次决策的**。
 
@@ -277,6 +319,11 @@ def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
     **占号之前**就 spawn 了 Stage 1（L-11「身份晚于证据」）——
     而 schema v4 那整套机制正是为了防它。
 
+    ✅ 2026-09-23 复核：上面这个招牌例子**现在仍然跑得出来**（一度跑不出来 ——
+    去重把携带临时号的那份文本丢了，见 `_merge_text_by_run_id()`）。实跑
+    `orphan_spawns("20260921")` 里 19:31:52 那批：market/technical/emotion
+    「无决策号」、sector「只带临时号 -000」，与上面逐条对上。
+
     ⚠️ 与 `spawn_proof()` 的分工：那个按决策号查「这张卡的 agent 真跑了吗」，
     **查不到孤儿** —— 孤儿的特征恰恰是没有号可查。两个都要有。
 
@@ -336,7 +383,7 @@ def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
                 d["agent"] = seg[0] if seg else ""
                 d["text"] = d.get("payload_json") or ""
                 rows.append(d)
-        rows = _dedupe_by_run_id(rows)
+        rows = _merge_text_by_run_id(rows)
         rows.sort(key=lambda d: d["created_at"])
     except sqlite3.Error:
         return None
