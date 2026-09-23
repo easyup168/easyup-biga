@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import functools
 import pathlib
 import re
 import subprocess
@@ -53,6 +54,8 @@ def test_扫到了文档():
 
 @pytest.mark.parametrize("path", _md_files(), ids=lambda p: str(p.relative_to(DOCS)))
 def test_文件名符合所在目录的规则(path: pathlib.Path):
+    if _is_untracked_external(path):
+        pytest.skip("docs/external/ 未跟踪 —— 按策略不会提交，命名约定不适用")
     top = path.relative_to(DOCS).parts[0]
     if path.parent == DOCS:            # docs/README.md 本身
         assert path.name == "README.md"
@@ -65,6 +68,8 @@ def test_文件名符合所在目录的规则(path: pathlib.Path):
 
 @pytest.mark.parametrize("path", _md_files(), ids=lambda p: str(p.relative_to(DOCS)))
 def test_开头声明了类别与覆盖范围(path: pathlib.Path):
+    if _is_untracked_external(path):
+        pytest.skip("docs/external/ 未跟踪 —— 按策略不会提交，类别头约定不适用")
     head = _head(path)
     # 允许带后缀，例如 **阶段 · 已完成并冻结**
     marker = re.compile(r"\*\*(" + "|".join(CATEGORIES) + r")[^*]*\*\*")
@@ -104,8 +109,14 @@ def test_教程序号唯一且连续():
 
 
 def test_外部材料带日期前缀():
-    """它是别人在某个时刻的想法的快照，日期是它的一部分。"""
+    """它是别人在某个时刻的想法的快照，日期是它的一部分。
+
+    未跟踪的（`.gitignore` 挡住、按策略不会提交）跳过 —— 理由见
+    `_is_untracked_external()`。
+    """
     for p in (DOCS / "external").glob("*.md"):
+        if _is_untracked_external(p):
+            continue
         assert re.match(r"^\d{4}-\d{2}-\d{2}-", p.name), \
             f"{p.name} 缺日期前缀"
         assert "只读" in _head(p), f"{p.name} 必须标注只读"
@@ -222,6 +233,7 @@ _TEST_COUNT_PATTERNS = (
 _FROZEN_MARK = "冻结"
 
 
+@functools.lru_cache(maxsize=1)
 def _tracked_docs() -> set[pathlib.Path] | None:
     """`docs/` 下**被 git 跟踪**的 `.md`。拿不到返回 `None`。
 
@@ -247,6 +259,33 @@ def _tracked_docs() -> set[pathlib.Path] | None:
         return None
     return {REPO / rel for rel in out.decode("utf-8").split("\0")
             if rel.endswith(".md")}
+
+
+def _is_untracked_external(path: pathlib.Path) -> bool:
+    """`path` 是不是「`docs/external/` 下、且未被 git 跟踪」的文档。
+
+    🔴 与 `_is_untracked_doc_case` 是两条不同的判据，别合并
+    -----------------------------------------------------------
+    那一个只管"这个提交里数不数它"——未跟踪文档**照样受检**，只是不计入条数
+    （见 `_tracked_docs()`），因为大多数未跟踪文档是"还没提交、以后会提交"的
+    在途状态，提交前查出来正是它的价值。
+
+    `docs/external/*` 不是这种状态：2026-09-23 起 `.gitignore` 把它整体挡住
+    （运营者的决策——那目录放的是本地参考材料，**不打算提交**，见
+    `.gitignore` 里那条注释）。这类文件没有"以后会提交"的那一刻，命名 /
+    类别头 / 日期前缀这些"提交前该长什么样"的约定对它们不适用——不是放松
+    检查，是检查的前提（"这份东西即将进入公开仓库"）本身不成立。已经提交过的
+    老文件（比如 `2026-09-19-upstream-source-design-v1.md`）不受影响，继续
+    跟踪、继续受检。
+    """
+    tracked = _tracked_docs()
+    if tracked is None:
+        return False            # 拿不到跟踪清单就不豁免，按老规则查（R-3 方向）
+    try:
+        path.relative_to(DOCS / "external")
+    except ValueError:
+        return False
+    return path not in tracked
 
 
 def _is_untracked_doc_case(item, tracked: set[pathlib.Path]) -> bool:
