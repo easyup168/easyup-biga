@@ -15,6 +15,30 @@
 
 ## [未发布]
 
+### ✅ 复核 · 批 J-I 独立复核 —— 机制成立，一条假设未 live 验证
+
+下面这条批 J-I 的条目自称"评审复核通过"。独立复核（2026-09-23，另开会话，
+未参与建造）动手验了其中最安全相关的一处：2b 裁定（`save_assessment` 的
+`run_id` 只能从被 amends 的 fact 行继承，Agent 在命令行上够不到）。
+
+把 `skills/_store/db.py` 里 `inherited_run_id = meta["run_id"]` 这行改成硬编码
+字符串，`tests/test_run_id_capture.py::TestInheritRunId` 的两条行为证明测试
+当场翻红——值对不上、以及"fact 无 run_id 时 assessment 也该是 None"两个场景
+都报错，还原后绿。commit 信息里"关掉继承当场报红"的描述复现成立。另外确认了
+`amend_verdict.py` 里确实没有任何 `run_id`/`run-id` 字样——CLI 层面 Agent 连
+尝试传都传不了。干净 `git clone` 全量 1118 条绿，`audit_public.sh` 十一项绿。
+
+**一条假设本批和这次复核都没有像 J-II 那样做 live 验证**：`--run-id` 走的是
+提示词指令（"跑你的 skill 时必须加 --task-id … --run-id …"），与 `--task-id`
+同一机制——LLM 是否真的会在真实 spawn 里带上它，线下测不出来，只能靠真实
+spawn 确认。检查生产库 `data/biga.db`：自 J-I 合并以来一次真实卡都没跑过
+（`user_version` 仍是 9，J-I 需要的 v10 列不存在），没有现成证据可查。
+
+风险等级比 J-II 那次低：不带就是 `None`（capture 不 enforce，到处都按"可能没有"
+处理，不是静默错值），且复用的是 `--task-id` 已经在生产路径上长期验证过的
+同一种机制，不是全新假设。是否要照 J-II 的先例、花一次可忽略的小成本真跑一次
+去确认，留给下一步决定，这里先如实记录"尚未验证"。
+
 ### 🔴 新增 · 批 J-I：`run_id` capture 贯穿全链（EvidenceSet / Verdict / Card 绑定 Run）
 
 设计文档 §2 追加 5.1；总体设计 §43 短期重点第 2、3 条。**实现完成、离线全绿
