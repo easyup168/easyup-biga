@@ -97,7 +97,7 @@ class FakeAdapter:
         rid = f"run-{agent}-{uuid.uuid4().hex[:6]}"
         if agent != SYNTHESIZER_AGENT and agent not in self.absent:
             save_verdict(_verdict(agent, task_id), path=self.db)
-        h = SpawnHandle(run_id=rid, agent=agent, task_id=task_id,
+        h = SpawnHandle(runtime_run_id=rid, agent=agent, task_id=task_id,
                         group_id=group_id, session_key=f"sk-{rid}")
         self.started_handles.append(h)
         return h

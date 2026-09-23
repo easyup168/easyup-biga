@@ -116,10 +116,17 @@ class SpawnStartError(RuntimeError):
 
 @dataclass(frozen=True)
 class SpawnHandle:
-    """一次 spawn 的引用。`run_id` 是 `agents_wait` 用的 id；`session_key` 是
-    运行时给的 `childSessionKey`（排查 / 取消关联用）。"""
+    """一次 spawn 的引用。`runtime_run_id` 是 `agents_wait` 用的 id（运行时
+    `subagent_runs.run_id` 那个 UUID）；`session_key` 是运行时给的
+    `childSessionKey`（排查 / 取消关联用）。
 
-    run_id: str
+    🔴 批 J-II 从 `run_id` 改名为 `runtime_run_id`：一出 Adapter 它就会和编排的
+    `run_id`（decision_runs.run_id，一次执行尝试）撞名。在 Adapter 内部叫
+    `run_id` 本来是对的（忠实照抄运行时列名），但边界之外必须认得出这是运行时的
+    命名空间，不是我们的 —— 见设计文档 §4 的三同名表。
+    """
+
+    runtime_run_id: str
     agent: str
     task_id: str
     group_id: str
@@ -222,12 +229,13 @@ class OpenClawRuntimeAdapter:
             res = self._c.call_tool("sessions_spawn", args)
         except MCPError as e:
             raise SpawnStartError(f"[{agent}] spawn 被运行时拒绝：{e}") from e
-        run_id = res.get("runId")
-        if not run_id:
+        runtime_run_id = res.get("runId")
+        if not runtime_run_id:
             raise SpawnStartError(
                 f"[{agent}] spawn 响应里没有 runId —— 起没起来判不了。响应：{res}")
         return SpawnHandle(
-            run_id=run_id, agent=agent, task_id=task_id, group_id=group_id,
+            runtime_run_id=runtime_run_id, agent=agent, task_id=task_id,
+            group_id=group_id,
             session_key=res.get("childSessionKey") or res.get("sessionKey") or "")
 
     # ── wait ───────────────────────────────────────────────────────────────
@@ -238,7 +246,7 @@ class OpenClawRuntimeAdapter:
         整体预算耗尽。到期仍没回来的，status 记 `TIMEOUT`（不是 UNKNOWN —— 我们
         知道它是「等超时了」，这是有信息的）。
         """
-        by_id = {h.run_id: h for h in handles}
+        by_id = {h.runtime_run_id: h for h in handles}
         results: dict[str, SpawnResult] = {}
         deadline = time.monotonic() + timeout_sec
         while by_id and time.monotonic() < deadline:
@@ -274,7 +282,7 @@ class OpenClawRuntimeAdapter:
             results[rid] = SpawnResult(
                 handle=h, status=SpawnStatus.TIMEOUT,
                 error=f"等待超过 {int(timeout_sec)}s 仍未返回", raw_status=None)
-        return [results[h.run_id] for h in handles]
+        return [results[h.runtime_run_id] for h in handles]
 
     # ── status ───────────────────────────────────────────────────────────
     def status(self, handle: SpawnHandle) -> str:
@@ -283,7 +291,7 @@ class OpenClawRuntimeAdapter:
         🔴 对外永远返回 `SpawnStatus` 之一 —— 上层不该看到运行时的原始措辞。
         """
         listing = self._c.call_tool("subagents", {"action": "list", "recentMinutes": 60})
-        raw = _raw_status_for(listing, handle.run_id)
+        raw = _raw_status_for(listing, handle.runtime_run_id)
         return normalize_status(raw)
 
     # ── cancel ─────────────────────────────────────────────────────────────
@@ -296,13 +304,13 @@ class OpenClawRuntimeAdapter:
         （带 taskId）的**同序对应**把 runId 映射到 taskId。
 
         ⚠️ `active[]` 的顺序**不是** spawn 顺序（实测两个 spawn 在 active[] 里是
-        反的）—— 所以必须按 `active[i].runId == run_id` 定位 i，再取 `tasks[i]`，
+        反的）—— 所以必须按 `active[i].runId == runtime_run_id` 定位 i，再取 `tasks[i]`，
         绝不能按「我第几个 spawn 的」去 index。这条对应由
         `tools/verify/adapter_spike.py cancel` 实证过：取消 h0，死的正是 h0、
         h1 仍在跑。找不到就当它已经不在跑了，静默返回（取消一个已结束的东西不是错误）。
         """
         listing = self._c.call_tool("subagents", {"action": "list", "recentMinutes": 60})
-        task_id = _task_id_for(listing, handle.run_id)
+        task_id = _task_id_for(listing, handle.runtime_run_id)
         if task_id is None:
             return  # 已经不在活跃列表里 —— 无可取消
         with contextlib.suppress(MCPError):
@@ -320,18 +328,18 @@ def _active_and_tasks(listing: dict) -> tuple[list[dict], list[dict]]:
     return listing.get("active", []) or [], listing.get("tasks", []) or []
 
 
-def _raw_status_for(listing: dict, run_id: str) -> Any:
+def _raw_status_for(listing: dict, runtime_run_id: str) -> Any:
     """从 subagents list 里取某个 runId 的原始状态：先看 active[]，再看 recent[]。"""
     for a in listing.get("active", []) or []:
-        if a.get("runId") == run_id:
+        if a.get("runId") == runtime_run_id:
             return a.get("status") or (a.get("execution") or {}).get("state")
     for r in listing.get("recent", []) or []:
-        if r.get("runId") == run_id:
+        if r.get("runId") == runtime_run_id:
             return r.get("status") or (r.get("execution") or {}).get("state")
     return None
 
 
-def _task_id_for(listing: dict, run_id: str) -> str | None:
+def _task_id_for(listing: dict, runtime_run_id: str) -> str | None:
     """把 runId 映射到 cancel 要的 tasks[].taskId，靠 active[]/tasks[] 同序对应。
 
     实证依据：subagents list 的 `active[]`（keyed by runId）与 `tasks[]`
@@ -339,6 +347,6 @@ def _task_id_for(listing: dict, run_id: str) -> str | None:
     """
     active, tasks = _active_and_tasks(listing)
     for i, a in enumerate(active):
-        if a.get("runId") == run_id and i < len(tasks):
+        if a.get("runId") == runtime_run_id and i < len(tasks):
             return tasks[i].get("taskId")
     return None

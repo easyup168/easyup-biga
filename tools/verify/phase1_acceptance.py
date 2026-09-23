@@ -222,14 +222,37 @@ def spawn_proof(decision_id: str) -> SpawnProof:
 
     第一版把这两种混为一谈，于是伪造被报成「判不了」——
     而「判不了」是会被忽略的，「伪造」不会。
+
+    🔴 批 J-II —— 结构化 join 取代文本匹配（有 runtime_run_id 时）
+    -----------------------------------------------------------
+    `agent_runs.runtime_run_id` 非空时（在线路径落库的新行），直接拿它与运行时
+    `subagent_runs.run_id` 做 join，比原先按 `child_session_key` 段名匹配硬：
+    段名匹配会被「蹭上别人记录」骗过 —— 机器上别的决策真跑过同一个 agent，它的
+    `child_session_key` 段名照样命中。为 NULL（所有历史行）时退回段名判据。
+    形状照抄 `risk_check.py::CROSS_CHECK_PAIRS`（有 `evidence_set_id` 用它、
+    缺失退回 `raw_hash`）—— 逐字同形，不发明第二种兼容写法。
     """
     from _contract import STAGE1_AGENTS, STAGE2_AGENTS
     from _store import list_agent_runs
 
-    ours = {r["agent"] for r in list_agent_runs(decision_id=decision_id)}
+    runs = list_agent_runs(decision_id=decision_id)
+    ours = {r["agent"] for r in runs}
+    # agent → 该 agent 落库时记下的 runtime_run_id 集合（去 NULL）。
+    # ⚠️ 用 .get：历史行没有这一列，测试的 mock 行也只有 "agent" 键 —— 缺键即
+    #    NULL，走退回分支（这正是 P4「历史行三态不变」成立的原因）。
+    rr_by_agent: dict[str, set[str]] = {}
+    for r in runs:
+        rid = r.get("runtime_run_id")
+        if rid:
+            rr_by_agent.setdefault(r["agent"], set()).add(rid)
+
     spawns = _runtime_spawn_records(decision_id)
     if spawns is None:
         return SpawnProof(readable=False, rows=0, per_agent={})
+    # 结构化 join 的右表：这次决策在运行时侧真实存在的 spawn id。它取自**已按决策号
+    # 过滤**的 spawns，所以「id 存在」同时也蕴含「这条记录属于本次决策」——比对全表
+    # 存在性更硬：伪造者就算抄一个别处的真 id，那条记录的 payload 也不含本决策号。
+    runtime_ids = {r.get("run_id") for r in spawns if r.get("run_id")}
 
     out = {}
     # 判据取自契约里的 stage 名单，**不是手写的一个名字** ——
@@ -237,12 +260,17 @@ def spawn_proof(decision_id: str) -> SpawnProof:
     for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
         if agent == "discipline":          # 裁定 13：故意不建
             continue
-        # 🔴 `child_session_key` 的形状是 `agent:<name>:subagent:<uuid>` ——
-        #    按**段**比，不按子串包含。子串会让 `news` 命中 `newsflash`
-        #    这类名字，而这类误判从来不会报错。
-        spawned = any(
-            (r.get("child_session_key") or "").split(":")[1:2] == [agent]
-            for r in spawns)
+        rr = rr_by_agent.get(agent)
+        if rr:
+            # 🔴 强绑定：runtime_run_id 与运行时 subagent_runs.run_id 结构化 join。
+            spawned = any(rid in runtime_ids for rid in rr)
+        else:
+            # 退回弱绑定（历史行无 runtime_run_id）：`child_session_key` 形状是
+            # `agent:<name>:subagent:<uuid>` —— 按**段**比，不按子串包含（子串会让
+            # `news` 命中 `newsflash`，而这类误判从来不会报错）。
+            spawned = any(
+                (r.get("child_session_key") or "").split(":")[1:2] == [agent]
+                for r in spawns)
         out[agent] = (agent in ours, spawned)
     return SpawnProof(readable=True, rows=len(spawns), per_agent=out)
 
