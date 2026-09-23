@@ -847,24 +847,23 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         不做 enforce（`latest_verdict_ids()` 过滤逻辑不变）——那部分仍等
         真正的重试批次。
         ⚠️ 等批 E-II **与** E-III 都合并之后开工（三批都要碰同一批 skill 脚本）
-  - [~] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
+  - [x] 批 J-II · `agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库
         —— 已合并（933aa6d）。机制经**独立复核**（2026-09-23，另开会话，未参与
         建造）确认成立：亲手在 shipped 代码里关掉结构化强绑定，复现了 P3 描述的
         确切症状（stdout 印出「1 个 agent 两份独立记录都齐」），还原后绿；亲手对
         迁移后的 `agent_runs` 真跑 UPDATE/DELETE，只追加触发器仍拦得住；干净
         `git clone` 全量跑绿。schema v9。教程第 31 章（原写作 30，与批 E-III
         撞号——两批并行各取下一个空号）。
-        🔴 **但「live 补验」那条具体断言复核复现不出来**——详见 CHANGELOG 同名
-        修正条目：CHANGELOG 称查 `subagent_runs WHERE run_id='e5c00e01-…'`
-        「查得到」，独立复核原样重跑同一条查询（代码默认路径
-        `~/.openclaw-biga/state/openclaw.sqlite`），**返回 0 行**，且该表在这次
-        spawn 之后再没有新行。这次 spawn 本身确实发生过（`task_runs` 里有完全
-        匹配的记录），只是没有在 `subagent_runs` 留下对应行——原因未定（查的是
-        别的库/别的 profile？还是这类 spawn 本来就不写这张表？两条真实历史行都
-        带飞书投递语境，这次验证 spawn 没有）。⇒ **结构化 join 在真实生产 spawn
-        路径下是否真的命中，目前没有一次成功复现的实测**——这正是 J2-3 提交信息
-        自己点名要防的「静默退化」。不影响已合并的迁移与 join 逻辑本身（离线部分
-        都已独立复现），但这一条真实性断言在查清楚之前不能当作已证实。
+        ✅ **「live 补验」一度复核复现不出来，已重新补验并确认成立**（详见
+        CHANGELOG 两条相邻条目）：原断言称查 `subagent_runs` 能查到某个
+        `run_id`，独立复核原样重跑返回 0 行；用户授权后改为**直接走
+        `OpenClawRuntimeAdapter.attach()`/`start()`**（与 `orchestrator.py`
+        起 Specialist 同一条代码路径，非绕开 Adapter 的裸 MCP 调用）重新 spawn
+        一次（123 input/5 output tokens），`subagent_runs` 这次命中 1 行、
+        `child_session_key` 逐字一致。⇒ **命名空间共享结论成立，J2-3 的结构化
+        join 前提得到真实、可复现的实测支持**。最合理的解释：上一次的验证走的
+        不是 Adapter 路径（`task_runs` 行形状与真实历史生产行不同），不是结论
+        本身有问题。批 J-II 至此没有未决项。
         （另一条与此无关的既有缺口：强绑定 per-agent 启用，历史行 NULL 的含义
         将来会从「老行」漂移成「也可能是漏填的新行」，未加 per-decision 一致性
         检查前不报错——见 review-prompt §3，留给 J-I 之后处理。）
