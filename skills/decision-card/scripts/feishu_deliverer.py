@@ -6,20 +6,41 @@
 adapter」。`notify_worker.py --deliverer feishu` 用它把 Card 完成 / UNKNOWN / 风控
 否决 / 运行失败四类通知发回飞书。
 
+🔴 落地修正（P6 live 真跑，2026-09-23）：不走独立 HTTP 客户端 + 独立凭据
+------------------------------------------------------------------------
+最初这个类自己实现了两步飞书 API 调用（取 `tenant_access_token` → 发
+`im/v1/messages`），凭据从 `BIGA_FEISHU_APPID`/`APPSECRET`/`OWNER_ID` 三个环境变量
+读。P6 真跑第一次触发时，这条路径没有任何东西会给 `notify_worker.py` 注入这三个
+环境变量——`notify_worker.py` 至今没有调度方（这条缺口本就已知），意味着也没有
+"谁负责在正确环境里跑它"这件事本身也没有答案。
+
+而**网关这一刻已经在用一条真实、已认证的飞书连接**——它刚收到并处理了触发出卡的
+那条消息，也用同一条连接把 ACK 转达回去了。独立实现一套 HTTP 客户端 + 独立凭据
+是重复发明这条连接已经在做的事，还额外背了一个"这三个环境变量到底谁来设、从哪
+读"的悬而未决的问题。
+
+⇒ 改成 shell 一次 `bin/biga message send --channel feishu --target <open_id>
+--message <text>`——走网关自己已经认证好的飞书通道，**不需要 appId/appSecret**。
+唯一还需要的是「发给谁」（`BIGA_FEISHU_OWNER_ID`，一个标识符，不是凭据），且它
+本来就有处可去（`channels.feishu.allowFrom[0]`，与判定「谁能给这个机器人发消息」
+的那个值同源）。这与本仓库其余所有技能的形态一致（R-1：一切经 `bin/biga`，绝不
+裸 `openclaw`；`apply_config.py`/`inbound.py` 都是同一个 `_run_biga` idiom）。
+
 🔴 凭据与密钥纪律（公开仓库）
 ------------------------------
-仓库里**一个凭据都不落**。`app_id` / `app_secret` / 收件人 `open_id` 全部从
-**环境变量**读（`BIGA_FEISHU_APPID` / `BIGA_FEISHU_APPSECRET` / `BIGA_FEISHU_OWNER_ID`），
-由运行环境从它的密钥库注入 —— 与 CLAUDE.md「凭据记在仓库外」一致（真实飞书接入
-`channels.feishu` 那块本就在仓库外的 `openclaw.json` 里）。这个类只有**取值逻辑与
-发送逻辑**，没有任何具体值。
+仓库里**一个凭据都不落**。收件人 `open_id` 从**环境变量**读
+（`BIGA_FEISHU_OWNER_ID`），由运行环境注入——与 CLAUDE.md「凭据记在仓库外」一致
+（真实飞书接入 `channels.feishu` 那块本就在仓库外的 `openclaw.json` 里，且这个类
+现在完全不碰 appId/appSecret，那两个值只存在于网关自己的配置里，这个脚本从头到尾
+看不到）。
 
-🔴 可测：HTTP 传输是注入点
---------------------------
-`http` 参数默认走 `urllib`（真发网络），测试注入一个假的、只记录请求 ——
-于是「投的是不是对的接口、body 里有没有决策号、失败会不会抛」全部离线可断言，
-真实飞书 API 只在 live 收尾那一次走（探针 P6）。这与 orchestrator 的 `attach=`、
-SnapshotCoordinator 的 fetcher、notify_worker 的 deliverer 是同一套依赖注入做法。
+🔴 可测：子进程调用是注入点
+----------------------------
+`runner` 参数默认真的 `subprocess.run`（真跑 `bin/biga`），测试注入一个假的、只
+记录调用参数——于是「发的是不是对的命令、参数里有没有决策号、失败会不会抛」全部
+离线可断言，真实飞书投递只在 live 收尾那一次走（探针 P6）。这与 orchestrator 的
+`attach=`、SnapshotCoordinator 的 fetcher、`inbound.py` 的 launcher 是同一套依赖
+注入做法。
 
 不做什么（分发提示词「不要做」）
 --------------------------------
@@ -30,105 +51,66 @@ SnapshotCoordinator 的 fetcher、notify_worker 的 deliverer 是同一套依赖
 
 from __future__ import annotations
 
-import json
 import os
-import time
-import urllib.error
-import urllib.request
+import pathlib
+import subprocess
 from typing import Any, Callable
 
-__all__ = ["FeishuDeliverer", "FeishuError", "urllib_http"]
+__all__ = ["FeishuDeliverer", "FeishuError"]
 
-#: 飞书开放平台基址。海外租户是 open.larksuite.com —— 也从环境变量覆盖，不写死租户。
-_DEFAULT_BASE = "https://open.feishu.cn"
+#: 一次子进程调用的形状：`(argv) -> CompletedProcess`。抽成类型别名，
+#: 让「真 subprocess.run」和「测试假实现」是同一个形状（与 http/fetcher/launcher
+#: 那几处依赖注入同一套做法）。
+Runner = Callable[[list], "subprocess.CompletedProcess"]
 
-#: 一次 HTTP 调用：`(method, url, headers, body_dict) -> (http_status, resp_dict)`。
-#: 抽成类型别名，是为了让「真 urllib」和「测试假实现」是同一个形状。
-Http = Callable[[str, str, dict, "dict | None"], "tuple[int, dict]"]
+
+def _run_biga(cmd: list) -> subprocess.CompletedProcess:
+    """经 `bin/biga` 跑一条子命令。绝不裸 `openclaw`（R-1，与 apply_config.py 同一 idiom）。"""
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 
 class FeishuError(RuntimeError):
-    """飞书 API 返回了非零 `code`，或 HTTP 层失败。worker 据此记一条 failed（不重跑决策）。"""
+    """投递失败（`bin/biga message send` 非零退出，或缺配置）。
 
-
-def urllib_http(method: str, url: str, headers: dict,
-                body: dict | None) -> tuple[int, dict]:
-    """默认 HTTP 传输：标准库 urllib，无第三方依赖。真发网络。"""
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = resp.read().decode("utf-8")
-            return resp.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", "replace")
-        try:
-            return e.code, json.loads(raw)
-        except json.JSONDecodeError:
-            return e.code, {"_raw": raw}
+    worker 据此记一条 failed（不重跑决策、不连累其余通知）。
+    """
 
 
 class FeishuDeliverer:
-    """把一条通知发成一条飞书文本消息。满足 `notify_worker.Deliverer` 协议。"""
+    """把一条通知发成一条飞书文本消息。满足 `notify_worker.Deliverer` 协议。
+
+    走网关自己已认证的飞书通道（`bin/biga message send`），不持有、不需要
+    appId/appSecret ——那两个值只存在于网关自己的 `openclaw.json` 里。
+    """
 
     channel = "feishu"
 
     def __init__(
         self,
         *,
-        app_id: str | None = None,
-        app_secret: str | None = None,
         receive_id: str | None = None,
-        receive_id_type: str = "open_id",
-        base_url: str | None = None,
-        http: Http = urllib_http,
-        clock: Callable[[], float] = time.monotonic,
+        biga_bin: str | None = None,
+        runner: Runner = _run_biga,
     ) -> None:
-        # 🔴 全部从环境变量兜底 —— 仓库里不落任何具体值（公开仓库纪律）。
-        self._app_id = app_id or os.environ.get("BIGA_FEISHU_APPID", "")
-        self._app_secret = app_secret or os.environ.get("BIGA_FEISHU_APPSECRET", "")
+        # 🔴 唯一还需要的输入：发给谁。这是个标识符，不是凭据 —— 与判定「谁能给
+        #    这个机器人发消息」的 channels.feishu.allowFrom[0] 同源（仓库外，不落库）。
         self._receive_id = receive_id or os.environ.get("BIGA_FEISHU_OWNER_ID", "")
-        self._receive_id_type = receive_id_type
-        self._base = (base_url or os.environ.get("BIGA_FEISHU_BASE_URL")
-                      or _DEFAULT_BASE).rstrip("/")
-        self._http = http
-        self._clock = clock
-        # tenant_access_token 缓存：飞书的 token 约 2 小时过期，别每条通知都换一次。
-        self._token: str | None = None
-        self._token_exp: float = 0.0
+        # 🔴 R-1：一切经 bin/biga，绝不裸 openclaw —— 与 apply_config.py 同一个
+        #    _BIGA 取值 idiom（env 覆盖只为测试）。
+        self._biga = biga_bin or os.environ.get(
+            "BIGA", str(pathlib.Path.home() / ".openclaw-biga" / "bin" / "biga"))
+        self._runner = runner
 
-    # ── 凭据自检 ──────────────────────────────────────────────────────────
+    # ── 配置自检 ──────────────────────────────────────────────────────────
     def _require_config(self) -> None:
-        missing = [name for name, val in (
-            ("BIGA_FEISHU_APPID", self._app_id),
-            ("BIGA_FEISHU_APPSECRET", self._app_secret),
-            ("BIGA_FEISHU_OWNER_ID", self._receive_id),
-        ) if not val]
-        if missing:
+        if not self._receive_id:
             # 🔴 报错指路（dev-workflow §8）：缺什么、去哪配，而不是一句裸异常。
             raise FeishuError(
-                "飞书投递缺凭据：环境变量 " + ", ".join(missing) + " 没设。\n"
-                "  它们**不放仓库**（公开仓库纪律）——由运行环境从密钥库注入。\n"
-                "  真实值见仓库外 ~/.openclaw-biga 的飞书接入配置；"
-                "本地排查可临时 export 后再跑 notify_worker --deliverer feishu。")
-
-    # ── token（缓存 + 过期刷新）──────────────────────────────────────────
-    def _tenant_token(self) -> str:
-        now = self._clock()
-        if self._token and now < self._token_exp:
-            return self._token
-        status, resp = self._http(
-            "POST", f"{self._base}/open-apis/auth/v3/tenant_access_token/internal",
-            {"Content-Type": "application/json"},
-            {"app_id": self._app_id, "app_secret": self._app_secret})
-        if status != 200 or resp.get("code") != 0 or not resp.get("tenant_access_token"):
-            raise FeishuError(
-                f"取 tenant_access_token 失败：http={status} code={resp.get('code')} "
-                f"msg={resp.get('msg')!r}")
-        self._token = resp["tenant_access_token"]
-        # 提前 60s 视作过期，避开「刚好卡在边界」。expire 单位是秒。
-        self._token_exp = now + max(0, int(resp.get("expire", 7200)) - 60)
-        return self._token
+                "飞书投递缺收件人：环境变量 BIGA_FEISHU_OWNER_ID 没设。\n"
+                "  它不放仓库（公开仓库纪律）——由运行环境注入。\n"
+                "  真实值见仓库外 ~/.openclaw-biga 的飞书接入配置\n"
+                "  （channels.feishu.allowFrom[0]，与出卡触发的 owner 白名单同源）；\n"
+                "  本地排查可临时 export 后再跑 notify_worker --deliverer feishu。")
 
     # ── Deliverer 协议 ───────────────────────────────────────────────────
     def deliver(self, *, event_type: str, aggregate: str,
@@ -139,19 +121,15 @@ class FeishuDeliverer:
         不连累其余、也不重跑决策）——所以这里所有失败路径都抛，绝不静默吞。
         """
         self._require_config()
-        token = self._tenant_token()
         text = self._render(event_type, aggregate, payload)
-        status, resp = self._http(
-            "POST",
-            f"{self._base}/open-apis/im/v1/messages?receive_id_type={self._receive_id_type}",
-            {"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-            {"receive_id": self._receive_id, "msg_type": "text",
-             # 🔴 飞书的坑：content 必须是**字符串化的 JSON**，不是嵌套对象。
-             "content": json.dumps({"text": text}, ensure_ascii=False)})
-        if status != 200 or resp.get("code") != 0:
+        cmd = [self._biga, "message", "send", "--channel", "feishu",
+               "--target", self._receive_id, "--message", text]
+        r = self._runner(cmd)
+        if r.returncode != 0:
             raise FeishuError(
-                f"飞书发消息失败：http={status} code={resp.get('code')} "
-                f"msg={resp.get('msg')!r}（event={event_type} aggregate={aggregate}）")
+                f"飞书发消息失败：bin/biga message send 退出码 {r.returncode}\n"
+                f"{(r.stderr or r.stdout or '').strip()}\n"
+                f"（event={event_type} aggregate={aggregate}）")
 
     # ── 消息文本（四类事件各一句人话）────────────────────────────────────
     @staticmethod
