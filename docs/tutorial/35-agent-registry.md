@@ -215,7 +215,7 @@ P1 的断言这才干净地报红。
 `DID NOT RAISE`。一度怀疑是自己改坏了 —— 但换上**未改动的** `orchestrator.py`（只留
 `_contract` 改动）它照样红，再 `git stash -u` 退到**纯净基线**跑同一个子集，还是红。
 结论：这是基线上一个**子集顺序依赖**的既有污染（前面某个文件漏了全局状态），**跑全量套件
-时不出现**（全量 1194 条全绿）。不是这一批的账，没在这一批动它，记进这里免得下次又查一遍。
+时不出现**（全量 1198 条全绿）。不是这一批的账，没在这一批动它，记进这里免得下次又查一遍。
 
 > 通用原则：**判断「这次改动是否让套件变红」，要跟纯净基线在同一环境下比**，别拿一个
 > 手挑子集的红当自己的锅 —— 子集顺序会放大既有的测试间污染。
@@ -231,14 +231,18 @@ $ python3 -m pytest tests/test_agent_registry.py -q
 
 # 2) 全量套件（worktree 干净 checkout，不含共享树里那批 gitignore 的外部材料）
 $ python3 -m pytest -q
-1194 passed
+1198 passed
 
-# 3) 七道探针都见过红、且文件逐字节还原
-$ python3 scratchpad/run_probes.py
-✅ 每道探针都见过红，且工作区已还原
+# 3) 七道探针都见过红、且文件逐字节还原 —— 逐条手动弄坏、跑对应测试、还原
+#    （批 K 自己的 sabotage 脚本躺在开工会话自己的 scratchpad 里，没进仓库；
+#    下面这条是可复现的等价步骤，照「探针记录」表格挨个做）
+$ git checkout -- <被改的文件> && python3 -m pytest tests/test_agent_registry.py -q
+23 passed   # 每弄坏一处，先看对应测试 FAILED，再还原、确认这里重新变绿
 
 # 4) 三张真卡（都是批 K 之前落库、card_json 里没有 expected_roster）回放逐字段相同
-$ BIGA_DB_PATH=<真库副本> bin/biga-card --check BIGA-20260922-001   # 及 -025 / -024
+$ BIGA_DB_PATH=<真库副本> bin/biga-card --check BIGA-20260922-001         # 09-22
+$ BIGA_DB_PATH=<真库副本> bin/biga-card --check BIGA-20260921-025         # 09-21
+$ BIGA_DB_PATH=<真库副本> bin/biga-card --check BIGA-20260921-024         # 09-21
 ✅ 组装一致：… 用冻结证据重跑，逐字段相同。
 
 # 5) 公开仓库审查十一项
