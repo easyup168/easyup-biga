@@ -2,7 +2,7 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / E-III / J-I / J-II / **F**）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / **G-II**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -1749,17 +1749,148 @@ P5  `NOTIFICATION_PENDING` 转移的合法性：`LEGAL_TRANSITIONS` 更新之后
 
 ---
 
-## 批 I / G-II / K / L / H · 现在不写分发提示词
+## 批 G-II · Inbound Trigger —— 飞书出卡变成结构化事件，main 全程不参与路由
 
-🔴 **2026-09-23 批 J（J-I + J-II）已双双合并进 orchestration，且都独立复核
-+ live 补验过关**——下表里"等批 J"这条依赖，凡是引用它的行，现在都已解除。
-批 F 与批 G-I 的分发提示词都已经写好（见上两节），不在这张表里了。
+⚠️ **依赖已清**：批 G-I 已合并（`0484e2e`），`notification_outbox`/
+`notification_deliveries`（schema v12）与 `RunState.NOTIFICATION_PENDING`
+状态转移都已定型，`notify_worker.py` 的 `Deliverer` 接口与桩
+`StdoutDeliverer` 已经在跑。开工第一件事 `git log --oneline -5` 确认没有
+更晚的合并改过这几处，不要假设本提示词里的行号还准。
+
+🔴 **这是批 G 里真正有攻击面、真正动"钱怎么被花掉"这条链入口的一批，
+风险与批 E-III/J-II 同一量级**——上两批最终都是靠一次小额真实验证才把
+一个关键假设彻底澄清（J-II 是命名空间共享，E-III 是迁移路径），这一批
+大概率也需要类似的收尾，正文最后一条探针已经把这个预算留出来了。
+
+```text
+把飞书"出卡"从一次自由对话，变成一个结构化的、main 的 LLM 全程不参与
+路由决策的 trigger：真实接上 decision_runs.trigger_id 做入站幂等键，
+给 bin/biga-card 发明一条异步执行路径（快速 ACK + 后台完成，因为
+170-200s 没法在一次 webhook 响应里同步等完），把 notify_worker.py 的
+Deliverer 接口接上真实飞书 API，并且从结构上让 main 压根看不到这类
+请求——不是"教它认出来再转发"。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` 的「批 G」小节全文，
+  尤其"结构性修法"那一段（2026-09-21 两次事故的根因分析：19:31 的 4 个
+  孤儿 spawn 与 21:03 的出卡递归 L-14，根子都是"入口在 prompt 层面，不在
+  代码层面"）和"六个指纹只有一个是真的"那一段——六个指纹里五个没有
+  任何消费方，这一批不做它们
+- `skills/decision-card/scripts/entry_guard.py` 全文，尤其
+  `classify_caller()`（107 行起）——它挡的是"入口脚本被递归调用"（L-14），
+  这一批要加的是新的一条防线（"飞书事件根本不给 main 机会去调用
+  `sessions_spawn`"），是新增路径，不是改这条已有护栏，先弄清楚两者的
+  边界在哪
+- `bin/biga-card` 全文，尤其 247-263 行的 `_ORCH_PID`/`_reap_orch`/`wait`
+  模式——这是"今天完全同步"的证据，也是这一批要新建异步路径时，人工
+  CLI 调用**不能被破坏**的那个基线行为
+- `skills/_contract/run.py` 的 `RUN_ORIGINS`（120-125 行左右，`feishu`
+  值已经预留但零生产方）与 `skills/_store/schema.py` 里 `decision_runs`
+  的 `trigger_id` 列（`_V7` 附近，建表注释原话是"一次外部请求的幂等键"，
+  同样零生产方）——这一批是这两处**第一次真正有人写它们**
+- `skills/decision-card/scripts/notify_worker.py` 全文——`Deliverer`
+  协议与桩 `StdoutDeliverer`，这一批要接的就是这个接口，不要绕开它
+  另起一套投递逻辑
+- `skills/_contract/verdict_ref.py` 的 `CONTRACT_VERSION`（41 行，
+  `"contract/1"`）——六个指纹里唯一是真的那个，粒度是每条 `VerdictRef`，
+  不是一条独立的按次运行记录，这一批不用把它拔高成后者
+- 如果 `docs/external/` 下能找到飞书最佳实践材料，通读它 §17（两种工作
+  模式彻底分开）与 §25（Outbound Only → Preflight → Inbound Trigger →
+  Question Bridge 的分阶段建议）——本批只做第三阶段，其余明确不做（见下）
+
+## 做什么
+
+1. **`deploy/openclaw/`（未建）+ `apply_config.py`**：`agents.yaml` /
+   `tool-policy.yaml` / `profile.template.json` / `apply_config.py`。
+   🔴 撞 R-2：必须走 `bin/biga`，绝不允许写出按默认名推导的 systemd
+   单元名。判据机关已经在——`tools/verify/isolation.py::
+   check_namespaces()` 已经实现"systemd 单元名必须带 `-biga`"这条，
+   `bin/biga` 已经强制 `--profile biga`——这一批是让 `apply_config.py`
+   走这条已有的路，不是新发明一套 R-2 检查。
+2. **异步执行模型**：`bin/biga-card` 今天全程 `wait "$_ORCH_PID"`，飞书
+   inbound 这条路径不能这样等（webhook 通常有秒级 ACK 期限）。需要
+   "快速 ACK + 后台完成"——具体是新脚本、新 CLI flag，还是别的形状，
+   你自己判断，但**人工 CLI 与飞书 inbound 最终必须走到同一个
+   orchestrator**，不要分叉出两套决策逻辑，且人工 CLI 现有的同步体验
+   不能被这一批改坏。
+3. **Inbound trigger 端点/adapter**：真正把 `origin="feishu"` 填上
+   （`RUN_ORIGINS` 已预留），`decision_runs.trigger_id` 接上真实飞书
+   event id 做幂等键——同一个 event id 重投必须被识别为重复，不能重跑
+   一次决策（2026-09-21 19:31 事故的直接解法）。
+4. **`main` 结构性移出这条路径的路由决策**：飞书"出卡"事件必须直接从
+   gateway/adapter 层调用 `bin/biga-card` 等价的入口，`main` 的 LLM
+   全程不参与——不是"教 main 认出这是出卡请求再转发"，是"main 压根不会
+   看到这类请求"。这一立场比外部材料 §18 自己推荐的拓扑更保守，但与
+   批 C-II 已经采用的立场一致，不是新裁定。
+5. **`tools.deny: [ask_user]`**：给自动出卡的 agent 配上，并**补一条
+   测试**证明 `main` 的正常飞书/TUI 交互不受影响——`stall_watchdog.py`
+   的注释记录过半年前这条被否决的历史（那时 `main` 同时是交互入口和
+   出卡入口），批 C-II 之后前提已经不成立，但不能只凭推理认为安全。
+6. **`notify_worker.py` 的 `Deliverer` 接口接上真实飞书 API**——这正是
+   它当初被设计成"可替换接口"而不是写死 `StdoutDeliverer` 的原因。
+
+## 不要做
+
+- 不做 Preflight Interaction（外部材料的阶段二）与 Question Bridge
+  （阶段四）——设计文档明确推迟：阶段四"只有出现真实需求后才实现"，
+  阶段二在没有阶段三（本批）之前没有意义
+- 不建 `contract_version` 之外的其余五个指纹字段（`git_commit` /
+  `openclaw_version` / `agent_config_hash` / `tool_policy_hash` /
+  `prompt_hash`）——零消费方（L-1），留给以后真正需要审计这些维度的
+  时候再建
+- 不改 `entry_guard.py::classify_caller()` 已有的护栏逻辑本身——这一批
+  加的是新增路径（飞书事件不经过 `main`），不是修改它已经在拦的那条
+  （入口脚本被递归调用）。如果你发现两者确实必须合并，在正文写清楚
+  为什么，不要默默改掉一条已经在生产上生效的判据
+- 不要把异步执行模型做成"只对飞书生效"的特例——人工 CLI 出卡
+  （`bin/biga-card` 当前的同步体验）不能被这一批改坏，两种调用方式
+  都要有测试覆盖
+- 不要在这一批实现真实飞书 API 的完整功能面（消息卡片富文本格式、
+  按钮交互等）——探针只需要证明"收到一个飞书 event → 幂等去重 → 不
+  经过 main → 触发 bin/biga-card 等价路径 → 产出 Card → 通知投出去"
+  这条链闭环，不是把飞书生态全量对接完
+
+## 必须做的探针（G-1）
+
+P1  幂等：同一个 `trigger_id`（模拟同一个飞书 event id）重投两次，断言
+    只触发一次决策/一次 orchestrator 调用，第二次被识别为重复而不是
+    重新走一遍
+P2  🔴 main 不参与路由：构造一次飞书出卡事件，证明这条路径不依赖 main
+    的 LLM 判断——具体怎么证明你自己定，但要经得起"如果把 main 的
+    system prompt 整个清空，这条路径还能不能正常出卡"这个反事实检验
+P3  异步：飞书 inbound 调用必须在一个短时间窗口内返回 ACK，不能等
+    170-200s 的 orchestrator 跑完；同时验证人工 CLI 同步调用
+    （`bin/biga-card`）的现有行为没有被破坏
+P4  R-2：`apply_config.py` 装前装后跑 `isolation.py`，断言 systemd 单元
+    名带 `-biga` 后缀；试着让它写一个不带 `-biga` 后缀的单元名，断言
+    被拒
+P5  `tools.deny: [ask_user]`：证明自动出卡路径配了这条之后，main 的
+    正常飞书/TUI 交互（非出卡类请求）确实不受影响——这是设计文档明确
+    要求补的那条测试，不能只凭推理
+P6  🔴 一处必须 live 验（参照 J-II 与批 C-I 的先例，线下 mock 无法替代）：
+    至少一次真实（或最接近真实、确认无法再线下模拟的）飞书 event 走
+    完全链路到 Card 产出与通知投递成功。预算参照 J-II 的量级，不要为了
+    这条探针反复出真卡——一次讲清楚就够
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 I / K / L / H · 现在不写分发提示词
+
+🔴 **2026-09-23 批 F 与批 G-I 已先后合并进 orchestration**，且都独立复核过关
+——下表里"等 F 落地"这条依赖，凡是引用它的行，现在都已解除。
+批 F、批 G-I、批 G-II 的分发提示词都已经写好（见前面几节），不在这张表里了。
 
 | 批 | 现状 |
 |---|---|
-| I（RawArtifact） | "`run_id` 得先由批 J 变成没有歧义的"这条已解除（J-I/J-II 双双落地，`agent_verdicts`/`evidence_sets`/`agent_runs` 的 `run_id` 语义都已单一）。**已具备写分发提示词的条件**，但建议等 F 落地——F 会不会想让 raw 溯源字段指向"relocate 后的" risk 调用点，晚一步看得更清楚 |
-| K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**已具备写分发提示词的条件**。⚠️ 与 F 一样会碰 `orchestrator.py`（K 要把 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 改成从 Registry 派生）——等 F 落地合并之后再写，避免同一批文件二次冲突 |
-| G-II（Inbound Trigger） | 依赖批 G-I 落地——需要 `notification_outbox` 与 `NOTIFICATION_PENDING` 已经存在，`decision_runs.trigger_id` 才有地方接。这是"飞书变成结构化 trigger、绕开 main 自由判断"的核心交付物，风险与 E-III/J-II 同量级，等 G-I 合并、拿到它实际的表结构与状态转移之后再写，避免分发提示词里的具体字段名跟 G-I 最终落地的不一致 |
+| I（RawArtifact） | 两个前置条件都已满足：`run_id` 已无歧义（J-I/J-II 落地），**批 F 已落地**（`e5b959f`，risk 搬移已定型，raw 溯源字段该指向哪个调用点现在看得清楚了）。**已具备写分发提示词的条件** |
+| K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**批 F 已落地**（`orchestrator.py` 里 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 这块 F 动过的部分已经定型），阻塞已解除。**已具备写分发提示词的条件** |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 

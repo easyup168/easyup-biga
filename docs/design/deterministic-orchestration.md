@@ -851,10 +851,10 @@ assessment**，卡上呈现的是"risk 给出了事实、判定是 UNKNOWN、没
 > 的输入。建的东西：
 > * `skills/_contract/notify.py` —— 事件类型词表（`NOTIFICATION_EVENT_TYPES` 四类）
 >   + `card_event_type()` 分类判据（否决 / UNKNOWN·缺失 / 正常）+ `NOTIFY_FAILURE_STATES`。
-> * schema **v11** 两张只追加表：`notification_outbox`（幂等键 `(event_type, aggregate)`）
+> * schema **v12** 两张只追加表：`notification_outbox`（幂等键 `(event_type, aggregate)`）
 >   + `notification_deliveries`（投递尝试日志）。「投没投成」是派生查询，不给 outbox 开
 >   `delivered_at` 的 UPDATE 例外 —— 与 `run_events`/`amends`/`replay_of` 同一条「状态变更
->   一律追加」的先例（理由见 `schema.py` `_V11` 注释与 `CHANGELOG`）。
+>   一律追加」的先例（理由见 `schema.py` `_V12` 注释与 `CHANGELOG`）。
 > * `_store.db` 的 `save_card_with_notifications`（Card + outbox **同事务**）/
 >   `enqueue_run_failed` / `record_delivery` / `undelivered_notifications`。
 > * `RunState.NOTIFICATION_PENDING`（插在 `CARD_PERSISTED` 与 `COMPLETED` 之间，只代表
@@ -862,7 +862,9 @@ assessment**，卡上呈现的是"risk 给出了事实、判定是 UNKNOWN、没
 > * `skills/decision-card/scripts/notify_worker.py` —— outbox 的读取方，桩投递
 >   `StdoutDeliverer`（真飞书 adapter 是 G-II 的生产方）。
 >
-> 落地细节冻结在教程第 33 章；探针记录见 `CHANGELOG`。**批 G-II（Inbound Trigger）
+> 落地细节冻结在教程第 34 章（与批 F 各自独立选中"第 33 章"撞车，按落地
+> 先后顺序处理，F 先落地保住 33，本批改记 34）；探针记录见 `CHANGELOG`。
+> **批 G-II（Inbound Trigger）
 > 未开工** —— 异步执行、飞书 trigger、`deploy/openclaw/` + R-2、`main` 移出路由，都在那批。
 
 * `notification_outbox` 与 Card **同事务**写入；worker 投递；幂等键 `(event_type, aggregate)`
