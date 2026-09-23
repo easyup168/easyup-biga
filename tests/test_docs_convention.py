@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 from collections import Counter
 
 import pytest
@@ -221,12 +222,96 @@ _TEST_COUNT_PATTERNS = (
 _FROZEN_MARK = "冻结"
 
 
+def _tracked_docs() -> set[pathlib.Path] | None:
+    """`docs/` 下**被 git 跟踪**的 `.md`。拿不到返回 `None`。
+
+    🔴 为什么条数要按「被跟踪」算，而不是按「磁盘上有什么」算
+    ------------------------------------------------------------
+    上面那两条检查是**按文件参数化**的：`docs/` 下每多一个 `.md`，就多两条
+    test case。于是工作区里任何**未跟踪**的 `.md` —— 哪怕被 `.gitignore` 挡着、
+    永远不会进仓库 —— 都会把 collected 抬高。
+
+    实测踩过（2026-09-23）：主工作区当时躺着一批未提交的材料，同步出来的条数
+    比干净 checkout 高 16 条，那个数被提交了，而**任何人 clone 下来都跑不出它**。
+    裁定 14：徽章与验收数字必须始终描述一个真被测过的**提交**。
+
+    ⚠️ 解法不是「参数化时别扫未跟踪文件」——那会让「新写的文档没带类别头」
+    在提交前查不出来，等于关掉一道有用的守卫。未跟踪文件**照样受检**，
+    只是不计入「这个提交有多少条测试」。
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "-z", "--", "docs/"],
+            capture_output=True, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {REPO / rel for rel in out.decode("utf-8").split("\0")
+            if rel.endswith(".md")}
+
+
+def _is_untracked_doc_case(item, tracked: set[pathlib.Path]) -> bool:
+    """这条 test case 是不是「参数是某个未跟踪的 docs/*.md」。
+
+    判据从 `callspec.params` 推，**不硬编码「每个文件贡献几条」** ——
+    将来多一条按 `_md_files()` 参数化的检查，这里不用改
+    （手写倍数正是 `test_roster_matches_config` 的清单式教训）。
+    """
+    spec = getattr(item, "callspec", None)
+    if spec is None:
+        return False
+    return any(
+        isinstance(v, pathlib.Path) and v.suffix == ".md"
+        and DOCS in v.parents and v not in tracked
+        for v in spec.params.values())
+
+
+class _FakeSpec:
+    def __init__(self, params): self.params = params
+
+
+class _FakeItem:
+    def __init__(self, params): self.callspec = _FakeSpec(params)
+
+
+def test_条数只数被跟踪的文档():
+    """`_tracked_docs()` / `_is_untracked_doc_case()` 的自证。
+
+    没有这条，上面那个 `collected` 的口径就是「看起来对」——而 2026-09-23
+    那次正是「看起来对」：同步出来的数在本机跑得通，clone 下来跑不出。
+    """
+    tracked = _tracked_docs()
+    assert tracked, "拿不到 git 跟踪清单 —— 条数检查会整条退化成 skip"
+    # 🔴 非平凡：必须真的扫到已知的被跟踪文档，否则「全都算未跟踪」也会绿
+    known = DOCS / "README.md"
+    assert known in tracked, f"没扫到 {known}，覆盖坏了"
+
+    # 被跟踪 ⇒ 计入条数
+    assert not _is_untracked_doc_case(_FakeItem({"path": known}), tracked)
+
+    # 未跟踪 ⇒ 不计入（这正是 1116 那次的成因）
+    ghost = DOCS / "external" / "_never-committed.md"
+    assert ghost not in tracked
+    assert _is_untracked_doc_case(_FakeItem({"path": ghost}), tracked)
+
+    # docs/ 之外的参数不受影响（别把别的参数化检查也误伤）
+    assert not _is_untracked_doc_case(_FakeItem({"rel": "CLAUDE.md"}), tracked)
+    assert not _is_untracked_doc_case(_FakeItem({"path": REPO / "skills"}), tracked)
+
+
 def test_文档里的测试条数与实测一致(request):
-    collected = len(request.session.items)
     # 只在**全量**跑时校验：跑子集时条数本来就对不上，那不是文档的错
     got = {item.path for item in request.session.items}
     if got != set((REPO / "tests").glob("test_*.py")):
         pytest.skip("跑的是子集，条数无从比较")
+
+    tracked = _tracked_docs()
+    if tracked is None:
+        # R-3：拿不到跟踪清单就是算不出来，不当作通过（skip 会显示成 's'）。
+        pytest.skip("拿不到 git 跟踪清单，条数无从比较")
+
+    # 🔴 只数「这个提交里真的有的」那些 case —— 见 `_tracked_docs()` 的说明。
+    collected = sum(1 for it in request.session.items
+                    if not _is_untracked_doc_case(it, tracked))
 
     bad = []
     for rel in _LIVE_TEST_COUNT_DOCS:
