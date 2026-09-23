@@ -51,11 +51,9 @@ class TestRenderPatch:
     def test_commands_text_true(self):
         assert ac.render_patch()["commands"]["text"] is True
 
-    def test_mcp服务用绝对脚本路径(self):
-        mcp = ac.render_patch()["mcp"]["servers"]["biga-card-trigger"]
-        assert mcp["command"] == "python3"
-        p = pathlib.Path(mcp["args"][0])
-        assert p.is_absolute() and p.name == "card_trigger_mcp.py"
+    def test_patch不注册mcp_server(self):
+        """出卡触发是纯 skill（shell 跑 inbound.py），patch 里不该冒出 mcp.servers。"""
+        assert "mcp" not in ac.render_patch(), "不再用 MCP server —— patch 不该含 mcp 键"
 
     def test_patch里没有任何凭据或可识别id(self):
         """公开仓库纪律：patch 只碰它管的键，绝不含 appSecret / token / ownerAllowFrom。"""
