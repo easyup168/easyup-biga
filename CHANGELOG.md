@@ -15,6 +15,27 @@
 
 ## [未发布]
 
+### 📐 设计 · 批 H-II 设计探活 + 分发提示词 —— H 又拆一层，收窄成两个有把握的包
+
+批 H-I 落地时明确留白了四件事：`_runtime`/`_snapshot` 往哪迁、
+`application`/`integrations`/`cli` 三个命名空间装什么。轮到 H-II 时先探活
+这四件事，而不是照 §29 骨架硬填——结论是四件事里只有两件现在有把握：
+`_runtime`（352+253 行，市场/板块/技术三个 Specialist 与 orchestrator.py
+共同消费）→ `runtime`；`_snapshot`（266 行，同时 import 三个 H-I 已迁移包，
+协调另外三层而不自成一层）→ `application`。探活确认这两个包**没有** H-I
+撞过的三个坑：零 `__file__` 用法、几乎零直接子模块导入（仅 1 处）、零
+AST 守卫硬编码路径——可达性机制直接照抄 H-I，不需要重新设计。
+
+**`integrations`/`cli` 与挖 `orchestrator.py` 出来单独建包，留给 H-III**：
+探活发现 `orchestrator.py`/`feishu_deliverer.py`/`notify_worker.py` 三个
+§29 骨架点名放 `application`/`integrations` 的候选，实际全部活在
+`skills/decision-card/scripts/` 里，只被 `decision-card` 一个 skill 消费
+——跟 H-I 三个包"第二个消费方出现才抽取"（裁定 15 同源理由）不是一回事，
+现在抽出来是造一个只有一个消费方的共享包，L-1 的反面。
+
+分发提示词见 `docs/guide/orchestration-kickoff-prompt.md` 同名小节；探活
+全文见设计 SSOT §8.1。
+
 ### 🔧 变更 · 批 H-I —— 三个共享基础设施包迁进 `src/easyup_biga/`，旧路径留薄壳
 
 外部评审 §29 建议把代码长期迁到 `src/easyup_biga/{domain,application,providers,
