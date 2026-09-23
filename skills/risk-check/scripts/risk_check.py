@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""risk-check —— 从 Stage 1 的**冻结证据**里算出风险事实，输出 AgentVerdict。
+"""risk-check —— 从 Stage 1 的**冻结证据**里算出风险事实，输出 FactBundle。
+
+🔴 批 E-III：Facts/Assessment 拆分的最后一棒。risk 从产合体 `AgentVerdict` 迁到产
+`FactBundle`（只事实、无 stance），形状与前五个一致。risk 的 stance 是 `VETO_STANCE`
+（"否决"）—— 制衡层唯一能拦住 BUY 的信号，由 Risk Agent 事后 `amend_verdict.py --stance`
+追加一个 `AgentAssessment`，经 `load_verdict` 多态压回 `AgentVerdict.stance`、被
+`DecisionCard` 读到并拦截（穿透链见教程第 30 章）。
+⚠️ risk 读**上游**五个 verdict 仍用 `load_verdict()`（多态，对新旧形状都返回
+`AgentVerdict`）——risk 是它们的消费方，那一半跟这次迁移无关。
 
 🔴 它不采数据
 --------------
@@ -43,13 +51,14 @@ from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
     CROSS_CHECK_PAIRS,
     STAGE1_AGENTS,
-    AgentVerdict,
+    AgentVerdict,  # 上游判定（load_verdict 多态返回）仍是 AgentVerdict —— risk 是消费方
     Evidence,
+    FactBundle,
     MissingItem,
     new_task_id,
     now_cn,
 )
-from _store import init_schema, load_verdict, save_verdict  # noqa: E402
+from _store import init_schema, load_verdict, save_fact_bundle  # noqa: E402
 
 AGENT = "risk"
 CALC_VERSION = "risk-check/1"
@@ -95,7 +104,7 @@ def _cmp(value: Any, op: str, bound: float) -> bool:
     return v > bound if op == ">" else v < bound
 
 
-def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> AgentVerdict:
+def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> FactBundle:
     t_start = time.monotonic()
     retrieved = now_cn()
     missing: list[MissingItem] = []
@@ -169,7 +178,7 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
             "foreign_task_ids": foreign,
             "upstream_attribution": {v.agent: v.task_id for v in upstream},
         }
-        return AgentVerdict(
+        return FactBundle(
             task_id=task_id, agent=AGENT, status="failed", verdict="UNKNOWN",
             result=attribution,
             # 🔴 `confidence` 不能沿用 `len(result)/_EXPECTED_FIELDS` ——
@@ -192,7 +201,7 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
         missing.append(MissingItem(
             "全部风险判据 —— 没有拿到任何上游判定，无从审起",
             "risk.upstream.none"))
-        return AgentVerdict(
+        return FactBundle(
             task_id=task_id, agent=AGENT, status="failed", verdict="UNKNOWN",
             result={}, data_completeness=0.0, evidence=[], warnings=warnings,
             missing=missing, elapsed_ms=int((time.monotonic() - t_start) * 1000))
@@ -338,7 +347,9 @@ def build_verdict(*, verdict_ids: list[int], store: bool, task_id: str) -> Agent
     else:
         status, level = "partial", "UNKNOWN"
 
-    v = AgentVerdict(
+    # 🔴 批 E-III：产 FactBundle（只事实、无 stance）。stance（否决/放行/…）由 Risk Agent
+    #    事后 amend_verdict.py --stance 追加一个 AgentAssessment，不重打这份事实。
+    v = FactBundle(
         task_id=task_id, agent=AGENT, status=status, verdict=level,
         result=result, data_completeness=round(len(result) / _EXPECTED_FIELDS, 2) if result else 0.0,
         evidence=evidence, warnings=warnings, missing=missing,
@@ -352,7 +363,7 @@ _EXPECTED_FIELDS = 10
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="从 Stage 1 冻结证据算风险事实 → AgentVerdict JSON")
+        description="从 Stage 1 冻结证据算风险事实 → FactBundle JSON（批 E-III）")
     ap.add_argument("--verdict-ids", required=True,
                     help="Stage 1 各 Specialist 的 verdict_id，逗号或空格分隔")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
@@ -373,26 +384,27 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         init_schema()
 
-    v = build_verdict(verdict_ids=ids, store=store,
-                      task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
-    ref = save_verdict(v) if store else None
+    fb = build_fact_bundle(verdict_ids=ids, store=store,
+                           task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
+    # 🔴 批 E-III：事实原件（FactBundle，不含 stance）直接落库；stance 由 Risk Agent 事后追加。
+    ref = save_fact_bundle(fb) if store else None
 
-    print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
         print(f"verdict_ref={ref}", file=sys.stderr)
 
     if args.render:
         print("\n" + "─" * 60, file=sys.stderr)
-        print(f"{AGENT}  {v.status}/{v.verdict}  耗时 {v.elapsed_ms}ms"
+        print(f"{AGENT}  {fb.status}/{fb.verdict}  耗时 {fb.elapsed_ms}ms"
               + (f"  verdict_ref={ref}" if ref else "  (未落库)"), file=sys.stderr)
-        for e in v.evidence:
+        for e in fb.evidence:
             print(f"  {e.display_label:<26} = {e.value}", file=sys.stderr)
-        for w in v.warnings:
+        for w in fb.warnings:
             print(f"  ⚠ {w}", file=sys.stderr)
-        for m in v.missing:
+        for m in fb.missing:
             print(f"  ⚠ 缺失 [{m.code}] {m}", file=sys.stderr)
 
-    return {"PASS": 0, "WARNING": 2}.get(v.verdict, 3)
+    return {"PASS": 0, "WARNING": 2}.get(fb.verdict, 3)
 
 
 if __name__ == "__main__":
