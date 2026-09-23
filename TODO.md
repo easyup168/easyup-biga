@@ -1009,24 +1009,30 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
           复核新发现）：判据是「调度命令的字面量」，而不是「有一个能跑的
           脚本」——现在没有 cron/systemd 实体去调它，outbox 会一直攒行、
           不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
-  - [ ] 批 G-II · Inbound Trigger —— **离线部分独立复核已过，代码已合并进
-        orchestration；P6 live 待做**。核心交付物：飞书"出卡"变结构化
-        trigger，**出卡编排绝不在 main 进程树里跑**（2026-09-21 那次 $0.4
-        白花事故的真根子）。🔴 **立场变过一次，如实记**：原计划零 LLM 的
-        `command-dispatch: tool` 走死了——它够不到会话内才连接的 MCP 工具
-        （P6 first/second retry 报 `Tool not available`；main 在会话里反而
-        调得到）。加上运营者约束（一个飞书机器人 + LLM 可用），退回 BigA
-        全仓一致的「技能 + shell 跑脚本」：main 认出请求 → 跑
-        `skills/card/scripts/inbound.py` → `systemd-run` 脱树拉起
-        （entry_guard 判 HUMAN = L-14 止血点，与"谁发起"解耦）。MCP server /
-        专用 agent 两个多余抽象已删。详见教程第 37 章 §三/§四、CHANGELOG 批 G-II。
-        离线复核内容：diff 摘要 + 五道探针红灯（P2 脱树两道独立复核亲手验红）+
-        全量 1254 条测试 + audit_public.sh 十一项，均已过。
-        - [ ] 待 live：P6 —— 真飞书 /card → main 认出 → 脱树出卡 → 推回飞书；
-              `inbound-trigger-debug.log` 随 MCP 工具一起删了（那是给"入参一堆键、
-              认哪个"这个已不存在的问题用的）——首个真 event 改核实 main 自己
-              transcript 里 `--trigger-id` 传的值，以及它是否原样落进
-              `decision_ids.trigger_id`（教程第 37 章「验证」一节已更新）
+- [x] 批 G-II · Inbound Trigger —— **P6 live 端到端已确认完成（2026-09-23）**。
+      核心交付物：飞书"出卡"变结构化 trigger，**出卡编排绝不在 main 进程树里跑**
+      （2026-09-21 那次 $0.4 白花事故的真根子）。🔴 **立场变过一次，如实记**：
+      原计划零 LLM 的 `command-dispatch: tool` 走死了——它够不到会话内才连接的
+      MCP 工具（P6 first/second retry 报 `Tool not available`；main 在会话里反而
+      调得到）。加上运营者约束（一个飞书机器人 + LLM 可用），退回 BigA 全仓
+      一致的「技能 + shell 跑脚本」：main 认出请求 → 跑
+      `skills/card/scripts/inbound.py` → `systemd-run` 脱树拉起
+      （entry_guard 判 HUMAN = L-14 止血点，与"谁发起"解耦）。MCP server /
+      专用 agent 两个多余抽象已删。
+      🔴 **P6 real 真跑又暴露、又修好两处**（离线探针测不出，只有真链路暴露）：
+      ① 预算闸门拒了它自己刚占的号——飞书路径先占号再拉起 `bin/biga-card`，
+      闸门的"上次占号"查到的是自己，100% 自拒；加 `exclude_decision_id` 参数解决。
+      ② 飞书投递缺凭据——`notify_worker.py` 从没有过调度方，也就没人带着
+      `BIGA_FEISHU_APPID`/`APPSECRET` 跑它；改成 `FeishuDeliverer` shell 一次
+      `bin/biga message send`，走网关自己已认证的飞书通道，appId/appSecret
+      从此不出现在这个类里。**运营者在飞书里确认收到了卡**——这是这一批第一次
+      有外发通知真的从"代码认为发出去了"走到"人看见了"。
+      详见教程第 37 章 §三～§五、CHANGELOG 批 G-II 三条修复记录。
+      离线 + live 复核内容：diff 摘要 + 全部探针红灯（含两处 P6 才暴露的新探针，
+      均亲手 sabotage-revert）+ 全量测试 + `audit_public.sh` 十一项，均已过。
+  - [ ] **`notify_worker.py` 仍然没有调度方**（更早已披露的缺口，本批修的是
+        "有凭据也发不出去"，不是"谁来定期跑它"）——今天靠人手动跑一次；
+        接上 cron/systemd 定时调用是 Phase 3 或后续批次的事
 - [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
       五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
       `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`

@@ -171,6 +171,49 @@ orchestrator。异步只发生在 `inbound.py → bin/biga-card` 这条边界，
 名单里。⚠️ agent 名单**从 `_contract` 派生、不手写**（裁定 15）：`discipline` 在
 STAGE2 名单里但故意没建（裁定 13）⇒ 按「真有 AGENTS.md 才算建成」过滤掉。
 
+### 九、🔴 P6 real 真跑：闸门拒了自己、投递缺凭据——两处只有真链路才暴露
+
+前面八节 + 离线探针把能想到的都钉住了，但 P6 真正接上飞书那一刻，还是暴露了两个
+新问题——都不是这一批之前没考虑过的东西坍了，是**两段各自独立正确的逻辑，头一次
+真的串在一条调用链上跑**时才互相咬合出的坑。
+
+**闸门拒了自己刚占的号。** `bin/biga-card` 自带的预算闸门（`check_budget()`，批
+G-I 就有）查「decision_ids 最近一行、距现在多久」。CLI 路径下，闸门先跑、orchestrator
+后占号，"最近一行"自然是**别的**、更早的尝试。飞书路径反过来——`accept_trigger`
+为了给出幂等 ACK，**先**占号、**再**拉起 `bin/biga-card`；闸门跑的时候，"最近一行"
+就是它自己刚占的那个。gap 恒为 0s——**这条路径上闸门必然拒绝每一次真实触发，不是
+偶发**。第一次真飞书 `/card`（`BIGA-20260923-003`）就是这样被拦下的：ACK 已经说
+"正在出卡"，`bin/biga-card` 却在几毫秒后报"距上次占号只有 0s"，两条理由都指向它
+自己。修法：`check_budget()` 加 `exclude_decision_id` 参数，把"跟自己比"这一条摘出去
+（`DAILY_CAP`——今天总共占了几个号——不受影响，这次自己确实算一次）。
+
+> 通用原则：一个"查最近一次别的尝试"的判据，一旦调用方自己先往同一张表里写了一行、
+> 再去跑这个判据，就会把自己算成"最近一次"。这类闸门只要**在调用它之前，同一张表
+> 会不会已经多了一行**这个问题，答案在两条路径上不一样，就该显式排除自己，不能假设
+> "查的时候号还不存在"对所有路径都成立。
+
+**飞书投递缺凭据。** 卡真的生成了、正确入队了通知（`notification_outbox`），但
+`notify_worker.py --deliverer feishu` 报错缺 `BIGA_FEISHU_APPID`/`APPSECRET`/
+`OWNER_ID`——根子是 `notify_worker.py` 从批 G-I 起就没有调度方，意味着**也没有
+"谁在正确环境里带着这三个值跑它"这件事本身的答案**。而网关那一刻正用一条真实、
+已认证的飞书连接（刚处理完触发出卡的那条消息）。改法：`FeishuDeliverer.deliver()`
+不再自己实现 `tenant_access_token` + `im/v1/messages` 两步 HTTP 调用，改成 shell 一次
+`bin/biga message send --channel feishu`（R-1，同 `apply_config.py` 的 `_run_biga`
+idiom）——走网关自己的飞书通道，appId/appSecret 从此不出现在这个类里，只剩一个
+标识符（`BIGA_FEISHU_OWNER_ID`，收件人，不是凭据）。真的手动跑通一次：
+`bin/biga message send` 返回 Feishu API 的真实 `messageId` + `receipt`（不是本地
+exit code 自证成功），运营者在飞书里确认收到了。
+
+> 通用原则：重构把业务逻辑挪出了原来隐式拥有某个能力（这里是"已认证的飞书连接"）
+> 的那层，容易第一反应是"那就让新的那层自己实现一遍这个能力"。先检查旧的那层
+> 是否还活着、是否已经有一个入口能借用——借用比重新发明更少一套凭据来源，也更少
+> 一个"这套凭据该由谁维护"的悬而未决的问题。
+
+两处都只有**真的接上飞书跑一次**才暴露——离线探针分别测了各自的一段（P1 幂等、
+P3 异步、`test_apply_config.py` 的 R-2/tools.deny），没有一道把"占号→拉起→闸门"
+或"卡完成→入队→投递"串成一条真实链路去跑，所以都没测出来。这不是探针写得不够
+细，是这类"两段各自独立正确，串起来才咬合出问题"的坑，本质上只有 live 才照得到。
+
 ## 执行
 
 真跑过的命令（都在独立 worktree 里，见「坑」一节）：
@@ -213,6 +256,18 @@ skill 就行」删掉了三个抽象（MCP server 脚本、专用 agent、comman
 上开工（Agent Registry / raw 层）。处理：把本批挪进独立 worktree，只还原自己碰过的
 文件。第 28 章记过这条纪律，这次是复发提醒。
 
+**预算闸门拒了它自己刚占的号（本章 §九）。** 离线探针把幂等/异步/脱树都测过了，但
+没有一道探针真的把"占号 → 拉起 bin/biga-card → 闸门检查"串成一条链路跑——直到真飞书
+`/card` 第一次触发，才看见闸门拿"刚占的这个号"当"上一次尝试"，100% 自拒。教训：
+一条链路被拆成好几段各自测试时，"每段都对"不等于"串起来也对"，尤其是当某一段的
+副作用（占号）恰好是下一段的判据（上次占号）的输入。
+
+**飞书投递缺凭据，根子是投递从来没有过一个"谁在正确环境里跑"的答案（本章 §九）。**
+不是漏配了三个环境变量，是 `notify_worker.py` 从批 G-I 起就没有调度方——补环境变量
+只是让本地手跑那一次不报错，没回答"部署好之后这三个值日常该从哪来"。改成借用网关自己
+已认证的连接（`bin/biga message send`）之后，这个问题从"需要一套凭据管理"变成"不需要
+凭据"，问题本身消失了，不是被绕过。
+
 ## 验证
 
 ```bash
@@ -231,17 +286,18 @@ python3 -m pytest tests/test_inbound_trigger.py tests/test_feishu_deliverer.py \
 python3 deploy/openclaw/apply_config.py 2>&1 | grep "openclaw-biga"   # 只出现 -biga 路径
 ```
 
-> 🔴 P6（live）：真在飞书里发 `/card` → main 认出 → 跑 `inbound.py` → 脱树出卡 →
-> 结论推回飞书。这一步要碰 live（网关配置 / 凭据），**须先与运营者确认再动**，不在
-> 离线判据里。
+> 🔴 P6（live）**已完成（2026-09-23）**：真在飞书里发 `/card` → main 认出 → 跑
+> `inbound.py` → 脱树出卡 → 结论推回飞书，全链路走通，运营者在飞书里确认收到了
+> 结论。中途真的撞见并修好了两处只有真链路才暴露的问题（本章 §九）：预算闸门
+> 自拒、飞书投递缺凭据。
 >
-> ⚠️ **`inbound-trigger-debug.log` 这个核实手段随 pivot 一起没了**——它是
+> `inbound-trigger-debug.log` 这个原计划的核实手段随 pivot 一起没了——它是
 > `card_trigger_mcp.py` 的 `_debug_log_args()` 记的（专门给"MCP 调用入参里 event id
-> 落在哪个键"这个问题用的），那个工具连同这份诊断日志一起删掉了。这一版 main 自己
-> 从上下文里判断、直接把 event id 当 `--trigger-id` 的**字面参数**传给
-> `inbound.py`，不再有"入参一堆键、认哪个"这个问题。第一次真 event 该核实的东西
-> 变了：main 的 tool-use 调用参数里 `--trigger-id` 传的到底是什么（看 main 自己的
-> transcript），以及那个值有没有原样落进 `decision_ids.trigger_id`（看真实生产库）。
+> 落在哪个键"这个问题用的），那个工具连同这份诊断日志一起删掉了。真事件的核实改走
+> main 自己的 transcript（`~/.openclaw-biga/agents/main/agent/openclaw-agent.sqlite`
+> 的 `transcript_events` 表——`created_at` 是 UTC 毫秒，见 CLAUDE.md 的老警告）：
+> `--trigger-id` 传的是飞书 `messageId`（`om_...`），原样落进了
+> `decision_ids.trigger_id`（`reserved_by='feishu:om_...'`）——对上了。
 
 ## 本章要点
 
@@ -254,5 +310,7 @@ python3 deploy/openclaw/apply_config.py 2>&1 | grep "openclaw-biga"   # 只出�
 | 5 | 🔴 撞墙时退回系统本来就在用的机制（技能 + shell 跑脚本），别加桥/垫片/中介去凑——一句「不用 MCP」删掉了三个多余抽象 |
 | 6 | 幂等键绑在 `decision_ids`（每决策一行）不绑 `decision_runs`（每尝试一行）——后者误伤重试；唯一约束才是可靠的并发仲裁（schema v14）|
 | 7 | 异步用 `systemd-run` 把出卡拉成瞬态单元：血缘变 systemd ⇒ entry_guard 判 HUMAN。pivot 后这是**唯一**的 L-14 止血点，P2 因此改成「launcher 必须脱树」的结构判据 |
+| 10 | 🔴 P6 real 才暴露：预算闸门拿"飞书路径先占号、才拉起 bin/biga-card"里自己刚占的那个号当"上一次尝试"，100% 自拒——`exclude_decision_id` 参数解决；一条链路被拆成好几段各自离线测过，不等于串起来也对 |
+| 11 | 🔴 P6 real 才暴露：飞书投递缺凭据的根子不是漏配环境变量，是投递从来没有过"谁在正确环境里跑"的答案——改成借网关自己已认证的连接（`bin/biga message send`），appId/appSecret 从此不需要，问题消失而不是被绕过 |
 | 8 | 人工 CLI 与飞书 inbound 走同一个 `bin/biga-card`（同五道守卫、同 orchestrator）；异步只在 `inbound → bin/biga-card` 的边界，CLI 同步体验不变 |
 | 9 | `apply_config.py` 撞 R-2 但机关早在：一切经 `bin/biga`、拒绝非 `-biga` 单元名、装后 `isolation.py` 核对；`tools.deny:[ask_user]` 只给被 spawn 的流水线 agent，名单从 `_contract` 派生 |
