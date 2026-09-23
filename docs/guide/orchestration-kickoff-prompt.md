@@ -2004,8 +2004,29 @@ P6  如果这一批决定顺手修 `skipif` 缺口：模拟"本机没有运行�
 ⚠️ **依赖已清**：批 F 已合并（`e5b959f`），raw 溯源字段该指向哪个 `run_id`
 已有确切答案（`ctx.run_id`，见下文）；`architecture.md` §5.1 已按四个
 存储平面重写，本批不再需要为"这算不算撞了切 PostgreSQL 的触发条件"
-纠结。开工第一件事 `git log --oneline -5` 确认没有更晚的改动，不要假设
-本提示词里的行号还准。
+纠结。
+
+🔴 **开工第一步、不是可选项：先建独立 worktree，不要直接在共享工作区
+`~/.openclaw-biga/workspace` 里改。** 2026-09-23 核对时确认批 G-II 正在
+（很可能还有别的批次也在）**直接在共享工作区里**改
+`skills/_store/schema.py`/`skills/_store/db.py`——这两个文件本批也要改
+（新迁移、`save_raw_snapshot`/`load_raw_snapshot`），是真实的、当下正在
+发生的文件级冲突，不是预防性建议。做法照 C-III/J-I/J-II/G-I 的既定
+先例：
+
+```bash
+git worktree add .claude/worktrees/i -b i orchestration   # 基于最后一次干净提交，不含其他会话的未提交改动
+cd .claude/worktrees/i
+```
+
+在这个独立 worktree 里开工、测试、提交，**不要碰共享工作区里那些不属于
+本批的未提交改动**。做完之后（评审通过后）参照既定流程：先把
+`orchestration` 合并进这个 worktree 解冲突（大概率是 schema 版本号
+撞车——本批的新迁移与批 G-II/其他并行批次谁先落地谁保留编号，后落地的
+重新编号，迁移 SQL 本体不动），验绿之后再合回 `orchestration`。
+
+开工后 `git log --oneline -5` 确认没有更晚的改动，不要假设本提示词里的
+行号还准。
 
 🔴 **这一批的核心风险不是"改不动"，是"改完之后静默破坏一个现有消费方"**
 ——设计探活已经找到那个消费方并给出了必须遵守的边界（见下文"不要做"第
