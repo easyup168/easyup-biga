@@ -454,6 +454,40 @@ ALTER TABLE evidence_sets  ADD COLUMN run_id TEXT;
 """
 
 
+_V11 = """
+-- ───────────────────────────────────────────────────────────────
+-- v11：一个 (task_id, agent) 至多一份 fact 原件（批 F）
+--
+-- 🔴 它堵的是一个实测能构造出来的静默洞：`save_fact_bundle` 落 fact 行时
+--    `amends` 恒为 NULL，而 v6 的 `ux_verdict_amends_linear` 只管
+--    `WHERE amends IS NOT NULL` —— fact 行天生在它管辖之外。于是对同一个
+--    `(task_id, agent)` **第二次**写 fact，两行都是 amends=NULL，唯一索引
+--    一个都拦不住 ⇒ 静默产生两条并存的判定原件。
+--
+-- 批 F 把 risk 的事实从「risk 被 spawn 后自己跑 risk_check.py」挪成「编排器
+-- 在 spawn 之前直接算好、落库」。这条路径下，如果 risk 没听新提示词、又自己
+-- 跑了一遍 risk_check.py --task-id <同一个决策号>，就正好触发上面那个双写：
+--   · `latest_verdict_ids()` 取 MAX(verdict_id) ⇒ 悄悄改用 risk 双跑那条，
+--     编排器预先算的那条被架空；
+--   · 「这次决策的 risk 事实原件是哪一条」从此有歧义，而这正是一个卖点为
+--     「证据可追溯、可回放」的系统最不能有的东西。
+--
+-- ⇒ 补一条分区唯一索引：kind='fact' 的行里，(task_id, agent) 不许重复。
+--    与 `ux_decision_online`（一个 decision 一条在线卡）、`ux_verdict_amends_linear`
+--    （一条原件至多一条修订）同形 —— 都是「唯一约束由数据库兜底，不靠应用层
+--    先查再插」。assessment 行（kind='assessment'）与历史合体行（kind NULL/'verdict'）
+--    不在 WHERE 内，不受影响：一份事实仍可挂一个判断，历史行照旧只读。
+--
+-- 🔴 加索引前实测过生产库：kind='fact' 的行里没有任何 (task_id, agent) 重复
+--    （唯一 1 条 fact 行）—— 迁移不会因存量重复而失败。CREATE UNIQUE INDEX
+--    在有重复时会直接报错，那正是 append-only 下不能事后清洗的处境，所以必须
+--    先确认干净再加。
+-- ───────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fact_per_task_agent
+    ON agent_verdicts(task_id, agent) WHERE kind = 'fact';
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -466,6 +500,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (8, _V8),
     (9, _V9),
     (10, _V10),
+    (11, _V11),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

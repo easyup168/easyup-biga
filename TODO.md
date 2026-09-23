@@ -945,11 +945,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
    `task_id`」，一条 SELECT。**这是写边界校验，不是 `latest_verdict_ids()` 过滤** ——
    后者才是追加 5.1 说的那个 enforce，两件事别混。
 
-- [ ] 批 F · RiskPolicy 前移 —— 依赖已清（E 系列 + J-I 都已合并），设计探活
-      已完成、分发提示词已就绪（2026-09-23）：`build_fact_bundle()` 本来就是
-      纯函数，编排器可以直接调用；两种确定性结论（跨决策证据污染/无上游）
-      不必再 spawn risk，其余情况仍 spawn 但只负责解读、不再自己跑
-      `risk_check.py`。VETO 穿透必须回归验证，不能因为改了调用路径就松了
+- [x] 批 F · RiskPolicy 前移 —— **已落地（2026-09-23）**。`build_fact_bundle()`
+      挪进编排器；两种确定性早退（`fb.status=='failed'`：跨决策污染/无上游）不 spawn
+      risk，其余仍 spawn 但只解读。落地时独立发现并修掉两处设计没点名的交互：
+      schema v11 `ux_fact_per_task_agent`（fact 双写静默并存）、`persist()` 只给真被
+      spawn 的 agent 记账本行（早退场景 spawn_check 误判 forged）。VETO 全路径回归
+      已验（P5）。教程第 33 章、`CHANGELOG.md`。
+  - [ ] **既有测试隔离脆弱性**（批 F 落地时发现，非批 F 引入，原始提交 f9bc68c 同样
+        复现）：`tests/test_facts_split_e3.py` 模块级 `_load("card_ops", …)` 会把
+        `sys.modules["card_ops"]` 换成它自己 `importlib` 出来的实例。当 `pytest` 的
+        **文件采集顺序**让 `test_orchestrator.py` 排在 e3 前面时，`orchestrator` 绑定
+        的是原始 `card_ops`，而 `test_persist抛异常…` 的 `import card_ops` 拿到 e3 的
+        实例 ⇒ `monkeypatch.setattr(card_ops, "persist", …)` 打偏、测试红。全量套件
+        （字母序，e3 在前）不触发，所以 CI/`pytest` 无参跑绿。修法方向：让 `_load`
+        对 `card_ops` 幂等（已在 `sys.modules` 就复用），或 e3 不覆盖 `card_ops` 这个
+        规范名。**本批不修**（不属于批 F 范围）
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。等批 J 的依赖
       已解除（run_id 已消歧义），建议等批 F 落地——它给 raw 加溯源字段，

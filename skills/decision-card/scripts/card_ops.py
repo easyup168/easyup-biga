@@ -172,6 +172,9 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
     runtime_run_id`，`spawn_check.py` 据此做结构化 join。
     🔴 必须有默认值：`synthesize.py` 与几条测试也在调 `persist()`，它们没有这个
     映射；不给默认值会把不相干的调用一起弄红。回放路径整段不记账本，自然也不写它。
+    🔴 批 F：提供这个映射时，它的 **key 集**同时是「本次真正被 spawn 的 agent」的权威
+    名单 —— 只有名单里的 agent 记账本行。risk 在两种确定性早退里由编排器免费算出事实、
+    未被 spawn，就不进映射、也不该有账本行（否则 L-8 幽灵行 + spawn_check 误判伪造）。
 
     ⚠️ 这是批 C-II 的一处回归修复：旧的 standalone `synthesize.py`（编排从
     main 的提示词驱动时期）在落库前调过这个账本；批 C-II 把合成逻辑挪进这个
@@ -181,13 +184,22 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
     live 验证时才暴露（不是安全洞：把成功误判成失败，不是把失败误判成成功）。
     """
     if replay_of is None:
-        rr = runtime_run_ids or {}
         for v in card.verdicts:
+            # 🔴 批 F：runtime_run_ids 提供时，它的 key 集就是「本次真正被 spawn 的 agent」
+            #    的权威名单 —— 只给这些 agent 记执行账本行（agent_runs）。risk 在两种
+            #    确定性早退（证据跨决策污染 / 完全没有上游）里由编排器**免费**算出事实、
+            #    根本没被 spawn：给它记一行「执行过」既是 L-8 幽灵账本行（记了没发生的事），
+            #    又会让 spawn_check 把它误判成伪造（agent_runs 有行、运行时 subagent_runs
+            #    没有 ⇒ forged）。⚠️ 判据是 key 在不在，不是 rr.get() 的值 —— 被 spawn 但
+            #    没拿到 runtime_run_id 的 agent 是「key 在、值 None」，仍要记账。
+            #    不提供 runtime_run_ids（synthesize.py / 测试 / 回放）时维持原样：给所有 verdict 记账。
+            if runtime_run_ids is not None and v.agent not in runtime_run_ids:
+                continue
             record_verdict_run(v, decision_id=card.decision_id,
                                started_at=card.generated_at,
                                finished_at=card.generated_at,
                                model=card.model_ref,
-                               runtime_run_id=rr.get(v.agent))
+                               runtime_run_id=(runtime_run_ids or {}).get(v.agent))
     return save_card(card, replay_of=replay_of)
 
 
