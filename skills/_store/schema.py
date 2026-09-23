@@ -424,6 +424,36 @@ ALTER TABLE agent_runs ADD COLUMN runtime_run_id TEXT;
 """
 
 
+_V10 = """
+-- ───────────────────────────────────────────────────────────────
+-- v10：run_id capture 贯穿全链（批 J-I）
+--
+-- 让「这条判定原件 / 这份冻结切片是哪次 run 产生的」能被查到 —— §4 身份模型里
+-- run_id 从批 B 就存在（decision_runs / run_events），但 agent_verdicts /
+-- evidence_sets 一直没有它，于是「所有 Specialist 看的是同一份数据、都属于同一次
+-- 执行尝试」这句话在这两张表上无法验证。
+--
+-- 🔴 **只做 capture，不做 enforce**（设计文档 §2 追加 5.1）：只是把 run_id 存下来、
+--    传下去，**不改任何现有的判定/过滤逻辑**。latest_verdict_ids() 仍按 decision_id
+--    聚合 —— 按 run_id 过滤要等真正的重试路径出现才做。
+--
+-- · agent_verdicts.run_id：fact 行由 skill 经 --run-id 带下来；assessment 行**不**
+--   自己传，而是从它 amends 的那条 fact 行**继承**（save_assessment 里做）——
+--   判据别建在 Agent 手传的可篡改输入上，继承在结构上不可能与事实行不一致。
+-- · evidence_sets.run_id：SnapshotCoordinator.freeze_index_daily 冻结时由编排器
+--   把 ctx.run_id 直接传进来（Python 内部调用，不经 CLI）。decision_runs 早就有
+--   evidence_set_id 反向指针，但那是 run→set；这一列是 set→run，直接、不用 join。
+--
+-- 🔴 都 nullable、不回填：历史行没有这个值，NULL 如实表达「迁移前落的，不知道是
+--    哪次 run」。做成 NOT NULL 等于强迫历史数据造假。
+-- ⚠️ J-II 的 TestRunIdNamespace 守卫会自动把这两列纳入判据（任何名为 run_id 的列
+--    必须 TEXT、值可追到 decision_runs.run_id）—— 这里声明 TEXT 正是为了过它。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE agent_verdicts ADD COLUMN run_id TEXT;
+ALTER TABLE evidence_sets  ADD COLUMN run_id TEXT;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -435,6 +465,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (7, _V7),
     (8, _V8),
     (9, _V9),
+    (10, _V10),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

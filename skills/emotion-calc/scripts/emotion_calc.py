@@ -363,6 +363,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--date", help="交易日 YYYYMMDD。给了就是严格模式："
                                    "数据源返回的日期对不上即进 missing[]")
     ap.add_argument("--task-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
+    ap.add_argument("--run-id", default=None,
+                    help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
+                         "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
     ap.add_argument("--break-source", action="append", default=[],
                     metavar="NAME",
                     help="演练用：人为中断某个数据源 "
@@ -387,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     #    15 条 evidence 的 retrieved_at 转述后一条不剩。让数据不经过 LLM，是唯一可靠的修法。
     #    stance 由 emotion Agent 事后 `amend_verdict.py --ref <这个号> --stance <词>` 追加，
     #    落成一条 AgentAssessment，**不重打这份事实**。
-    ref = save_fact_bundle(fb) if store else None
+    ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
 
     print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
