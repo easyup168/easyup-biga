@@ -42,6 +42,7 @@ __all__ = [
     "run_header",
     "run_events",
     "run_journey",
+    "find_run_by_trigger",
 ]
 
 
@@ -180,6 +181,31 @@ def run_header(
             "SELECT run_id, decision_id, trigger_id, evidence_set_id, origin, "
             "non_interactive, created_at FROM decision_runs WHERE run_id=?",
             (run_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["non_interactive"] = bool(d["non_interactive"])
+    return d
+
+
+def find_run_by_trigger(
+    trigger_id: str, *, path: pathlib.Path | str | None = None
+) -> dict[str, Any] | None:
+    """这个 `trigger_id` 起过的（最早那次）运行头 —— 入站幂等的**查询侧**（批 G-II）。
+
+    占号的原子仲裁在 `decision_ids.trigger_id`（`reserve_decision_for_trigger`）；
+    这里是给「已在处理」那句 ACK 补一个当前状态用的：一次外部请求重投时，回一句
+    「决策 X 已在处理（跑到 STAGE1_RUNNING）」比只回「重复了」有用。走 v7 的
+    `ix_runs_trigger` 索引。找不到（占了号但 run 还没 open）返回 None ——
+    调用方仍可凭 `reserve_decision_for_trigger` 的 `created=False` 判定这是重投。
+    """
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT run_id, decision_id, trigger_id, evidence_set_id, origin, "
+            "non_interactive, created_at FROM decision_runs WHERE trigger_id=? "
+            "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+            (trigger_id,),
         ).fetchone()
     if not row:
         return None

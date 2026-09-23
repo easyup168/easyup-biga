@@ -575,6 +575,46 @@ CREATE INDEX IF NOT EXISTS ix_deliveries_outbox ON notification_deliveries(outbo
     + _append_only("notification_deliveries", "投递日志改了，就没法复述这条通知投了几次、结果如何")
 
 
+_V13 = """
+-- ───────────────────────────────────────────────────────────────
+-- v13：入站幂等 —— decision_ids 的号绑一次外部请求（批 G-II，Inbound Trigger）
+--
+-- 🔴 它解决的是 2026-09-21 19:31 那次事故的直接根子：飞书事件会**重投**，
+--    而没有幂等键时，一次重投 = 重跑一次决策（4 spawn + yield + 占号在后，$0.4 白花）。
+--    §4 身份模型早把 trigger_id 列为「一次外部请求（飞书 event id / CLI / cron）」，
+--    decision_runs.trigger_id（v7）也一直留着这一列 —— 但至今零生产方在填它，更没有
+--    任何东西保证「同一个 trigger 只起一次决策」。批 G-II 第一次真的填它，并把
+--    「一个 trigger 至多一个决策」变成**数据库自己**保证的不变量。
+--
+-- 为什么绑在 decision_ids（号分配器）而不是新开一张入站幂等表：
+--   · 设计探活（2026-09-23）点名：「不要另造一个入站幂等表，decision_runs.trigger_id
+--     这一列已经在等着被用」。这里更进一步 —— 号分配器 decision_ids 本就是**决策身份
+--     的原子仲裁点**（reserve_decision_id 靠主键冲突占号，见 db.py）。把「这个号是为哪
+--     次外部请求占的」记在同一处，幂等就与占号**同一个原子操作**，不引第二套。
+--   · 身份模型是 Trigger → Decision → 多个 Run。「一个 trigger 一个决策」正是这条链的
+--     第一段；**重试（Run B）复用同一个 decision_id，不重新占号 ⇒ 不撞这条唯一约束**。
+--     所以约束加在 decision_ids（每个决策一行）而不是 decision_runs（每次尝试一行）——
+--     加在后者会误伤将来的重试。
+--
+-- 🔴 唯一约束是唯一可靠的并发仲裁（decision_runs.py / decision_ids 反复用的同一招）：
+--    「先查 trigger 在不在、不在就占号」中间有窗口，两次同时到的重投会各占一个号、
+--    合出两张卡。UNIQUE(trigger_id) 让第二个并发占号在数据库层当场撞掉，
+--    reserve_decision_for_trigger 据此回退到「返回已占的那个号」（见 db.py）。
+--
+-- 只追加不冲突：decision_ids 是只追加的（v5 触发器）。trigger_id 在 **INSERT 时**
+--   一次写定，从不 UPDATE —— ADD COLUMN 是 DDL，不触发 no_update；老行 trigger_id
+--   留 NULL（它们是 trigger_id 存在之前占的号，本就没有对应的外部请求）。
+--   partial index `WHERE trigger_id IS NOT NULL`：CLI 每次生成的是唯一 trigger_id
+--   （不去重、各是一次独立请求），NULL 老行与彼此都不进唯一域，只有真正重复的
+--   外部 event id 才会撞 —— 正是要拦的那一种。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE decision_ids ADD COLUMN trigger_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_ids_trigger
+    ON decision_ids(trigger_id) WHERE trigger_id IS NOT NULL;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -589,6 +629,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (10, _V10),
     (11, _V11),
     (12, _V12),
+    (13, _V13),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

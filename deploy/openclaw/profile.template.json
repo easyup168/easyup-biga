@@ -1,0 +1,53 @@
+{
+  "__doc__": [
+    "deploy/openclaw/profile.template.json —— BigA profile 的形状模板（配置即代码，批 G-II）。",
+    "覆盖：一个全新 BigA 装机该有的 profile 骨架（端口/隔离/飞书命令面）。",
+    "不覆盖：真实凭据与个人 id —— 一律用占位符，真值留在仓库外的 live openclaw.json。",
+    "",
+    "🔴 这是模板，不是被 apply 的东西：apply_config.py 只增量 patch 它管的那几个键",
+    "（tools.deny / commands.text / mcp.servers），绝不用本文件整个覆盖 live 配置 ——",
+    "那样会抹掉 appSecret / gatewayToken / ownerAllowFrom 这些 live-only 的值。",
+    "本文件是给「从零装一台 BigA」当参照，以及让 R-2 相关的形状（端口间距、-biga 单元名",
+    "由 --profile biga 推导）有个写下来的出处。"
+  ],
+
+  "gateway": {
+    "mode": "local",
+    "port": 19789,
+    "bind": "loopback",
+    "auth": { "mode": "token", "token": "<GATEWAY_TOKEN — live only, 不落仓库>" }
+  },
+
+  "commands": {
+    "text": true,
+    "ownerAllowFrom": ["feishu:<OWNER_OPEN_ID — live only, 可识别个人信息，不落仓库>"]
+  },
+
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "connectionMode": "websocket",
+      "appId": "<飞书 appId，live only，不落仓库>",
+      "appSecret": { "__ref__": "<解析自密钥库，不落仓库明文>" },
+      "dmPolicy": "allowlist",
+      "allowFrom": ["<OWNER_OPEN_ID — live only>"]
+    }
+  },
+
+  "mcp": {
+    "servers": {
+      "biga-card-trigger": {
+        "command": "python3",
+        "args": ["<DEPLOY_ROOT>/skills/card/scripts/card_trigger_mcp.py"]
+      }
+    }
+  },
+
+  "__r2_note__": [
+    "R-2（共享命名空间）：systemd 单元名必须带 -biga 后缀。",
+    "本模板不写单元名 —— 它由 `bin/biga daemon install`（--profile biga）推导成",
+    "openclaw-gateway-biga.service。apply_config.py 装服务前拒绝任何非 -biga 单元名，",
+    "装后由 tools/verify/isolation.py::check_namespaces() 核对。端口 19789 与同机另一套",
+    "实例的 18789 间距 1000（≥ 官方 120）。"
+  ]
+}

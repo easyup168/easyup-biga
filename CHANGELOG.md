@@ -15,6 +15,88 @@
 
 ## [未发布]
 
+### ✨ 新增 · 批 G-II —— Inbound Trigger：飞书出卡变结构性命令，main 全程不参与路由
+
+批 G-I 让卡跑完能**推**回飞书。这一批做反方向、风险大得多的那半：让飞书能
+**触发**出卡，但**不经过 main 的自由判断**。它关掉的是 2026-09-21 两次事故
+（19:31 四孤儿 spawn、21:03 出卡递归 L-14）的共同根子——**入口在 prompt 层面、
+不在代码层面**。立场沿用批 C-II：不是教 main 认出出卡请求再转发，是 **main 压根
+收不到这类请求**（反事实检验：把 main 的 system prompt 清空，`/card` 照样出卡）。
+
+**为什么这么设计**（几处不显然的裁定）：
+
+- **结构性拦截用 `command-dispatch: tool`。** 飞书是 websocket 长连接（事件从网关
+  进程内到达，没有能指向的 HTTP 端点）⇒ 拦截只能表达成配置。`/card` 做成一个技能
+  （`skills/card/SKILL.md`），`command-dispatch: tool` 让命令**直接派发到工具、绕过
+  model**（命令消息绕过 queue+model）。`command-tool` **不能指 `exec`**：
+  `command-arg-mode: raw` 会把用户在 `/card` 后打的字当 shell 命令跑（聊天框变
+  host shell）⇒ 专门做一个 stdio MCP 工具 `biga_card_trigger`（`mcp` 包），它只调
+  `inbound.accept_trigger`。
+- **幂等键绑 `decision_ids` 不绑 `decision_runs`。** 身份模型是 Trigger→Decision→
+  多个 Run。绑在每次尝试一行的 `decision_runs.trigger_id` 会**误伤将来的重试**
+  （重试复用同一 trigger、会撞唯一约束）；绑在号分配器 `decision_ids`（每决策一行）
+  正好——重试复用同一号、不重占 ⇒ 不撞约束，且占号本就是决策身份的原子仲裁点。
+  **「先查 trigger 在不在、不在就占号」中间有竞态窗口——唯一约束才是唯一可靠的
+  并发仲裁**（本仓库第三次用这句话，前两次在 `decision_ids`/`run_events`）。
+- **异步用 `systemd-run` 把出卡拉出 agent 进程树。** 受理要快（立刻 ACK）、出卡要慢
+  （后台 170~200s）。但命令工具在网关进程里跑，直接 fork 的 `bin/biga-card` 会继承
+  运行时血缘/service env、被 `entry_guard` 判成 AGENT 拒掉。解法是**新增一条被允许
+  的路径**（不改 entry_guard 已在拦的那条）：`systemd-run --user` 把它拉成瞬态
+  systemd 单元 ⇒ 血缘变 `systemd --user`、无 service env ⇒ 判成 HUMAN——正是
+  entry_guard 本就允许的「外部 Trigger」那一类。**不是绕过守卫，是走它本就留的门。**
+- **人工 CLI 与飞书走同一个 `bin/biga-card`**（同五道守卫、同 orchestrator，不分叉
+  两套决策逻辑）。异步只在 `inbound.py → bin/biga-card` 边界；`bin/biga-card` 内部
+  照旧同步。人工 CLI 没有那三个透传环境变量 ⇒ `origin=cli` ⇒ **同步体验一字不变**。
+- **`tools.deny:[ask_user]` 只给被 spawn 的非交互流水线 agent，main 不在名单。**
+  半年前不能做（那时 main 同时是交互入口和出卡入口，禁它会连累飞书/TUI），批 C-II
+  之后前提不成立。agent 名单**从 `_contract` 派生、不手写**（裁定 15 / dev-workflow
+  第五问）：`discipline` 在 STAGE2 名单里但没建（裁定 13）⇒ 按「真有 AGENTS.md」
+  过滤掉。**这条是设计探活点名必须补测的**——config 层的落点就是「main 不在 patch 里」。
+- **`apply_config.py` 撞 R-2 但机关早在。** 一切经 `bin/biga`（强制 `--profile biga`、
+  绝不裸 `openclaw`）、装 systemd 服务前拒绝任何非 `-biga` 单元名（`OPENCLAW_SYSTEMD_UNIT`
+  env 覆盖是唯一能绕过推导的口子，堵上它）、装后由 `isolation.py::check_namespaces()`
+  核对。`config patch` 递归合并 ⇒ 只碰它管的键（`tools.deny`/`commands.text`/
+  `mcp.servers`），**不碰 appSecret/gateway token/ownerAllowFrom 这些 live-only 值
+  ——仓库里一个凭据都不落**。
+
+**建的东西**：
+
+- schema **v13**：`decision_ids` 加 `trigger_id` 列 + partial unique index
+  （`WHERE trigger_id IS NOT NULL`）。`_store.reserve_decision_for_trigger`（幂等
+  占号，返回 `(decision_id, created)`）+ `find_run_by_trigger`（入站幂等查询侧）。
+- `skills/decision-card/scripts/inbound.py`：入站适配器 `accept_trigger`——幂等占号
+  → 异步拉起（脱离进程树）→ 立刻 ACK。launcher 是依赖注入点（离线测桩）。
+- `skills/card/SKILL.md` + `skills/card/scripts/card_trigger_mcp.py`：`/card` 技能
+  （`command-dispatch: tool`）+ 它直达的 MCP 工具。`handle_card_trigger` 是纯函数
+  （离线可测），`resolve_trigger_id` 认不出飞书 event id 就 fail-closed（不编一个）。
+- `skills/decision-card/scripts/feishu_deliverer.py`：`FeishuDeliverer` 实现批 G-I 的
+  `Deliverer` 协议，接真飞书 API（HTTP 传输是注入点、凭据从环境变量读）。
+  `notify_worker.py` 加 `--deliverer feishu`（默认仍是 stdout 桩）。
+- `deploy/openclaw/`（新目录）：`agents.yaml` / `tool-policy.yaml` /
+  `profile.template.json` / `apply_config.py`。
+- `bin/biga-card`：认 `BIGA_CARD_ORIGIN/TRIGGER_ID/DECISION_ID` 三个环境变量透传给
+  orchestrator（都没设 = 人工 CLI，同步路径不变）。`orchestrator.py` 加 `--decision-id`。
+
+**探针（G-1，每道都亲手弄坏、见过红、已还原）**：
+
+- **P1 幂等**：关掉 `reserve_decision_for_trigger` 的去重（跳过快查 + 插入不带
+  trigger 标记）⇒ `created2` 变 `True`、adapter 拉起两次 ⇒ 幂等两条测试翻红。还原绿。
+- **P2 main 出局**：从 `SKILL.md` 删掉 `disable-model-invocation: true` ⇒ 结构测试
+  `re.search` 找不到、断言 `None` ⇒ 翻红（少了它 `/card` 会回落到 model=main）。还原绿。
+- **P3 异步**：给 `accept_trigger` 塞 `time.sleep(2)`（模拟同步等出卡）⇒
+  「受理 < 1s」断言翻红。还原绿。
+- **P4 R-2**：把 `check_r2` 的判据改成 `if False`（fail-open）⇒ 非 `-biga` 单元名
+  不再被拒 ⇒ `DID NOT RAISE R2Violation` 翻红。还原绿。
+- **P5 tools.deny**：把 `main` 塞进 deny patch（并关掉那句 `assert "main" not in`）⇒
+  「main 不在 deny」断言在集合里查到 `'main'` ⇒ 翻红。还原绿。
+- **P6 live**（真飞书 event → 卡 → 投递）：外部收尾，见下方「已知问题/待办」。
+
+**探针记录里没有抄任何真值**：飞书 open_id / appId / appSecret / gateway token
+一个都没进这份 CHANGELOG（公开仓库纪律——描述「不要写 X」的规则时不抄 X）。
+
+**现状**：schema **v13**（十张表 + `decision_ids` 多一列）、测试 **1213** 条、
+教程 **35** 章。全部在独立 worktree（`wt-g-ii`，不含未跟踪文件干扰）里跑过。
+
 ### ✅ 复核 · 批 G-I 独立复核 + 合回 orchestration，schema v11 撞车按先例解决
 
 批 G-I（外发通知 outbox）在独立 worktree（`.claude/worktrees/g-i`）里做完后，
