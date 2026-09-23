@@ -233,8 +233,15 @@ python3 deploy/openclaw/apply_config.py 2>&1 | grep "openclaw-biga"   # 只出�
 
 > 🔴 P6（live）：真在飞书里发 `/card` → main 认出 → 跑 `inbound.py` → 脱树出卡 →
 > 结论推回飞书。这一步要碰 live（网关配置 / 凭据），**须先与运营者确认再动**，不在
-> 离线判据里。第一次真 event 还要对着 `inbound-trigger-debug.log` 把 event id 落在
-> 哪个字段核实、收敛幂等键取值。
+> 离线判据里。
+>
+> ⚠️ **`inbound-trigger-debug.log` 这个核实手段随 pivot 一起没了**——它是
+> `card_trigger_mcp.py` 的 `_debug_log_args()` 记的（专门给"MCP 调用入参里 event id
+> 落在哪个键"这个问题用的），那个工具连同这份诊断日志一起删掉了。这一版 main 自己
+> 从上下文里判断、直接把 event id 当 `--trigger-id` 的**字面参数**传给
+> `inbound.py`，不再有"入参一堆键、认哪个"这个问题。第一次真 event 该核实的东西
+> 变了：main 的 tool-use 调用参数里 `--trigger-id` 传的到底是什么（看 main 自己的
+> transcript），以及那个值有没有原样落进 `decision_ids.trigger_id`（看真实生产库）。
 
 ## 本章要点
 
