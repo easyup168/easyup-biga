@@ -36,6 +36,9 @@ import uuid
 _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
+# 🔴 批 F：编排器直接 import risk 的纯函数 build_fact_bundle —— 与 risk_check.py 的 CLI
+#    共用同一份计算，不发明第二套（skill 目录带连字符，脚本文件是下划线，加路径后可 import）。
+sys.path.insert(0, str(_HERE.parent.parent.parent / "risk-check" / "scripts"))
 
 from _contract import (  # noqa: E402
     STAGE1_AGENTS,
@@ -51,8 +54,10 @@ from _store import (  # noqa: E402
     latest_verdict_ids,
     open_run,
     reserve_decision_id,
+    save_fact_bundle,
     transition,
 )
+from risk_check import build_fact_bundle  # noqa: E402
 import card_ops  # noqa: E402
 import entry_guard  # noqa: E402
 
@@ -182,19 +187,45 @@ class DecisionOrchestrator:
                                  detail=self._stage_detail(r1))
 
                 # ── Stage 2：制衡层 risk（读 Stage 1 冻结证据）──
+                # 🔴 批 F：risk 的事实（build_fact_bundle）由编排器在 spawn 之前**直接、
+                #    免费**地算一遍并落库 —— 老路径要先花一次 LLM 调用去触发 risk 跑这个
+                #    脚本。run_id 走批 J-I 的 capture 路径（与 Stage 1 六个 skill 同一种落法）。
                 stage1_ids = latest_verdict_ids(did)
                 s1_refs = [stage1_ids[a] for a in STAGE1_AGENTS if a in stage1_ids]
                 state = self._to(ctx.run_id, state, RunState.RISK_RUNNING)
-                gid_r = f"g-{ctx.run_id[:8]}-risk"
-                rh = ad.start(RISK_AGENT, did, self._risk_task(did, s1_refs, ctx.run_id),
-                              group_id=gid_r, run_timeout_sec=max(30, self.risk_sec))
-                r2 = ad.wait([rh], self._stage_timeout(deadline, self.risk_sec))
+                # store= 是 risk_check.main 的老参数，build_fact_bundle 内部并不读它；
+                # 编排器自己调 save_fact_bundle 落库，拿到 verdict_ref 参与合成。
+                risk_fb = build_fact_bundle(verdict_ids=s1_refs, store=False, task_id=did)
+                risk_ref = save_fact_bundle(risk_fb, run_id=ctx.run_id)
+                if risk_fb.status == "failed":
+                    # 🔴 两种确定性早退（foreign 证据跨决策污染 / 完全没有上游）：verdict
+                    #    已是机械终局 UNKNOWN，LLM 解读没有信息增量 ⇒ **不 spawn risk**。
+                    #    契约铁律钉死 status='failed' ⟹ verdict='UNKNOWN'，而走到底那条永远
+                    #    是 completed/partial —— 这个判据不会误伤「覆盖不足但仍值得解读」。
+                    #    r2 空 ⇒ risk 不进 runtime_run_ids ⇒ 不记账本行（persist 的批 F 语义），
+                    #    卡上 risk 呈现「给出事实、判定 UNKNOWN、无 stance」而非「缺席」。
+                    r2 = []
+                else:
+                    # 其余情况仍 spawn risk，但它不再自己跑 skill —— 只解读编排器算好的
+                    # verdict_ref、按判断表给 stance、amend 一行（新提示词见 _risk_task）。
+                    gid_r = f"g-{ctx.run_id[:8]}-risk"
+                    rh = ad.start(RISK_AGENT, did,
+                                  self._risk_task(did, risk_ref, risk_fb),
+                                  group_id=gid_r, run_timeout_sec=max(30, self.risk_sec))
+                    r2 = ad.wait([rh], self._stage_timeout(deadline, self.risk_sec))
 
                 # ── Stage 3：判官给综合判断，程序组装 Card ──
                 state = self._to(ctx.run_id, state, RunState.SYNTHESIZING,
                                  detail=self._stage_detail(r2))
                 all_ids = latest_verdict_ids(did)
                 ordered = [all_ids[a] for a in (*STAGE1_AGENTS, RISK_AGENT) if a in all_ids]
+                # 🔴 批 F 起这道检查退成纵深防御：risk 现在**总会**落一条 fact（连「完全没有
+                #    上游」都落一条无上游 UNKNOWN），所以正常输入下 ordered 至少有 risk 这条。
+                #    「全员 Stage 1 缺席」不再判「零证据」，而是出一张只有 risk「无上游」、
+                #    满是缺失项的卡（P2 + 「出一张标着不知道的卡，比不出卡强」）。这道检查留着
+                #    抢在 synthesizer spawn（花钱）之前 fail-fast，并给一句比契约层
+                #    `synthesize`（也拦零 verdict）更具体的话 —— 万一将来有人改坏「risk 总落
+                #    fact」这条不变量，这里当场炸。
                 if not ordered:
                     raise OrchestratorError(
                         "零证据：Stage 1/2 没有任何 agent 落下判定原件，无从合成。")
@@ -309,14 +340,27 @@ class DecisionOrchestrator:
                 f"读这份冻结快照，不要自己联网抓日线，这样所有 Specialist 看的是同一份。")
         return base
 
-    def _risk_task(self, did: str, s1_ids: list[int], run_id: str) -> str:
-        ids = ",".join(str(i) for i in s1_ids)
-        # 🔴 批 J-I：risk 是第六个产落库记录的 agent，同样带 --run-id。
+    def _risk_task(self, did: str, risk_ref: int, fb) -> str:
+        # 🔴 批 F：事实已由编排器算好并落库（verdict_ref=risk_ref）。risk 不再自己跑
+        #    risk_check.py —— 只读这份事实、按它 AGENTS.md 的判断表给 stance、amend 一行。
+        #    事实字段全给它（自包含），免得它去 grep/find 找东西（dev-workflow §5）；
+        #    stance 词表**不在这里重复**（它在 risk 的 AGENTS.md，重复就是会漂的第二套口径）。
+        #    run_id 也不再由 risk 传：事实的 run_id 由编排器 save_fact_bundle 已 capture，
+        #    amend 出的 assessment 从 fact 行**继承** run_id（save_assessment，批 J-I 2b）。
+        facts = "\n".join(f"    {k} = {v}" for k, v in fb.result.items()) or "    （无）"
+        miss = "\n".join(f"    ⚠ [{m.code}] {m}" for m in fb.missing) or "    （无）"
         return (
-            f"请依据 Stage 1 的冻结证据做风险审查。\n"
-            f"本次决策编号 {did}，跑 skill 时必须加 --task-id {did} --run-id {run_id}。\n"
-            f"Stage 1 的 verdict_ref：{ids}\n"
-            f"不要自己重新采集数据。")
+            f"本次决策编号 {did}。风险事实**已经算好并落库**，verdict_ref={risk_ref}，"
+            f"数据完整度 verdict={fb.verdict}。\n"
+            f"🔴 不要重新跑 risk_check.py，不要自己采集或计算 —— 事实就是下面这些，"
+            f"你唯一的任务是按判断表给一个 stance。\n"
+            f"── 已算好的风险事实（verdict_ref={risk_ref}）──\n"
+            f"{facts}\n"
+            f"  缺失项：\n{miss}\n"
+            f"── 提交判断 ──\n"
+            f"照你 AGENTS.md「最后一步」那条命令，--ref 填 {risk_ref}、--stance 填你的结论：\n"
+            f"  python3 skills/decision-card/scripts/amend_verdict.py --ref {risk_ref} --stance <你的判断>\n"
+            f"（verdict={fb.verdict}：UNKNOWN 时 stance 只能「无法判定」。）")
 
     def _synth_task(self, did: str, verdicts) -> str:
         return (

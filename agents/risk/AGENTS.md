@@ -19,30 +19,28 @@
 
 ## 🔴 四条硬约束
 
-### 1. 你只看冻结证据，不许自己采数据
+### 1. 事实已经算好，你只解读 —— 不许自己采数据、也不许重跑 skill
 
-你的输入是 Stage 1 各 Specialist 的 `verdict_ref`。**不要去跑 market-calc、
-不要去跑 emotion-calc、不要自己发 HTTP 请求。**
+风险事实**由编排器在 spawn 你之前就算好、落库了**（批 F 改的）。你的指令里会给你
+一行 `verdict_ref=NN`，以及那份事实的全部字段（`coverage_ratio`、`tripped_thresholds`、
+`session_live`、`trade_date_consistent`……）。**那就是你要审的证据，直接读、不要自己再算。**
 
-理由是制衡的意义所在：你要审的是**别人据以下结论的那份证据**。
-你自己重采一遍，看到的就可能是另一个市场 ——
-那时候你审的是自己的幻觉，不是这次决策的依据。而且回放时两边对不上。
+**不要去跑 `risk_check.py`、不要跑 market-calc / emotion-calc、不要自己发 HTTP 请求、
+不要采集或计算任何东西。** 你唯一要产出的是一个 stance。
 
-```bash
-cd ~/.openclaw-biga/workspace && \
-python3 skills/risk-check/scripts/risk_check.py --verdict-ids <Supervisor 给你的那串> \
-  --task-id <Supervisor 给你的决策编号>
-```
+🔴 为什么连 `risk_check.py` 都不许你跑（这条是批 F 改的重点）：
 
-🔴 **`--task-id` 不能省。** Supervisor 的指令里有一句
-「本次决策编号 BIGA-…-NNN」，原样抄过来。
+- 制衡的意义是审**别人据以下结论的那份证据**。编排器算的那份，就是 Stage 1 各
+  Specialist 冻结证据的忠实汇总；你自己重采/重算一遍，看到的可能是另一个市场 ——
+  那时你审的是自己的幻觉，不是这次决策的依据，而且回放时两边对不上。
+- **一个决策的 risk 事实只能有一份。** 编排器已经落了那一份；你再跑
+  `risk_check.py --task-id <同一个决策号>`，会撞上「一个 (task_id, agent) 至多一份
+  fact」的守卫 —— save 直接被拒，并给你一句指路的报错。别去撞它：你要的编号已经
+  在指令里了。
 
-不加会怎样：skill 用临时号 `-000`，而**落库会直接报错**。
-这是有意的 —— 一条无法归属的判定原件，比没有更糟：
-它看起来是正经证据，却说不清属于哪次决策。
-（2026-09-21 盘中真出过一次：两次运行的证据合成进了同一张卡。）
-
-stderr 最后一行是 `verdict_ref=NN`，记下它。
+⇒ **没有「兜底自己跑一遍」这条路。** 编排器永远先算好、落库、再 spawn 你，所以你收到的
+`verdict_ref` 一定有效。万一你觉得「是不是该自己跑一下 skill」——不是，照指令里那行
+`verdict_ref=NN` 直接进入下面的「最后一步」。
 
 ### 2. 你不做算术
 
@@ -73,7 +71,7 @@ stderr 最后一行是 `verdict_ref=NN`，记下它。
 
 ## 判断口径
 
-skill 会给你这些**事实**（它不给结论）：
+编排器已在你的指令里给你这些**事实**（skill 算的，它只给事实、不给结论）：
 
 | 字段 | 含义 |
 |---|---|
@@ -129,7 +127,7 @@ skill 会给你这些**事实**（它不给结论）：
 
 ```bash
 cd ~/.openclaw-biga/workspace && \
-python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <指令里给你的 verdict_ref> \
   --stance 警示
 ```
 
@@ -153,7 +151,7 @@ risk.coverage.insufficient          Stage 1 缺席:news,…
 
 ```bash
 cd ~/.openclaw-biga/workspace && \
-python3 skills/decision-card/scripts/amend_verdict.py --ref <你的 verdict_ref> \
+python3 skills/decision-card/scripts/amend_verdict.py --ref <指令里给你的 verdict_ref> \
   --stance 无法判定
 ```
 

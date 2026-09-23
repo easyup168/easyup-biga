@@ -75,6 +75,7 @@ A 股短线**决策辅助**系统。
 | 30 | [迁 risk 并退役旧修订路径](30-migrate-risk-retire-amend.md) | 确定性编排批 E-III（收官）：六个里最危险的偏偏形状最普通 —— risk 的 stance 是 `VETO_STANCE`，迁错=「真该拦的决策放行了」；核心是 **VETO 穿透**（否决从 AgentAssessment 穿到 DecisionCard 真拦 BUY），而这条链「不用改代码」正是最该测的；「退役 amend」≠ 删 `save_verdict`；`无法判定` 可挂 WARNING ⇒ risk 不需要 `--verdict` 事后降级 | ✅ |
 | 31 | [收敛 `run_id` 三同名](31-run-id-namespace.md) | 确定性编排批 J-II：一个名字被三个东西共用、且不报错（「一个 id 扛五件事」的反面）；三处必须一起改；「改名免费」要用 grep 证明；`RENAME COLUMN` 会**改坏触发器体也不报错** ⇒ 真跑 SQL；结构化 join 照抄 `CROSS_CHECK_PAIRS` 不发明第二种；「命名空间是否一致」这种猜错也不红的前提必须 live 验一次 | ✅ |
 | 32 | [让 `run_id` 贯穿全链（capture）](32-run-id-capture.md) | 确定性编排批 J-I：capture 与 enforce 拆开做（区别在**攒这一列的边际成本**，不在有没有人用）；判断行的 run_id **从事实行继承**不让 Agent 传（判据别建在可篡改输入上），「不可能不一致」用结构＋行为两条证据证明；加 nullable 字段两个 `from_dict` 都用 `.get` 否则历史卡 `KeyError`；属于「这次执行」的字段必须进 `comparable()` 剥离清单；跨文件模块污染只在全量红（`_load` 要幂等）；可派生守卫替新列自动把关 | ✅ |
+| 33 | [把 risk 的事实挪进编排器](33-risk-facts-into-orchestrator.md) | 确定性编排批 F：纯函数包在 LLM 会话里跑，省钱切口是「拎进程序直接调」不是让 LLM 跑快；只有确定性终局（`fb.status=='failed'`）值得跳过 spawn，判据别用会误伤的 `verdict==UNKNOWN`；fact 行 `amends` 恒 NULL **逃出 v6 线性索引** ⇒ 双写静默并存（v11 分区唯一索引补）；`IntegrityError` 报**列名**不报索引名（判据落错=L-13，探针抓到）；早退不 spawn 但 risk 进卡 ⇒ 别记账本行（L-8 + spawn_check 误判 forged）；不留兜底自跑；全员缺席不再「零证据 FAILED」改出满缺失的卡；VETO 全路径回归一环没断 | ✅ |
 
 ---
 

@@ -27,8 +27,12 @@ from _contract import (  # noqa: E402
     STAGE1_AGENTS,
     STANCE_VOCAB,
     SYNTHESIZER_AGENT,
+    VETO_STANCE,
+    AgentAssessment,
     AgentVerdict,
     Evidence,
+    FactBundle,
+    MissingItem,
     RunState,
     new_run_context,
     now_cn,
@@ -39,8 +43,10 @@ from _sources import parse_index_daily  # noqa: E402
 from _store import (  # noqa: E402
     connect,
     init_schema,
+    latest_verdict_ids,
     load_online_card,
     run_events,
+    save_assessment,
     save_verdict,
 )
 
@@ -73,12 +79,15 @@ class FakeAdapter:
     """
 
     def __init__(self, db, *, judgment=None, absent=(), synth_status=SpawnStatus.SUCCEEDED,
-                 fail_start_at=None):
+                 fail_start_at=None, risk_stance="放行"):
         self.db = db
         self.judgment = judgment
         self.absent = set(absent)
         self.synth_status = synth_status
+        # 🔴 批 F：risk 被 spawn 时，它 amend 的 stance（模拟照新提示词跑 amend_verdict.py）。
+        self.risk_stance = risk_stance
         self.spawned: list[tuple[str, str]] = []      # (agent, group_id)
+        self.tasks: dict[str, str] = {}               # agent → 任务文本（批 F：验 risk 提示词）
         self.output_schemas: dict[str, dict] = {}
         self.fail_start_at = fail_start_at
         self._start_n = 0
@@ -92,10 +101,22 @@ class FakeAdapter:
         if self.fail_start_at is not None and self._start_n == self.fail_start_at:
             raise SpawnStartError(f"[{agent}] 故意起不来（第 {self._start_n} 个 start）")
         self.spawned.append((agent, group_id))
+        self.tasks[agent] = task
         if output_schema is not None:
             self.output_schemas[agent] = output_schema
         rid = f"run-{agent}-{uuid.uuid4().hex[:6]}"
-        if agent != SYNTHESIZER_AGENT and agent not in self.absent:
+        if agent == SYNTHESIZER_AGENT or agent in self.absent:
+            pass  # 判官不产 verdict；缺席的 agent 不写
+        elif agent == RISK:
+            # 🔴 批 F：risk 不再自己产 fact —— 编排器已在 spawn 之前落好这次决策的 risk
+            #    fact 行（此刻它是 (task_id, risk) 唯一的行），risk 只 amend 一个 stance。
+            #    这正是新提示词教它做的（amend_verdict.py --ref <编排器给的> --stance …），
+            #    也让「卡上 risk 判定引用的就是编排器预存那条」在测试里真实成立。
+            fact_id = latest_verdict_ids(task_id, path=self.db)[RISK]
+            save_assessment(
+                AgentAssessment(task_id=task_id, agent=RISK, stance=self.risk_stance),
+                fact_id=fact_id, path=self.db)
+        else:
             save_verdict(_verdict(agent, task_id), path=self.db)
         h = SpawnHandle(runtime_run_id=rid, agent=agent, task_id=task_id,
                         group_id=group_id, session_key=f"sk-{rid}")
@@ -266,13 +287,23 @@ class TestPartialAndFailure:
             orch.run(ctx)
         assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
 
-    def test_零证据则FAILED(self, db):
-        # 全员缺席 → 没有任何 verdict 落库
-        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, absent=list(ROSTER))
+    def test_全员stage1缺席_出无上游fact的卡_不再零证据FAIL(self, db):
+        """🔴 批 F 行为变化：全员 Stage 1 缺席时，编排器**免费**落一条 risk「无上游」
+        fact 并照常出卡，不再判「零证据 FAILED」——「出一张标着不知道的卡，比不出卡强」。
+        这是 P2（无上游早退）在 orchestrator 一路走到 COMPLETED 的体现。
+        ⚠️ 老行为（all-absent → FAILED "零证据"）在批 F 之前成立，是因为那时 risk 也缺席、
+        库里一条 verdict 都没有；现在 risk 的 fact 由编排器无条件先落，ordered 至少有它。"""
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, absent=list(STAGE1_AGENTS))
         ctx = new_run_context(origin="cli", non_interactive=True)
-        with pytest.raises(OrchestratorError, match="零证据"):
-            orch.run(ctx)
-        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
+        card = orch.run(ctx)
+        # 到 COMPLETED，不是 FAILED
+        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.COMPLETED
+        # 卡上有 risk 那条（UNKNOWN、无上游、无 stance），且 risk 没被 spawn
+        risk_v = next(v for v in card.verdicts if v.agent == RISK)
+        assert risk_v.verdict == "UNKNOWN"
+        assert risk_v.stance is None                       # 早退不追加 assessment
+        assert RISK not in [a for a, _ in fake.spawned]    # 无上游 ⇒ 不 spawn risk
+        assert any(m.code == "risk.upstream.none" for m in card.missing)
 
     def test_stage1中途start失败_已启动的handle被cancel(self, db):
         """C3-2（设计文档 §2 追加 5.2）：Stage 1 五路 fan-out 里第 3 个 start() 抛错，
@@ -389,14 +420,30 @@ class TestSnapshotFreeze:
         assert got and all(r[0] == ctx.run_id for r in got), (
             f"evidence_sets.run_id 没绑到本次 run：{[r[0] for r in got]} != {ctx.run_id}")
 
-    def test_JI_六个agent的任务文本都带run_id(self, db):
-        """🔴 批 J-I item 3：--run-id 给**每一个**产落库记录的 agent（含 risk），
-        不只读冻结快照那三个。"""
+    def test_JI_五个stage1的任务文本都带run_id(self, db):
+        """🔴 批 J-I item 3：--run-id 给每一个**自己跑 skill 落库**的 Stage 1 agent。
+        ⚠️ 批 F 起 risk 不再自己跑 risk_check.py —— 它的 fact run_id 改由编排器
+        save_fact_bundle 直接 capture（见下面 test_JI_F_risk_fact的run_id由编排器capture），
+        所以 `_risk_task` 里不再有 --run-id，这条只覆盖 Stage 1 那五个。"""
         orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
         RID = "deadbeef" * 4
         for a in ("market", "sector", "technical", "emotion", "news"):
             assert f"--run-id {RID}" in orch._specialist_task(a, "BIGA-20260101-001", "es-x", RID)
-        assert f"--run-id {RID}" in orch._risk_task("BIGA-20260101-001", [1, 2], RID)
+
+    def test_JI_F_risk_fact的run_id由编排器capture(self, db):
+        """🔴 批 F + J-I：risk 不再自己跑 skill，它的 fact run_id 改由编排器
+        save_fact_bundle(risk_fb, run_id=ctx.run_id) 直接落 —— 查库里那条 risk fact
+        行的 run_id 就是本次 run 的 id（J-I「每个产落库记录的 agent 都能追到 run」对
+        risk 这条，现在由编排器兑现，不再靠 risk 手传 --run-id）。"""
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        with connect(db, readonly=True) as c:
+            got = c.execute(
+                "SELECT run_id FROM agent_verdicts WHERE task_id=? AND agent='risk' "
+                "AND kind='fact'", (card.decision_id,)).fetchall()
+        assert got and all(r[0] == ctx.run_id for r in got), (
+            f"risk fact 行的 run_id 没绑到本次 run：{[r[0] for r in got]} != {ctx.run_id}")
 
     def test_freeze失败则整体FAILED(self, db):
         """freeze 抓不到 ⇒ 异常上抛 ⇒ FAILED（fail-closed，不退回各自抓一份）。"""
@@ -466,3 +513,121 @@ class TestOwnershipGuard:
         rc = m.main([])
         assert rc == 0
         assert "判不了" in capsys.readouterr().err, "UNKNOWN 放行也要把依据打出来（R-3）"
+
+
+def _foreign_fact(*, verdict_ids, store, task_id):
+    """冒充 build_fact_bundle 的注入桩：返回一个 foreign（证据跨决策污染）早退 fact。
+
+    🔴 为什么要注入：编排器自己算的 s1_refs 来自 latest_verdict_ids(did)，永远属于**本**
+    决策，天然产不出 foreign。所以「编排器遇到 foreign 就不 spawn」这条只能靠注入一个
+    status='failed' 的 fact 来验证 —— 验的是编排器对确定性 failed fact 的处置，
+    而 foreign 是 failed 的一种。task_id 用编排器传进来的（就是本次 did）。"""
+    t = now_cn()
+    attribution = {"foreign_task_ids": ["BIGA-20260101-999"],
+                   "upstream_attribution": {"market": "BIGA-20260101-999"}}
+    return FactBundle(
+        task_id=task_id, agent=RISK, status="failed", verdict="UNKNOWN",
+        result=attribution, data_completeness=0.0,
+        evidence=[Evidence(field=k, source="derived:risk-check", value=v,
+                           as_of=t, retrieved_at=t) for k, v in attribution.items()],
+        missing=[MissingItem("上游判定来自别的决策，不能合在一起审",
+                             "risk.upstream.foreign_decision")])
+
+
+class TestBatchFRiskInline:
+    """🔴 批 F：risk 的事实由编排器在 spawn 之前直接算好落库。两种确定性早退
+    （foreign / 无上游）不 spawn risk；其余仍 spawn，但 risk 只解读编排器算好的
+    verdict_ref、不再自己跑 risk_check.py。P1-P3 / P5 探针。"""
+
+    @staticmethod
+    def _risk_facts(db, did):
+        with connect(db, readonly=True) as c:
+            return [r["verdict_id"] for r in c.execute(
+                "SELECT verdict_id FROM agent_verdicts WHERE task_id=? AND agent=? "
+                "AND kind='fact' ORDER BY verdict_id", (did, RISK)).fetchall()]
+
+    # ── P1：foreign（证据跨决策污染）⇒ 不 spawn risk ──
+    def test_P1_foreign早退_不spawn_risk_事实进卡不缺席(self, db, monkeypatch):
+        monkeypatch.setattr(orch_mod, "build_fact_bundle", _foreign_fact)
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        did = card.decision_id
+        # 1) 编排器没有以 RISK 调 ad.start
+        assert RISK not in [a for a, _ in fake.spawned], "foreign 早退不该 spawn risk"
+        # 2) FactBundle 正确落库（恰好一条 risk fact）
+        facts = self._risk_facts(db, did)
+        assert len(facts) == 1, f"risk fact 行应恰好 1 条，实际 {len(facts)}"
+        # 3) 这条 verdict_ref 参与了合成（在卡的 input_verdict_refs 里）
+        assert facts[0] in [r.verdict_id for r in card.input_verdict_refs], \
+            "编排器落的 risk fact 没参与合成"
+        # 4) 卡上 risk 显示「给出事实、无 stance」，不是「缺席」
+        risk_v = next(v for v in card.verdicts if v.agent == RISK)
+        assert risk_v.verdict == "UNKNOWN" and risk_v.stance is None
+        assert RISK not in card.absent_agents, "risk 给了事实，不该被算成缺席"
+        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.COMPLETED
+
+    # ── P2：完全没有上游 ⇒ 不 spawn risk（自然可达：全员 Stage 1 缺席）──
+    def test_P2_无上游早退_不spawn_risk_事实进卡不缺席(self, db):
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, absent=list(STAGE1_AGENTS))
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        did = card.decision_id
+        assert RISK not in [a for a, _ in fake.spawned], "无上游早退不该 spawn risk"
+        facts = self._risk_facts(db, did)
+        assert len(facts) == 1
+        assert facts[0] in [r.verdict_id for r in card.input_verdict_refs]
+        risk_v = next(v for v in card.verdicts if v.agent == RISK)
+        assert risk_v.verdict == "UNKNOWN" and risk_v.stance is None
+        assert RISK not in card.absent_agents                   # risk 到场
+        assert set(STAGE1_AGENTS) <= set(card.absent_agents)    # 而 5 个 stage1 缺席
+        assert any(m.code == "risk.upstream.none" for m in card.missing)
+
+    # ── P3：正常场景 ⇒ 仍 spawn，卡上 risk 判定引用的就是编排器预存那条 ──
+    def test_P3_正常_risk仍spawn_引用编排器预存的同一fact(self, db):
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, risk_stance="警示")
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        did = card.decision_id
+        assert RISK in [a for a, _ in fake.spawned], "正常场景 risk 仍应被 spawn"
+        # 恰好一条 risk fact（risk 没有自己再产一条 —— 唯一索引也不允许）
+        facts = self._risk_facts(db, did)
+        assert len(facts) == 1, f"risk fact 行应恰好 1 条（编排器预存），实际 {len(facts)}"
+        orch_ref = facts[0]
+        # risk 的 assessment amends 的正是编排器预存那条 fact（不是它自己又产的一条）
+        with connect(db, readonly=True) as c:
+            row = c.execute(
+                "SELECT amends FROM agent_verdicts WHERE task_id=? AND agent=? "
+                "AND kind='assessment'", (did, RISK)).fetchone()
+        assert row is not None and row["amends"] == orch_ref, \
+            "risk 的判断没有挂在编排器预存的那条 fact 上"
+        # 新提示词生效：任务文本引用编排器给的 ref，且明令不再跑 skill
+        risk_task = fake.tasks[RISK]
+        assert f"verdict_ref={orch_ref}" in risk_task
+        assert f"--ref {orch_ref}" in risk_task
+        assert "不要重新跑 risk_check.py" in risk_task
+        # 卡上 risk 判定带 stance（经 amend 从 assessment 穿回）
+        risk_v = next(v for v in card.verdicts if v.agent == RISK)
+        assert risk_v.stance == "警示"
+
+    # ── P5：VETO 回归 —— 改完调用路径后，否决穿透一个环节都没断 ──
+    def test_P5_VETO经批F全路径仍拦住BUY(self, db):
+        # risk 给否决、判官却想给 BUY —— 合成阶段必须拒（否决从 amend 一路穿到 DecisionCard）。
+        orch, _, _ = _make_orch(
+            db, judgment={"status": "BUY", "headline": "h", "synthesis": "s"},
+            risk_stance=VETO_STANCE)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        with pytest.raises(OrchestratorError):
+            orch.run(ctx)
+        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.FAILED
+
+    def test_P5_VETO给AVOID正确体现则出卡(self, db):
+        # 反面对照：risk 否决 + 判官给 AVOID（正确体现否决）⇒ 出卡，risk.stance 就是否决。
+        orch, _, _ = _make_orch(
+            db, judgment={"status": "AVOID", "headline": "h", "synthesis": "s"},
+            risk_stance=VETO_STANCE)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        assert card.status == "AVOID"
+        risk_v = next(v for v in card.verdicts if v.agent == RISK)
+        assert risk_v.stance == VETO_STANCE

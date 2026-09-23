@@ -15,6 +15,96 @@
 
 ## [未发布]
 
+### 变更（批 F）· risk 的事实挪进编排器：确定性早退省一次 LLM 调用
+
+**为什么**：`risk_check.py::build_fact_bundle()` 本来就是纯 Python、fail-closed、只给
+事实不给结论。它唯一的问题是**位置** —— 跑在一个被 spawn 的 LLM 会话**内部**。老
+路径为了触发这次「免费、快」的本地计算，先得花一次 LLM 调用（spawn risk → 它读提示词
+→ exec 脚本 → 读 JSON → amend stance）。真正花钱耗时的是那两次 LLM turn，不是脚本本身。
+
+这一批把 `build_fact_bundle()` 的调用从「risk 被 spawn 之后自己在 LLM 会话里跑」挪到
+「编排器在决定要不要 spawn risk 之前，直接 `import` 它、免费地跑」。`run_id` 走批 J-I
+已打通的 capture 路径（`save_fact_bundle(fb, run_id=ctx.run_id)`）。
+
+- **两种确定性早退不再 spawn risk**：`build_fact_bundle` 的两条提前 return（`foreign`
+  证据跨决策污染 / 完全没有上游）都产 `status='failed'`、`verdict='UNKNOWN'`，是**机械
+  终局**——`missing` 已写清缺什么，stance 只能是「无法判定」，LLM 解读没有任何信息增量。
+  判据是 `fb.status == 'failed'`（契约铁律钉死 `failed ⟹ verdict='UNKNOWN'`，而走到底那条
+  永远是 `completed/partial`，所以这个判据不会误伤「覆盖不足但仍值得解读」）。编排器自己
+  落库、直接拿 `verdict_ref` 参与合成，卡上 risk 呈现「给出事实、判定 UNKNOWN、无 stance」，
+  **不是「缺席」**（`absent_agents` 单独管缺席）。
+- **其余情况仍 spawn risk，但 risk 不再自己跑 skill**：编排器先落好 fact，`_risk_task`
+  提示词整个换掉——「事实已算好，verdict_ref=NN，别重跑 skill，读它、按判断表给 stance、
+  `amend_verdict.py --ref NN --stance <词>`」。提示词自包含（把该判断的字段全给它），
+  免得它去 grep/find 找东西（那是实测踩过 62 秒 12 次工具调用的坑）。
+- **`risk_check.py` 的 CLI 原样保留**（手工调试/人工复核仍要能独立跑），两条路径共用
+  同一个 `build_fact_bundle`/`save_fact_bundle`，不发明第二套。
+- **`agents/risk/AGENTS.md` 约束 1 改写**：从「怎么跑 `risk_check.py`」改成「事实已算好、
+  你只解读」。**明确不留兜底自跑路径**——编排器永远先算好再 spawn，收到的 `verdict_ref`
+  一定有效；真去自跑会撞下面那道守卫。这不跟着改就是 L-6（契约与实际行为对不上）。
+
+### 修复（批 F）· 一个 (task_id, agent) 至多一份 fact —— 堵掉静默双写（schema v11）
+
+**为什么**：`save_fact_bundle` 落 fact 行时 `amends` 恒为 `NULL`，而 v6 的
+`ux_verdict_amends_linear` 只管 `WHERE amends IS NOT NULL` —— **fact 行天生在它管辖之外**。
+于是对同一个 `(task_id, agent)` 第二次写 fact，两行都是 `amends=NULL`，唯一索引一条都拦
+不住 ⇒ **静默产生两条并存的判定原件**。批 F 把 risk 的事实挪进编排器后，如果 risk 没听
+新提示词、又自己跑一遍 `risk_check.py --task-id <同一个 did>`，正好触发这个双写：
+`latest_verdict_ids()` 取 `MAX(verdict_id)` 会悄悄改用 risk 双跑那条，编排器预先算的那条
+被架空——而「这次决策的 risk 事实原件是哪一条」从此有歧义。对一个卖点是「证据可追溯、
+可回放」的系统，这最不能有。
+
+- schema **v11** 加分区唯一索引 `ux_fact_per_task_agent ON agent_verdicts(task_id, agent)
+  WHERE kind='fact'`，与 `ux_decision_online` / `ux_verdict_amends_linear` 同形（唯一约束
+  由数据库兜底，不靠应用层「先查再插」）。assessment / 历史合体行不在 WHERE 内，不受影响。
+- `save_fact_bundle` 接住 `IntegrityError` 翻成**指路的 `ValueError`**（不是裸
+  `IntegrityError`）：说清「已经有一份 fact（verdict_ref=NN）」，指出手工复核加 `--no-store`。
+  🔴 判据匹配的是**列名**（`agent_verdicts.task_id` + `agent_verdicts.agent`），不是索引名
+  ——SQLite 的 `UNIQUE constraint failed` 报的是列不是索引（第一版判据落在索引名上，被探针
+  当场抓到，这正是 L-13 的形状）。`risk_check.py` 的 CLI 也接住它、干净退出码 2。
+- 🔴 **加索引前实测生产库**：`kind='fact'` 的行里没有任何 `(task_id, agent)` 重复
+  （唯一 1 条 fact 行）——`CREATE UNIQUE INDEX` 在有重复时会直接报错，append-only 下没法
+  事后清洗，所以必须先确认干净再加。
+
+**G-1 探针（弄坏→报红→还原）**：
+
+1. **守 A · v11 唯一索引**。从 `MIGRATIONS` 移除 `(11, _V11)`（索引不建）后跑
+   `test_P4_CLI双跑同一did` → **FAILED**，stderr 实证 `verdict_ref=6` 后又 `verdict_ref=7`
+   ——第二次 `risk_check` 静默产生了第二条并存 fact 原件（正是守卫要防的洞）。还原后绿。
+   另有内联永久红灯 `test_P4_红灯_删掉唯一索引则第二次静默并存`（tmp 库里 `DROP INDEX`
+   后两次 save 并存两条），证明索引 load-bearing。
+2. **守 B · `status=='failed'` 不 spawn 判据**。把判据临时改成 `if False and …`（永远 spawn）
+   后跑 P1/P2 → **FAILED**，报错 `编排在 RISK_RUNNING 失败：[risk] verdict='UNKNOWN' 却给出
+   stance='放行'` ——揭示这道判据不只是省 spawn，还挡住了「对 UNKNOWN 事实强行要 stance」
+   这个契约违规。还原后绿。
+
+### 修复（批 F）· 执行账本只记真被 spawn 的 agent —— 修早退场景的 spawn_check 误判
+
+**为什么**（这是设计文档没点名、批 F 引入的一处真实交互，独立发现并修掉）：早退不 spawn
+risk，但 risk 仍在卡上 ⇒ `persist()` 原本会给 risk 写一行 `agent_runs`（执行账本）。而
+risk 根本没被 spawn（没有 LLM turn、没花钱、运行时 `subagent_runs` 里没它）⇒
+`tools/verify/spawn_check.py` 会看到「`agent_runs` 有行、`subagent_runs` 没有」，把 risk
+判成 **forged（伪造）**，`bin/biga-card` 据此 `exit 4` —— 一张正确产出的卡被判失败。
+
+给一个没执行过的 agent 记账本行，本身就是 **L-8 幽灵账本行**（记了没发生的事）。
+⇒ `card_ops.persist()`：提供 `runtime_run_ids` 时，它的 **key 集**就是「本次真正被 spawn
+的 agent」的权威名单，只给名单里的 agent 记账本行。判据是 key 在不在（不是 `.get()` 的
+值——被 spawn 但没拿到 runtime id 的是「key 在、值 None」，仍要记账）。不提供该映射
+（`synthesize.py` / 测试 / 回放）时维持原样。
+
+### 行为变化（批 F）· 全员 Stage 1 缺席不再判「零证据 FAILED」，改出一张满是缺失的卡
+
+因为 risk 现在**总会**落一条 fact（连「完全没有上游」都落一条无上游 UNKNOWN），编排器
+Stage 3 的 `ordered` 至少有 risk 这一条。老行为（全员缺席 → 库里零 verdict → 「零证据
+FAILED」）不再成立：现在出一张只有 risk「无上游」、满是缺失项的卡（「出一张标着不知道
+的卡，比不出卡强」）。那道 `if not ordered` 检查退成纵深防御（契约层 `synthesize` 也拦
+零 verdict，且抢在 synthesizer spawn 之前 fail-fast）。测试 `test_零证据则FAILED` 相应
+改成 `test_全员stage1缺席_出无上游fact的卡_不再零证据FAIL`。
+
+**VETO 回归底线**：这一批不改 risk 的判断实质，只改「事实从哪来」。P5（orchestrator 全
+路径）验证：risk 给「否决」、判官给 BUY ⇒ 合成阶段照旧拒（否决从 `amend` 一路穿到
+`DecisionCard`，一个环节都没断）；给 AVOID ⇒ 出卡、`risk.stance` 就是否决。
+
 ### ✅ 复核 · spawn-proof 四轮修复（最初 + 回合二/三/四），独立复现确认成立
 
 下面四条（最初 `0a89ae0` → 回合二 `0c46a0e` → 回合三 `c061a60` → 回合四

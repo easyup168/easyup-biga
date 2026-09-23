@@ -390,7 +390,15 @@ def main(argv: list[str] | None = None) -> int:
     fb = build_fact_bundle(verdict_ids=ids, store=store,
                            task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ))
     # 🔴 批 E-III：事实原件（FactBundle，不含 stance）直接落库；stance 由 Risk Agent 事后追加。
-    ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
+    # 🔴 批 F：这个决策的 risk 事实由编排器在 spawn 之前就算好落库了 —— 你（risk）不该再
+    #    自己跑一遍。真跑了会撞上「一个 (task_id, agent) 至多一份 fact」的唯一索引，
+    #    save_fact_bundle 抛一个指路的 ValueError。这里接住它、干净退出（码 2），不让它
+    #    变成一坨 traceback（dev-workflow §8：报错要指路）。
+    try:
+        ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
 
     print(json.dumps(fb.to_dict(), ensure_ascii=False, indent=2))
     if ref is not None:
