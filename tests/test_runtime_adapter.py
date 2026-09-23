@@ -129,7 +129,7 @@ class TestStart:
         assert args["context"] == "isolated"
         assert args["task"] == "干活"
         assert args["runTimeoutSeconds"] == 90
-        assert h.run_id == "r1" and h.agent == "market" and h.group_id == "g1"
+        assert h.runtime_run_id == "r1" and h.agent == "market" and h.group_id == "g1"
         assert h.session_key.startswith("agent:market:subagent:")
 
     def test_运行时结构化拒绝翻成SpawnStartError(self):
@@ -186,7 +186,7 @@ class TestWait:
         h1 = SpawnHandle("r1", "market", "BIGA-20260101-001", "g", "sk")
         h2 = SpawnHandle("r2", "sector", "BIGA-20260101-001", "g", "sk")
         out = ad.wait([h1, h2], timeout_sec=30)
-        assert [r.handle.run_id for r in out] == ["r1", "r2"]  # 与入参同序，不随运行时乱序
+        assert [r.handle.runtime_run_id for r in out] == ["r1", "r2"]  # 与入参同序，不随运行时乱序
 
     def test_agents_wait整批被拒_不静默丢(self):
         c = FakeClient({"agents_wait": MCPError("all ids invalid")})

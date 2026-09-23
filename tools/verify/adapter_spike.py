@@ -57,7 +57,7 @@ def parallel() -> int:
                             run_timeout_sec=120) for a in STAGE1]
         print(f"  起了 {len(handles)} 个，groupId={gid}")
         for h in handles:
-            print(f"    {h.agent:10} runId={h.run_id[:8]}")
+            print(f"    {h.agent:10} runId={h.runtime_run_id[:8]}")
 
         # 轮询：每个 tick 记下哪些 handle 处于 RUNNING。区间相交 = 某个 tick 里
         # 同时 ≥2 个在 RUNNING。
@@ -68,7 +68,7 @@ def parallel() -> int:
             now_running = [h for h in handles if ad.status(h) == SpawnStatus.RUNNING]
             max_concurrent = max(max_concurrent, len(now_running))
             for h in now_running:
-                running_seen[h.run_id] = True
+                running_seen[h.runtime_run_id] = True
             done = [h for h in handles if ad.status(h) in (
                 SpawnStatus.SUCCEEDED, SpawnStatus.FAILED, SpawnStatus.CANCELLED)]
             if len(done) == len(handles):
@@ -141,7 +141,7 @@ def cancel_correlation() -> int:
         long_task = "采集今日A股情绪数据并汇报（这是取消测试，慢慢来）。"
         h0 = ad.start("market", "BIGA-20260101-000", long_task, group_id=gid, run_timeout_sec=180)
         h1 = ad.start("emotion", "BIGA-20260101-000", long_task, group_id=gid, run_timeout_sec=180)
-        print(f"  h0={h0.agent} runId={h0.run_id[:8]}  h1={h1.agent} runId={h1.run_id[:8]}")
+        print(f"  h0={h0.agent} runId={h0.runtime_run_id[:8]}  h1={h1.agent} runId={h1.runtime_run_id[:8]}")
         time.sleep(4)
         # 诊断：完整 dump 一次 list，看 active[]/tasks[] 有没有可对应的字段
         listing = ad._c.call_tool("subagents", {"action": "list", "recentMinutes": 60})

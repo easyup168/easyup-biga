@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field as dc_field
 
 _HERE = pathlib.Path(__file__).resolve()
@@ -152,13 +153,21 @@ def synthesize(
     )
 
 
-def persist(card: DecisionCard, *, replay_of: int | None = None) -> int:
+def persist(card: DecisionCard, *, replay_of: int | None = None,
+            runtime_run_ids: Mapping[str, str] | None = None) -> int:
     """落库，返回 `record_id`。在线路径 `replay_of=None`，回放路径填原始 record_id。
 
     🔴 只在在线路径记账本（`agent_runs`，`record_verdict_run`）——回放不重新
     执行任何 agent，给回放记一遍「执行」是假账。这与 `synthesize()` 保持纯函数
     是同一个理由的另一半：`persist()` 才是 IO 边界，账本这类「这次真的跑过」
     的记录只能长在这里，不能长在纯函数里。
+
+    `runtime_run_ids`（批 J-II，keyword-only、默认 None）：`agent → 运行时 spawn id`
+    的映射，编排器从每个 Stage 1/risk 的 `SpawnResult.handle.runtime_run_id` 收来
+    （Stage 3 的 synthesizer 不产 verdict，不进这个映射）。落进 `agent_runs.
+    runtime_run_id`，`spawn_check.py` 据此做结构化 join。
+    🔴 必须有默认值：`synthesize.py` 与几条测试也在调 `persist()`，它们没有这个
+    映射；不给默认值会把不相干的调用一起弄红。回放路径整段不记账本，自然也不写它。
 
     ⚠️ 这是批 C-II 的一处回归修复：旧的 standalone `synthesize.py`（编排从
     main 的提示词驱动时期）在落库前调过这个账本；批 C-II 把合成逻辑挪进这个
@@ -168,11 +177,13 @@ def persist(card: DecisionCard, *, replay_of: int | None = None) -> int:
     live 验证时才暴露（不是安全洞：把成功误判成失败，不是把失败误判成成功）。
     """
     if replay_of is None:
+        rr = runtime_run_ids or {}
         for v in card.verdicts:
             record_verdict_run(v, decision_id=card.decision_id,
                                started_at=card.generated_at,
                                finished_at=card.generated_at,
-                               model=card.model_ref)
+                               model=card.model_ref,
+                               runtime_run_id=rr.get(v.agent))
     return save_card(card, replay_of=replay_of)
 
 

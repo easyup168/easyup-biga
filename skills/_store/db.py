@@ -752,9 +752,15 @@ def record_agent_run(
     verdict: str | None = None,
     missing_count: int = 0,
     error: str | None = None,
+    runtime_run_id: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
-    """记一次 Agent 执行，返回 `run_id`。
+    """记一次 Agent 执行，返回 `ledger_id`（账本行号，批 J-II 从 `run_id` 改名）。
+
+    `runtime_run_id`（可选）：运行时返回的真实 spawn id（`SpawnHandle.runtime_run_id`，
+    即 OpenClaw `subagent_runs.run_id`）。在线路径由编排器传入，落库后
+    `tools/verify/spawn_check.py` 拿它与运行时做结构化 join（比原先的文本匹配硬）。
+    历史行 / 回放路径为 None ⇒ 该列 NULL，核验退回按决策号的 LIKE 判据。
 
     🔴 **这不是 spawn 的证明**（外部评审 P2-3）
     ------------------------------------------
@@ -781,10 +787,11 @@ def record_agent_run(
         cur = conn.execute(
             """INSERT INTO agent_runs
                (decision_id, task_id, agent, model, status, verdict,
-                missing_count, elapsed_ms, error, started_at, finished_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                missing_count, elapsed_ms, error, started_at, finished_at,
+                runtime_run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (decision_id, task_id, agent, model, status, verdict, missing_count,
-             elapsed_ms, error, started_at, finished_at),
+             elapsed_ms, error, started_at, finished_at, runtime_run_id),
         )
         return int(cur.lastrowid)
 
@@ -796,13 +803,17 @@ def record_verdict_run(
     finished_at: str,
     decision_id: str | None = None,
     model: str | None = None,
+    runtime_run_id: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
-    """从一个 `AgentVerdict` 直接记账，省得调用方手抄字段（抄错就是口径分裂）。"""
+    """从一个 `AgentVerdict` 直接记账，省得调用方手抄字段（抄错就是口径分裂）。
+
+    `runtime_run_id` 透传给 `record_agent_run` —— 见那里的说明。
+    """
     return record_agent_run(
         task_id=v.task_id, agent=v.agent, status=v.status, verdict=v.verdict,
         missing_count=len(v.missing), elapsed_ms=v.elapsed_ms,
-        decision_id=decision_id, model=model,
+        decision_id=decision_id, model=model, runtime_run_id=runtime_run_id,
         started_at=started_at, finished_at=finished_at, path=path,
     )
 
@@ -824,7 +835,7 @@ def list_agent_runs(
         args.append(agent)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY run_id DESC LIMIT ?"
+    sql += " ORDER BY ledger_id DESC LIMIT ?"
     args.append(limit)
     with connect(path, readonly=True) as conn:
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
