@@ -766,8 +766,10 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       本次修复在这个会话里直接做的，没有走单独的开工/评审两会话流程——
       范围小、根因链条已经查实，但没有另一个独立视角复核过，如实记在这里。
 - [ ] 批 E · Facts / Assessment 拆分 —— **拆成 E-I / E-II 起**（同 A、C、D 的理由）
-  - [~] 批 E-I · 契约基础设施 + 一个试点 Specialist —— **实现完成、离线全绿，
-        六道探针（P1–P6）全见过红并已还原，待独立评审**（不自宣通过）。
+  - [x] 批 E-I · 契约基础设施 + 一个试点 Specialist —— **评审复核通过、已合并
+        （`b970182`）**。🔴 这一行的复选框长期停在 `[~]`（待独立评审），是记账
+        滞后，不是真的悬而未决——E-II/E-III 都构建在 E-I 之上且早已标完成，
+        E-I 自己的评审不可能没做完。六道探针（P1–P6）全见过红并已还原。
         已建 `FactBundle`/`AgentAssessment`/`AgentOutcome` + `LegacyAdapter`
         （`skills/_contract/facts.py`），事实层铁律抽成一份共用
         （`verdict.check_fact_invariants` 等，防 L-3）；schema v8 加 `kind` 列
