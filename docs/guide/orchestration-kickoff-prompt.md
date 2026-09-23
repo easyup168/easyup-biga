@@ -2,7 +2,7 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / **I**）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / I / **L**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -2136,22 +2136,155 @@ P6  建表注释真实性：取一条真实存的行，比对它的原始文本�
 
 ---
 
-## 批 L / H · 现在不写分发提示词
+## 批 L · `cn.trading_calendar` —— Provider→Raw→Normalize→Quality→Snapshot 第二遍，第一次真的建 `fact_*` 表
 
-🔴 **2026-09-23 批 F 与批 G-I 已先后合并进 orchestration**，且都独立复核过关
-——下表里"等 F 落地"这条依赖，凡是引用它的行，现在都已解除。
-批 F、批 G-I、批 G-II、批 K、批 I 的分发提示词都已经写好（见前面几节），
-不在这张表里了。
+⚠️ **依赖已清**：批 I 已合并（`c082205`），`raw_text` / `content_sha256`
+（基于原始响应文本）的形状有真实先例可抄；`architecture.md` §5.1 已按四个
+存储平面重写，本批不需要为"这算不算撞了切 PostgreSQL 的触发条件"纠结。
 
-| 批 | 现状 |
-|---|---|
-| L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
-| H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
+🔴 **开工第一步、不是可选项：先建独立 worktree。** 做法照 C-III/J-I/J-II/
+G-I/I 的既定先例：
 
-🔴 **现在把它们写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
+```bash
+git worktree add .claude/worktrees/l -b l orchestration   # 基于最后一次干净提交
+cd .claude/worktrees/l
+```
+
+开工后 `git log --oneline -5` 确认没有更晚的改动，不要假设本提示词里的
+行号还准。本批要改的文件（`skills/_sources/` 下新模块、`skills/_store/
+schema.py`、`skills/_sources/tradetime.py`）与批 G-II 那个仍在另一个
+worktree 里进行的修复（`skills/card/`、`deploy/openclaw/`）不相交，
+但 `schema.py` 的下一个迁移号是**所有并行批次共享的单点**——开工时读一遍
+`MIGRATIONS` 列表尾部取当时的下一个号，不要硬编码，这个数字最近连续
+撞车两次（v9/v10、v13/v14）。
+
+```text
+market_is_open() 现在认周末不认节假日（tradetime.py 53 行起，文档字符串
+已写明「已知边界」与朝安全方向偏的理由——节假日返回 True 只会多报 missing，
+不会让 Card 更激进）。今天没有任何交易日历数据。这是数据架构材料 §45 点名的
+六个市场数据集里，今天唯一已经证明有生产消费方（news-scan/emotion-calc）
+且体量小、免鉴权能拿到的一个，定位是给那一批打样：把 Provider → Raw →
+Normalize → Quality → Snapshot 这条链在一个非行情数据集上走第二遍
+（第一遍是已完成的 index_daily）。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` 的「批 L」小节全文（含
+  2026-09-23 补的设计探活）——为什么这一批不接 `SnapshotCoordinator`、
+  为什么这是第一次真正落地 `fact_*` 层、真实消费方是谁、Provider 选型的
+  既有惯例
+- `skills/_sources/tradetime.py` 全文——`market_is_open()`（53 行起）与
+  `session_in_progress()`（128 行起）现状。两个函数的文档字符串已经写明
+  「已知边界：不认节假日」与朝安全方向偏的理由，改的时候不要削弱这条方向
+  ——查不到日历数据时必须继续偏向"多报 missing"，不能变成"没查到就当
+  放假"（那是更危险的方向：会让系统在真实交易日里以为休市）
+- `skills/_sources/sina.py` 的 `IndexDaily`（67 行起）/`fetch_index_daily`
+  （96 行起）/`parse_index_daily`（116 行起）——三者的分层是本批新
+  Provider 该抄的形状：一个不联网的纯函数负责解析（能对着已存的 raw
+  重放，不用第二次实现同一套判断），一个联网的薄函数调用它
+- `skills/_snapshot/coordinator.py` 的 `freeze_index_daily`（104 行起）
+  ——抓取之后 `save_raw_snapshot(payload=d.raw, raw_text=d.raw_text)`
+  的真实调用写法。🔴 **只抄这一段落盘方式，不要接 `SnapshotCoordinator`
+  本身或 `evidence_sets`**——那解决的是"同一次决策运行内、多个 Specialist
+  必须看到同一份易变网络数据"，交易日历是低频更新的参考表，不是这个形状
+  （设计探活已展开这一条，不要重新论证一遍）
+- `skills/_store/db.py` 的 `save_raw_snapshot`（1184 行起）/
+  `raw_text_sha256`（1165 行起）——批 I 已经把两者通用化，本批直接用，
+  不需要改
+- `skills/_store/schema.py` 开头的 `_append_only()`（22 行起）——新表怎么
+  接上「只追加」触发器；`tests/test_store.py::test_每张表都有只追加触发器`
+  会自动发现新表并要求它接上，不接会真的红（不是装饰，见该测试实现）
+- `docs/external/` 数据架构材料点名的 `a-stock-data`
+  （`github.com/t4ol1n/a-stock-data`）——这个仓库对它的定位一直是「Provider
+  Catalog / 接口实现参考」，不是依赖；开工前点开它的交易日历实现看一眼有
+  没有免鉴权端点可抄
+
+## 做什么
+
+1. **新 Provider 适配器**：`skills/_sources/` 下新增一个模块（模块名你
+   定，比如 `calendar.py`），仿 `sina.py` 的 `fetch_index_daily`/
+   `parse_index_daily` 分层——一个纯函数解析响应、一个薄函数联网调用它。
+   端点自己选：先看 `a-stock-data` 的交易日历实现作参考，按现有四个适配器
+   （sina/eastmoney/tencent/sina_news）的既定惯例选一个**免鉴权**的公开
+   端点。如果确实找不到免鉴权的、只能考虑 Tushare 这类需要 token 的源，
+   在正文里写清楚为什么值得为这一批引入凭据管理这项新复杂度，不要静默
+   选上——这类需要凭据管理的源本身就是批 G-II 刚踩过的坑。
+2. **落 raw**：抓取结果原样调 `save_raw_snapshot(source=, as_of=,
+   retrieved_at=, payload=, raw_text=)`——直接调用，不接
+   `SnapshotCoordinator`（理由见"先读"）。
+3. **新增 `fact_trading_calendar` 表**（`skills/_store/schema.py`，新迁移号
+   见上文"开工第一步"那条约束）。这是这个仓库第一张真正的 `fact_*` 表，
+   列你自己定，但至少要能回答"某个交易日是否开市"；接上 `_append_only()`。
+   历史事实一旦落地不该被 UPDATE——如果交易所事后补发调整（临时增加/
+   取消一天），用新的一行（更晚的 `retrieved_at`）表达修正，不要覆盖旧行，
+   读的一方按 `retrieved_at` 取最新一条。
+4. **先给 `market_is_open()`/`session_in_progress()` 补特征测试
+   （characterization tests），再改**：两个函数目前 `grep -rl
+   market_is_open tests/` 零命中，改之前没有基线可比。至少固定：一个
+   已知的、落在工作日上的法定节假日（例如 2026-01-01，元旦，周四——
+   `market_is_open` 现状对这一天 09:31 会返回 `True`，这正是要修的缺陷，
+   不是这一步该断言的"正确答案"）、一个普通交易日、一个周末日。有了基线
+   之后，再让 `market_is_open()` 在有日历数据时优先查
+   `fact_trading_calendar`；查不到时（数据还没抓到、或问的日期超出已抓
+   范围）回退到现在这套 weekday 判据——回退分支的结果必须与"改之前"对
+   同一输入完全一致，不能变成第三种沉默失败。
+5. **`session_in_progress()` 要不要跟着改，你自己判断并在正文里说清楚**
+   ——它回答的是"这一天是不是还没过完"，跟节假日感知是不是同一个问题、
+   改了会不会影响 `emotion-calc` 现在的行为，设计探活没有替你做这个决定。
+
+## 不要做
+
+- 不要接 `SnapshotCoordinator`/`evidence_sets`——见上，这解决的是另一个
+  问题
+- 不要现在就把其余五个 P0 数据集的 schema 定下来——那是 §46 选股闭环的
+  输入，没开工之前按猜测定型是要撞的坑
+- 不要把 `market_is_open()` "查不到就多报 missing"这个朝安全方向偏的
+  失败方向改成相反方向——见上
+- 不要碰批 G-II 还在另一个 worktree 里修的 `skills/card/`/
+  `deploy/openclaw/` 相关文件——两批文件基本不相交，如果 `git log` 发现
+  有交叉，先确认谁先落地，不要假设
+
+## 必须做的探针（G-1）
+
+P1  Provider 纯函数可离线测：给解析函数喂一段固定响应文本，断言解析出的
+    "是否开市"结果正确；联网函数本身不在离线测试范围内跑（沿用既有的
+    禁网围栏）
+P2  raw 层真的存 raw：抓取路径调 `save_raw_snapshot` 时，落盘的 `raw_text`
+    与构造的响应体逐字节相同，`content_sha256` 与手算的 `raw_text_sha256`
+    一致（沿用批 I 的判法，不该有第二套）
+P3  🔴 只追加：`fact_trading_calendar` 的 UPDATE/DELETE 被拒——先确认
+    `test_每张表都有只追加触发器` 真的把这张新表也扫进去了（比如故意在
+    迁移里漏写 `_append_only()` 调用，跑一次看这道测试是否真的报红，
+    再补上验证它变绿），不要只信"新表默认在清单里"这句话
+P4  🔴 特征测试锁基线：改 `market_is_open()` 之前先跑一遍第 4 步写的特征
+    测试，确认它们精确刻画了"改之前"的行为；改完之后同一批日期重新断言
+    ——有日历数据的分支给出正确答案，没有数据的分支与"改之前"的结果
+    逐一相同，不是"看起来差不多"
+P5  fail-direction 不倒转：构造"日历数据完全空"与"查询的日期超出已抓
+    范围"两种场景，断言 `market_is_open()` 的回退结果与改之前对同一
+    输入完全一致
+P6  新 Provider 的选型站得住：如果最终选了免鉴权源，断言测试套件里没有
+    引入任何真实凭据依赖；如果选了需要 token 的源，断言正文里有一段
+    解释为什么这一批值得引入凭据管理
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 H · 现在不写分发提示词
+
+批 F、批 G-I、批 G-II、批 K、批 I、批 L 的分发提示词都已经写好（见前面
+各节）。只剩批 H（包结构重组，§29）——排在最后，因为它会让期间所有其他
+批次的 diff 变脏，故意等其余批次都落地才动。
+
+🔴 **现在把它写出来，得到的是一份过期的分发清单** —— 那正是 L-6 文档漂移，
 而本仓库已经因为「两份清单各自过期」吃过亏（`TODO.md` 与设计文档的出口条件漂了一次）。
 
-⇒ 每批合并之后，回来补写下一批。
+⇒ 其余批次落地之后，回来补写。
 
 ---
 

@@ -1009,21 +1009,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
           复核新发现）：判据是「调度命令的字面量」，而不是「有一个能跑的
           脚本」——现在没有 cron/systemd 实体去调它，outbox 会一直攒行、
           不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
-  - [ ] 批 G-II · Inbound Trigger —— **离线部分建完，在独立 worktree
-        `wt-g-ii-v2` 待复核；未碰 live**（网关配置/systemd/飞书凭据都没动）。
-        核心交付物：飞书"出卡"变结构化 trigger，**出卡编排绝不在 main 进程树里跑**
-        （2026-09-21 那次 $0.4 白花事故的真根子）。🔴 **立场变过一次，如实记**：
-        原计划零 LLM 的 `command-dispatch: tool` 走死了——它够不到会话内才连接的
-        MCP 工具（P6 live 报 `Tool not available`；main 在会话里反而调得到）。加上
-        运营者约束（一个飞书机器人 + LLM 可用），退回 BigA 全仓一致的「技能 + shell
-        跑脚本」：main 认出请求 → 跑 `skills/card/scripts/inbound.py` → `systemd-run`
-        脱树拉起（entry_guard 判 HUMAN = L-14 止血点，与"谁发起"解耦）。MCP server /
+  - [ ] 批 G-II · Inbound Trigger —— **离线部分独立复核已过，代码已合并进
+        orchestration；P6 live 待做**。核心交付物：飞书"出卡"变结构化
+        trigger，**出卡编排绝不在 main 进程树里跑**（2026-09-21 那次 $0.4
+        白花事故的真根子）。🔴 **立场变过一次，如实记**：原计划零 LLM 的
+        `command-dispatch: tool` 走死了——它够不到会话内才连接的 MCP 工具
+        （P6 first/second retry 报 `Tool not available`；main 在会话里反而
+        调得到）。加上运营者约束（一个飞书机器人 + LLM 可用），退回 BigA
+        全仓一致的「技能 + shell 跑脚本」：main 认出请求 → 跑
+        `skills/card/scripts/inbound.py` → `systemd-run` 脱树拉起
+        （entry_guard 判 HUMAN = L-14 止血点，与"谁发起"解耦）。MCP server /
         专用 agent 两个多余抽象已删。详见教程第 37 章 §三/§四、CHANGELOG 批 G-II。
-        - [ ] 待复核：diff 摘要 + 五道探针红灯（P2 脱树两道已亲手验红）已备好
-        - [ ] 待 live（**先跟运营者确认再动**）：P6 —— 真飞书 /card → 脱树出卡 →
-              推回飞书；首个真 event 对着 `inbound-trigger-debug.log` 核实幂等键取值
-        - [ ] 待合并：base 落后于 orchestration（G-I 台账/G-II 分发提示词已在它上面），
-              合并时把 TODO/设计文档/kickoff 对着 orchestration 当前版调和
+        离线复核内容：diff 摘要 + 五道探针红灯（P2 脱树两道独立复核亲手验红）+
+        全量 1254 条测试 + audit_public.sh 十一项，均已过。
+        - [ ] 待 live：P6 —— 真飞书 /card → main 认出 → 脱树出卡 → 推回飞书；
+              首个真 event 对着 `inbound-trigger-debug.log` 核实幂等键取值
 - [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
       五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
       `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`
@@ -1047,10 +1047,15 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
       体量小的数据集把 Provider→Raw→Normalize→Quality→Snapshot 走第二遍
-      （第一遍是已完成的 index_daily）。**批 I 已落地**，raw 层的形状
-      （`raw_text` 新增列 + `content_sha256` 口径）现在有真实先例可抄，
-      但还没针对批 L 做过设计探活——按批 I/K 的先例，写分发提示词前应先
-      跑一次设计探活确认没有新的坑，不要假设"依赖解除"就等于"可以直接写"
+      （第一遍是已完成的 index_daily）。**设计探活已完成（2026-09-23）**：
+      不接 `SnapshotCoordinator`/`evidence_sets`（那解决的是同一次运行内
+      多个 Specialist 看同一份易变数据，日历是低频参考表，不是这个形状）；
+      会是仓库第一张真正的 `fact_*` 表（现在文档画的三层图里只有 raw 层
+      被真正实例化过）；真实消费方 `market_is_open`/`session_in_progress`
+      目前零测试覆盖，动它们之前必须先补特征测试锁基线。**分发提示词已写好**
+      （`docs/guide/orchestration-kickoff-prompt.md` 批 L 一节），Provider
+      端点选哪个、`session_in_progress` 要不要跟着改，留给建造会话自己判断
+      并在交回时说明理由
       🔴 其余五个的 schema 形状由 §46 选股闭环决定（FeatureSet 要什么、
       Screening 按什么过滤），那一批没开工之前不要按猜测定 —— raw 只追加
 - [ ] 批 H · 包结构重组（§29，排最后 —— 它会让期间所有 diff 变脏）
