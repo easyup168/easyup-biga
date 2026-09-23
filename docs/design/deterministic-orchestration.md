@@ -768,6 +768,16 @@ raw 层只追加，改形状的代价全在后面。
 
 ### 批 F · Risk 拆两层
 
+> ✅ **已落地（2026-09-23）。** `build_fact_bundle()` 的调用从「risk 被 spawn 后自己在
+> LLM 会话里跑」挪到「编排器在 spawn 之前直接 import、免费地跑」。两种确定性早退
+> （`foreign` / 无上游，判据 `fb.status=='failed'`）不再 spawn risk；其余仍 spawn，但
+> risk 只解读编排器算好的 `verdict_ref`。落地时**独立发现并一并修掉两处设计没点名的
+> 交互**：① schema **v11** `ux_fact_per_task_agent` 分区唯一索引堵「同一 (task_id, agent)
+> 双写 fact 的静默并存」（fact 行 amends 恒 NULL，v6 线性索引管不到它）；② `persist()`
+> 只给真被 spawn 的 agent 记账本行，修早退场景下 `spawn_check` 把 risk 误判成 forged。
+> 行为变化：全员 Stage 1 缺席不再判「零证据 FAILED」，改出一张满是缺失的卡。
+> 落地细节冻结在教程第 33 章；探针红灯与理由见 `CHANGELOG.md`。
+
 * `RiskPolicy`（Python，硬）：身份 / 覆盖率 / 新鲜度 / 硬阈值 / 缺失传播 —— **fail closed**
 * `RiskAssessment`（LLM，软）：硬规则全过之后才解释风险
 

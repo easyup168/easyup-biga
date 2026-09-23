@@ -39,10 +39,12 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _store import (  # noqa: E402
+    connect,
     init_schema,
     load_verdict_meta,
     save_assessment,
     save_fact_bundle,
+    save_verdict,
 )
 
 TID = "BIGA-20260302-001"
@@ -255,3 +257,54 @@ class TestP5AllSixNewForm:
             judgment=card_ops.Judgment(status="WAIT", headline="x", synthesis="y"),
             model_ref="test", verdict_refs=refs)
         assert len(card.verdicts) == 6
+
+
+# ─────────────────────────────── P4 · risk 双跑同一决策（批 F 唯一索引守卫）
+
+
+class TestBatchFDoubleFactRejected:
+    """🔴 批 F / P4：risk 万一没听新提示词、又自己跑了一遍 `risk_check.py --task-id
+    <同一个 did>`，第二次落 fact 必须**报明确错**（不是裸 IntegrityError），不静默覆盖、
+    也不静默产生两条并存原件。这条洞在批 F 之前是**静默**的：fact 行 amends 恒 NULL，
+    v6 的线性修订唯一索引（WHERE amends IS NOT NULL）天生管不到它 —— v11 的
+    ux_fact_per_task_agent 才堵上。"""
+
+    def _five_upstream(self, db):
+        """库里放 5 个真实上游 verdict，返回它们的 id（供 --verdict-ids 用）。"""
+        return [save_verdict(_up(a), path=db)
+                for a in ("market", "sector", "news", "technical", "emotion")]
+
+    def test_P4_CLI双跑同一did_第二次退出2且报明确错(self, db, capsys):
+        ids = self._five_upstream(db)
+        idarg = ",".join(str(i) for i in ids)
+        # 第一次（首次落库，模拟编排器已落 / 或人首次手跑）：正常
+        rc1 = risk.main(["--verdict-ids", idarg, "--task-id", TID])
+        assert rc1 in (0, 2), f"首次跑 risk_check 应正常，rc={rc1}"
+        # 第二次（模拟 risk 没听话、又跑一遍同一个 did）：被拒、退出 2、报明确错
+        rc2 = risk.main(["--verdict-ids", idarg, "--task-id", TID])
+        assert rc2 == 2, f"第二次落 fact 应被拒并退出 2，rc={rc2}"
+        err = capsys.readouterr().err
+        assert "已经有一份 fact" in err          # 说清楚撞了什么
+        assert "IntegrityError" not in err        # 不是裸 IntegrityError
+        assert "--no-store" in err                # 指路：手工看输出加 --no-store
+        # 没有静默并存：库里仍只有一条 risk fact
+        with connect(db, readonly=True) as c:
+            n = c.execute("SELECT COUNT(*) FROM agent_verdicts WHERE task_id=? "
+                          "AND agent='risk' AND kind='fact'", (TID,)).fetchone()[0]
+        assert n == 1, f"第二次落 fact 后不该并存两条，实际 {n}"
+
+    def test_P4_红灯_删掉唯一索引则第二次静默并存(self, db):
+        """🔴 G-1 红灯（内联）：把 ux_fact_per_task_agent 删掉，第二次 save_fact_bundle
+        就**静默成功、并存两条** —— 证明这道守卫真的在拦，不是恒过。tmp 库、跑完即弃。"""
+        fb = FactBundle(task_id=TID, agent="risk", status="completed", verdict="PASS",
+                        result={"coverage_ratio": 1.0}, data_completeness=1.0,
+                        evidence=[_ev("coverage_ratio")])
+        save_fact_bundle(fb, path=db)
+        with connect(db) as c:
+            c.execute("DROP INDEX ux_fact_per_task_agent")
+        # 索引没了 ⇒ 第二次不再 IntegrityError，静默插入第二条
+        save_fact_bundle(fb, path=db)
+        with connect(db, readonly=True) as c:
+            n = c.execute("SELECT COUNT(*) FROM agent_verdicts WHERE task_id=? "
+                          "AND agent='risk' AND kind='fact'", (TID,)).fetchone()[0]
+        assert n == 2, "删了唯一索引后第二条应能静默落库 —— 这正是守卫在防的洞"

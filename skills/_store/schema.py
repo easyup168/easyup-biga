@@ -456,7 +456,41 @@ ALTER TABLE evidence_sets  ADD COLUMN run_id TEXT;
 
 _V11 = """
 -- ───────────────────────────────────────────────────────────────
--- v11：外发通知 outbox + 投递日志（批 G-I，第 9/10 张表）
+-- v11：一个 (task_id, agent) 至多一份 fact 原件（批 F）
+--
+-- 🔴 它堵的是一个实测能构造出来的静默洞：`save_fact_bundle` 落 fact 行时
+--    `amends` 恒为 NULL，而 v6 的 `ux_verdict_amends_linear` 只管
+--    `WHERE amends IS NOT NULL` —— fact 行天生在它管辖之外。于是对同一个
+--    `(task_id, agent)` **第二次**写 fact，两行都是 amends=NULL，唯一索引
+--    一个都拦不住 ⇒ 静默产生两条并存的判定原件。
+--
+-- 批 F 把 risk 的事实从「risk 被 spawn 后自己跑 risk_check.py」挪成「编排器
+-- 在 spawn 之前直接算好、落库」。这条路径下，如果 risk 没听新提示词、又自己
+-- 跑了一遍 risk_check.py --task-id <同一个决策号>，就正好触发上面那个双写：
+--   · `latest_verdict_ids()` 取 MAX(verdict_id) ⇒ 悄悄改用 risk 双跑那条，
+--     编排器预先算的那条被架空；
+--   · 「这次决策的 risk 事实原件是哪一条」从此有歧义，而这正是一个卖点为
+--     「证据可追溯、可回放」的系统最不能有的东西。
+--
+-- ⇒ 补一条分区唯一索引：kind='fact' 的行里，(task_id, agent) 不许重复。
+--    与 `ux_decision_online`（一个 decision 一条在线卡）、`ux_verdict_amends_linear`
+--    （一条原件至多一条修订）同形 —— 都是「唯一约束由数据库兜底，不靠应用层
+--    先查再插」。assessment 行（kind='assessment'）与历史合体行（kind NULL/'verdict'）
+--    不在 WHERE 内，不受影响：一份事实仍可挂一个判断，历史行照旧只读。
+--
+-- 🔴 加索引前实测过生产库：kind='fact' 的行里没有任何 (task_id, agent) 重复
+--    （唯一 1 条 fact 行）—— 迁移不会因存量重复而失败。CREATE UNIQUE INDEX
+--    在有重复时会直接报错，那正是 append-only 下不能事后清洗的处境，所以必须
+--    先确认干净再加。
+-- ───────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fact_per_task_agent
+    ON agent_verdicts(task_id, agent) WHERE kind = 'fact';
+"""
+
+
+_V12 = """
+-- ───────────────────────────────────────────────────────────────
+-- v12：外发通知 outbox + 投递日志（批 G-I，第 9/10 张表）
 --
 -- 🔴 它解决的是「人得守着终端等卡跑完」——出卡是一次 170~200 秒的同步调用，
 --    Card 完成 / UNKNOWN / risk 否决 / 运行失败这四类事件此前没有任何外发通道。
@@ -499,12 +533,11 @@ _V11 = """
 -- 🔴 建表时**就**带只追加触发器 —— v4 建 decision_ids 时漏过一次（F1），
 --    代价是整套身份机制建在可撤销的地基上。两张新表都进 _append_only。
 --
--- ⚠️ **schema 版本号撞车提醒（2026-09-23）**：本迁移在开工时（HEAD=1824361）是
---    下一个空号 v11；但并行的**批 F**（当时未合并、在另一棵工作树上）也占用 v11
---    （agent_verdicts 的 ux_fact_per_task_agent）。两批迟早并进同一条主线时 v11 会
---    撞——套路同 J-I/J-II 处理 v9/v10：**谁先合并谁占 v11，后合并的那批开工前
---    先 `git log` 确认对方是否已落地、占下一个空号**（重编号只改 MIGRATIONS 尾部
---    的字面量，迁移体本身不动）。此处留记号，免得并线时以为对方改错了。
+-- ⚠️ **schema 版本号撞车，已解决（2026-09-23）**：本迁移开工时（HEAD=1824361）
+--    v11 是下一个空号，但并行的批 F（当时未合并、在另一棵工作树上）也占用了
+--    v11（`ux_fact_per_task_agent`）。批 F 先合并（`e5b959f`）落地 v11 —— 合并
+--    orchestration 进本批工作树时按 J-I/J-II 的先例重新编号：本迁移改占 v12，
+--    迁移体本身一字未动。
 -- ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS notification_outbox (
     outbox_id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -555,6 +588,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (9, _V9),
     (10, _V10),
     (11, _V11),
+    (12, _V12),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

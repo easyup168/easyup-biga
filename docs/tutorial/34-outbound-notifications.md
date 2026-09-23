@@ -1,4 +1,4 @@
-# 第 33 章 · 外发通知 outbox（只做「推」，不接「收」）
+# 第 34 章 · 外发通知 outbox（只做「推」，不接「收」）
 
 > 📁 **过程文档** · 写完即冻结
 > **覆盖**：确定性编排批 G-I —— 给「Card 完成 / UNKNOWN / risk 否决 / 运行失败」四类
@@ -15,7 +15,7 @@
 出一张卡要 170~200 秒，而且是**同步**的（`bin/biga-card` 一路 `wait` 到 Card 落库）。
 在这一章之前，卡跑完了没有任何东西会告诉你 —— 你只能守着终端。做完这一章：
 
-- `notification_outbox`（队列）+ `notification_deliveries`（投递日志），schema **v11**，两张都只追加。
+- `notification_outbox`（队列）+ `notification_deliveries`（投递日志），schema **v12**，两张都只追加。
 - `_contract/notify.py`：四类事件白名单 + `card_event_type()` 分类判据。
 - `save_card_with_notifications()`：Card 与 outbox 行**同一个事务**入库。
 - `RunState.NOTIFICATION_PENDING`，插在 `CARD_PERSISTED` 与 `COMPLETED` 之间。
@@ -49,7 +49,7 @@
 failed → … → delivered`。append 日志天然记得下「第几次投的、结果如何、什么时候」——
 而 `delivered_at` 一列只留得下终值，重试了几次、为什么失败全丢了。
 
-> 通用原则：**когда一个字段要记的是「一串发生过的事」而不是「一个当前值」，
+> 通用原则：**当一个字段要记的是「一串发生过的事」而不是「一个当前值」，
 > 用追加日志、让当前值变成派生查询，不要原地 UPDATE。** 省下的那张表，换来的是
 > 一份可回放的历史 —— 对一个卖点是「可追溯、可回放」的系统，这笔账永远划算。
 
@@ -125,11 +125,11 @@ CLI 路径先接好）。
 
 ## 执行
 
-### schema v11 建出两张表
+### schema v12 建出两张表
 
 ```console
 $ python3 -c "import sys;sys.path.insert(0,'skills');from _store import db;print('schema ->',db.init_schema())"
-schema -> 11
+schema -> 12
 ```
 
 新表随 `init_schema` 幂等建出（`notification_outbox` / `notification_deliveries`），
@@ -189,10 +189,9 @@ ValueError: Verdict 报告的缺失项没有上浮到 Card: [MissingItem('情绪
 ### 坑 4 · 并行批次占了同一个 schema 版本号
 
 开工时另一批（批 F）在别的工作树上未提交，也占用了 v11。这不是代码冲突（各在各的树上），
-是**版本号命名空间的撞车** —— 和当年 J-I/J-II 处理 v9/v10 一模一样。处理方式：谁先合并谁
-占 v11，后合并的那批开工前先 `git log` 确认对方是否已落地、占下一个空号（重编号只改
-`MIGRATIONS` 尾部字面量，迁移体不动）。`schema.py` `_V11` 注释里留了记号，免得并线时以为
-对方改错了。
+是**版本号命名空间的撞车** —— 和当年 J-I/J-II 处理 v9/v10 一模一样。批 F 先合并落地，
+合并 `orchestration` 进本批工作树时按同一套先例重新编号：本批的两张新表改占 **v12**，
+迁移体本身一字未动，`schema.py` 里两个版本号的注释都留了记号。
 
 > 通用原则：**append-only 的迁移列表，版本号是共享命名空间。** 多批并行时，它和「systemd
 > 单元名」「端口」一样会静默撞 —— 靠「先看对方占了没」而不是「假设自己那个号是空的」。
