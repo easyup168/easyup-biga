@@ -25,7 +25,7 @@ import pathlib
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field as dc_field, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
@@ -100,6 +100,28 @@ _REAL_SPAWN_SQL = (
 )
 
 
+def _dedupe_by_run_id(rows: list[dict]) -> list[dict]:
+    """同一次 spawn 在两张表里各有一行 ⇒ 按 `run_id` 去重，保留先到的那条。
+
+    🔴 `subagent_runs ⊂ task_runs`（实测 67/67，0 个独有）。取数时先读
+    `task_runs`（全集、有显式 `agent_id` 列），`subagent_runs` 只补老库。
+    不去重的后果不是「多算几条」那么轻 —— `orphan_spawns()` 会把同一次 spawn
+    印两遍，而它报的是**钱**（回合二实测 09-21：54 个 → 真实 29 个，虚高 1.9 倍）。
+
+    `run_id` 为空的行不参与去重（宁可重复，也不把两条不同的记录合成一条）。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in rows:
+        rid = r.get("run_id")
+        if rid and rid in seen:
+            continue
+        if rid:
+            seen.add(rid)
+        out.append(r)
+    return out
+
+
 def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
     """读 OpenClaw 运行时自己记的子会话表，**只取属于这次决策的**。
 
@@ -123,10 +145,21 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
     ⇒ 这一版用它过滤，同时去掉 LIMIT —— 按号取就不该有条数上限，
       否则一天跑得多了，早先的决策会悄悄查不到。
 
-    🔴 为什么读**两张**表（2026-09-23）
-    ----------------------------------
-    运行时把一次 spawn 记在哪张表**不是恒定的**，而这套核验原来只读
-    `subagent_runs` 一张。实测对照：
+    🔴 为什么读**两张**表（2026-09-23，措辞经回合二评审纠正）
+    ----------------------------------------------------------
+    ⚠️ **不是「落点会变」，是 `subagent_runs ⊂ task_runs`** —— `task_runs` 记全部，
+    `subagent_runs` 只记其中一部分。实测：`subagent_runs` 去重后 67 个 `run_id`，
+    **67 个全都出现在 `task_runs` 里，0 个是它独有的**。
+
+    第一版的说法是「运行时把一次 spawn 记在哪张表不是恒定的，两张都可能是落点」——
+    那句话本身就是**重复计数的根**：按它写代码就会把两张表的结果直接拼起来，
+    而同一次 spawn 在两张表里各有一行。回合二实测：`budget_report.py 20260921`
+    打出「孤儿 spawn 54 个」，其中 25 条是逐字重复，真实 29 个，钱虚高约 1.9 倍 ——
+    而那是个**报钱数的告警**，最容易让人下次直接忽略。
+    ⇒ 归一化时按 `run_id` 去重，且**只在取数处做一次**。
+
+    原来只读 `subagent_runs` 确实是盲区，但成因是「只看了子集」，不是「看错了表」。
+    实测对照：
 
         BIGA-20260922-001（至今唯一一张编排器真实产出的卡）
           subagent_runs                      0 行
@@ -196,7 +229,15 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
             except sqlite3.Error:
                 return False          # 表在却读不了 ⇒ 这就是「算不出来」
 
-        # ① subagent_runs —— agent 名字藏在 child_session_key 的第二段里
+        # ① task_runs —— 全集，且 agent 名字有独立的 agent_id 列（比从 session key
+        #    里抠可靠）。先读它，`subagent_runs` 只用来补老库缺的部分。
+        ok2 = _pull(
+            "task_runs",
+            "SELECT run_id, agent_id, child_session_key, created_at FROM task_runs"
+            " WHERE task LIKE ?" + _REAL_SPAWN_SQL + " ORDER BY created_at DESC",
+            lambda d: d.get("agent_id"))
+
+        # ② subagent_runs —— 子集。老库里没有 task_runs 时它是唯一来源。
         ok1 = _pull(
             "subagent_runs",
             "SELECT run_id, child_session_key, created_at FROM subagent_runs"
@@ -204,15 +245,8 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
             lambda d: (seg[0] if (seg := (d.get("child_session_key") or "")
                                   .split(":")[1:2]) else None))
 
-        # ② task_runs —— agent 名字有独立的 agent_id 列，不用从 session key 里抠。
-        #    判据见 `_REAL_SPAWN_SQL`：肯定式，不枚举 task_kind。
-        ok2 = _pull(
-            "task_runs",
-            "SELECT run_id, agent_id, child_session_key, created_at FROM task_runs"
-            " WHERE task LIKE ?" + _REAL_SPAWN_SQL + " ORDER BY created_at DESC",
-            lambda d: d.get("agent_id"))
-
         got_any = ok1 and ok2
+        out[:] = _dedupe_by_run_id(out)
 
         # R-3：任何一个来源「表在却读不了」⇒ 说「判不了」，不说「零条记录」。
         # 这两者在调用方那里是**完全不同的结论**：后者会被判成**伪造**，
@@ -283,9 +317,18 @@ def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
         #    同一个事实两套口径，且其中一套已被自己证明是错的。
         if "subagent_runs" not in tables and "task_runs" not in tables:
             return None
+        if "task_runs" in tables:
+            for r in conn.execute(
+                    "SELECT run_id, agent_id, child_session_key, created_at, task"
+                    " FROM task_runs WHERE created_at >= ? AND created_at < ?"
+                    + _REAL_SPAWN_SQL, (lo, hi)):
+                d = dict(r)
+                d["agent"] = d.get("agent_id") or ""
+                d["text"] = d.get("task") or ""
+                rows.append(d)
         if "subagent_runs" in tables:
             for r in conn.execute(
-                    "SELECT child_session_key, created_at, payload_json"
+                    "SELECT run_id, child_session_key, created_at, payload_json"
                     " FROM subagent_runs WHERE created_at >= ? AND created_at < ?",
                     (lo, hi)):
                 d = dict(r)
@@ -293,15 +336,7 @@ def orphan_spawns(day: str) -> list[tuple[str, str, str]] | None:
                 d["agent"] = seg[0] if seg else ""
                 d["text"] = d.get("payload_json") or ""
                 rows.append(d)
-        if "task_runs" in tables:
-            for r in conn.execute(
-                    "SELECT agent_id, child_session_key, created_at, task"
-                    " FROM task_runs WHERE created_at >= ? AND created_at < ?"
-                    + _REAL_SPAWN_SQL, (lo, hi)):
-                d = dict(r)
-                d["agent"] = d.get("agent_id") or ""
-                d["text"] = d.get("task") or ""
-                rows.append(d)
+        rows = _dedupe_by_run_id(rows)
         rows.sort(key=lambda d: d["created_at"])
     except sqlite3.Error:
         return None
@@ -336,11 +371,20 @@ class SpawnProof:
     #: 🔴 它是 `_runtime_spawn_records()` 里 `source` 字段的**消费方**（L-1）——
     #:    没有它，那个字段写了没人读；有了它，报错才说得出「刚才到底读到了哪张表」。
     #:    两张表同时存在而只有一张有记录，正是 2026-09-23 那次盲区的形状。
-    by_source: dict[str, int] = dc_field(default_factory=dict)
+    by_source: dict[str, int] = field(default_factory=dict)
 
 
 def spawn_proof(decision_id: str) -> SpawnProof:
     """`agent -> (在 agent_runs 里, 在运行时 subagent_runs 里)`。
+
+    ⚠️ **它证明的是「被 spawn 了」，不是标题写的「被 Supervisor spawn 了」** ——
+    全程不看 `requester`。今天两者等价，但靠的是**配置**不是判据：七个 specialist
+    的 `subagents.allowAgents` 都是 `[]`，运行时的 `resolveSubagentTargetPolicy`
+    读的正是发起方自己这份名单 ⇒ specialist 起不了别的 agent（真实库里这种行 0 条）。
+    哪天给某个 specialist 开了 `allowAgents`，「A 起了 B」就会被算成
+    「Supervisor 起了 B」，**而且不报错**。
+    🔴 不要据此加 requester 判据：实测有 4 行真 spawn 的 requester 等于 child
+    （自指，`[Subagent Context]` 那类），加了会误杀。改配置的人看到这段就够了。
 
     🔴 两份记录的性质完全不同，这正是本函数存在的全部理由：
 
@@ -434,7 +478,8 @@ def check_1_spawned(decision_id: str | None) -> Check:
     proof = spawn_proof(decision_id)
     if not proof.readable:
         return c.pending(
-            "读不到运行时的 subagent_runs，无法证明任何一个是 Supervisor spawn 的"
+            "读不到运行时的 spawn 记录（subagent_runs / task_runs 两张都不在，"
+            "或在却读不了），无法证明任何一个是被 spawn 的"
         ) or c
 
     ours = [a for a, (o, _) in proof.per_agent.items() if o]
@@ -442,11 +487,13 @@ def check_1_spawned(decision_id: str | None) -> Check:
     absent = [a for a, (o, _) in proof.per_agent.items() if not o]
     if proof.rows == 0 and ours:
         return c.fail(
-            f"{decision_id} 在运行时 subagent_runs 里一条记录都没有，"
+            f"{decision_id} 在运行时的 spawn 记录里一条都没有"
+            f"（读到的来源：{proof.by_source or '两张表都是空的'}），"
             f"而 agent_runs 里有 {sorted(ours)} —— 这个号从未被 spawn 过") or c
     if forged:
         return c.fail(
-            f"这些 agent 在 agent_runs 里有行，但运行时 subagent_runs 里没有："
+            f"这些 agent 在 agent_runs 里有行，但运行时的 spawn 记录里没有"
+            f"（读到的来源：{proof.by_source}）："
             f"{sorted(forged)} —— 那些行是被直接写入的，"
             "**不是 Supervisor spawn 出来的**") or c
     if absent:
