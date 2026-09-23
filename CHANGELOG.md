@@ -76,10 +76,10 @@
 Stage 2」，结果先触发了 `RISK_AGENT` 的 fail-closed（import 炸），没验到 P1 自己声称验的东西
 （L-13 形状）——改成「关 `technical.reads_snapshot`」才干净地报红。
 
-**验收**：schema **不变**（批 K 是纯契约/派生，无迁移）；测试 **1194** 条全绿（在 worktree
+**验收**：schema **不变**（批 K 是纯契约/派生，无迁移）；测试 **1198** 条全绿（在 worktree
 干净 checkout 里跑，不含共享树里那批 gitignore 的外部材料）；`bin/biga-card --check` 拿三张
-**批 K 之前**落库、`card_json` 里没有 `expected_roster` 的真卡（BIGA-20260922-001 / -025 /
--024）回放逐字段相同；`audit_public.sh --worktree` 十一项全绿。
+**批 K 之前**落库、`card_json` 里没有 `expected_roster` 的真卡（BIGA-20260922-001、
+BIGA-20260921-025、BIGA-20260921-024）回放逐字段相同；`audit_public.sh --worktree` 十一项全绿。
 
 ⚠️ **过程记一笔（不是新问题，是复现的老形状）**：开工不久发现共享工作树里冒出不属于本批的
 改动（另一会话在做批 G-II，动了 `_store/*` 与 `orchestrator.py`）。按第 28 章（批 C-III）
