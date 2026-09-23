@@ -15,6 +15,42 @@
 
 ## [未发布]
 
+### 🐛 修复 · 批 G-II P6 live 真跑发现：预算闸门拒了它自己刚占的号
+
+准备好 live 环境后真发了第一条飞书 `/card`。main 认出请求、跑了 `inbound.py`，
+`accept_trigger` 正确占了号（`BIGA-20260923-003`）、正确拉起了 `systemd-run` 脱树
+（entry_guard 判 HUMAN，journal 确认单元真的起来了）——到这里为止，这次返工要防的
+东西全部兑现。但 `bin/biga-card` 自己的预算闸门（`check_budget()`）紧接着**拒绝了
+这次运行**，报「距上次占号只有 0s」「还有 1 次运行没出卡」，两条理由都指向的是
+`BIGA-20260923-003`——也就是它自己。
+
+根因：预算闸门的「上次占号」查的是 `decision_ids` 表里最新一行。CLI 路径下，
+`bin/biga-card` 先过闸门、后占号（orchestrator 自己占），闸门跑的时候号还不存在，
+"最新一行"自然是**别的**、更早的尝试。飞书 inbound 路径反过来——`accept_trigger`
+为了拿幂等键，**先**占号、**再**拉起 `bin/biga-card`；闸门跑的时候，"最新一行"
+就是它自己刚占的那个。gap 恒为 0s，"还没出卡"也恒为真——**这条路径上，闸门 100%
+会拒绝每一次触发，不是偶发**。这解释了为什么离线探针测不出来：P1/P3 的测试直接
+调 `accept_trigger` 或桩掉 launcher，从没让`bin/biga-card` 自己的闸门在同一条真实
+调用链上跑过。
+
+修复：`check_budget()` 新增 `exclude_decision_id` 参数，排除掉「跟自己比」这一条
+（`DAILY_CAP`——今天总共占了几个号——不受影响，这次自己确实算一次）；
+`bin/biga-card` 把 `$BIGA_CARD_DECISION_ID`（飞书路径才有，CLI 路径本就没有）
+传进去。`tests/test_budget_gate.py` 新增 `TestExcludeSelf` 四条：排除自己就不再
+自比、不排除时（CLI 默认）行为一字不变、排除自己不连带放过同一天**别的**真实
+占号、`DAILY_CAP` 不受排除影响。
+
+**验证**：sabotage-revert 亲手复现——把排除逻辑改回"假装排除、实际不排除"
+（`others = reserved`）⇒ 新增四条里两条当场翻红，报错文本与真实 live 事故完全同形；
+还原绿。全量 1258 条测试（新增 4 条，`sync_test_count.sh` 已同步）+
+`audit_public.sh` 十一项复跑仍绿。
+
+⚠️ **这条比 MCP 路由那个坑更靠后、更隐蔽**：MCP 那个坑在"main 能不能碰到工具"
+这一步就报错，錶面现象很显眼；这个坑要走到"main 已经成功发起、`accept_trigger`
+已经成功占号、`systemd-run` 已经成功脱树"这么远，才在**下一个进程**里被同一套
+闸门用**自己刚写的那一行**拒绝——四道离线探针（P1-P4）分别验证了各自的那一段，
+没有一道探针把这几段串成一条真实调用链去跑，所以谁都没测出来。
+
 ### 🐛 修复 · 批 G-II P6 live 预检发现：config patch 省略 mcp 键不等于删除
 
 给 P6 live 验证做准备时，把返工后的配置 apply 到真实 live，发现 `mcp.servers.
