@@ -20,7 +20,7 @@ import os
 import pathlib
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 from _contract import (
@@ -818,16 +818,49 @@ def save_fact_bundle(
     blob = _canonical_dumps(fb.to_dict())
     # 🔴 写边界重校验（A3）：只信「序列化之后还能重建出来」。
     FactBundle.from_dict(json.loads(blob))
-    with connect(path) as conn:
-        cur = conn.execute(
-            "INSERT INTO agent_verdicts "
-            "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
-            " created_at, kind, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
-            (fb.task_id, fb.agent, None, None, blob,
-             hashlib.sha256(blob.encode("utf-8")).hexdigest(),
-             now_cn().isoformat(), "fact", run_id),
-        )
-        return int(cur.lastrowid)
+    try:
+        with connect(path) as conn:
+            cur = conn.execute(
+                "INSERT INTO agent_verdicts "
+                "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
+                " created_at, kind, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                (fb.task_id, fb.agent, None, None, blob,
+                 hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+                 now_cn().isoformat(), "fact", run_id),
+            )
+            return int(cur.lastrowid)
+    except sqlite3.IntegrityError as e:
+        # 🔴 批 F：schema v11 的 `ux_fact_per_task_agent` 在拦「同一个 (task_id, agent)
+        #    第二份 fact」。fact 行 amends 恒 NULL，v6 的线性索引管不到它 —— 没有这条
+        #    分区唯一索引，第二次写会静默产生两条并存原件（编排器算的那条被 MAX 架空）。
+        #    报错要报得明确（不是裸 IntegrityError）并指路：手工复核只想看输出加 --no-store。
+        # SQLite 报的是**列名**（`agent_verdicts.task_id, agent_verdicts.agent`），
+        # 不是索引名 —— 与 save_verdict 匹配 `agent_verdicts.amends` 同理。只有
+        # ux_fact_per_task_agent 同时涉及这两列，两者都在才是它。
+        msg = str(e)
+        if not ("agent_verdicts.task_id" in msg and "agent_verdicts.agent" in msg):
+            raise
+        existing = None
+        with suppress(sqlite3.Error):
+            with connect(path, readonly=True) as conn:
+                row = conn.execute(
+                    "SELECT verdict_id FROM agent_verdicts "
+                    "WHERE task_id=? AND agent=? AND kind='fact' "
+                    "ORDER BY verdict_id LIMIT 1",
+                    (fb.task_id, fb.agent),
+                ).fetchone()
+            existing = row["verdict_id"] if row else None
+        raise ValueError(
+            f"[{fb.agent}] 决策 {fb.task_id} 已经有一份 fact 原件了"
+            + (f"（verdict_ref={existing}）" if existing else "")
+            + " —— 一个 (task_id, agent) 至多一份事实，不许第二次落 fact。\n"
+            "  批 F：risk 的事实由编排器在 spawn 之前算好落库，你不该再自己跑一遍 "
+            "risk_check.py。\n"
+            "  · 要给这份事实加判断：amend_verdict.py --ref "
+            + (str(existing) if existing else "<那条 fact 的 verdict_ref>")
+            + " --stance <词>；\n"
+            "  · 只是手工看一眼 skill 的输出：加 --no-store（不落库）。"
+        ) from e
 
 
 def load_fact_bundle(
