@@ -27,13 +27,15 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "skills"))
 
-from _contract import CN_TZ, AgentVerdict, Evidence  # noqa: E402
+from _contract import CN_TZ, AgentVerdict, Evidence, FactBundle  # noqa: E402
 from _store import (  # noqa: E402
     AppendOnlyViolation,
     connect,
     init_schema,
+    load_outcome,
     load_verdict,
     load_verdict_meta,
+    save_fact_bundle,
     save_verdict,
 )
 
@@ -61,6 +63,19 @@ def _verdict(agent="market", missing=None, verdict="PASS", status="completed",
         task_id="BIGA-20260918-001", agent=agent, status=status, verdict=verdict,
         result={"sh_close": 3911.87}, data_completeness=1.0, evidence=ev,
         warnings=[], missing=list(missing or []), elapsed_ms=1234, stance=stance)
+
+
+def _fact(agent="market"):
+    """一条新形状 FactBundle（批 E-III 后六个 skill 都产它）。"""
+    from datetime import datetime
+    as_of = datetime(2026, 9, 18, 15, 0, tzinfo=CN_TZ)
+    got = datetime(2026, 9, 20, 20, 42, 48, tzinfo=CN_TZ)
+    ev = [Evidence(field="sh_close", source="sina:kline/sh000001", value=3911.87,
+                   as_of=as_of, retrieved_at=got, calc_version="market-calc/1",
+                   label="上证指数点位")]
+    return FactBundle(
+        task_id="BIGA-20260918-001", agent=agent, status="completed", verdict="PASS",
+        result={"sh_close": 3911.87}, data_completeness=1.0, evidence=ev, elapsed_ms=1234)
 
 
 class TestRoundTrip:
@@ -157,35 +172,33 @@ class TestAmendCLI:
         return subprocess.run([sys.executable, str(AMEND), *args],
                               capture_output=True, text=True, env=env)
 
-    def test_追加缺失项写新行原件不动(self, db):
+    def test_旧合体行的修订路径已退役(self, db):
+        # 🔴 批 E-III：历史合体 AgentVerdict（save_verdict 仍能造它）的旧修订路径退役 ——
+        #    照抄一条旧命令，CLI 明确报错（rc=2）指路，不是静默改库。
         vid = save_verdict(_verdict(), path=db)
         r = self._run("--ref", str(vid),
                       "--add-missing", "market.trend.no_history", "趋势判不了",
                       "--verdict", "WARNING", db=db)
+        assert r.returncode == 2
+        assert "退役" in r.stderr and "只读" in r.stderr
+
+    def test_fact行加stance成功_写新行事实不动(self, db):
+        # 新形状：给 fact 行加一行 AgentAssessment，事实那行一个字不动
+        fid = save_fact_bundle(_fact(), path=db)
+        r = self._run("--ref", str(fid), "--stance", "放量上涨", db=db)
         assert r.returncode == 0, r.stderr
         new = int(r.stderr.split("verdict_ref=")[1].split()[0])
+        assert new != fid, "判断该落在新的一行"
+        oc = load_outcome(new, path=db)
+        assert oc.stance == "放量上涨"
+        # 事实那行的 evidence 原样在（没被重打），retrieved_at 仍是采集时刻
+        assert oc.fact.evidence[0].retrieved_at == _fact().evidence[0].retrieved_at
 
-        original, amended = load_verdict(vid, path=db), load_verdict(new, path=db)
-        assert list(original.missing) == [] and original.verdict == "PASS"
-        assert [m.detail for m in amended.missing] == ["趋势判不了"] and amended.verdict == "WARNING"
-        assert amended.missing[0].code == "market.trend.no_history"
-        assert amended.status == "partial"
-        # 证据一条不少，且仍是采集时刻
-        assert len(amended.evidence) == len(original.evidence)
-        assert amended.evidence[0].retrieved_at == original.evidence[0].retrieved_at
-        assert load_verdict_meta(new, path=db)["amends"] == vid
-
-    def test_加缺失项不给verdict时给出指路报错(self, db):
-        vid = save_verdict(_verdict(), path=db)
-        r = self._run("--ref", str(vid),
-                      "--add-missing", "market.trend.no_history", "x", db=db)
+    def test_fact行加add_missing被拒(self, db):
+        fid = save_fact_bundle(_fact(), path=db)
+        r = self._run("--ref", str(fid), "--add-missing", "market.x.y", "限制", db=db)
         assert r.returncode == 2
-        assert "WARNING" in r.stderr and "UNKNOWN" in r.stderr, \
-            "报错必须说清下一步怎么做，否则 agent 要花几轮去猜"
-
-    def test_什么都不改时拒绝(self, db):
-        vid = save_verdict(_verdict(), path=db)
-        assert self._run("--ref", str(vid), db=db).returncode == 2
+        assert "--stance" in r.stderr
 
     def test_ref不存在时报错说清原因(self, db):
         r = self._run("--ref", "999", "--add-missing", "market.trend.no_history", "x",
