@@ -382,18 +382,18 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 
 ## License
 
-BigA is licensed under the **Apache License, Version 2.0**. See
+EasyUp for BigA 2.0 is licensed under the **Apache License, Version 2.0**. See
 [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
 
-Unless explicitly stated otherwise, BigA-owned source code and documentation
-are provided under Apache-2.0. Third-party components remain subject to their
-respective licenses and attribution requirements; see
+Unless explicitly stated otherwise, EasyUp for BigA 2.0-owned source code and
+documentation are provided under Apache-2.0. Third-party components remain
+subject to their respective licenses and attribution requirements; see
 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
 
 ### Market data and third-party content
 
-The Apache-2.0 license applies to the **BigA software**, not to third-party
-market data or content accessed through it.
+The Apache-2.0 license applies to the **EasyUp for BigA 2.0 software**, not to
+third-party market data or content accessed through it.
 
 Market data, financial data, news, research reports, regulatory filings,
 web content, and other third-party information may be subject to separate
@@ -403,9 +403,9 @@ each provider complies with the applicable terms.
 
 ### Financial disclaimer
 
-BigA is software for research, analysis, automation, and trading-system
-experimentation. It does not provide investment advice, a recommendation,
-or a guarantee of investment performance.
+EasyUp for BigA 2.0 is software for research, analysis, automation, and
+trading-system experimentation. It does not provide investment advice, a
+recommendation, or a guarantee of investment performance.
 
 Trading and investing involve risk, including possible loss of principal.
 Users remain responsible for reviewing analyses, configuring risk controls,
