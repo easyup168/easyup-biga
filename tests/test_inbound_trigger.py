@@ -213,10 +213,20 @@ class TestCommandDispatchTool:
 class TestMainOutOfRouting:
 
     def test_P2_card技能是command_dispatch_tool且model选不到(self):
-        """SKILL.md 强制「命令直达工具、绕过 model」——这是 main 出局的结构性落点。"""
+        """SKILL.md 强制「命令直达工具、绕过 model」——这是 main 出局的结构性落点。
+
+        🔴 P6 live 实测发现（2026-09-23）：`command-tool` 必须是
+        `<mcp server 名>__<工具名>` 的完整形式，不能只写工具自己的裸名
+        （`card_trigger_mcp.py` 用 `FastMCP("biga-card-trigger")` +
+        `@server.tool(name="biga_card_trigger")` 注册，OpenClaw 对外按
+        `biga-card-trigger__biga_card_trigger` 拼出可解析的名字）。写裸名时
+        这条静态检查本身照样会绿——它只查字符串存在，不查这个名字能不能真的
+        解析到一个工具——`/card` 在真实网关里直接报 `Tool not available`，
+        这是离线测不出、只有 live 才暴露的坑。
+        """
         fm = (REPO / "skills" / "card" / "SKILL.md").read_text("utf-8").split("---")[1]
         for key, val in (("command-dispatch", "tool"),
-                         ("command-tool", "biga_card_trigger"),
+                         ("command-tool", "biga-card-trigger__biga_card_trigger"),
                          ("disable-model-invocation", "true"),
                          ("command-arg-mode", "raw")):
             assert re.search(rf"{re.escape(key)}:\s*{re.escape(val)}", fm), \

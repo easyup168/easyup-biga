@@ -4,7 +4,7 @@ description: "触发一次 A 股决策出卡（幂等 + 异步）。飞书 owner
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool
-command-tool: biga_card_trigger
+command-tool: biga-card-trigger__biga_card_trigger
 command-arg-mode: raw
 ---
 
@@ -31,7 +31,14 @@ command-arg-mode: raw
 - `commands.text: true` —— 飞书没有原生斜杠菜单，`/card` 作为纯文本命令发。
 - `commands.ownerAllowFrom` 含出卡人的飞书 id —— 只有 owner 能触发（付费动作）。
 - `mcp.servers` 注册本技能的工具服务（`scripts/card_trigger_mcp.py`）——
-  `command-tool: biga_card_trigger` 才有得可指。
+  `command-tool: biga-card-trigger__biga_card_trigger` 才有得可指。
+  🔴 **必须带 `biga-card-trigger__` 前缀**（P6 live 才暴露的坑）：`card_trigger_mcp.py`
+  内部用 `FastMCP("biga-card-trigger")` + `@server.tool(name="biga_card_trigger")`
+  注册，OpenClaw 对外暴露时按 `<server>__<tool>` 拼成完整名——只写裸名
+  `biga_card_trigger` 时，command-dispatch 找不到这个工具，`/card` 直接报
+  `Tool not available`。main 自己用 LLM 判断调用同一个工具时反而能算对
+  （它看到的是解析后的完整工具列表），只有走 command-dispatch 这条**静态声明**
+  的路径才会踩这个名字缺前缀的坑——离线测试只查字符串存在，测不出这个。
 - `disable-model-invocation: true` —— model 选不到它，只能由人显式 `/card` 触发。
 
 ## 触发之后（都在代码里，不在这段文字里）
