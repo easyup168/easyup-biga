@@ -172,7 +172,7 @@ class TestP2CrossCheckPenetration:
             task_id=TID, evidence_set_id=esid))
         tid = save_fact_bundle(technical.build_fact_bundle(
             break_source=set(), store=False, task_id=TID, evidence_set_id=esid))
-        v = risk.build_verdict(verdict_ids=[mid, tid], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[mid, tid], store=False, task_id=TID)
         assert v.result["cross_check_conflict"] == []
 
     def test_不同evidence_set_id_报冲突且带冻结集与两个esid(self, db):
@@ -188,7 +188,7 @@ class TestP2CrossCheckPenetration:
             task_id=TID, evidence_set_id=es1))
         tid = save_fact_bundle(technical.build_fact_bundle(
             break_source=set(), store=False, task_id=TID, evidence_set_id=es2))
-        v = risk.build_verdict(verdict_ids=[mid, tid], store=False, task_id=TID)
+        v = risk.build_fact_bundle(verdict_ids=[mid, tid], store=False, task_id=TID)
         xconf = v.result["cross_check_conflict"]
         assert xconf, "不同 evidence_set_id 却没报冲突"
         msg = " ".join(xconf)

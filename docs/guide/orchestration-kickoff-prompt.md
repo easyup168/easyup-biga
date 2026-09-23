@@ -2,7 +2,7 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / **J-I / J-II**）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / **E-III** / J-I / J-II）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -1425,14 +1425,106 @@ P5  `amend_verdict.py` 对这四个 skill 的 fact 行正确路由到 `_assess_f
 
 ---
 
-## 批 E-III / I / F / G / K / L / H · 现在不写分发提示词
+## 批 E-III · 迁 `risk` + 退役 `amend_verdict.py`（六个全迁完）
+
+⚠️ **批 E-II（`359b97c`）已落地才能开工**——现在满足。这是 Facts/Assessment
+拆分的最后一棒：`risk` 迁完之后六个 Specialist 全部产 `FactBundle`，
+`amend_verdict.py` 的旧路径（操作合体 `AgentVerdict` 那部分）才能真正退役。
+
+🔴 **`risk` 不是市场/板块/技术/新闻那种迁移——它的 `stance` 是
+`VETO_STANCE`（"否决"），是制衡层唯一能拦住 BUY 的信号。** 前五个迁移里，
+`stance` 判断错了后果是「这句话不准」；这一个判断错了后果是「一个真该被拦的
+决策放行了」。这一批的探针清单因此比前面几批多一条不能省的：VETO 必须能从
+`AgentAssessment` 一路穿透到 `DecisionCard` 检查它的那一层，不能只测到
+"FactBundle 迁移成功"就停。
+
+```text
+把 risk 迁到 FactBundle（形状与前五个一致），然后退役 amend_verdict.py
+里操作旧 AgentVerdict 的那部分代码（不是整个文件——`_assess_fact()`
+那条 fact 行路径永久保留，六个 Specialist 以后都走它）。
+
+## 先读
+
+- `docs/tutorial/29-migrate-four-to-factbundle.md`——机械迁移那部分照抄
+- 找到 `DecisionCard`/`card_ops` 里读 `VETO_STANCE` 或读 risk 的 `.stance`
+  来决定是否拦截的那一处代码——这一批唯一的高风险点在那里，不在 risk_check.py
+  本身的迁移（那部分和前五个一样机械）
+
+## 做什么
+
+1. **`risk_check.py` 改产 FactBundle**：`build_verdict→build_fact_bundle`、
+   `save_verdict→save_fact_bundle`。risk 读其余五个 verdict 用的
+   `load_verdict()`（多态）不用动——它已经对新旧形状都返回 AgentVerdict，
+   risk 自己是消费方不是产出方那一半的形状问题跟这一批无关。
+2. **`amend_verdict.py` 退役旧路径**：删掉操作合体 `AgentVerdict` 的那部分
+   （`--add-missing`/`--add-warning` 对旧形状生效的分支、`--verdict` 覆盖
+   逻辑、`dataclasses.replace(original, ...)` 那条 old-style 修订）。
+   `_assess_fact()`（fact 行只加 `--stance`）**保留，不动**——六个 Specialist
+   以后永远走这一条。
+   🔴 **`save_verdict()` 不要删、也不要标记废弃**：`grep` 一下就知道
+   `test_decision_id_ownership.py`/`test_orchestrator.py`/
+   `test_readback_check.py`/`test_spawn_proof.py`/`test_verdict_provenance.py`/
+   `test_write_boundary.py`/`tools/verify/phase1_acceptance.py` 都还在用它
+   构造"老形状"的测试数据——这是证明 `LegacyAdapter` 读路径宽这件事**唯一**
+   的手段，退役的是"活的 skill 还在写这个形状"，不是"这个形状不该再被测试到"。
+3. **补 risk 的 AGENTS.md**：跟 E-II 给 market 做的一样——如果 risk 的
+   AGENTS.md 里有类似"事后加缺失项/覆盖 verdict"的旧命令模板，同样删掉、
+   caveat 走"需要注意"。**先查真实数据库**里 risk 历史上到底有没有用过
+   `--add-missing`，不要假设它跟 market 同款（risk 的输出结构和市场类
+   Specialist 不一样，别照搬结论）。
+4. **VETO 穿透验证**（这一批的核心交付物，不是顺带）：找到消费 risk `.stance`
+   来判断是否拦截的那处代码，确认它读到的 `.stance` 是 `load_verdict()`
+   多态转换出来的那个字段，不需要改；如果发现它绕过 `load_verdict()`
+   直接读别的东西（比如原始 verdict_json），停下来——那是这一批要修的
+   真问题，不是顺手的事。
+5. 迁移用到 amend_verdict.py 旧路径断言的测试文件（`test_verdict_refs.py`
+   等，先 `grep -rln amend_verdict tests/` 拿到准确清单）——旧路径测试要么
+   删、要么改成测 `_assess_fact()` 那条路径，不能留着测一个已经删除的分支。
+
+## 不要做
+
+- 不要删 `save_verdict()` 或它的任何调用点——见上面第 2 条
+- 不要碰批 J（`run_id` 贯穿 / `agent_runs` 改名）正在动的
+  `_store/schema.py`/`_store/db.py`/`orchestrator.py`——J-I/J-II 正在
+  另一个会话里进行，发现要改这几个文件先停下来确认没有撞车
+- 不要顺手把 `AgentOutcome` 暴露给 `card_ops`/`DecisionCard`——这仍然是
+  E-II 定过的裁定（②：没有消费方，L-1），六个全迁完也不改变这个结论
+
+## 必须做的探针（G-1）
+
+P1  risk 产 `FactBundle`（不是 `AgentVerdict`），落库 `kind='fact'`
+P2  🔴 **VETO 穿透**：构造一个 risk fact 行 + `AgentAssessment(stance=VETO_STANCE)`，
+    走到 `DecisionCard` 实际检查拦截的那一层，断言它真的判定"拦截"——不是
+    断言"stance 字段等于'否决'"就算过，要断到消费方真正用它做判断的地方
+P3  旧路径确认退役：对一个 fact 行跑 `amend_verdict.py` 已删除的那些旧参数
+    组合（如果还residual 存在），断言明确报错/找不到该分支，不是静默成功
+P4  `_assess_fact()` 对 risk 的 fact 行正常工作（复用 E-II 已有判据，换成
+    risk 这个 agent 名字，证明保留的路径没有因为这一批的改动被破坏）
+P5  回归：`card_ops.load_verdicts_and_refs()` 对六个全新形状的 Specialist
+    聚合不丢——这是 Facts/Assessment 拆分做完的最终验收，跟 E-I 的 P3、
+    E-II 的 P4 是同一条判据的最后一次扩展（六个而不是五个/六个混一个旧的）
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 I / F / G / K / L / H · 现在不写分发提示词
 
 | 批 | 为什么现在不写 |
 |---|---|
-| E-III | 迁 `risk` + 退役 `amend_verdict.py`；依赖 E-II 落地的真实结果（尚不具备） |
 | I（RawArtifact） | 要给 raw 加溯源字段，那些字段指向的 `run_id` 得先由批 J 变成没有歧义的（尚不具备） |
-| F–G | 依赖 E 系列完整落地（尚不具备） |
-| K（Pipeline / Agent Registry） | 它要固化的 agent 名单，在 E 系列迁移期间正在变形状 |
+| F（Risk 前移进编排器） | **E 系列已完整落地（2026-09-23，E-III `619d35e`）**，这条依赖已经解除。
+  但 F 要改 `orchestrator.py` 里 risk 的 spawn 方式，J-I 也要改 `orchestrator.py`
+  （加 `--run-id` 参数）——两者都还没开工，谁先开工谁占 `orchestrator.py`，
+  另一个等它合并。**建议 J-I 先**（已经分发提示词就绪、范围更小），F 排在它后面写 |
+| G | 依赖 E 系列完整落地（已解除），但排在 F 之后——飞书 trigger 那部分与 F 的
+  "risk 前移"无直接耦合，只是分发时习惯上一起考虑（同批 E 的排法） |
+| K（Pipeline / Agent Registry） | E 系列没有改过 agent 名单/roster（只改了各 skill 的内部产出形状），
+  这条原始理由不完全准确，但 K 本身还没做过详细设计探活，不建议现在就写分发提示词 |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 

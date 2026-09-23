@@ -17,9 +17,14 @@
 
 ### 🔴 变更 · 批 J-II：收敛 `run_id` 三同名（`agent_runs.run_id`→`ledger_id` ＋ `runtime_run_id` 落库）
 
-设计文档 §4「`run_id` 这个名字现在指三个互不相同的东西」。**实现完成、离线全绿
-（1068→1079 条），五道探针 P1–P5 外加对应红灯演练全见过红并已还原，一处 live 命名空间
-补验实测通过，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。schema v8→**v9**。
+设计文档 §4「`run_id` 这个名字现在指三个互不相同的东西」。**✅ 评审复核通过**
+（2026-09-23，独立会话）：五道探针 P1–P5 外加红灯演练全见过红并已还原，一处 live
+命名空间补验实测通过。schema v8→**v9**。
+
+评审独立复现了两道（不看交接里贴的输出，自己弄坏）：关掉强绑定 ⇒ 伪造经文本匹配
+蒙混过关（stdout 实打实印出「1 个 agent 两份独立记录都齐」）；把命名空间守卫的表
+扫描改成空 ⇒ 三条全红，包括那条「必须真的扫到 decision_runs/run_events」的非平凡
+覆盖断言 —— 「全绿是因为什么都没查」这个模式确实被堵住了。
 
 **为什么现在做**：`run_id` 这个字面量在仓库里同时指三个东西，同住一个库、一份代码：
 编排的一次执行尝试（`decision_runs.run_id`，32 位 hex）、`agent_runs` 的账本行号
@@ -96,6 +101,63 @@
 即便 `agent_runs.runtime_run_id` 存了正确的 id，强绑定也会**误报伪造**（fail-closed，方向安全，
 但会把真卡判失败）。live 补验只证了「同一命名空间」，没证「所有 spawn 路径都把决策号写进
 payload」——后者目前只有 orchestrator 一条路且确实写了，但这是评审该盯的假设。
+
+### 🔴 变更 · 批 E-III：迁 `risk` + 退役 `amend_verdict.py` 旧路径（Facts/Assessment 拆分收官）
+
+设计文档 §6 批 E 的最后一段。**实现完成、离线全绿（1068→1079 条），五道探针（P1–P5）
+外加三道红灯演练全见过红并已还原，但未交独立评审 —— 不自宣通过**（开工与评审分不同会话）。
+
+**为什么**：`risk` 迁完之后六个 Specialist 全部产 `FactBundle`，`amend_verdict.py` 操作
+合体 `AgentVerdict` 的旧路径才能真正退役。🔴 但 `risk` 不是前五个那种迁移 —— 它的 stance
+是 `VETO_STANCE`（"否决"），是制衡层**唯一能拦住 BUY 的信号**。前五个迁错 stance 后果是
+「这句话不准」；这一个迁错后果是「一个真该被拦的决策放行了」。所以这一批的核心不是迁移
+本身（那跟前五个一样机械），是 **VETO 穿透验证**：否决必须能从 `AgentAssessment` 一路穿
+到 `DecisionCard` 真正拦截它的那一层。
+
+**做了什么**：
+
+- **`risk_check.py` 改产 FactBundle**（三个 return 点，含 foreign/no-upstream 两条
+  `status='failed'` 路径）：`build_verdict→build_fact_bundle`、`save_verdict→save_fact_bundle`。
+  ⚠️ risk 读**上游**五个 verdict 仍用 `load_verdict()`（多态，对新旧形状都返回
+  `AgentVerdict`）—— risk 是它们的消费方，那一半跟这次迁移无关，`AgentVerdict` 仍在 import。
+- **VETO 穿透，确认无需改代码**：`card_ops.load_verdicts_and_refs()` 用 `load_verdict()`
+  多态把 risk 的 `AgentAssessment(stance=否决)` 压回 `AgentVerdict.stance`，`DecisionCard`
+  的否决判据（`v.stance == VETO_STANCE` ⇒ 拒 BUY、必须 AVOID/BLOCK）读的正是这个字段 ——
+  没有任何一处绕过 `load_verdict` 直接读原始 `verdict_json`。穿透链完整，P2 钉死它。
+- **退役 `amend_verdict.py` 旧路径**：删掉操作合体 `AgentVerdict` 的 74 行（`--add-missing`/
+  `--add-warning` 对旧形状生效、`--verdict` 覆盖、`dataclasses.replace(original,…)` +
+  `save_verdict(amends=…)`）。`_assess_fact()`（fact 行只加 `--stance`）**保留** —— 六个
+  Specialist 以后永远走它，并顺手把它扩成也拒 `--verdict`（堵掉「fact 行给 --verdict 被静默
+  忽略」那个缝）。历史合体行（kind NULL/'verdict'）现在只读：对它跑 amend 明确报「已退役」。
+  🔴 **`save_verdict()` 不删也不废弃** —— 七个测试文件 + `phase1_acceptance.py` 还靠它造
+  「老形状」来测 `LegacyAdapter` 读路径宽；退役的是「活的 skill 还在写这个形状」，不是
+  「这个形状不该再被测试到」。amend 不再 import 它，函数本身留在 `_store`。
+- **`agents/risk/AGENTS.md`**：删掉 `--verdict UNKNOWN --stance 无法判定` 组合命令
+  （**先查了真实数据库**：risk 历史 `--add-missing` 只有两个码 `risk.coverage.insufficient` /
+  `risk.upstream.trade_date_inconsistent`，都已由 skill 自己报，不是 market 那种范围外判断
+  边界）。`无法判定` 允许挂在 skill 报的 WARNING 上（`check_stance_vs_verdict` 只禁 UNKNOWN
+  上的方向判断），所以 agent 不再需要 `--verdict` 事后把完整度降级；上游矛盾这类 agent
+  观察走「依据/未被审阅的面」自由文本。
+- **迁移旧路径测试**：`test_facts_split.py` 的 P6「老路径照常」→「旧路径已退役」；
+  `test_verdict_refs.py::TestAmendCLI` 三条旧路径 CLI 断言改成测退役 + fact 行新路径；
+  九处 `risk.build_verdict` 调用点改名 `build_fact_bundle`。
+
+**探针记录（G-1：每道守卫先弄坏、见红、还原）**：
+
+- **P2**（🔴 VETO 穿透，核心）：**弄坏** `AgentOutcome.to_agent_verdict()` 把 `stance` 丢成
+  `None`（断掉否决从 AgentAssessment 到 AgentVerdict 的传导）→ 跑「否决真的拦住 BUY」→
+  **报红 `DID NOT RAISE`**（BUY 没被拦）→ 还原。证明 P2 锚在**整条穿透链**上，不是断
+  「stance 字段等于否决」——后者就算穿透断了也照样绿。
+- **P1**（risk 产 FactBundle）：**弄坏** risk 的 return 退回 `AgentVerdict` → `type is FactBundle`
+  **报红** → 还原。
+- **P3**（旧路径退役）：**弄坏** 退役分支 `return 2`→`return 0`（假装成功）→「报退役不静默」
+  的 `assert rc==2` **报红** → 还原。P3 另用 AST 断言退役的代码真没了（`dataclasses` 不在
+  Name 里、`save_verdict` 不在被调用集里、`save_assessment` 还在）。
+- **P4**（`_assess_fact` 对 risk 正常）：risk fact 行加 `--stance 否决` 成功、加 `--add-missing`
+  被拒（复用 E-II 判据，换 risk 名字）。
+- **P5**（六个全新形状聚合不丢）：market/emotion/sector/technical/news/risk 全走 fact+assessment，
+  `load_verdicts_and_refs` 聚合六个、stance 全压回 —— Facts/Assessment 拆分的最终验收
+  （E-I P3 → E-II P4 → 这里六个全是新形状，一个旧的都没有）。
 
 ### 🔴 变更 · 批 E-II：把 market/sector/technical/news 四个 skill 迁到 FactBundle
 

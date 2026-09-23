@@ -546,10 +546,10 @@ Provider → RawArtifact → NormalizedSnapshot → FactBundle → EvidenceSet �
 > ✅ **E-I 已落地（2026-09-22）。** 契约三型（`skills/_contract/facts.py`）+ `LegacyAdapter`
 > + 存储（schema v8 `kind` 列，新旧同住 `agent_verdicts`）+ `Evidence.evidence_set_id`
 > （顺带还了 D-II 的账）+ risk CROSS_CHECK 升级 + **试点 `emotion`** 已迁到新三型。
-> 其余五个 skill（market/sector/technical/news/risk）**未迁**，仍产 `AgentVerdict`。
-> 落地细节冻结在教程第 27 章；当前状态见 `architecture.md` §4.1.2。
-> ⬜ **批 E-II（分发提示词已就绪）**：迁 market/sector/technical/news 四个。
-> ⬜ **批 E-III（未写分发提示词）**：迁 `risk` + 退役 `amend_verdict.py`——
+> 只剩 `risk` **未迁**，仍产 `AgentVerdict`。
+> 落地细节冻结在教程第 27/29 章；当前状态见 `architecture.md` §4.1.2。
+> ✅ **批 E-II 已落地（2026-09-23，`359b97c`）**：迁 market/sector/technical/news 四个。
+> ⬜ **批 E-III（分发提示词已就绪）**：迁 `risk` + 退役 `amend_verdict.py`——
 > `risk` 单独一批的理由是它同样带 `stance`（`VETO_STANCE`，制衡层最安全关键的判断），
 > 且它消费其余五个的产出，等那五个形状稳定、评审复核过之后再动最后一个更安全；
 > 退役 `amend_verdict.py` 的前提是**全部六个**都迁完，天然只能跟最后一个绑在一起，

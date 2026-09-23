@@ -57,7 +57,7 @@ def wired(monkeypatch):
 def build(ids, **kw):
     kw.setdefault("store", False)
     kw.setdefault("task_id", "BIGA-20260918-001")
-    return rc.build_verdict(verdict_ids=list(ids), **kw)
+    return rc.build_fact_bundle(verdict_ids=list(ids), **kw)
 
 
 class TestNeverCollects:
