@@ -1004,12 +1004,25 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         「批 G-II」节）。核心交付物：飞书"出卡"从自由对话变成结构化
         trigger，main 的 LLM 全程不参与路由决策——这是真正关掉 2026-09-21
         那次 $0.4 白花事故的地方，风险与 E-III/J-II 同量级
-- [ ] 批 K · Pipeline Registry + Agent Registry —— 2026-09-21 `news` 没被
-      spawn 那次事故的结构性解法（现在只有对账测试，不是单一源）；
-      顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）。
-      设计探活已完成（2026-09-23）。**F 已落地合并（e5b959f）**，阻塞已解除，
-      **分发提示词已就绪**（`docs/guide/orchestration-kickoff-prompt.md`
-      「批 K」节），可以开新会话开工
+- [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
+      五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
+      `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`
+      一份 `AGENT_REGISTRY`，`STAGE1_AGENTS`/`STAGE2_AGENTS`/`RISK_AGENT`/
+      `SNAPSHOT_INDEX_AGENTS`/`EXPECTED_ROSTER` 全部派生（照 `RUN_STATES` 的
+      `vars()` 内省形状）。`DecisionCard.expected_roster` 生成时冻结期望
+      roster，`absent_agents` 优先读它、老卡回退今天的 Registry、回放原样
+      透传不重算。`RISK_AGENT` 是会 fail-closed 的纯函数。`discipline` 在册
+      但不 spawn ⇒ 永不进 `absent_agents` 权威（裁定 13）。独立复核已亲手
+      复现全部七道 G-1 探针见红还原，用真实生产库三张历史卡验证 `--check`
+      组装一致。**Pipeline Registry 不在本批范围**（只做了 Agent Registry
+      那一半，"Pipeline 版本化"该不该单独立一批，留给下一次设计探活判断）。
+      教程第 35 章、`CHANGELOG.md`。
+  - [ ] **Pipeline Registry 仍未做**（批 K 自己披露的范围收窄，非复核新
+        发现）：数据架构 §17 建议的 Pipeline Registry（`pipeline_id` /
+        `pipeline_version` / roster 快照）没有一并做——批 K 的
+        `expected_roster` 只解决了"这张卡当时期望谁答"，没有解决"这个
+        Pipeline 版本本身该不该有独立标识"。留给以后需要多套并行 Pipeline
+        版本时再建（现在只有一个 Pipeline，装了就是 L-1 死配置）
 - [ ] 批 L · `cn.trading_calendar` —— P0 六个 dataset 里**今天**唯一有
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、

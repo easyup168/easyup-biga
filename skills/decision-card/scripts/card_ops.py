@@ -104,6 +104,7 @@ def synthesize(
     historical: bool = False,
     verdict_refs: list[VerdictRef] | None = None,
     run_id: str | None = None,
+    expected_roster: tuple[str, ...] | None = None,
 ) -> DecisionCard:
     """把 Verdict 组装成 Card。**纯函数，不碰 IO。**
 
@@ -156,6 +157,9 @@ def synthesize(
         elapsed_ms=elapsed_ms,
         input_verdict_refs=list(verdict_refs or []),
         run_id=run_id,
+        # 🔴 批 K：在线路径把生成时的期望 roster 冻进卡（编排器传 EXPECTED_ROSTER）；
+        #    回放把原卡冻结的那份**原样带过去**（replay.py），不重算 —— 老卡为 None。
+        expected_roster=expected_roster,
     )
 
 
