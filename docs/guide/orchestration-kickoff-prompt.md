@@ -1517,8 +1517,14 @@ P5  回归：`card_ops.load_verdicts_and_refs()` 对六个全新形状的 Specia
 | 批 | 为什么现在不写 |
 |---|---|
 | I（RawArtifact） | 要给 raw 加溯源字段，那些字段指向的 `run_id` 得先由批 J 变成没有歧义的（尚不具备） |
-| F–G | 依赖 E 系列完整落地（尚不具备） |
-| K（Pipeline / Agent Registry） | 它要固化的 agent 名单，在 E 系列迁移期间正在变形状 |
+| F（Risk 前移进编排器） | **E 系列已完整落地（2026-09-23，E-III `619d35e`）**，这条依赖已经解除。
+  但 F 要改 `orchestrator.py` 里 risk 的 spawn 方式，J-I 也要改 `orchestrator.py`
+  （加 `--run-id` 参数）——两者都还没开工，谁先开工谁占 `orchestrator.py`，
+  另一个等它合并。**建议 J-I 先**（已经分发提示词就绪、范围更小），F 排在它后面写 |
+| G | 依赖 E 系列完整落地（已解除），但排在 F 之后——飞书 trigger 那部分与 F 的
+  "risk 前移"无直接耦合，只是分发时习惯上一起考虑（同批 E 的排法） |
+| K（Pipeline / Agent Registry） | E 系列没有改过 agent 名单/roster（只改了各 skill 的内部产出形状），
+  这条原始理由不完全准确，但 K 本身还没做过详细设计探活，不建议现在就写分发提示词 |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 

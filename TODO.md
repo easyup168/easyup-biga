@@ -794,11 +794,11 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         **可选**的 `--add-missing X.partial` 示例命令。它们对应 genuine 数据缺口、skill
         已自检，agent 正常只需 `--stance` 转述、不会撞上，破坏概率远低于 market；但示例
         本身迁移后同样会被 fact 行拒 ⇒ 建议随 E-III 或一次文档 pass 一并清掉。
-  - [~] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py` —— **实现完成、离线全绿
-        （1068→1079），五道探针（P1–P5）+ 三道红灯全见过红并已还原，`biga-card
-        --check` 回放一致、`audit --worktree` 十一项全绿，待独立评审**（不自宣通过）。
-        **Facts/Assessment 拆分至此收官：六个 Specialist 全部产 `FactBundle`。**
-        教程 ch 30。
+  - [x] 批 E-III · 迁 `risk` + 退役 `amend_verdict.py` —— **评审复核通过、已合并
+        （`619d35e`）**。VETO 穿透独立复现：评审自己写脚本，从数据库落库开始走完整
+        链路（FactBundle→AgentAssessment(否决)→`load_verdict`→`DecisionCard`），
+        不经过报告贴的探针。**Facts/Assessment 拆分至此收官：六个 Specialist 全部产
+        `FactBundle`。** 教程 ch 30。
         · risk 机械迁移（三个 return 点，含两条 `status='failed'` 早退），读上游仍用
           `load_verdict`（多态），`AgentVerdict` 仍在 import（它是上游的消费方）。
         · 🔴 **VETO 穿透验证（核心）**：查明拦截链（`load_verdict` 多态 →
