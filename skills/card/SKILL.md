@@ -1,58 +1,69 @@
 ---
 name: card
-description: "触发一次 A 股决策出卡（幂等 + 异步）。飞书 owner 发 /card 直达工具、绕开 main 的路由判断；同一请求重投不会重复出卡。"
+description: "触发一次 A 股决策出卡（幂等 + 异步）。收到出卡请求就跑一次 inbound.py、把它打印的 ACK 原样转达；出卡本身在后台脱离进程树跑，不要自己编排、不要等。同一请求重投不会重复出卡。"
 user-invocable: true
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: biga-card-trigger__biga_card_trigger
-command-arg-mode: raw
 ---
 
-# /card —— 飞书触发出卡（结构性绕开 main，批 G-II）
+# card —— 触发出卡（main 发起，程序编排，批 G-II）
 
-> 📄 **类别**：这是一个 OpenClaw **技能**（`command-dispatch: tool`），不是常青设计文档。
-> **覆盖**：`/card` 命令怎么被路由、它触发什么 ｜ **不覆盖**：出卡本身怎么跑
+> 📄 **类别**：这是一个 OpenClaw **技能**，不是常青设计文档。
+> **覆盖**：收到出卡请求时 main 该跑什么 ｜ **不覆盖**：出卡本身怎么跑
 > （那在 `orchestrator.py` / `docs/design/deterministic-orchestration.md`）。
 
-## 这个技能存在的唯一理由
+## 什么时候用这个技能
 
-把飞书「出卡」从**一次自由对话**（main 的 LLM 读消息、自己决定要不要出卡、怎么出）
-变成一个**结构性命令**：owner 发 `/card` → OpenClaw 命令层识别 → `command-dispatch: tool`
-**绕过 queue + model**、直达 `biga_card_trigger` 工具 → 幂等受理 + 异步拉起出卡。
+用户在飞书里**要一张决策卡**时 —— 发 `/card`，或明确说「出卡 / 现在给我出张卡 /
+帮我看看现在能不能进」这类意图。**只有这种「要出卡」的意图才用它。** 用户只是随口
+问行情、聊某只票，不属于这里，照常正常回答。
 
-🔴 **main 的 LLM 在这条链上没有一步。** 这不是「教 main 认出出卡请求再转发」，是
-**main 压根收不到这条消息**（命令消息在命令层就被消费了）。它关掉的是 2026-09-21
-两次事故的根子（19:31 四孤儿 spawn、21:03 出卡递归 L-14）——入口从 prompt 层面
-挪到了代码/配置层面。反事实检验（探针 P2）：把 main 的 system prompt 整个清空，
-`/card` 照样出卡。
+## 收到出卡请求，跑这一条
+
+```bash
+python3 skills/card/scripts/inbound.py \
+  --origin feishu \
+  --trigger-id "<本次飞书请求的 event / message id>" \
+  --json
+```
+
+- `--trigger-id` 传**本次触发消息的稳定 event / message id**（幂等键）——照原样传，
+  **不要改写、不要编**。真的拿不到就跑不了这条、如实说明请在终端排查，**绝不要自己
+  瞎填一个 id**（幂等全靠它，编一个等于让「同一请求重投只跑一次」这条保证悄悄失效）。
+- 脚本会**立刻**打印一段 JSON（含 `message` 字段：ACK 文本）。把那句 `message`
+  **原样转达给用户**。
+- **跑完就停。** 不要再说别的，不要分析行情，不要预测结论。
+
+## 🔴 你不做、也不能做的事
+
+- **不要 spawn 任何 Specialist / risk / synthesizer**，不要自己去拉 Stage 1，不要直接
+  跑 `bin/biga-card`、`orchestrator.py` 或任何出卡脚本。出卡的**编排、占号、等待、
+  合成全在程序里** —— `inbound.py` 会用 `systemd-run` 把出卡**脱离你的会话进程树**、
+  在后台异步拉起（约 170~200 秒），跑完自动把结论推回飞书。**那不是你的活。**
+- **不要等它跑完。** 你跑完 `inbound.py`（它秒回）、转达完那句 ACK 就返回。一次出卡
+  塞不进一次对话的响应窗口，等它 = 把你自己卡死两三分钟。
+- 脚本回「已经在处理了」就**别再触发第二次**。
+
+## 为什么是「跑一条脚本」而不是「你自己编排」
+
+2026-09-21 出过两次事故（19:31 四个孤儿 spawn、21:03 出卡递归 L-14），根子都是
+**出卡入口经过自由判断、由会话自己去拼一套 `sessions_spawn`**。所以出卡编排被收进了
+**程序**：`inbound.py` → `accept_trigger` → 用 `systemd-run` 把 `bin/biga-card` 拉成
+一个**脱离 agent 进程树**的后台运行（`entry_guard` 因此判成 HUMAN、不是 AGENT ⇒
+递归那条路根本到不了）。
+
+你（main）在这条链上只做**一件事**——跑一次 `inbound.py`（发起）。你**不参与编排**，
+也没有能力参与（编排在另一个脱离你的进程里）。这就是这次要防的东西：**入口可以经过
+你，但编排绝不经过你。**
 
 ## 前置（由 `deploy/openclaw/` 配置保证，`apply_config.py` 落地）
 
-- `commands.text: true` —— 飞书没有原生斜杠菜单，`/card` 作为纯文本命令发。
-- `commands.ownerAllowFrom` 含出卡人的飞书 id —— 只有 owner 能触发（付费动作）。
-- `mcp.servers` 注册本技能的工具服务（`scripts/card_trigger_mcp.py`）——
-  `command-tool: biga-card-trigger__biga_card_trigger` 才有得可指。
-  🔴 **必须带 `biga-card-trigger__` 前缀**（P6 live 才暴露的坑）：`card_trigger_mcp.py`
-  内部用 `FastMCP("biga-card-trigger")` + `@server.tool(name="biga_card_trigger")`
-  注册，OpenClaw 对外暴露时按 `<server>__<tool>` 拼成完整名——只写裸名
-  `biga_card_trigger` 时，command-dispatch 找不到这个工具，`/card` 直接报
-  `Tool not available`。main 自己用 LLM 判断调用同一个工具时反而能算对
-  （它看到的是解析后的完整工具列表），只有走 command-dispatch 这条**静态声明**
-  的路径才会踩这个名字缺前缀的坑——离线测试只查字符串存在，测不出这个。
-- `disable-model-invocation: true` —— model 选不到它，只能由人显式 `/card` 触发。
-
-## 触发之后（都在代码里，不在这段文字里）
-
-1. `biga_card_trigger` 工具 → `inbound.accept_trigger(origin="feishu", trigger_id=<飞书 event id>)`
-2. **幂等**：`trigger_id` 原子占号（`reserve_decision_for_trigger`）。同一个 event 重投
-   第二次 → 回「已在处理」、**不重跑**（探针 P1）。
-3. **异步**：受理后**立刻**回 ACK，不等 170~200s 的出卡（探针 P3）。后台脱离进程树
-   拉起 `bin/biga-card`（带 origin/trigger/decision），走**同一套五道守卫 + 同一个
-   orchestrator**（人工 CLI 与飞书 inbound 不分叉）。
-4. 出卡完成 → outbox 入队一条通知（批 G-I）→ `notify_worker --deliverer feishu`
-   把结论投回飞书（`feishu_deliverer.py`）。
+- `commands.text: true` —— 飞书没有原生斜杠菜单，`/card` 作为纯文本命令发、由命令层
+  识别成对本技能的调用。
+- 出卡流水线里被 spawn 的那些 agent（market/sector/…/risk/synthesizer）配了
+  `tools.deny:[ask_user]`（非交互路径，禁死锁）；**main 不在其中** —— 你的 ask_user
+  照常可用（探针 P5）。
 
 ## 人工 CLI 不受影响
 
 终端直接 `bin/biga-card` 仍是**同步**的、体验一字不变（没有那三个环境变量 ⇒
-origin=cli ⇒ orchestrator 自己现占号）。异步只发生在飞书这条 inbound 路径上。
+origin=cli ⇒ orchestrator 自己现占号）。异步 + 脱离进程树只发生在 `inbound.py`
+这条 inbound 路径上。

@@ -1009,12 +1009,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
           复核新发现）：判据是「调度命令的字面量」，而不是「有一个能跑的
           脚本」——现在没有 cron/systemd 实体去调它，outbox 会一直攒行、
           不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
-  - [ ] 批 G-II · Inbound Trigger —— **G-I 已落地，阻塞已解除**。
-        `notification_outbox` 表结构与 `NOTIFICATION_PENDING` 状态转移
-        已定型，**分发提示词已就绪**（`docs/guide/orchestration-kickoff-prompt.md`
-        「批 G-II」节）。核心交付物：飞书"出卡"从自由对话变成结构化
-        trigger，main 的 LLM 全程不参与路由决策——这是真正关掉 2026-09-21
-        那次 $0.4 白花事故的地方，风险与 E-III/J-II 同量级
+  - [ ] 批 G-II · Inbound Trigger —— **离线部分建完，在独立 worktree
+        `wt-g-ii-v2` 待复核；未碰 live**（网关配置/systemd/飞书凭据都没动）。
+        核心交付物：飞书"出卡"变结构化 trigger，**出卡编排绝不在 main 进程树里跑**
+        （2026-09-21 那次 $0.4 白花事故的真根子）。🔴 **立场变过一次，如实记**：
+        原计划零 LLM 的 `command-dispatch: tool` 走死了——它够不到会话内才连接的
+        MCP 工具（P6 live 报 `Tool not available`；main 在会话里反而调得到）。加上
+        运营者约束（一个飞书机器人 + LLM 可用），退回 BigA 全仓一致的「技能 + shell
+        跑脚本」：main 认出请求 → 跑 `skills/card/scripts/inbound.py` → `systemd-run`
+        脱树拉起（entry_guard 判 HUMAN = L-14 止血点，与"谁发起"解耦）。MCP server /
+        专用 agent 两个多余抽象已删。详见教程第 37 章 §三/§四、CHANGELOG 批 G-II。
+        - [ ] 待复核：diff 摘要 + 五道探针红灯（P2 脱树两道已亲手验红）已备好
+        - [ ] 待 live（**先跟运营者确认再动**）：P6 —— 真飞书 /card → 脱树出卡 →
+              推回飞书；首个真 event 对着 `inbound-trigger-debug.log` 核实幂等键取值
+        - [ ] 待合并：base 落后于 orchestration（G-I 台账/G-II 分发提示词已在它上面），
+              合并时把 TODO/设计文档/kickoff 对着 orchestration 当前版调和
 - [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
       五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
       `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`

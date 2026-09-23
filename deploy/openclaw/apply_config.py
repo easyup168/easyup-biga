@@ -18,9 +18,12 @@ live `openclaw.json`；装服务经 `bin/biga daemon install`。
 🔴 只增量合并自己管的键，绝不覆盖 live 值
 ------------------------------------------
 `config patch` 递归合并：对象并、数组/标量替换、null 删。本脚本的 patch 只含
-`agents.entries.<pipeline>.tools.deny` / `commands.text` / `mcp.servers`。它**不碰**
-飞书 appSecret、网关鉴权 token、owner 白名单这几个 live-only 的凭据与可识别 id
+`agents.entries.<pipeline>.tools.deny` / `commands.text`。它**不碰**飞书 appSecret、
+网关鉴权 token、owner 白名单这几个 live-only 的凭据与可识别 id
 （patch 里没提到的键原样保留）。⇒ 仓库里一个凭据都不落。
+
+出卡触发不注册任何 MCP server：BigA 的技能一律「SKILL.md + shell 跑脚本」
+（main 认出出卡请求 → 跑 skills/card/scripts/inbound.py），与全仓形态一致。
 
 🔴 agent 名单从 `_contract` 派生，不手写
 ----------------------------------------
@@ -83,8 +86,9 @@ def render_patch(
 ) -> dict:
     """渲染要 patch 进 live 配置的**增量**（纯函数，离线可测）。
 
-    只含本脚本管的键：非交互流水线 agent 的 `tools.deny`、`commands.text`、
-    `mcp.servers`。**不含**任何凭据/可识别 id（那些 live-only，patch 不提及 ⇒ 原样保留）。
+    只含本脚本管的键：非交互流水线 agent 的 `tools.deny` + `commands.text`。
+    **不含**任何凭据/可识别 id（那些 live-only，patch 不提及 ⇒ 原样保留）。
+    出卡触发是纯 skill（main 用 shell 跑 inbound.py），不注册任何 MCP server。
     """
     policy = yaml.safe_load((deploy_root / "agents.yaml").read_text("utf-8"))
     toolpol = yaml.safe_load((deploy_root / "tool-policy.yaml").read_text("utf-8"))
@@ -95,16 +99,9 @@ def render_patch(
     # 🔴 main 绝不进 patch —— 不写它 = 它的 ask_user 原样保留（探针 P5）。
     assert "main" not in entries, "main 不该出现在 tools.deny patch 里"
 
-    mcp_servers = {}
-    for name, spec in toolpol["mcp_servers"].items():
-        script = (repo_root / spec["script"]).resolve()
-        # 网关 spawn MCP 服务时 cwd 不确定 ⇒ 脚本路径必须绝对。
-        mcp_servers[name] = {"command": spec["command"], "args": [str(script)]}
-
     return {
         "agents": {"entries": entries},
         "commands": {"text": bool(toolpol["commands"]["text"])},
-        "mcp": {"servers": mcp_servers},
     }
 
 
