@@ -2,7 +2,7 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / **E-III** / J-I / J-II）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / **F**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -1529,18 +1529,114 @@ P5  回归：`card_ops.load_verdicts_and_refs()` 对六个全新形状的 Specia
 
 ---
 
-## 批 I / F / G / K / L / H · 现在不写分发提示词
+## 批 F · Risk 拆两层——硬规则挪进编排器，省掉注定白花的 LLM 调用
+
+⚠️ **依赖已清**（2026-09-23）：E 系列（含 `risk` 迁到 FactBundle，`619d35e`）
+与批 J-I（`005af7f`，`--run-id` capture）都已合并，`orchestrator.py` 现在没有
+别的批次占着。
+
+🔴 **这一批动的是 `risk` 的核心调用路径，不是它的判断逻辑。** `risk` 的
+`stance` 是 `VETO_STANCE`（"否决"），是制衡层唯一能拦住 BUY 的信号——批 E-III
+已经把 VETO 一路验穿。这一批**不改变** risk 会给出什么结论，只改变
+「这份事实是谁算的、什么时候算的」。如果改完之后 VETO 穿透的验证有任何一处
+不如 E-III 时那么硬，就是这一批出了问题，不是可以将就的细节。
+
+```text
+把 risk_check.py::build_fact_bundle() 的调用从"risk 被 spawn 之后自己在
+LLM 会话里跑"挪到"编排器在决定要不要 spawn risk 之前，直接、免费地跑"。
+两种确定性结论（证据跨决策污染 / 完全没有上游）不再 spawn risk；其余情况
+仍然 spawn，但 risk 不再自己跑 risk_check.py，只负责解读编排器已经算好的
+verdict_ref。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` 的「批 F」小节
+  （2026-09-23 设计探活，含设计方向 1-5、两处故意留白的核实点）——
+  这是这一批的设计依据，不是背景资料，做之前完整读一遍
+- `skills/risk-check/scripts/risk_check.py` 全文（414 行）——
+  `build_fact_bundle()`（107-357 行）是纯函数，`main()`（364-410 行）只是
+  给它套了一层 argparse + `save_fact_bundle()`；哪些字段触发提前 return
+  （`foreign` 归属污染 / 无上游）看 107-195 行
+- `skills/decision-card/scripts/orchestrator.py`：risk 的 spawn 调用在
+  189 行，`_risk_task()`（给 risk 的提示词文本）在 312 行
+- `agents/risk/AGENTS.md`：「四条硬约束」第 1 条——现在整段在教 risk
+  怎么跑 `risk_check.py`，这一批做完之后大部分场景下它不会再跑这个脚本
+
+## 做什么
+
+1. **编排器直接 `import build_fact_bundle, save_fact_bundle`**（同一份函数，
+   不新写一套），在原本 189 行 `ad.start(RISK_AGENT, ...)` 的位置之前，
+   用已经拿到的 Stage 1 `verdict_ref`（186 行的 `s1_refs`）在本地算一遍，
+   `run_id` 走 `ctx.run_id`（批 J-I 已经打通，跟 Stage 1 六个 skill 同一种
+   capture 方式，不要发明第二种写法）。
+2. **提前 return 的两种情况（`foreign`/无上游）⇒ 不 spawn risk**：编排器自己
+   `save_fact_bundle()` 落库（不追加 assessment——设计探活已确认这不会被
+   `absent_agents` 误判成"没跑"），直接拿这个 `verdict_ref` 参与合成，
+   跳过 189 行那次 spawn。
+3. **其余情况 ⇒ 仍然 spawn risk**，但编排器先把 `build_fact_bundle()` 的结果
+   落库拿到 `verdict_ref`，`_risk_task()`（312 行）的提示词整个换掉：
+   不再让它跑 `risk_check.py`，改成「事实已经算好，编号 verdict_ref=NN，
+   不要重新跑 skill，读它、按判断表给 stance、跑 `amend_verdict.py --ref NN
+   --stance <词>`」。
+4. **`risk_check.py` 的 CLI 原样保留**——手工调试/人工复核仍然要能独立跑它。
+   两条路径（CLI 手跑 / 编排器直接 import）共用同一个
+   `build_fact_bundle`/`save_fact_bundle`，不要为编排器这条路径另写一份。
+5. **改 `agents/risk/AGENTS.md` 的「约束 1」**：现在的写法（怎么跑
+   `risk_check.py`、`--task-id` 不能省……）大部分场景下不再适用。改成新流程
+   （拿到 verdict_ref、直接读、不要重新采集/不要重新计算）。**要不要保留一条
+   「万一编排器没能算出来、risk 自己兜底跑一遍」的路径**，你自己判断并写清楚
+   理由——这里不预先拍板，但**不管选哪种都要在探针里验一遍**（见 P4）。
+
+## 不要做
+
+- 不要碰批 K 会动的 `RISK_AGENT`/`STAGE2_AGENTS`/`SNAPSHOT_INDEX_AGENTS`
+  这几个 orchestrator.py 里的常量本身——K 打算把它们改成从 `AGENT_REGISTRY`
+  派生，这一批只用它们、不改它们的定义方式，避免两批在同一批文件里二次冲突
+  （K 排在这一批之后开工）
+- 不要改 `agents/risk/AGENTS.md` 里「判断口径」「什么时候该否决」「词表」
+  那几节——那是 risk 的判断实质，这一批只改"事实从哪来"，不改"怎么判断"
+- 不要给 `save_fact_bundle`/`build_fact_bundle` 加新参数或新分支去"兼容"
+  编排器这条新调用路径——它们已经是纯函数，编排器应该跟 CLI 一样直接调用
+  它们本来的签名，不需要为调用方是谁而分叉
+
+## 必须做的探针（G-1）
+
+P1  `foreign`（证据跨决策污染）场景：编排器不 spawn risk（断言 `ad.start`
+    没有被以 `RISK_AGENT` 调用），FactBundle 正确落库、`verdict_ref` 正确
+    参与合成，卡面上 risk 显示"给出事实、无 stance"而不是"缺席"
+P2  无上游场景：同 P1，换成"完全没有 Stage 1 verdict_ref 可审"这个触发条件
+P3  正常场景（覆盖齐备、无冲突）：risk 仍被 spawn，但新提示词生效——验证
+    编排器预先落库的 `verdict_ref` 与最终卡上 risk 那条判定引用的是**同一
+    个**，不是 risk 自己又产生了一条新的
+P4  🔴 **边界情况必须真跑，不能只看代码**：模拟 risk 没听新提示词、自己又跑了
+    一遍 `risk_check.py --verdict-ids ... --task-id <同一个 did>` 这个场景，
+    断言 `save_fact_bundle` 对同一个 `(task_id, agent)` 第二次写 `fact` 行
+    时的实际行为——报错要报得明确（不是裸 `IntegrityError`），不能静默
+    覆盖或静默产生两条并存的判定原件
+P5  **VETO 回归**（不是顺带，是这一批不能退步的底线）：构造一个 risk fact
+    行 + `AgentAssessment(stance=VETO_STANCE)`，走到 `DecisionCard` 实际
+    检查拦截的那一层，断言真的判定"拦截"——复用 E-III 的 P2，验的是"改完
+    调用路径之后，VETO 穿透这条链一个环节都没被打断"
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 I / G / K / L / H · 现在不写分发提示词
 
 🔴 **2026-09-23 批 J（J-I + J-II）已双双合并进 orchestration，且都独立复核
 + live 补验过关**——下表里"等批 J"这条依赖，凡是引用它的行，现在都已解除。
-以下逐行重新核对，不是整体照搬旧表。
+批 F 的分发提示词已经写好（见上一节），不在这张表里了。
 
 | 批 | 现状 |
 |---|---|
-| **F（Risk 前移进编排器）** | 依赖已全部解除：E 系列完整落地、J-I 也已合并（`orchestrator.py` 不再有人占着）。**当前判断里最应该先写分发提示词的一批**——建议下一批就是它 |
-| I（RawArtifact） | "`run_id` 得先由批 J 变成没有歧义的"这条已解除（J-I/J-II 双双落地，`agent_verdicts`/`evidence_sets`/`agent_runs` 的 `run_id` 语义都已单一）。**已具备写分发提示词的条件**，但建议排在 F 之后——F 会不会想让 raw 溯源字段指向"relocate 后的" risk 调用点，晚一步看得更清楚 |
-| K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**已具备写分发提示词的条件**。⚠️ 与 F 一样会碰 `orchestrator.py`（K 要把 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 改成从 Registry 派生）——建议 **F 先、K 后**，避免同一批文件二次冲突 |
-| G | 依赖 E 系列完整落地（已解除），仍排在 F 之后——飞书 trigger 那部分与 F 的
+| I（RawArtifact） | "`run_id` 得先由批 J 变成没有歧义的"这条已解除（J-I/J-II 双双落地，`agent_verdicts`/`evidence_sets`/`agent_runs` 的 `run_id` 语义都已单一）。**已具备写分发提示词的条件**，但建议等 F 落地——F 会不会想让 raw 溯源字段指向"relocate 后的" risk 调用点，晚一步看得更清楚 |
+| K（Pipeline / Agent Registry） | 详细设计探活已完成（2026-09-23，见设计 SSOT 同名小节）：roster 现状普查、卡级冻结名单方案、明确排除的字段都已定。**已具备写分发提示词的条件**。⚠️ 与 F 一样会碰 `orchestrator.py`（K 要把 `RISK_AGENT`/`SNAPSHOT_INDEX_AGENTS` 改成从 Registry 派生）——等 F 落地合并之后再写，避免同一批文件二次冲突 |
+| G | 依赖 E 系列完整落地（已解除），仍建议等 F 落地——飞书 trigger 那部分与 F 的
   "risk 前移"无直接耦合，只是分发时习惯上一起考虑（同批 E 的排法） |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |

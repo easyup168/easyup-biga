@@ -918,14 +918,21 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
    `task_id`」，一条 SELECT。**这是写边界校验，不是 `latest_verdict_ids()` 过滤** ——
    后者才是追加 5.1 说的那个 enforce，两件事别混。
 
+- [ ] 批 F · RiskPolicy 前移 —— 依赖已清（E 系列 + J-I 都已合并），设计探活
+      已完成、分发提示词已就绪（2026-09-23）：`build_fact_bundle()` 本来就是
+      纯函数，编排器可以直接调用；两种确定性结论（跨决策证据污染/无上游）
+      不必再 spawn risk，其余情况仍 spawn 但只负责解读、不再自己跑
+      `risk_check.py`。VETO 穿透必须回归验证，不能因为改了调用路径就松了
 - [ ] 批 I · RawArtifact —— raw 层存的不是 raw（`json.loads`→`json.dumps
-      (sort_keys=True)`），而建表注释断言「不做任何归一化」。排在批 J 之后、
-      批 F 之前：它给 raw 加溯源字段，那些字段要指向一个不含歧义的 `run_id`
-- [ ] 批 F · RiskPolicy 前移
-- [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库
+      (sort_keys=True)`），而建表注释断言「不做任何归一化」。等批 J 的依赖
+      已解除（run_id 已消歧义），建议等批 F 落地——它给 raw 加溯源字段，
+      那些字段指向哪个调用点，等 risk 搬移落定后再定更清楚
+- [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 依赖已清，建议排在 F 之后
 - [ ] 批 K · Pipeline Registry + Agent Registry —— 2026-09-21 `news` 没被
       spawn 那次事故的结构性解法（现在只有对账测试，不是单一源）；
-      顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）
+      顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）。
+      设计探活已完成（2026-09-23），但会碰 `orchestrator.py` 里 F 也要动的
+      常量，建议等 F 落地合并之后再写分发提示词
 - [ ] 批 L · `cn.trading_calendar` —— P0 六个 dataset 里**今天**唯一有
       被证明消费方的（`skills/_sources/tradetime.py` 自己写着「不认节假日」）。
       定位是给总体设计 §45「第一版完整市场数据」那一批**打样**：用一个非行情、
