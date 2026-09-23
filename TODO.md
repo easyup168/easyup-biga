@@ -1009,20 +1009,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
           复核新发现）：判据是「调度命令的字面量」，而不是「有一个能跑的
           脚本」——现在没有 cron/systemd 实体去调它，outbox 会一直攒行、
           不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
-  - [ ] 批 G-II · Inbound Trigger —— **代码已合并进 orchestration，但核心
-        机制未验证成立，不算完成**。2026-09-23 P6 live 真跑发现：`/card`
-        走的 command-dispatch 路径**结构性够不到 MCP 工具**（真实网关日志里
-        两次真实尝试都没有一行显示 spawn/连接过 `card_trigger_mcp.py`；
-        `main` 自己用 LLM 判断调用同一个工具却能成功——MCP 连接是按会话
-        需要才建立的，command-dispatch 建工具表这一步根本不经过它）。
-        期间独立复核修了两处真 bug（`command-tool` 缺 MCP server 前缀；
-        工具缺 `ToolAnnotations`），**都是真问题但都不是这次的根因**。
-        🔴 **架构层面的修法在另一个 worktree 里进行**：`/card` 改路由到一个
-        专用非-main agent（`allowAgents:[]` + 只留触发工具），用它自己的
-        LLM 判断调用同一个工具——main 仍不参与（P2 反事实检验的核心不变），
-        代价是从"零 LLM"变成"一次极薄的非-main LLM 判断"。**不要再碰
-        live**（网关配置/systemd/飞书凭据），带 diff + 探针红灯 + 真实
-        live 验证回来评审，同其余批次一样的流程
+  - [ ] 批 G-II · Inbound Trigger —— **离线部分独立复核已过，代码已合并进
+        orchestration；P6 live 待做**。核心交付物：飞书"出卡"变结构化
+        trigger，**出卡编排绝不在 main 进程树里跑**（2026-09-21 那次 $0.4
+        白花事故的真根子）。🔴 **立场变过一次，如实记**：原计划零 LLM 的
+        `command-dispatch: tool` 走死了——它够不到会话内才连接的 MCP 工具
+        （P6 first/second retry 报 `Tool not available`；main 在会话里反而
+        调得到）。加上运营者约束（一个飞书机器人 + LLM 可用），退回 BigA
+        全仓一致的「技能 + shell 跑脚本」：main 认出请求 → 跑
+        `skills/card/scripts/inbound.py` → `systemd-run` 脱树拉起
+        （entry_guard 判 HUMAN = L-14 止血点，与"谁发起"解耦）。MCP server /
+        专用 agent 两个多余抽象已删。详见教程第 37 章 §三/§四、CHANGELOG 批 G-II。
+        离线复核内容：diff 摘要 + 五道探针红灯（P2 脱树两道独立复核亲手验红）+
+        全量 1254 条测试 + audit_public.sh 十一项，均已过。
+        - [ ] 待 live：P6 —— 真飞书 /card → main 认出 → 脱树出卡 → 推回飞书；
+              首个真 event 对着 `inbound-trigger-debug.log` 核实幂等键取值
 - [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
       五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
       `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`

@@ -2,34 +2,36 @@
 
 > 📁 **过程文档** · 写完即冻结
 > **覆盖**：确定性编排批 G-II（Inbound Trigger）的建造过程 —— 飞书「出卡」怎么从
-> 一次自由对话变成一个 main 全程不参与路由的结构性命令。
+> 一次自由对话变成一个「main 只负责发起、编排绝不在 main 进程树里跑」的结构化触发。
+> 尤其记一条**走死了的路**（零 LLM 的 command-dispatch → MCP 工具）和为什么绕开它。
 > **不覆盖**：批 G-I 的外发通道（第 34 章）、飞书渠道本身怎么装。
 
 ## 目标 / 产出
 
 批 G-I 让卡跑完能**推**回飞书。这一章做反方向、也是风险大得多的那半：让飞书能
-**触发**出卡 —— 但**不经过 main 的自由判断**。做完得到：
+**触发**出卡 —— 但**出卡的编排绝不在 main 的会话进程树里跑**（2026-09-21 两次事故的
+根子）。做完得到：
 
-- `/card` 命令（飞书 owner 发）→ 直达一个工具 → 幂等受理 → 异步拉起出卡；
-- `decision_ids.trigger_id`（schema v13）做入站幂等键，同一个飞书 event 重投不重跑；
+- `card` 技能：main 认出出卡请求 → 跑一条 `skills/card/scripts/inbound.py` → 幂等
+  受理 → 异步、**脱离进程树**拉起出卡（照 BigA 全仓「SKILL.md + shell 跑脚本」的形态）；
+- `decision_ids.trigger_id`（schema **v14**）做入站幂等键，同一个飞书 event 重投不重跑；
 - `bin/biga-card` 长出一条异步入口，人工 CLI 的同步体验一字不变；
 - `feishu_deliverer.py` 把批 G-I 的 `Deliverer` 接口接上真飞书 API；
-- `deploy/openclaw/` + `apply_config.py`：出卡流水线 agent 禁 `ask_user`、命令面
-  与工具服务进配置，全部经 `bin/biga` 落地（R-2 安全）。
+- `deploy/openclaw/` + `apply_config.py`：出卡流水线 agent 禁 `ask_user`、命令面进
+  配置，全部经 `bin/biga` 落地（R-2 安全）。
 
 ## 为什么这么做（占篇幅最大的一节）
 
-### 一、根子不是「让 main 更听话」，是「飞书触发根本不该经过 main」
+### 一、根子不是「让 main 更听话」，是「编排绝不能在 main 的进程树里」
 
 2026-09-21 两次事故（19:31 四个孤儿 spawn、21:03 出卡递归 L-14）根子相同：
-**入口在 prompt 层面，不在代码层面**。L-14 那次的事后总结已经说过——契约文字
-（AGENTS.md 写「不要自己编排」）这个量级**不够**。批 C-II 把 main 移出了
-`bin/biga-card` 的转发链，但飞书这条路当时还没建，唯一挡着「main 收到『出一张卡』
-就自己拼一套 spawn」的，仍然只是 AGENTS.md 里的一句话。
+**出卡的编排跑在了一个 agent 会话里，于是它能自己拼一套 `sessions_spawn`、还能递归
+再拉一次出卡**。L-14 那次的事后总结已经说过——契约文字（AGENTS.md 写「不要自己
+编排」）这个量级**不够**。
 
-所以这一批的立场从一开始就定死：**不是教 main 认出出卡请求再转发，是 main 压根
-收不到这类请求。** 反事实检验（探针 P2）把这句话变成可测的：**把 main 的 system
-prompt 整个清空，`/card` 还能不能正常出卡？** 能，才算「结构性」。
+所以这一批要钉死的**不变式**是：**出卡的编排必须跑在一个不是 agent 会话的进程里。**
+谁「按下按钮」是次要的，「按下之后那一大坨编排在哪跑」才是命门。这条比「main 全程
+不参与」更本质 —— 后者只是实现前者的一种（后面会看到它这一版走不通）。
 
 ### 二、探活先纠正了三个隐含假设
 
@@ -37,151 +39,190 @@ prompt 整个清空，`/card` 还能不能正常出卡？** 能，才算「结�
 
 **飞书是 websocket 长连接，不是 webhook。** 事件从网关进程内部到达，没有一个我
 能指向的 HTTP 端点。⇒ 「起一个自己的 webhook server 绕开 main」这条路根本不存在。
-结构性拦截**只能表达成配置**（让某类消息不走 main）+ OpenClaw 自己的命令层。
 
 **仓库里一行飞书代码都没有。** 真实飞书接入（渠道配置、凭据、装好的插件）全在
 仓库外的运行时配置里。⇒ 这一批要造的是**第一个真正把 `origin="feishu"` 填上**的
-调用点，不是接一个半成品。
+调用点。
 
 **`bin/biga-card` 今天完全同步。** 全文一次 `wait "$_ORCH_PID"`，没有任何「快速
-ACK、后台完成」的半成品可复用。而一次出卡要 170~200 秒，塞不进一次命令的 ACK
-窗口。⇒ **异步执行本身**是这一批最大的一块新增基础设施，不是「把已有异步接上飞书」。
+ACK、后台完成」的半成品可复用。而一次出卡要 170~200 秒，塞不进一次触发的 ACK
+窗口。⇒ **异步执行本身**是这一批最大的一块新增基础设施。
 
-### 三、结构性拦截怎么落地：`command-dispatch: tool`
+### 三、🔴 走死了的路：零 LLM 的 `command-dispatch: tool` → MCP 工具
 
-翻 OpenClaw 文档翻到关键一句（`docs/tools/slash-commands.md`）：技能可以声明
-`command-dispatch: tool`，让斜杠命令**直接派发到一个工具、绕过 model**；而且
-「来自白名单发送者的纯命令消息**绕过 queue + model**」。
+最初的立场比现在激进：**main 压根收不到出卡请求**。翻 OpenClaw 文档
+（`docs/tools/slash-commands.md`）翻到关键一句：技能可以声明 `command-dispatch: tool`，
+让斜杠命令**直接派发到一个工具、绕过 model**。于是把 `/card` 做成这样一个技能，
+`command-tool` 指向一个专门做的 stdio MCP 工具 `biga_card_trigger`（`command-tool`
+不能指 `exec` —— `command-arg-mode: raw` 会把用户 `/card` 后面打的字当 shell 命令，
+等于把聊天框变 host shell）。理论链路：owner 发 `/card` → 命令层直达工具 →
+**main 的 LLM 没有一步**。
 
-这正是要找的结构。于是 `/card` 做成一个技能（`skills/card/SKILL.md`）：
+**live 上它直接报 `Tool not available: biga-card-trigger__biga_card_trigger`。**
+两次「修复」（补 MCP server 名前缀、补 `ToolAnnotations`）都是真 bug、但都没打在根上。
+真根子（网关日志 + 官方文档双证）：
 
-```yaml
-command-dispatch: tool          # 命令直达工具，不经过 model
-command-tool: biga_card_trigger # 派发到这个工具
-command-arg-mode: raw           # 原样把参数给工具
-disable-model-invocation: true  # model 自己选不到它，只能人显式 /card
-```
+> MCP stdio server 是**会话内**按需连接的（`docs/gateway/cli-backends.md`:
+> *"Session-scoped bundled MCP runtimes … do not outlive the run"*）。而
+> `command-dispatch` 在**任何会话/MCP 连接建立之前**就把 `toolSchema` 定死了 ——
+> 会话内才连接的工具根本不在那张表里。**main 自己用 LLM 调同一个工具反而能算对**，
+> 因为它在一个真会话里、MCP 当场连得上；只有 command-dispatch 这条**静态声明**路径
+> 够不到。离线探针只查「SKILL.md 里字符串在不在」，测不出这个 —— 只有 live 暴露
+> （这正是这批留一道 live 探针 P6 的理由）。
 
-owner 发 `/card` → OpenClaw 命令层识别 → 直接调 `biga_card_trigger` 工具 →
-**main 的 LLM 没有一步**。这比外部材料自己推荐的拓扑（还让 Main Agent 留在转发链
-上）更保守，但与批 C-II 已采用的立场一致 —— 不是新裁定，是老裁定的延伸。
+⇒ **「零 LLM 的 command-dispatch 桥」在这个 OpenClaw 版本不成立。** 记下来，别让下一个
+人再走一遍。
 
-> ⚠️ `command-tool` 不能指 `exec`：`command-arg-mode: raw` 会把用户在 `/card` 后
-> 打的字当 shell 命令跑（`/card` 后面接什么就执行什么），那是把聊天框变成 shell。
-> ⇒ 必须指一个**专用工具**。用 `mcp` 包做一个极小的 stdio MCP 服务暴露
-> `biga_card_trigger`，它只干一件事：调 `inbound.accept_trigger`。
+### 四、🔴 pivot：两个约束把设计收敛成「纯 skill + 脱树编排」
 
-### 四、幂等键为什么绑在 `decision_ids`，不绑在 `decision_runs`
+死胡同之后，是运营者给的两个约束把设计一锤定音：
 
-身份模型是 **Trigger → Decision → 多个 Run**（一次外部请求 → 一次业务决策 →
-可能多次执行尝试，重试/回放各是一个 run）。飞书 event 重投必须映射到**同一个
-决策**、绝不新起。
+1. **「我就是通过一个飞书机器人和系统沟通，别的不考虑。」** ⇒ 一个机器人、一个私聊里
+   既日常对话又触发出卡。而 OpenClaw 的 `bindings` **按 peer 路由、不按内容** —— 一个
+   私聊要么整条给 main、要么整条给别的 agent，没法「/card 归 A、闲聊归 main」。
+   ⇒ 「给出卡建一个专用非-main agent、靠 binding 分流」这条**也死了**。
+2. **「可以使用 LLM，不追求 0 LLM。」** ⇒ 允许 main 的 LLM **发起**。
 
-- 绑在 `decision_runs.trigger_id`（每次尝试一行）会**误伤将来的重试**：重试
-  Run B 复用同一个 trigger，会撞唯一约束。
-- 绑在 `decision_ids`（每个决策一行、号分配器）正好：**重试复用同一个决策号、
-  不重新占号 ⇒ 不撞约束**。而且号分配器本就是决策身份的**原子仲裁点**
-  （`reserve_decision_id` 靠主键冲突占号）。把「这个号为哪次外部请求占的」记在
-  同一处，幂等就与占号是**同一个原子写**。
+两条合起来：既然一个私聊里没有「零 LLM 的内容分流器」（command-dispatch 是唯一一个、
+且够不到工具），那就**让 main 的 LLM 认出出卡请求来发起** —— 但把真正要防的东西
+（§一那条不变式）落在**发起之后**：出卡编排用 `systemd-run` 脱离 main 的进程树跑。
 
-⇒ schema v13：给 `decision_ids` 加一列 `trigger_id` + 一个 partial unique index
-（`WHERE trigger_id IS NOT NULL`——CLI 每次生成唯一 trigger，NULL 老行互不冲突）。
-`reserve_decision_for_trigger` 返回 `(decision_id, created)`：`created=False` 就是
-「这个 event 之前占过号」。**「先查 trigger 在不在、不在就占号」中间有竞态窗口
-——唯一约束才是唯一可靠的并发仲裁**（这句话本仓库在 `decision_ids`/`run_events`
-上已经写过两遍，这是第三次用它）。
+同时第二条约束点破了一件更基本的事：**BigA 全仓的技能都是同一个形态** ——
+SKILL.md 写一条 `python3 .../script.py`，agent 读了技能就用 shell 跑那个脚本
+（`decision-card` / 各 `*-calc` / `news-scan` / `risk-check` 无一例外）。那个为了迁就
+command-dispatch 才引入的 MCP server，**与全仓形态不一致、且已经没用了**。⇒ 整体删掉。
+`/card` 回归成一个**普通技能**：main 认出出卡请求 → 用 shell 跑 `inbound.py`。
 
-### 五、异步 + entry_guard 的张力：为什么用 `systemd-run`
+> 通用原则：当一个「绕过模型」的机制在你的运行时里够不到你要调的东西时，先别加桥、
+> 加垫片、加中介去凑它 —— 退回到这套系统**本来就在用**的那个机制（这里是「技能 +
+> shell 跑脚本」），往往又简单又一致。三个多余的抽象（MCP server、专用 agent、
+> command-dispatch 桥）就是这么被一句「不用 MCP，封装成 skill 就行」全删掉的。
 
-受理要快（立刻 ACK），出卡要慢（后台跑 170~200s）。所以适配器**拉起后台运行、
-立刻返回**。但拉起谁、怎么拉，撞上一个已有护栏：
+**诚实的降级**：不变式从「main 全程不参与路由」弱化成「main 只发起、**编排绝不在
+main 进程树里**」。放弃的是「清空 main 的 prompt 这条路还能走」这个漂亮的反事实；
+**没放弃**的是这批真正要防的东西 —— 会话自己拼 ad-hoc spawn 递归出卡（那靠 §五的
+脱树挡死，与谁发起无关）。
+
+### 五、异步 + entry_guard：`systemd-run` 脱树，是这批的命门
+
+受理要快（立刻 ACK），出卡要慢（后台跑 170~200s）。所以 `inbound.py` **拉起后台运行、
+立刻返回**。但拉起谁、怎么拉，撞上一个已有护栏 —— 而 pivot 之后这道恰恰成了**唯一**
+的 L-14 止血点，份量比 command-dispatch 那版更重：
 
 `entry_guard.classify_caller()` 把「祖先里有运行时 / env 里有 `OPENCLAW_SERVICE_*`」
-判成 AGENT 并拒绝（防 main 递归拉起出卡）。而命令工具是在网关进程里跑的——直接
-fork 出的 `bin/biga-card` 会继承这两样、被判成 AGENT、被拒。
-
-不能改 entry_guard 已经在拦的那条（分发提示词明确不许）。解法是**新增一条被允许
-的路径**：用 `systemd-run --user` 把 `bin/biga-card` 拉成一个瞬态 systemd 单元——
-祖先变成 `systemd --user`、不继承网关的 service env ⇒ `classify_caller` 判成
-HUMAN。而 entry_guard 的 docstring 里，允许的发起方本就写着「人 / CLI / cron /
-**外部 Trigger**」——飞书 inbound 正是「外部 Trigger」。**这不是绕过守卫，是走它
-本就留的那道门。**
+判成 AGENT 并拒绝。main 用 shell 跑的 `inbound.py` 是在网关进程树里 —— 它直接 fork 出的
+`bin/biga-card` 会继承这两样、被判 AGENT。解法是**新增一条被允许的路径**：用
+`systemd-run --user` 把 `bin/biga-card` 拉成一个瞬态 systemd 单元 —— 祖先变成
+`systemd --user`、不继承网关的 service env ⇒ `classify_caller` 判成 HUMAN。entry_guard
+的 docstring 里，允许的发起方本就写着「人 / CLI / cron / **外部 Trigger**」。**这不是
+绕过守卫，是走它本就留的那道门。**（没有 systemd-run 时回退 `setsid` + **显式清掉**
+`OPENCLAW_SERVICE_*`，语义相同。）
 
 > 通用原则：一道安全守卫拦的是**某一类主体**（这里是「agent 会话」），不是「所有
 > 子进程」。给一条**结构上不同类**的新路径放行，正确做法是让它真的落在被允许的
-> 那一类里（systemd 拉起 ⇒ 血缘真的是外部触发），而不是在守卫上开一个按名字的口子。
+> 那一类里（脱树 ⇒ 血缘真的是外部触发），而不是在守卫上开一个按名字的口子。
 
-### 六、人工 CLI 与飞书 inbound 必须走到同一个 orchestrator
+⇒ 探针 P2 因此从「清空 main 的 prompt 照跑」改成**结构判据**：`detached_biga_card_launcher`
+必须用 `systemd-run --user`（脱树），或在回退路径显式清掉 `OPENCLAW_SERVICE_*`。
+把 `--user` 去掉、或把清 env 那段删掉，测试当场翻红（红灯记录见 CHANGELOG）。
 
-分发提示词点名：两条路不许分叉出两套决策逻辑。而出卡的五道守卫（总闸 →
-ownership → 单实例锁 → 预算 → 第一次付费）全在 `bin/biga-card` 里。⇒ 飞书路径
-异步拉起的**就是 `bin/biga-card`**（带三个环境变量透传 origin/trigger/decision），
-不是绕过守卫直插 orchestrator。异步只发生在 `inbound.py → bin/biga-card` 这条边界
-（脱离进程树 + 立刻 ACK），`bin/biga-card` 内部照旧从头同步跑到卡落库。人工 CLI
-没有那三个环境变量 ⇒ `origin=cli` ⇒ 一字不变。
+### 六、幂等键为什么绑在 `decision_ids`，不绑在 `decision_runs`
 
-### 七、config-as-code 撞 R-2，但机关早就在
+身份模型是 **Trigger → Decision → 多个 Run**（一次外部请求 → 一次业务决策 →
+可能多次执行尝试）。飞书 event 重投必须映射到**同一个决策**、绝不新起。
+
+- 绑在 `decision_runs.trigger_id`（每次尝试一行）会**误伤将来的重试**：重试
+  Run B 复用同一个 trigger，会撞唯一约束。
+- 绑在 `decision_ids`（每个决策一行、号分配器）正好：重试复用同一个决策号、不重新
+  占号 ⇒ 不撞约束。而号分配器本就是决策身份的**原子仲裁点**。把「这个号为哪次外部
+  请求占的」记在同一处，幂等就与占号是**同一个原子写**。
+
+⇒ schema **v14**：给 `decision_ids` 加一列 `trigger_id` + 一个 partial unique index
+（`WHERE trigger_id IS NOT NULL` —— CLI 每次生成唯一 trigger，NULL 老行互不冲突）。
+`reserve_decision_for_trigger` 返回 `(decision_id, created)`：`created=False` 就是
+「这个 event 之前占过号」。**「先查 trigger 在不在、不在就占号」中间有竞态窗口 ——
+唯一约束才是唯一可靠的并发仲裁**（本仓库第三次用这句话）。
+
+⚠️ 幂等键的**可靠性**在 pivot 后有一层诚实的降级：event id 现在由 main 的 LLM 从消息
+里读出、作为 `--trigger-id` 传入（可能拿不到）。好在飞书事件的**首道去重**在 OpenClaw
+渠道层（durable events），多数重投到不了 main；`decision_ids` 唯一约束是**兜底**。
+真实 event 落在哪个字段、上下文能不能不经 LLM 直接给到，留 live（P6）核实。
+
+### 七、人工 CLI 与飞书 inbound 必须走到同一个 orchestrator
+
+分发提示词点名：两条路不许分叉出两套决策逻辑。出卡的五道守卫（总闸 → ownership →
+单实例锁 → 预算 → 第一次付费）全在 `bin/biga-card` 里。⇒ 飞书路径异步拉起的**就是
+`bin/biga-card`**（带三个环境变量透传 origin/trigger/decision），不是绕过守卫直插
+orchestrator。异步只发生在 `inbound.py → bin/biga-card` 这条边界，`bin/biga-card`
+内部照旧从头同步跑到卡落库。人工 CLI 没有那三个环境变量 ⇒ `origin=cli` ⇒ 一字不变。
+
+### 八、config-as-code 撞 R-2，但机关早就在
 
 `apply_config.py` 要装 systemd 服务 —— 撞红线 R-2（systemd 单元名是共享命名空间）。
-但判据机关已经在：`isolation.py::check_namespaces()` 已经会查「引用 BigA 的单元
-必须带 `-biga`」，`bin/biga` 已经强制 `--profile biga`（由它推导 `-biga` 名）。
-⇒ `apply_config.py` 要做的是**走这条已有的路**，不是新发明一套 R-2 检查：一切经
-`bin/biga`（绝不裸 `openclaw`）、装前拒绝任何非 `-biga` 单元名（`OPENCLAW_SYSTEMD_UNIT`
-这个 env 覆盖是唯一能绕过推导的口子，堵上它）、装后用 `isolation.py` 核对。
+但判据机关已经在：`isolation.py::check_namespaces()` 已经会查「引用 BigA 的单元必须
+带 `-biga`」，`bin/biga` 已经强制 `--profile biga`。⇒ `apply_config.py` 走这条已有的
+路：一切经 `bin/biga`（绝不裸 `openclaw`）、装前拒绝任何非 `-biga` 单元名
+（`OPENCLAW_SYSTEMD_UNIT` 这个 env 覆盖是唯一能绕过推导的口子，堵上它）、装后用
+`isolation.py` 核对。
 
-而 `tools.deny:[ask_user]` 这条**半年前不能做、现在能做**：配置级 `tools.deny` 粒度
-按 agent，批 C-II 之前 main 同时是交互入口和出卡入口，禁它的 `ask_user` 会连累
-飞书/TUI 正常交互。批 C-II 之后 main 不再是出卡入口 —— 现在禁的是**被 spawn 的
-流水线 agent**（它们非交互、调 `ask_user` 就是确定性死锁），main 根本不在名单里。
-⚠️ agent 名单**从 `_contract` 派生、不手写**（裁定 15 / dev-workflow 第五问）：
-`discipline` 在 STAGE2 名单里但故意没建（裁定 13）⇒ 按「真有 AGENTS.md 才算建成」
-过滤掉，不给一个不存在的 agent 写配置。
+而 `tools.deny:[ask_user]` 这条**半年前不能做、现在能做**：批 C-II 之前 main 同时是
+交互入口和出卡入口，禁它的 `ask_user` 会连累飞书/TUI 正常交互。批 C-II 之后禁的是
+**被 spawn 的流水线 agent**（非交互、调 `ask_user` 就是确定性死锁），main 根本不在
+名单里。⚠️ agent 名单**从 `_contract` 派生、不手写**（裁定 15）：`discipline` 在
+STAGE2 名单里但故意没建（裁定 13）⇒ 按「真有 AGENTS.md 才算建成」过滤掉。
 
 ## 执行
 
 真跑过的命令（都在独立 worktree 里，见「坑」一节）：
 
 ```bash
-# schema v13 迁移在新旧库上都干净跑通、幂等
-python3 -c "import sys;sys.path.insert(0,'skills');from _store import db;print(db.init_schema('/tmp/t.db'))"   # 13
+# schema v14 迁移在新旧库上都干净跑通、幂等（在真实 prod 库的副本上验过，18 行原样保留）
+python3 -c "import sys;sys.path.insert(0,'skills');from _store import db;print(db.init_schema('/tmp/t.db'))"   # 14
 
-# 入站幂等 + 异步 + 命令工具，离线全绿
+# 入站幂等 + 异步 + 脱树 + 配置，离线全绿
 python3 -m pytest tests/test_inbound_trigger.py tests/test_feishu_deliverer.py tests/test_apply_config.py -q
 
 # 配置 dry-run：patch 对着 live schema 校验通过、且落在 ~/.openclaw-biga（不是同机另一套）
-python3 deploy/openclaw/apply_config.py            # Dry run successful: 10 update(s) validated
+python3 deploy/openclaw/apply_config.py            # Dry run：只 patch tools.deny + commands.text
 ```
 
 ## 坑
 
-**这一批开工时撞上了另一批在同一棵工作树上开工。** 环境默认落在
-`orchestration` 主检出，而另一批（Agent Registry）正在同一目录里改
-`_contract`。两批文件当时不重叠，但**共享工作树意味着任何一次提交都会带上对方
-的未提交改动** —— 一批的 schema 迁移会被写进另一批的 commit。第 28 章记过本项目
-「第一次两批并行」时的结论：**并行批各开一棵 worktree、绝不动对方的未提交草稿**。
-这次是同一条纪律的复发提醒，处理方式一样：把本批挪进独立 worktree（`wt-g-ii`），
-把落在共享检出里的自己那几个改动**只还原自己碰过的文件**（与对方不重叠 ⇒ 零影响）。
+**零 LLM 的 command-dispatch 走死了（本章 §三）。** 花了三次「修复」才确认根因不在
+工具名/标注，而在「command-dispatch 够不到会话内才连接的 MCP 工具」。教训有二：
+① 一道**只有 live 才暴露**的机制（静态 toolSchema vs 会话内工具），离线探针天然测不
+到，得留一道 live 探针；② 撞墙时先别加桥加垫片，退回系统本来就在用的机制（skill +
+shell）。
 
-**`command-tool` 一开始想指 `exec`，是错的。** `command-arg-mode: raw` 会把用户
-`/card` 后面打的字当 shell 命令，等于把聊天框变成 host shell。必须专门做一个
-MCP 工具。
+**为了迁就 command-dispatch 引入的 MCP server 是多余的。** 一句「不用 MCP，封装成
+skill 就行」删掉了三个抽象（MCP server 脚本、专用 agent、command-dispatch 桥）。
+**保留的**是真有用的那几块：`inbound.py` 的幂等 + 脱树、schema v14、feishu deliverer。
+—— 走过弯路不等于全推倒，认清哪几块是「迁就死路才有的」、哪几块是「本来就对的」。
 
-**红-verify 时一个测试裸 `import sqlite3` 被守卫拦下。** `test_no_raw_sqlite.py`
-钉死「`_store` 之外不许 `import sqlite3`」，而我在一条测原子唯一约束的用例里图省事
-`import sqlite3` 取异常类型。改成用 `_store.connect` + 断言异常消息里有 `unique`，
-不碰那个 import。**一个坏掉时会花钱/破坏隔离的守卫，正确的反应是顺着它改，不是
-给它开豁免。**
+**P2 探针的第一版 substring 检查抓到了自己的 docstring。** 我把「触发路径不许出现
+`sessions_spawn`」写成裸字符串包含，结果 `inbound.py` 的 docstring 里为了解释「防的
+是什么」正好提到了这个词 —— 测试红在自己身上。这与 CLAUDE.md「描述『不要写 X』时
+别把 X 抄进去」是同一个形状。改成 **AST 查真实 import**（`inbound.py` 是纯 Python，
+`sessions_spawn` 是 agent 工具、根本不可能被它 import；真正要防的是 import LLM SDK）。
+
+**红-verify 时一个测试裸 `import sqlite3` 被守卫拦下。** `test_no_raw_sqlite.py` 钉死
+「`_store` 之外不许 `import sqlite3`」。改成用 `_store.connect` + 断言异常消息里有
+`unique`。**一个坏掉时会破坏隔离的守卫，正确的反应是顺着它改，不是给它开豁免。**
+
+**并行批各开 worktree、不动对方未提交草稿。** 这批开工时撞上另外几批在同一棵工作树
+上开工（Agent Registry / raw 层）。处理：把本批挪进独立 worktree，只还原自己碰过的
+文件。第 28 章记过这条纪律，这次是复发提醒。
 
 ## 验证
 
 ```bash
-# 1. 全部离线探针绿（P1 幂等 / P2 main 出局 / P3 异步 / P4 R-2 / P5 tools.deny）
+# 1. 全部离线探针绿（P1 幂等 / P2 脱树 / P3 异步 / P4 R-2 / P5 tools.deny）
 python3 -m pytest tests/test_inbound_trigger.py tests/test_feishu_deliverer.py \
                   tests/test_apply_config.py -q          # 期望：全绿
 
-# 2. 每道守卫都见过红（G-1）—— 探针红灯记录见 CHANGELOG 批 G-II 一节
+# 2. 每道守卫都见过红 —— 探针红灯记录见 CHANGELOG 批 G-II 一节
 #    P1: 关掉 reserve_decision_for_trigger 的去重 ⇒ 幂等测试翻红
-#    P2: 从 SKILL.md 删掉 disable-model-invocation ⇒ 结构测试翻红
+#    P2: 给 systemd-run 去掉 --user、或回退路径不清 service env ⇒ 「脱树」翻红
 #    P3: 给 accept_trigger 塞一个 sleep ⇒ 「快速返回」翻红
 #    P4: 让 check_r2 fail-open ⇒ 「非 -biga 被拒」翻红
 #    P5: 把 main 塞进 deny patch ⇒ 「main 不在 deny」翻红
@@ -190,16 +231,21 @@ python3 -m pytest tests/test_inbound_trigger.py tests/test_feishu_deliverer.py \
 python3 deploy/openclaw/apply_config.py 2>&1 | grep "openclaw-biga"   # 只出现 -biga 路径
 ```
 
+> 🔴 P6（live）：真在飞书里发 `/card` → main 认出 → 跑 `inbound.py` → 脱树出卡 →
+> 结论推回飞书。这一步要碰 live（网关配置 / 凭据），**须先与运营者确认再动**，不在
+> 离线判据里。第一次真 event 还要对着 `inbound-trigger-debug.log` 把 event id 落在
+> 哪个字段核实、收敛幂等键取值。
+
 ## 本章要点
 
 | # | 一句话 |
 |---|---|
-| 1 | 飞书出卡的根子修法是「main 收不到这类请求」，不是「教 main 认出来再转发」——反事实检验：清空 main 的 prompt 这条路还能走 |
-| 2 | 飞书是 websocket 长连接 ⇒ 没有能指向的 HTTP 端点 ⇒ 结构性拦截只能表达成配置 + OpenClaw 命令层 |
-| 3 | `command-dispatch: tool` 让 `/card` 直达工具、绕过 model；`command-tool` 不能指 `exec`（会把聊天框变 shell），要专用 MCP 工具 |
-| 4 | 幂等键绑在 `decision_ids`（每决策一行）不绑 `decision_runs`（每尝试一行）——后者会误伤重试；唯一约束才是可靠的并发仲裁 |
-| 5 | 异步用 `systemd-run` 把出卡拉成瞬态单元：血缘变 systemd ⇒ entry_guard 判 HUMAN。这是走它本就留的「外部 Trigger」门，不是开口子 |
-| 6 | 人工 CLI 与飞书 inbound 走同一个 `bin/biga-card`（同五道守卫、同 orchestrator）；异步只在 `inbound → bin/biga-card` 的边界，CLI 同步体验不变 |
-| 7 | `apply_config.py` 撞 R-2 但机关早在：一切经 `bin/biga`、拒绝非 `-biga` 单元名、装后 `isolation.py` 核对 |
-| 8 | `tools.deny:[ask_user]` 只给被 spawn 的非交互流水线 agent，main 不在名单（探针 P5）；名单从 `_contract` 派生不手写 |
-| 9 | 并行批各开 worktree、不动对方未提交草稿——第 28 章记过的纪律，这次因默认落在共享检出而复发 |
+| 1 | 这批要钉的不变式是「出卡编排绝不在 agent 会话进程树里跑」——比「main 全程不参与」更本质；谁按按钮次要，按下之后那坨编排在哪跑才是命门 |
+| 2 | 飞书是 websocket 长连接 ⇒ 没有能指向的 HTTP 端点 ⇒ 结构性拦截只能表达成配置 + OpenClaw 命令层/技能 |
+| 3 | 🔴 零 LLM 的 `command-dispatch: tool` 走死了：它建 toolSchema 时够不到**会话内才连接**的 MCP 工具（main 在会话里反而调得到）——只有 live 暴露，离线探针测不出 |
+| 4 | 🔴 一个飞书机器人 + `bindings` 按 peer 路由 ⇒ 一个私聊没法按内容分流 ⇒ 「专用非-main agent」也走不通；LLM 允许后退回「main 发起 + 脱树编排」 |
+| 5 | 🔴 撞墙时退回系统本来就在用的机制（技能 + shell 跑脚本），别加桥/垫片/中介去凑——一句「不用 MCP」删掉了三个多余抽象 |
+| 6 | 幂等键绑在 `decision_ids`（每决策一行）不绑 `decision_runs`（每尝试一行）——后者误伤重试；唯一约束才是可靠的并发仲裁（schema v14）|
+| 7 | 异步用 `systemd-run` 把出卡拉成瞬态单元：血缘变 systemd ⇒ entry_guard 判 HUMAN。pivot 后这是**唯一**的 L-14 止血点，P2 因此改成「launcher 必须脱树」的结构判据 |
+| 8 | 人工 CLI 与飞书 inbound 走同一个 `bin/biga-card`（同五道守卫、同 orchestrator）；异步只在 `inbound → bin/biga-card` 的边界，CLI 同步体验不变 |
+| 9 | `apply_config.py` 撞 R-2 但机关早在：一切经 `bin/biga`、拒绝非 `-biga` 单元名、装后 `isolation.py` 核对；`tools.deny:[ask_user]` 只给被 spawn 的流水线 agent，名单从 `_contract` 派生 |

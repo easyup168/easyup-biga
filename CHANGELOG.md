@@ -15,23 +15,33 @@
 
 ## [未发布]
 
-### ✨ 新增 · 批 G-II —— Inbound Trigger：飞书出卡变结构性命令，main 全程不参与路由
+### ✨ 新增 · 批 G-II —— Inbound Trigger：飞书出卡变结构化触发，main 只发起、编排脱树
 
 批 G-I 让卡跑完能**推**回飞书。这一批做反方向、风险大得多的那半：让飞书能
-**触发**出卡，但**不经过 main 的自由判断**。它关掉的是 2026-09-21 两次事故
-（19:31 四孤儿 spawn、21:03 出卡递归 L-14）的共同根子——**入口在 prompt 层面、
-不在代码层面**。立场沿用批 C-II：不是教 main 认出出卡请求再转发，是 **main 压根
-收不到这类请求**（反事实检验：把 main 的 system prompt 清空，`/card` 照样出卡）。
+**触发**出卡，但**出卡的编排绝不在 main 的会话进程树里跑**。它关掉的是 2026-09-21
+两次事故（19:31 四孤儿 spawn、21:03 出卡递归 L-14）的共同根子——**出卡编排跑在了一个
+agent 会话里，于是它能自己拼 `sessions_spawn`、还能递归再拉一次出卡**。
+
+🔴 **这一批的立场在建造中变过一次，如实记下来**（详见教程第 37 章 §三/§四）：
+最初照批 C-II 的激进立场做「**main 压根收不到这类请求**」——用 `command-dispatch: tool`
+让 `/card` 绕过 model 直达一个 MCP 工具。**live 上走死了**：`command-dispatch` 在建
+`toolSchema` 时够不到**会话内才连接**的 MCP stdio 工具（`docs/gateway/cli-backends.md`：
+session-scoped，不 outlive the run），报 `Tool not available`；而 main 在会话里调同一个
+工具反而算得对。加上运营者两个约束（**一个飞书机器人**做全部交互、**LLM 可用不追求
+0 LLM**）——一个私聊里 `bindings` 按 peer 路由、没法按内容分流，于是退回到 BigA
+全仓一致的形态：**`/card` 是普通技能，main 认出出卡请求 → 用 shell 跑 `inbound.py`**。
+不变式从「main 全程不参与」诚实降级为「**main 只发起、编排绝不在 main 进程树里**」——
+后者靠 `systemd-run` 脱树挡死（与谁发起无关），才是这批真正要防的东西。
 
 **为什么这么设计**（几处不显然的裁定）：
 
-- **结构性拦截用 `command-dispatch: tool`。** 飞书是 websocket 长连接（事件从网关
-  进程内到达，没有能指向的 HTTP 端点）⇒ 拦截只能表达成配置。`/card` 做成一个技能
-  （`skills/card/SKILL.md`），`command-dispatch: tool` 让命令**直接派发到工具、绕过
-  model**（命令消息绕过 queue+model）。`command-tool` **不能指 `exec`**：
-  `command-arg-mode: raw` 会把用户在 `/card` 后打的字当 shell 命令跑（聊天框变
-  host shell）⇒ 专门做一个 stdio MCP 工具 `biga_card_trigger`（`mcp` 包），它只调
-  `inbound.accept_trigger`。
+- **出卡触发是纯技能（SKILL.md + shell 跑脚本），不用 MCP server。** BigA 全仓技能
+  都是这个形态（`decision-card` / 各 `*-calc` / `news-scan` / `risk-check`）。曾为迁就
+  command-dispatch 引入过一个 stdio MCP 工具 `biga_card_trigger`，但 command-dispatch
+  够不到它（见上）、且与全仓形态不一致 ⇒ **整体删除**（连带删掉一版试过的「专用非-main
+  agent + binding」，因单机器人单私聊无法按内容分流）。`/card` 回归成 `skills/card/SKILL.md`
+  + `skills/card/scripts/inbound.py`：main 用 shell 跑 `inbound.py --origin feishu
+  --trigger-id <event id>`，脚本秒回 ACK。
 - **幂等键绑 `decision_ids` 不绑 `decision_runs`。** 身份模型是 Trigger→Decision→
   多个 Run。绑在每次尝试一行的 `decision_runs.trigger_id` 会**误伤将来的重试**
   （重试复用同一 trigger、会撞唯一约束）；绑在号分配器 `decision_ids`（每决策一行）
@@ -55,20 +65,20 @@
 - **`apply_config.py` 撞 R-2 但机关早在。** 一切经 `bin/biga`（强制 `--profile biga`、
   绝不裸 `openclaw`）、装 systemd 服务前拒绝任何非 `-biga` 单元名（`OPENCLAW_SYSTEMD_UNIT`
   env 覆盖是唯一能绕过推导的口子，堵上它）、装后由 `isolation.py::check_namespaces()`
-  核对。`config patch` 递归合并 ⇒ 只碰它管的键（`tools.deny`/`commands.text`/
-  `mcp.servers`），**不碰 appSecret/gateway token/ownerAllowFrom 这些 live-only 值
-  ——仓库里一个凭据都不落**。
+  核对。`config patch` 递归合并 ⇒ 只碰它管的键（`tools.deny`/`commands.text`），
+  **不碰 appSecret/gateway token/ownerAllowFrom 这些 live-only 值——仓库里一个凭据都
+  不落**。
 
 **建的东西**：
 
 - schema **v14**：`decision_ids` 加 `trigger_id` 列 + partial unique index
   （`WHERE trigger_id IS NOT NULL`）。`_store.reserve_decision_for_trigger`（幂等
   占号，返回 `(decision_id, created)`）+ `find_run_by_trigger`（入站幂等查询侧）。
-- `skills/decision-card/scripts/inbound.py`：入站适配器 `accept_trigger`——幂等占号
-  → 异步拉起（脱离进程树）→ 立刻 ACK。launcher 是依赖注入点（离线测桩）。
-- `skills/card/SKILL.md` + `skills/card/scripts/card_trigger_mcp.py`：`/card` 技能
-  （`command-dispatch: tool`）+ 它直达的 MCP 工具。`handle_card_trigger` 是纯函数
-  （离线可测），`resolve_trigger_id` 认不出飞书 event id 就 fail-closed（不编一个）。
+- `skills/card/scripts/inbound.py`：入站适配器 `accept_trigger`——幂等占号
+  → 异步拉起（`detached_biga_card_launcher` 脱离进程树）→ 立刻 ACK。launcher 是依赖
+  注入点（离线测桩）；带薄 CLI（`--origin/--trigger-id/--json`），SKILL.md 让 main 跑它。
+- `skills/card/SKILL.md`：`/card` 技能（model-invocable）——指引 main 认出出卡请求后
+  跑 `inbound.py`、原样转达 ACK、**不 spawn / 不自己编排 / 不等**。
 - `skills/decision-card/scripts/feishu_deliverer.py`：`FeishuDeliverer` 实现批 G-I 的
   `Deliverer` 协议，接真飞书 API（HTTP 传输是注入点、凭据从环境变量读）。
   `notify_worker.py` 加 `--deliverer feishu`（默认仍是 stdout 桩）。
@@ -81,8 +91,11 @@
 
 - **P1 幂等**：关掉 `reserve_decision_for_trigger` 的去重（跳过快查 + 插入不带
   trigger 标记）⇒ `created2` 变 `True`、adapter 拉起两次 ⇒ 幂等两条测试翻红。还原绿。
-- **P2 main 出局**：从 `SKILL.md` 删掉 `disable-model-invocation: true` ⇒ 结构测试
-  `re.search` 找不到、断言 `None` ⇒ 翻红（少了它 `/card` 会回落到 model=main）。还原绿。
+- **P2 编排脱树**：给 `detached_biga_card_launcher` 的 systemd-run 去掉 `--user`、
+  或把回退路径清 `OPENCLAW_SERVICE_*` 那段删掉 ⇒ 两道结构测试翻红（不脱树/漏 service
+  env ⇒ entry_guard 会判 AGENT）。还原绿。⚠️ P2 第一版用裸 substring 查「代码里不许
+  出现 `sessions_spawn`」，结果抓到了 `inbound.py` docstring 里为解释「防的是什么」而
+  提到的这个词（与「描述『不要写 X』别抄 X」同构）——改成 AST 查真实 import。
 - **P3 异步**：给 `accept_trigger` 塞 `time.sleep(2)`（模拟同步等出卡）⇒
   「受理 < 1s」断言翻红。还原绿。
 - **P4 R-2**：把 `check_r2` 的判据改成 `if False`（fail-open）⇒ 非 `-biga` 单元名
@@ -94,8 +107,8 @@
 **探针记录里没有抄任何真值**：飞书 open_id / appId / appSecret / gateway token
 一个都没进这份 CHANGELOG（公开仓库纪律——描述「不要写 X」的规则时不抄 X）。
 
-**现状**：schema **v14**（仍是十张表；批 I 的 raw_text 列在 v13、本批 decision_ids.trigger_id 列在 v14，都是给既有表加列）、测试 **1255** 条、
-教程 **36** 章。全部在独立 worktree（`wt-g-ii`，不含未跟踪文件干扰）里跑过。
+**现状**：schema **v14**（仍是十张表；批 I 的 raw_text 列在 v13、本批 decision_ids.trigger_id 列在 v14，都是给既有表加列）、测试 **1254** 条、
+教程 **37** 章。全部在独立 worktree（`wt-g-ii`，不含未跟踪文件干扰）里跑过。
 ### 变更（批 I）· raw 层真的存 raw —— 新增 `raw_text` 列，`content_sha256` 改基于原始响应文本（schema v13）
 
 **为什么这是证据链最底层的问题**：raw 层此前存的**不是 raw**。链路是

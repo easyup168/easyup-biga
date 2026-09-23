@@ -1,17 +1,20 @@
-"""批 G-II 入站触发：幂等占号 + 异步受理 + main 结构性出局。
+"""批 G-II 入站触发：幂等占号 + 异步受理 + 编排脱离 main 进程树。
 
 探针清单（设计文档 §6 批 G-II 的 P1 / P2 / P3，离线可判的部分）：
 
   P1  幂等：同一个飞书 event id（trigger_id）重投两次 ⇒ 只触发一次决策/一次拉起，
-      第二次被识别为重复 —— 在三层各钉一遍：store（reserve_decision_for_trigger）、
-      adapter（accept_trigger）、命令派发工具（handle_card_trigger）。
-  P2  main 不参与路由：/card 技能是 command-dispatch:tool + disable-model-invocation
-      （结构性钉住）；触发路径是纯 Python、不 import 任何 main/LLM/spawn —— 反事实
-      检验「把 main 的 system prompt 清空，这条路还能不能走」在代码层面成立。
+      第二次被识别为重复 —— 在两层各钉一遍：store（reserve_decision_for_trigger）、
+      adapter（accept_trigger）。
+  P2  编排脱离 main 进程树：出卡入口可以经过 main（LLM 允许），但**编排绝不在 main 的
+      进程树里跑**。`detached_biga_card_launcher` 必须用 `systemd-run --user` 把出卡拉成
+      脱离进程树的瞬态单元（⇒ entry_guard 判 HUMAN），或在回退路径显式清掉
+      `OPENCLAW_SERVICE_*`（entry_guard 判 AGENT 的依据）—— 这才是挡住 2026-09-21
+      「会话自己拼 sessions_spawn 递归出卡」的那道。另钉：触发路径（inbound.py）里
+      不出现 sessions_spawn/LLM/编排依赖。
   P3  异步：accept_trigger 立刻返回 ACK（只调 launcher，不等 170~200s 的出卡）；
       人工 CLI 的同步入口不被这条路改坏（bin/biga-card 无 env 仍走 origin=cli）。
 
-P4/P5 在 test_apply_config.py（R-2 / tools.deny）；P6 是 live（真飞书 event → 卡 →
+P4/P5 在 test_apply_config.py（R-2 / tools.deny）；P6 是 live（真飞书 /card → 卡 →
 投递），不在离线判据里。
 
 🔴 这些是**新守卫的探针**：每条都能靠「把被守的东西弄坏 ⇒ 报红」验证（红灯记录见
@@ -29,12 +32,10 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
-sys.path.insert(0, str(REPO / "skills" / "decision-card" / "scripts"))
 sys.path.insert(0, str(REPO / "skills" / "card" / "scripts"))
 
 from _contract import new_run_context  # noqa: E402
 from _store import (  # noqa: E402
-    AppendOnlyViolation,
     connect,
     find_run_by_trigger,
     init_schema,
@@ -44,7 +45,6 @@ from _store import (  # noqa: E402
 )
 
 import inbound  # noqa: E402
-import card_trigger_mcp as ctm  # noqa: E402
 
 
 @pytest.fixture()
@@ -66,11 +66,11 @@ class _RecordingLauncher:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# schema v13 + store 层：一个 trigger 至多一个决策（原子）
+# schema v14 + store 层：一个 trigger 至多一个决策（原子）
 # ══════════════════════════════════════════════════════════════════════════
 class TestStoreIdempotency:
 
-    def test_v13_加了trigger_id列与唯一索引(self, db):
+    def test_v14_加了trigger_id列与唯一索引(self, db):
         with connect(db, readonly=True) as c:
             cols = [r[1] for r in c.execute("PRAGMA table_info(decision_ids)")]
             idx = [r[1] for r in c.execute("PRAGMA index_list(decision_ids)")]
@@ -168,77 +168,111 @@ class TestAcceptTrigger:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 命令派发工具 handle_card_trigger：P1（工具层）+ trigger_id 解析 fail-closed
+# P2：编排脱离 main 进程树（这是 L-14 递归的真正止血点）
 # ══════════════════════════════════════════════════════════════════════════
-class TestCommandDispatchTool:
+class TestOrchestrationDetached:
 
-    @pytest.fixture()
-    def patched_accept(self, db, monkeypatch):
-        """让工具用注入的假 launcher + tmp db（工具本身不暴露 launcher 参数）。"""
-        calls = []
-        real = inbound.accept_trigger
-        monkeypatch.setattr(
-            ctm, "accept_trigger",
-            lambda **kw: real(**kw, launcher=lambda *a: calls.append(a), path=db))
-        return calls
+    def test_P2_有systemd_run时用它脱离进程树(self, tmp_path, monkeypatch):
+        """systemd-run --user ⇒ 祖先变 systemd --user、不继承网关 service env ⇒ HUMAN。
 
-    def test_P1_工具层同event只受理一次(self, patched_accept):
-        m1 = ctm.handle_card_trigger({"command": "", "eventId": "evt-A"})
-        m2 = ctm.handle_card_trigger({"command": "", "eventId": "evt-A"})
-        assert "正在出卡" in m1 and "已经在处理" in m2
-        assert len(patched_accept) == 1
-
-    def test_resolve_trigger_id_顶层与嵌套都认(self):
-        assert ctm.resolve_trigger_id({"trigger_id": "e1"}) == "e1"
-        assert ctm.resolve_trigger_id({"eventId": "e2"}) == "e2"
-        assert ctm.resolve_trigger_id({"context": {"message_id": "e3"}}) == "e3"
-        assert ctm.resolve_trigger_id({"meta": {"feishu_event_id": "e4"}}) == "e4"
-
-    def test_resolve_trigger_id_认不出就抛_不编一个(self):
-        with pytest.raises(ctm.TriggerIdUnavailable):
-            ctm.resolve_trigger_id({"command": "沪深", "commandName": "/card"})
-
-    def test_工具在认不出event时回一句自解释而非抛(self, patched_accept):
-        # build_server 里的包装把 TriggerIdUnavailable 转成给人看的 ACK。
-        server = ctm.build_server()
-        # 直接调 handle_ 会抛；工具包装吞成消息 —— 这里断言 handle_ 的行为，
-        # 包装行为在 build_server 内联，靠上面 resolve 的 fail-closed 保证。
-        with pytest.raises(ctm.TriggerIdUnavailable):
-            ctm.handle_card_trigger({"command": "no-id"})
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# P2：main 结构性出局（结构钉住 + 反事实）
-# ══════════════════════════════════════════════════════════════════════════
-class TestMainOutOfRouting:
-
-    def test_P2_card技能是command_dispatch_tool且model选不到(self):
-        """SKILL.md 强制「命令直达工具、绕过 model」——这是 main 出局的结构性落点。
-
-        🔴 P6 live 实测发现（2026-09-23）：`command-tool` 必须是
-        `<mcp server 名>__<工具名>` 的完整形式，不能只写工具自己的裸名
-        （`card_trigger_mcp.py` 用 `FastMCP("biga-card-trigger")` +
-        `@server.tool(name="biga_card_trigger")` 注册，OpenClaw 对外按
-        `biga-card-trigger__biga_card_trigger` 拼出可解析的名字）。写裸名时
-        这条静态检查本身照样会绿——它只查字符串存在，不查这个名字能不能真的
-        解析到一个工具——`/card` 在真实网关里直接报 `Tool not available`，
-        这是离线测不出、只有 live 才暴露的坑。
+        这是「编排不在 main 进程树里跑」的首选实现。把它换成一个直接 fork（不脱树）
+        就会让出卡继承网关祖先、被 entry_guard 判成 AGENT —— 那正是要防的递归入口。
         """
-        fm = (REPO / "skills" / "card" / "SKILL.md").read_text("utf-8").split("---")[1]
-        for key, val in (("command-dispatch", "tool"),
-                         ("command-tool", "biga-card-trigger__biga_card_trigger"),
-                         ("disable-model-invocation", "true"),
-                         ("command-arg-mode", "raw")):
-            assert re.search(rf"{re.escape(key)}:\s*{re.escape(val)}", fm), \
-                f"SKILL.md 缺 {key}: {val} —— 少了它 /card 就会回落到 model（main）"
+        captured = {}
 
-    def test_P2_反事实_触发路径不依赖main或model(self):
-        """把 main 的 prompt 清空这条路还能走 ⇔ 路径里没有 main/LLM/spawn 依赖。"""
-        src = "\n".join(
-            (REPO / "skills" / p).read_text("utf-8")
-            for p in ("card/scripts/card_trigger_mcp.py",
-                      "decision-card/scripts/inbound.py"))
-        for forbidden in ("sessions_spawn", "import openai", "anthropic",
-                          "ORCHESTRATION.md", "SOUL.md"):
-            assert forbidden not in src, \
-                f"触发路径出现 {forbidden!r} —— 它就不再是「不经过 main/LLM」了"
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            captured["kw"] = kw
+            class R:  # noqa: D401 - 假 CompletedProcess
+                returncode = 0
+            return R()
+
+        monkeypatch.setattr(inbound.shutil, "which", lambda name: "/usr/bin/systemd-run")
+        monkeypatch.setattr(inbound.subprocess, "run", fake_run)
+
+        inbound.detached_biga_card_launcher("feishu", "evt-A", "BIGA-1", root=tmp_path)
+
+        cmd = captured["cmd"]
+        assert cmd[0] == "systemd-run"
+        assert "--user" in cmd, "必须 --user 拉成用户级瞬态单元（脱离网关进程树）"
+        assert cmd[-1] == str(tmp_path / "bin" / "biga-card")
+        joined = " ".join(cmd)
+        for k in ("BIGA_CARD_ORIGIN=feishu", "BIGA_CARD_TRIGGER_ID=evt-A",
+                  "BIGA_CARD_DECISION_ID=BIGA-1"):
+            assert k in joined, f"origin/trigger/decision 要经 --setenv 传给 biga-card：缺 {k}"
+
+    def test_P2_回退路径显式清掉service_env(self, tmp_path, monkeypatch):
+        """没有 systemd-run 时回退 setsid，但必须**清掉** OPENCLAW_SERVICE_* ——
+
+        那三个 env 是 entry_guard 判 AGENT 的依据。不清 = 出卡继承网关的 service 身份、
+        被判 AGENT、被拒（fail-closed），或更糟：绕过守卫。清掉是「声明这是一次外部
+        触发、不是 agent 会话」。删掉这段清理，本测试就会抓到 service env 漏进子进程。
+        """
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, **kw):
+                captured["cmd"] = cmd
+                captured["env"] = kw.get("env", {})
+
+        monkeypatch.setattr(inbound.shutil, "which", lambda name: None)  # 无 systemd-run
+        monkeypatch.setattr(inbound.subprocess, "Popen", FakePopen)
+        # 模拟网关进程里带着 service 身份
+        monkeypatch.setenv("OPENCLAW_SERVICE_KIND", "gateway")
+        monkeypatch.setenv("OPENCLAW_SERVICE_MARKER", "x")
+        monkeypatch.setenv("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway-biga.service")
+
+        inbound.detached_biga_card_launcher("feishu", "evt-A", "BIGA-1", root=tmp_path)
+
+        env = captured["env"]
+        assert captured["cmd"][0] == "setsid"
+        for leaked in ("OPENCLAW_SERVICE_KIND", "OPENCLAW_SERVICE_MARKER",
+                       "OPENCLAW_SYSTEMD_UNIT"):
+            assert leaked not in env, f"{leaked} 漏进了脱树子进程 —— entry_guard 会判它 AGENT"
+        # origin/trigger/decision 仍要传到
+        assert env["BIGA_CARD_ORIGIN"] == "feishu"
+        assert env["BIGA_CARD_TRIGGER_ID"] == "evt-A"
+        assert env["BIGA_CARD_DECISION_ID"] == "BIGA-1"
+
+    def test_P2_触发路径不import_llm或编排(self):
+        """出卡入口经过 main 没问题，但触发路径的**代码**里不该依赖 LLM/编排 ——
+
+        编排在程序里、脱树跑；inbound.py 只做「占号 + 脱树拉起 + ACK」。查**真实
+        import**（不是 substring —— docstring 里为解释「防的是什么」会提到 spawn 等词，
+        那不算依赖）：inbound.py 不该 import 任何 LLM SDK 或编排器。
+        """
+        import ast
+        src = (REPO / "skills" / "card" / "scripts" / "inbound.py").read_text("utf-8")
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Import):
+                imported.update(n.name.split(".")[0] for n in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        for forbidden in ("openai", "anthropic", "orchestrator"):
+            assert forbidden not in imported, \
+                f"inbound.py import 了 {forbidden!r} —— 触发路径不该依赖 LLM/编排器"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# card 技能：model-invocable + 指引 main「跑脚本、别编排」（P2 的落点之一）
+# ══════════════════════════════════════════════════════════════════════════
+class TestCardSkill:
+
+    def _skill(self) -> str:
+        return (REPO / "skills" / "card" / "SKILL.md").read_text("utf-8")
+
+    def test_card技能是model_invocable_没被禁(self):
+        """本版允许 main 的 LLM 发起 ⇒ 技能必须能被 model 选到（不能 disable）。"""
+        fm = self._skill().split("---")[1]
+        assert "disable-model-invocation" not in fm, \
+            "本版靠 main 认出出卡请求来发起，不能禁 model 调用"
+        assert re.search(r"user-invocable:\s*true", fm)
+
+    def test_card技能指向inbound并明令不编排(self):
+        body = self._skill()
+        assert "skills/card/scripts/inbound.py" in body, "技能必须文档化跑 inbound.py"
+        assert "--trigger-id" in body
+        # 明令 main 不要自己编排/spawn/等
+        assert "spawn" in body and ("不要 spawn" in body or "不 spawn" in body or "别" in body)
+        assert "不要等" in body or "不要等它跑完" in body
