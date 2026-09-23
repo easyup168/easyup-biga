@@ -15,6 +15,29 @@
 
 ## [未发布]
 
+### 🐛 修复 · 批 G-II P6 live 预检发现：config patch 省略 mcp 键不等于删除
+
+给 P6 live 验证做准备时，把返工后的配置 apply 到真实 live，发现 `mcp.servers.
+biga-card-trigger` 那条**没有消失**——它还指向一个这次返工已经从仓库删掉的脚本
+（`skills/card/scripts/card_trigger_mcp.py`），对应的 stdio 子进程也还活着。
+
+根因：`render_patch()` 不再往 patch 里写 `mcp` 键（因为不再注册 MCP server 了），
+但 `config patch` 的合并语义是"patch 没提到的键原样保留"——**省略只是「不管」，
+不是「删」**。任何 live 配置只要曾经 apply 过带 `mcp.servers` 的旧版 patch，这个键
+就会一直留在那，指向的脚本删了也不会跟着消失。这是"只增量合并自己管的键"这条设计
+本身的一个盲点：它保护了"不该碰的"，但没区分"不该碰的"和"曾经管过、现在不该再管的"。
+
+修复：`render_patch()` 显式加 `"mcp": {"servers": {"biga-card-trigger": None}}`——
+只删本脚本自己曾经写过的那一个键（不是整个 `mcp` 对象，给别的 MCP server 留位置），
+用 `config patch` 自己文档化的"null 删"语义真正撤回它。`tests/test_apply_config.py`
+的 `test_patch不注册mcp_server` 改名 `test_patch显式删掉曾经注册的mcp_server`，
+断言从"不含 mcp 键"改成"含显式 null"——原断言在这次真复现之前会一直误报绿（不含
+`mcp` 键 ≠ live 上那个键真的没了，两者在离线测试里看着一样，只有对着真实已污染的
+live 配置才能分辨）。
+
+**验证**：sabotage-revert 亲手复现——去掉 `"mcp"` 那行 ⇒ 新测试 `KeyError: 'mcp'`
+翻红；还原绿。全量 1254 条测试 + `audit_public.sh` 十一项复跑仍绿。
+
 ### ✨ 新增 · 批 G-II —— Inbound Trigger：飞书出卡变结构化触发，main 只发起、编排脱树
 
 批 G-I 让卡跑完能**推**回飞书。这一批做反方向、风险大得多的那半：让飞书能

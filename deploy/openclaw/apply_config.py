@@ -25,6 +25,13 @@ live `openclaw.json`；装服务经 `bin/biga daemon install`。
 出卡触发不注册任何 MCP server：BigA 的技能一律「SKILL.md + shell 跑脚本」
 （main 认出出卡请求 → 跑 skills/card/scripts/inbound.py），与全仓形态一致。
 
+🔴 patch 显式清掉本脚本曾经写过的那个 MCP server（`mcp.servers.biga-card-trigger:
+null`），不是只在渲染里"不再提它"——`config patch` 的合并语义是「patch 没提到的键
+原样保留」，早期 apply 过旧版 patch 的 live 配置里那个键**不会自己消失**，会一直
+指向一个已经从仓库删掉的脚本路径（真复现过：live 上那个键留了一版指向已删文件的
+`card_trigger_mcp.py`，且对应的 stdio 子进程还在跑）。只有显式 null 才是「删」，
+省略只是「不管」。
+
 🔴 agent 名单从 `_contract` 派生，不手写
 ----------------------------------------
 出卡 roster 的权威源是 `_contract`（裁定 15 / dev-workflow 第五问）。`agents.yaml`
@@ -86,9 +93,11 @@ def render_patch(
 ) -> dict:
     """渲染要 patch 进 live 配置的**增量**（纯函数，离线可测）。
 
-    只含本脚本管的键：非交互流水线 agent 的 `tools.deny` + `commands.text`。
-    **不含**任何凭据/可识别 id（那些 live-only，patch 不提及 ⇒ 原样保留）。
-    出卡触发是纯 skill（main 用 shell 跑 inbound.py），不注册任何 MCP server。
+    只含本脚本管的键：非交互流水线 agent 的 `tools.deny` + `commands.text` + 显式
+    清掉曾经写过的那个 MCP server 注册。**不含**任何凭据/可识别 id（那些 live-only，
+    patch 不提及 ⇒ 原样保留）。出卡触发是纯 skill（main 用 shell 跑 inbound.py），
+    不再注册任何 MCP server —— `mcp.servers.biga-card-trigger` 显式 null（删），
+    不是靠"不再提它"让它自然消失（省略 ≠ 删，见模块 docstring）。
     """
     policy = yaml.safe_load((deploy_root / "agents.yaml").read_text("utf-8"))
     toolpol = yaml.safe_load((deploy_root / "tool-policy.yaml").read_text("utf-8"))
@@ -102,6 +111,8 @@ def render_patch(
     return {
         "agents": {"entries": entries},
         "commands": {"text": bool(toolpol["commands"]["text"])},
+        # 只删本脚本自己曾经写过的那一个键，不动 mcp.servers 下可能存在的别的条目。
+        "mcp": {"servers": {"biga-card-trigger": None}},
     }
 
 

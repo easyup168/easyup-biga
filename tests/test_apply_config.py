@@ -51,9 +51,17 @@ class TestRenderPatch:
     def test_commands_text_true(self):
         assert ac.render_patch()["commands"]["text"] is True
 
-    def test_patch不注册mcp_server(self):
-        """出卡触发是纯 skill（shell 跑 inbound.py），patch 里不该冒出 mcp.servers。"""
-        assert "mcp" not in ac.render_patch(), "不再用 MCP server —— patch 不该含 mcp 键"
+    def test_patch显式删掉曾经注册的mcp_server(self):
+        """出卡触发是纯 skill（shell 跑 inbound.py），不再注册 MCP server。
+
+        🔴 必须是**显式 null**（删），不是"patch 里不提 mcp 键"——省略在 `config
+        patch` 的合并语义下是"原样保留"，早期 apply 过旧版 patch 的 live 配置里那个
+        键不会自己消失（真复现过：live 上那个键一直指向一个已经从仓库删掉的脚本
+        路径，对应的 stdio 子进程也还在跑）。只有显式 null 才是「删」。
+        """
+        mcp = ac.render_patch()["mcp"]
+        assert mcp == {"servers": {"biga-card-trigger": None}}, \
+            "必须显式 null 掉曾经写过的那个键，不能只是不提它"
 
     def test_patch里没有任何凭据或可识别id(self):
         """公开仓库纪律：patch 只碰它管的键，绝不含 appSecret / token / ownerAllowFrom。"""
