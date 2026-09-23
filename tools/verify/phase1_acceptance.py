@@ -89,6 +89,24 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
     的 spawn 指令带着它），只是没被拿来做绑定。
     ⇒ 这一版用它过滤，同时去掉 LIMIT —— 按号取就不该有条数上限，
       否则一天跑得多了，早先的决策会悄悄查不到。
+
+    🔴 为什么读**两张**表（2026-09-23）
+    ----------------------------------
+    运行时把一次 spawn 记在哪张表**不是恒定的**，而这套核验原来只读
+    `subagent_runs` 一张。实测对照：
+
+        BIGA-20260922-001（至今唯一一张编排器真实产出的卡）
+          subagent_runs                      0 行
+          task_runs（排除 exec）             12 行
+
+    于是 `spawn_check` 对那张真卡报「判不了」(exit 2)——**一张真卡，一次真
+    spawn，核验却给不出结论**。而同一条 Adapter 代码路径在 2026-09-23 重新
+    spawn 时，`subagent_runs` 又确实进了行（另一个会话的实测）。
+    ⇒ 两张表都可能是那次 spawn 的落点，只读一张就会在另一张那侧变成盲区。
+
+    ⚠️ 读两张**不削弱判据**：两张表都是运行时自己写的，BigA 的业务代码
+    碰不到任何一张 —— 「被验证方写不到的地方才算证据」这条前提不变。
+    变的只是「去哪儿找那份证据」。
     """
     import sqlite3  # store-exempt: 读的是 OpenClaw 运行时状态库，不是 BigA 事实层；
                     # _store 的单一入口规则是为了「将来切 PG 只改一个文件」，
@@ -107,13 +125,51 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
         # store-exempt: 同上 —— 外部运行时状态库，只读
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT run_id, child_session_key, controller_session_key, "
-            "       requester_session_key, created_at, payload_json "
-            "FROM subagent_runs WHERE payload_json LIKE ? ORDER BY created_at DESC",
-            (f"%{decision_id}%",)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        out: list[dict] = []
+        # 🔴 每张表**各自**容错：少一张不等于读不到。
+        #    第一版把两条查询写在同一个 try 里 —— 运行时库里没有 `task_runs`
+        #    （或反过来）就整个 return None ⇒ 核验退化成「判不了」，而
+        #    「判不了」是会被忽略的。只有**两张都取不到**才是真的读不到。
+        got_any = False
+
+        # ① subagent_runs —— agent 名字藏在 child_session_key 的第二段里
+        try:
+            for r in conn.execute(
+                    "SELECT run_id, child_session_key, created_at "
+                    "FROM subagent_runs WHERE payload_json LIKE ? "
+                    "ORDER BY created_at DESC", (f"%{decision_id}%",)):
+                d = dict(r)
+                seg = (d.get("child_session_key") or "").split(":")[1:2]
+                d["agent"] = seg[0] if seg else None
+                d["source"] = "subagent_runs"
+                out.append(d)
+            got_any = True
+        except sqlite3.Error:
+            pass
+
+        # ② task_runs —— agent 名字有独立的 agent_id 列，不用从 session key 里抠
+        #
+        # 🔴 排除 task_kind='exec'：那是 **Specialist 自己在会话里跑 shell**
+        #    （`run_id` 形如 `exec:<名字>`、requester 是它自己的子会话），
+        #    不是「被 spawn 起来」。不排掉的话，一个只跑过 exec、从未被 spawn
+        #    的 agent 会被判成「spawn 过」—— 正是这套核验要抓的那种伪造。
+        try:
+            for r in conn.execute(
+                    "SELECT run_id, agent_id, child_session_key, created_at "
+                    "FROM task_runs WHERE task LIKE ? "
+                    "  AND (task_kind IS NULL OR task_kind <> 'exec') "
+                    "ORDER BY created_at DESC", (f"%{decision_id}%",)):
+                d = dict(r)
+                d["agent"] = d.get("agent_id")
+                d["source"] = "task_runs"
+                out.append(d)
+            got_any = True
+        except sqlite3.Error:
+            pass
+
+        # R-3：两张都读不到 ⇒ 说「判不了」，不说「零条记录」。
+        # 这两者在调用方那里是**完全不同的结论**（后者会被判成伪造）。
+        return out if got_any else None
     except sqlite3.Error:
         return None
     finally:
@@ -265,12 +321,14 @@ def spawn_proof(decision_id: str) -> SpawnProof:
             # 🔴 强绑定：runtime_run_id 与运行时 subagent_runs.run_id 结构化 join。
             spawned = any(rid in runtime_ids for rid in rr)
         else:
-            # 退回弱绑定（历史行无 runtime_run_id）：`child_session_key` 形状是
-            # `agent:<name>:subagent:<uuid>` —— 按**段**比，不按子串包含（子串会让
-            # `news` 命中 `newsflash`，而这类误判从来不会报错）。
-            spawned = any(
-                (r.get("child_session_key") or "").split(":")[1:2] == [agent]
-                for r in spawns)
+            # 退回弱绑定（历史行无 runtime_run_id）：比**归一化后的 agent 名**。
+            # 🔴 两张表的 agent 名来源不同（`subagent_runs` 从 `child_session_key`
+            #    的第二段抠、`task_runs` 有现成的 `agent_id` 列），归一化在
+            #    `_runtime_spawn_records()` 里做完 —— 这里只比 `rec["agent"]`，
+            #    不在消费端各解析一遍（那就是第二套口径，L-3）。
+            #    仍然是**整段相等**，不是子串包含（子串会让 `news` 命中
+            #    `newsflash`，而这类误判从来不会报错）。
+            spawned = any(r.get("agent") == agent for r in spawns)
         out[agent] = (agent in ours, spawned)
     return SpawnProof(readable=True, rows=len(spawns), per_agent=out)
 
