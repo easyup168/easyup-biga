@@ -1005,10 +1005,9 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         教程章节号撞车（批 F 占了「第 33 章」，G-I 改第 34 章）。独立复核
         已亲手关闭 append-only 触发器验证 P3 会红。教程第 34 章、
         `CHANGELOG.md`。
-    - [ ] **`notify_worker.py` 尚无调度方**（批 G-I 自己披露的已知缺口，非
-          复核新发现）：判据是「调度命令的字面量」，而不是「有一个能跑的
-          脚本」——现在没有 cron/systemd 实体去调它，outbox 会一直攒行、
-          不会被真正投递。留给 Phase 3 或批 G-II 顺带解决
+    - [x] **`notify_worker.py` 尚无调度方** —— **已接上（2026-09-23）**。
+          `bin/biga-notify` + `notify-worker-biga.timer`（每 2 分钟一次），
+          详见下方批 G-II 收尾条目
 - [x] 批 G-II · Inbound Trigger —— **P6 live 端到端已确认完成（2026-09-23）**。
       核心交付物：飞书"出卡"变结构化 trigger，**出卡编排绝不在 main 进程树里跑**
       （2026-09-21 那次 $0.4 白花事故的真根子）。🔴 **立场变过一次，如实记**：
@@ -1030,9 +1029,15 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       详见教程第 37 章 §三～§五、CHANGELOG 批 G-II 三条修复记录。
       离线 + live 复核内容：diff 摘要 + 全部探针红灯（含两处 P6 才暴露的新探针，
       均亲手 sabotage-revert）+ 全量测试 + `audit_public.sh` 十一项，均已过。
-  - [ ] **`notify_worker.py` 仍然没有调度方**（更早已披露的缺口，本批修的是
-        "有凭据也发不出去"，不是"谁来定期跑它"）——今天靠人手动跑一次；
-        接上 cron/systemd 定时调用是 Phase 3 或后续批次的事
+  - [x] **`notify_worker.py` 调度方** —— **已接上（2026-09-23）**。对齐
+        `docs/external/2026-09-23-biga-minimal-feishu-design.md` §6/§13：
+        新增 `bin/biga-notify`（薄壳，默认把 `--deliverer` 定成 `feishu`，
+        不用每次手动记住那个参数）+ `notify-worker-biga.{service,timer}`
+        （`Type=oneshot`，每 2 分钟一次）；`install_notify_timer.py --apply`
+        已真实装上并 `enable --now`，`systemctl --user list-timers` 确认
+        在跑。副产物：装完后拿 `isolation.py` 自查，发现它漏认 `%h` 写法
+        与 `.timer` 单元（两处盲点，见 CHANGELOG 同批修复记录）——两个
+        单元文件本身也因为要进公开仓库，用 `%h` 而不是字面家目录路径。
 - [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
       五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
       `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`

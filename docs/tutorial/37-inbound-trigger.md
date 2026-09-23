@@ -214,6 +214,41 @@ P3 异步、`test_apply_config.py` 的 R-2/tools.deny），没有一道把"占�
 或"卡完成→入队→投递"串成一条真实链路去跑，所以都没测出来。这不是探针写得不够
 细，是这类"两段各自独立正确，串起来才咬合出问题"的坑，本质上只有 live 才照得到。
 
+### 十、🔴 补上调度方之后，隔离自检自己先露了一个盲点
+
+§九修好投递缺凭据之后还有一环没接："谁、多久调一次 `notify_worker.py`"——
+批 G-I 自己披露过这个缺口，一直挂在 TODO 里没人来解决，因为它不影响任何离线
+测试：只要没人跑这个脚本，`notification_outbox` 就安静地攒着，不会报错，也
+不会露出"其实没人管"这件事。
+
+对齐 `docs/external/2026-09-23-biga-minimal-feishu-design.md` §6/§13 补一个
+`bin/biga-notify`（薄壳，默认把 `--deliverer` 定成 `feishu`——不用每次手动
+记住那个参数，忘记它正是 §九投递缺凭据事故的**上游**：如果一开始就有调度方，
+"没人带着凭据跑它"这句话根本不会成立）+ `notify-worker-biga.timer`（每 2
+分钟一次），拿 `install_notify_timer.py --apply` 真装上、`enable --now`。
+
+装完照惯例跑一次 `python3 tools/verify/isolation.py` 自查，报告只数到网关
+一个单元——新装的 `notify-worker-biga.service` 没被算进去。查下去是
+`check_namespaces()` 自己的判据只认两件事的字面形式：
+
+1. 只用**字面展开路径**（`str(BIGA)`，形如 `/home/<用户>/.openclaw-biga`）
+   判断"单元是否引用了 BigA"。而新单元文件要进公开仓库，不能把真实家目录
+   硬编码进去，只能用 systemd 的可移植写法 `%h/.openclaw-biga`——这恰好正
+   是「引用了 BigA 路径」该有的写法之一，检查却没认它。
+2. 只 glob `*.service`，从没看过 `*.timer`。
+
+两处叠加，后果不是报红——是这道守卫对这一类单元**完全失明**：不确认它没
+事，是压根没看见它，比误判更危险，因为它连"这里可能有问题"的信号都不给。
+改法：判据同时接受字面路径与 `%h/.openclaw-biga`；候选文件同时 glob 两种
+后缀；「带不带 `-biga`」统一用 `f.stem.endswith("-biga")`（去掉扩展名后判断，
+不必为 `.service`/`.timer` 各写一份后缀常量）。
+
+> 通用原则：一道"扫目录里的文件、按内容关键字分类"的守卫，关键字如果只认
+> 一种字面写法，而被扫的文件为了别的、完全正当的理由（这里是"不许在公开
+> 仓库硬编码家目录"）必须用另一种等价写法，守卫就会把等价的东西判成"不
+> 相关"而悄悄漏掉。装完新东西后，习惯性地跑一次自己项目里现成的自检工具
+> ——这次就是靠这个习惯，而不是专门去审查检查逻辑，才发现的。
+
 ## 执行
 
 真跑过的命令（都在独立 worktree 里，见「坑」一节）：
@@ -268,6 +303,14 @@ skill 就行」删掉了三个抽象（MCP server 脚本、专用 agent、comman
 已认证的连接（`bin/biga message send`）之后，这个问题从"需要一套凭据管理"变成"不需要
 凭据"，问题本身消失了，不是被绕过。
 
+**装完新单元，隔离自检的报告数字对不上（本章 §十）。** 装了
+`notify-worker-biga.service`，`isolation.py` 却只报"1 个单元"（只有网关）。
+不是新单元装错了——它是真的 `enable` 成功、真的在 `list-timers` 里，问题在
+检查本身：只认字面家目录路径、只 glob `.service`，而新单元为了公开仓库纪律
+用了 `%h`，且配套的 `.timer` 文件从不在扫描范围内。**一个守卫的报告数字比
+预期少，不一定是被测的东西错了，可能是量它的尺子有盲区**——两者都要查，
+不能默认"数字不对就是新东西装错了"。
+
 ## 验证
 
 ```bash
@@ -284,6 +327,11 @@ python3 -m pytest tests/test_inbound_trigger.py tests/test_feishu_deliverer.py \
 
 # 3. 配置 patch 落在自己的 profile、不碰同机另一套
 python3 deploy/openclaw/apply_config.py 2>&1 | grep "openclaw-biga"   # 只出现 -biga 路径
+
+# 4. notify-worker 调度方真的装上了，隔离自检认得出这个新单元
+systemctl --user is-enabled notify-worker-biga.timer     # 期望：enabled
+python3 tools/verify/isolation.py 2>&1 | grep "共享命名空间"
+# 期望：2 个 —— ['notify-worker-biga.service', 'openclaw-gateway-biga.service']
 ```
 
 > 🔴 P6（live）**已完成（2026-09-23）**：真在飞书里发 `/card` → main 认出 → 跑
@@ -314,3 +362,5 @@ python3 deploy/openclaw/apply_config.py 2>&1 | grep "openclaw-biga"   # 只出�
 | 11 | 🔴 P6 real 才暴露：飞书投递缺凭据的根子不是漏配环境变量，是投递从来没有过"谁在正确环境里跑"的答案——改成借网关自己已认证的连接（`bin/biga message send`），appId/appSecret 从此不需要，问题消失而不是被绕过 |
 | 8 | 人工 CLI 与飞书 inbound 走同一个 `bin/biga-card`（同五道守卫、同 orchestrator）；异步只在 `inbound → bin/biga-card` 的边界，CLI 同步体验不变 |
 | 9 | `apply_config.py` 撞 R-2 但机关早在：一切经 `bin/biga`、拒绝非 `-biga` 单元名、装后 `isolation.py` 核对；`tools.deny:[ask_user]` 只给被 spawn 的流水线 agent，名单从 `_contract` 派生 |
+| 12 | `notify_worker.py` 缺调度方是根子，"飞书投递缺凭据"只是它的一个下游症状——补 `bin/biga-notify` + systemd timer 之后，"没人带着凭据跑它"这句话本身就不再成立 |
+| 13 | 🔴 装完新单元后隔离自检数字对不上，不代表新单元装错了——查下去是检查本身只认字面家目录路径、只 glob `.service`，两处都要认 `%h` 写法与 `.timer` 单元；守卫的报告数字比预期少，先怀疑尺子，别先怀疑被测的东西 |
