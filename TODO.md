@@ -954,7 +954,16 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       (sort_keys=True)`），而建表注释断言「不做任何归一化」。等批 J 的依赖
       已解除（run_id 已消歧义），建议等批 F 落地——它给 raw 加溯源字段，
       那些字段指向哪个调用点，等 risk 搬移落定后再定更清楚
-- [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 依赖已清，建议排在 F 之后
+- [ ] 批 G · Outbox + 飞书 trigger + 配置进仓库 —— 设计探活已完成（2026-09-23），
+      按外部材料自己的分阶段建议拆成两批：
+  - [ ] 批 G-I · Outbox（Outbound Only）—— 分发提示词已就绪。只做推送通知
+        （Card 完成/UNKNOWN/Risk BLOCK/失败四类），不接受任何飞书输入，
+        没有新攻击面，不涉及 R-2
+  - [ ] 批 G-II · Inbound Trigger —— 等 G-I 落地再写分发提示词（需要它的
+        `notification_outbox` 表结构与 `NOTIFICATION_PENDING` 状态转移
+        先定型）。核心交付物：飞书"出卡"从自由对话变成结构化 trigger，
+        main 的 LLM 全程不参与路由决策——这是真正关掉 2026-09-21 那次
+        $0.4 白花事故的地方，风险与 E-III/J-II 同量级
 - [ ] 批 K · Pipeline Registry + Agent Registry —— 2026-09-21 `news` 没被
       spawn 那次事故的结构性解法（现在只有对账测试，不是单一源）；
       顺带拿到 Pipeline 版本化（历史卡现在说不出「当时用了哪几个 agent」）。
