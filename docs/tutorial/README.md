@@ -77,6 +77,7 @@ A 股短线**决策辅助**系统。
 | 32 | [让 `run_id` 贯穿全链（capture）](32-run-id-capture.md) | 确定性编排批 J-I：capture 与 enforce 拆开做（区别在**攒这一列的边际成本**，不在有没有人用）；判断行的 run_id **从事实行继承**不让 Agent 传（判据别建在可篡改输入上），「不可能不一致」用结构＋行为两条证据证明；加 nullable 字段两个 `from_dict` 都用 `.get` 否则历史卡 `KeyError`；属于「这次执行」的字段必须进 `comparable()` 剥离清单；跨文件模块污染只在全量红（`_load` 要幂等）；可派生守卫替新列自动把关 | ✅ |
 | 33 | [把 risk 的事实挪进编排器](33-risk-facts-into-orchestrator.md) | 确定性编排批 F：纯函数包在 LLM 会话里跑，省钱切口是「拎进程序直接调」不是让 LLM 跑快；只有确定性终局（`fb.status=='failed'`）值得跳过 spawn，判据别用会误伤的 `verdict==UNKNOWN`；fact 行 `amends` 恒 NULL **逃出 v6 线性索引** ⇒ 双写静默并存（v11 分区唯一索引补）；`IntegrityError` 报**列名**不报索引名（判据落错=L-13，探针抓到）；早退不 spawn 但 risk 进卡 ⇒ 别记账本行（L-8 + spawn_check 误判 forged）；不留兜底自跑；全员缺席不再「零证据 FAILED」改出满缺失的卡；VETO 全路径回归一环没断 | ✅ |
 | 34 | [外发通知 outbox](34-outbound-notifications.md) | 确定性编排批 G-I（只推不收）：投递状态用**追加日志**不给 outbox 开 `delivered_at` 原地改（同 `run_events`/`amends` 先例）；**card 通知与卡同事务、run_failed 尽力而为**（原子性看「谁离了谁更糟」）；`NOTIFICATION_PENDING` 只代表入队、`COMPLETED` 不等投递；run_failed 两处触发共用一份实现、没塞进 `transition()`；`ON CONFLICT DO NOTHING` 冲突时 `lastrowid` 不可靠 ⇒ 看 `rowcount`；加状态靠既有「每个状态都有消费方」守卫兜底；迁移版本号是共享命名空间、多批并行会静默撞（本批实测撞上批 F，占了 v12） | ✅ |
+| 35 | [让 raw 层真的存 raw](35-raw-artifact.md) | 确定性编排批 I：`content_sha256` 此前是我们 `sort_keys` 重排后的指纹、证明不了源字节；改存储列语义前先普查读取方（coordinator 把 `payload` 当解析后对象用 `len`/切片）⇒ **新增 `raw_text` 列而非替换 `payload_json`**；损失点在 `get_json` 内部故加姊妹 `get_json_and_text` 把原文带到落库点；「原始」要落到具体字节（腾讯存整段 body、多页源存各页 body 的 JSON 数组）；建表注释改成分列陈述真话；旧行不回填、旧口径 `payload_sha256` 保留、别跨 v13 比 sha；拆函数调用前查它有没有搭便车的副作用（NaN 守卫原搭在 `payload_sha256` 上）；改网络边界函数名后测试桩会静默落空 | ✅ |
 
 ---
 

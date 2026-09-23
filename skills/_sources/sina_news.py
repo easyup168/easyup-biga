@@ -50,6 +50,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ from typing import Any
 
 from _contract import CN_TZ
 
-from .http import SourceError, get_json
+from .http import SourceError, get_json_and_text
 
 __all__ = ["NewsItem", "NewsFeed", "fetch_feed", "STALE_SEC", "PAGE_SIZE"]
 
@@ -129,8 +130,11 @@ class NewsItem:
 @dataclass(frozen=True)
 class NewsFeed:
     items: tuple[NewsItem, ...]
-    #: 原始报文，落 raw 层用。
+    #: 解析后的原始报文（`{"pages": [各页对象]}`），落 raw 层的 `payload_json`。
     raw: dict[str, Any]
+    #: 🔴 各页**原始响应文本**的 JSON 数组（批 I）：这个源翻多页，每页一次请求；
+    #: 数组每个元素逐字节等于对应那页的响应体。`content_sha256` 基于它算。
+    raw_text: str | None = None
 
     @property
     def server_as_of(self) -> datetime | None:
@@ -182,12 +186,14 @@ def fetch_feed(*, pages: int = 1) -> NewsFeed:
 
     items: list[NewsItem] = []
     raw_pages: list[dict[str, Any]] = []
+    # 与 `raw_pages` 平行累积各页**原始响应文本**（批 I）。
+    raw_text_pages: list[str] = []
     for pn in range(1, pages + 1):
         qs = urllib.parse.urlencode({
             "page": pn, "page_size": PAGE_SIZE, "zhibo_id": _ZHIBO_ID,
             "tag_id": 0, "dire": "f", "dpc": 1,
         })
-        payload = get_json(f"{_BASE}?{qs}", referer=_REFERER)
+        payload, body = get_json_and_text(f"{_BASE}?{qs}", referer=_REFERER)
         result = (payload or {}).get("result") or {}
         status = result.get("status") or {}
         if status.get("code") != 0:
@@ -208,6 +214,7 @@ def fetch_feed(*, pages: int = 1) -> NewsFeed:
                 "字段可能改名了，不要当成「新闻少」")
         items.extend(parsed)
         raw_pages.append(payload)
+        raw_text_pages.append(body)
         if not rows:
             break
 
@@ -218,4 +225,5 @@ def fetch_feed(*, pages: int = 1) -> NewsFeed:
             "0 条意味着取数失败，不是「今天没新闻」")
 
     items.sort(key=lambda i: i.at, reverse=True)
-    return NewsFeed(items=tuple(items), raw={"pages": raw_pages})
+    return NewsFeed(items=tuple(items), raw={"pages": raw_pages},
+                    raw_text=json.dumps(raw_text_pages, ensure_ascii=False))

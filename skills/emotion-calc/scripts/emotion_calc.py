@@ -86,7 +86,7 @@ from _sources import (  # noqa: E402
 )
 from _store import (  # noqa: E402
     init_schema,
-    payload_sha256,
+    raw_text_sha256,
     save_fact_bundle,
     save_raw_snapshot,
 )
@@ -176,12 +176,14 @@ class Collector:
             got = now_cn()
             snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
             with self._lock:
-                self.hashes[f"em:push2ex/{pool}"] = payload_sha256(r.raw)
+                # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+                self.hashes[f"em:push2ex/{pool}"] = raw_text_sha256(r.raw_text)
             self._keep_raw(save_raw_snapshot(
                 source=f"em:push2ex/{pool}",
                 as_of=snap_as_of.isoformat(),
                 retrieved_at=got.isoformat(),
                 payload=r.raw,
+                raw_text=r.raw_text,
             ))
 
     # -- 派生 --------------------------------------------------------------
