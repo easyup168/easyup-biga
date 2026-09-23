@@ -2,7 +2,7 @@
 
 > 📄 **操作** · 自包含，可直接粘贴
 > **覆盖**：已写好的各批开工提示词（A-I / A-II / B / C-I / C-II / C-III /
-> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / **K**）、每批通用的纪律与验收 ｜
+> D-I / D-II / E-I / E-II / E-III / J-I / J-II / F / G-I / G-II / K / **I**）、每批通用的纪律与验收 ｜
 > **不覆盖**：升级方案本身（见 [`../design/deterministic-orchestration.md`](../design/deterministic-orchestration.md)）、
 > 各批的实际结果（做完写进 `../tutorial/`）
 
@@ -1999,29 +1999,131 @@ P6  如果这一批决定顺手修 `skipif` 缺口：模拟"本机没有运行�
 
 ---
 
-## 批 I / L / H · 现在不写分发提示词
+## 批 I · RawArtifact —— raw 层第一次真正存 raw
+
+⚠️ **依赖已清**：批 F 已合并（`e5b959f`），raw 溯源字段该指向哪个 `run_id`
+已有确切答案（`ctx.run_id`，见下文）；`architecture.md` §5.1 已按四个
+存储平面重写，本批不再需要为"这算不算撞了切 PostgreSQL 的触发条件"
+纠结。开工第一件事 `git log --oneline -5` 确认没有更晚的改动，不要假设
+本提示词里的行号还准。
+
+🔴 **这一批的核心风险不是"改不动"，是"改完之后静默破坏一个现有消费方"**
+——设计探活已经找到那个消费方并给出了必须遵守的边界（见下文"不要做"第
+一条），做之前完整读一遍，不要重新排查一遍。
+
+```text
+raw 层现在存的不是 raw：HTTP 响应体在 get_json() 里被 json.loads 解析后，
+原始文本就地丢弃；六个 collector 攒的都是解析后的对象；落盘时又用
+json.dumps(sort_keys=True) 重新序列化一遍。content_sha256 因此是"我们
+自己重排后"的指纹，证明不了任何关于数据源原始字节的事。这一批要让
+原始文本真正被保留下来，且不能改变现有消费方已经在依赖的"payload 是
+解析后对象"这个语义。
+
+## 先读
+
+- `docs/design/deterministic-orchestration.md` 的「批 I」小节全文（设计
+  探活，2026-09-23）——完整链路怎么走、原始文本具体在哪一步丢失、
+  `coordinator.py` 那个会被静默破坏的消费方，都已经查清楚并写明必须
+  遵守的边界，不要重新排查一遍
+- `skills/_sources/http.py` 全文，尤其 `get_text()`（48 行起，HTTP body
+  → str，按 `encoding` 参数解码）与 `get_json()`（90 行起，`json.loads`
+  之后原始文本没有被保留到任何地方）
+- `skills/_store/db.py` 的 `payload_sha256()`（1081 行起）/
+  `save_raw_snapshot()`（1105 行起）/`load_raw_snapshot()`（1140 行起）
+  ——现状：存的和哈希的都是解析后再重新 `json.dumps` 的对象
+- 🔴 `skills/_snapshot/coordinator.py` 191-198 行——`load_raw_snapshot()`
+  之后 `raw = snap["payload"]` 被当**已解析对象**用（`len(raw)`、切片）。
+  这是这一批最容易踩的坑，做之前务必确认自己理解了它为什么不能被改坏
+- `skills/_contract/evidence.py` 的 `raw_hash` 字段（48/65 行附近）——
+  它的文档写着指向 `raw_market_snapshot.content_sha256`，这一批会改变
+  这一列的计算依据
+- `skills/_store/schema.py` 的 `raw_market_snapshot` 建表语句（`_V1`）
+  与它的建表注释——"这里存的是当时从数据源拿到的字节，不做任何归一化"
+  这句话现在是假的（L-3：注释断言了一件没发生的事），这一批要么让它
+  变成真话，要么改措辞说清楚哪一列才是真正未归一化的
+- 六个调用 `save_raw_snapshot` 的文件（`market_calc.py`/`emotion_calc.py`/
+  `technical_calc.py`/`sector_calc.py`/`news_scan.py`/
+  `_snapshot/coordinator.py`）——各自怎么把 `get_json()` 的返回值攒进
+  `c.raw: list[(source, payload, src_as_of)]`，这一批都要跟着改
+
+## 做什么
+
+1. **让 `get_json()`/`get_text()` 能同时交出原始文本**——不改变现有六个
+   collector 目前"拿到解析后对象"的用法，但让原始文本不再在 `get_json()`
+   内部就地丢弃。具体形状（返回二元组、新增可选参数、还是新增一个姊妹
+   函数）你自己判断。
+2. **六个 collector 的 `c.raw` 累积路径要连带原始文本**——目前是
+   `list[(source, payload, src_as_of)]`，原始文本需要一并带到
+   `save_raw_snapshot` 调用点。
+3. **schema 新增字段，不是替换 `payload_json`**：`raw_market_snapshot`
+   加一列存原始文本（列名你定，比如 `raw_text`）。新迁移号见 `schema.py`
+   尾部 `MIGRATIONS`，用下一个号，不要硬编码猜测的版本号（这个数字最近
+   连续撞车两次）。`content_sha256` 改成基于这个新列计算。
+4. **`save_raw_snapshot`/`load_raw_snapshot` 签名跟着变**，但
+   🔴 **`load_raw_snapshot()` 返回的 `payload` 字段必须继续是解析后的
+   对象**——`coordinator.py` 的 `len(raw)`/切片用法不能变成对字符串操作。
+5. 六个调用方改造：`market_calc.py`/`emotion_calc.py`/`technical_calc.py`/
+   `sector_calc.py`/`news_scan.py`/`_snapshot/coordinator.py`。
+6. **`schema.py` 建表注释改回真话**——现在断言"不做任何归一化"，加完
+   新列之后要么让它变成真话（点名哪一列是真正未归一化的原始文本），
+   要么改措辞讲清楚 `payload_json` 是解析后的规范表示、新列才是原始的。
+7. `skills/_contract/evidence.py` 的 `raw_hash` 文档补一句：这一列的
+   计算依据在某个 schema 版本之后变了（新行如此，旧行不受影响，raw 层
+   只追加，不需要迁移旧行）。
+
+## 不要做
+
+- 🔴 不要改变 `load_raw_snapshot()` 返回的 `payload` 现有语义（解析后
+  对象）——这是本批最容易踩的坑，`coordinator.py` 会静默读错而不报错
+- 不要解决 `get_text()` 的编码假设问题（比如某数据源实际是 GBK 而不是
+  utf-8）——这是设计探活里明确排除在范围外的独立问题，除非你核实后
+  发现现用数据源确实编码错了，那就在正文里写清楚为什么这一批也要顺手
+  解决
+- 不要对旧的 `raw_market_snapshot` 行做任何回填/迁移——raw 层只追加，
+  旧行的 `content_sha256` 语义就是旧语义，不用改
+- 不要顺手把 `Evidence.raw_hash` 从「可选」改成「必填」——那是另一个
+  决定，不在这一批范围
+- 不要碰批 K 正在动的 roster 相关常量，也不要碰批 G-II 的异步执行/
+  飞书路径——三批文件基本不相交，如果 `git log` 发现有交叉，先确认
+  谁先落地，不要假设
+
+## 必须做的探针（G-1）
+
+P1  🔴 原始性：构造一个响应体（比如带乱序 key、多余空白的 JSON 文本），
+    走完整链路存进去，断言存下来的原始文本与最初的响应体**逐字节相同**
+    ——不是"看起来一样"，是真的按字节比较
+P2  hash 正确性：同一段原始文本，新的 `content_sha256` 与手算的 sha256
+    一致；且两次采到**内容相同但序列化不同**（key 顺序不同）的响应体，
+    产出的 `content_sha256` 不同——这是要修的问题的反面验证：改之前
+    这两次会被判成"一样"，改之后能分辨
+P3  🔴 现有消费方不被破坏：`coordinator.py` 的 `load_raw_snapshot` 消费
+    路径（`len(raw)`/切片）现有测试全绿，且新增一条测试显式断言
+    `payload` 字段返回的还是解析后的对象，不是字符串
+P4  六个调用方改完之后，各自现有测试套件全绿——不能有一个漏改导致该
+    collector 往新列里存了个 `None` 或空字符串却不报错
+P5  只追加：新列所在的表仍然只追加，UPDATE/DELETE 断言被拒——确认新列
+    没有意外绕开 `raw_market_snapshot` 已有的触发器
+P6  建表注释真实性：取一条真实存的行，比对它的原始文本列与构造的原始
+    响应体逐字节相同，用这条测试证明"不做任何归一化"这句注释现在是
+    真话，不是又一句断言了没发生的事
+
+## 做完之后
+
+不要自己宣布通过。把 git diff 摘要 / 每道探针的红灯输出 / 你自己认为
+最可能被攻破的一处交出来，由另一个会话评审。
+```
+
+---
+
+## 批 L / H · 现在不写分发提示词
 
 🔴 **2026-09-23 批 F 与批 G-I 已先后合并进 orchestration**，且都独立复核过关
 ——下表里"等 F 落地"这条依赖，凡是引用它的行，现在都已解除。
-批 F、批 G-I、批 G-II、批 K 的分发提示词都已经写好（见前面几节），不在
-这张表里了。
+批 F、批 G-I、批 G-II、批 K、批 I 的分发提示词都已经写好（见前面几节），
+不在这张表里了。
 
 | 批 | 现状 |
 |---|---|
-| I（RawArtifact） | **不是"已具备条件"，是有一个真正的未了前置**：设计 SSOT §0 裁定表明写着
-"批 I 开工前必须先把 `architecture.md` §5.1 改成按平面分"（控制面/历史数据面/
-分析/归档四个平面各自的选型与触发条件），而 §5.1 至今**仍是原来那个"SQLite
-vs PostgreSQL+Redis"二选一的写法**，没有按平面拆过——这不是笔误，是一次
-真正的架构文档重写，且四个平面各自的"什么时候该建"触发条件，总体设计
-`docs/external/2026-09-23-baga-full-system-architecture.md` §33 只给了
-方向（SQLite→Control Plane、Parquet→历史数据面……），没有给触发条件，需要
-真正做判断，不该由写分发提示词的这个动作顺手替用户拍板。⚠️ 好消息是：
-上次台账把这条记成"待批 F 落地后看更清楚"的那个子问题——raw 溯源字段该
-指向哪个 `run_id`——已经在本次核对中有了确切答案：`orchestrator.py:201`
-`save_fact_bundle(risk_fb, run_id=ctx.run_id)`，risk 的事实包和其余 Stage 1
-六个 skill 走的是**同一个** `ctx.run_id`（批 F 特意复用了 J-I 的 capture
-路径，没有另起一套），批 I 不用再为"risk 是不是有个不同的调用点"纠结。
-但 §5.1 那个前置仍然没解除，写分发提示词前需要用户先决定怎么处理 |
 | L（`cn.trading_calendar`） | 总体设计已到（2026-09-23），它 §45 把六个市场数据集列成一批、§41 放在 Stage 2。批 L 只做日历一个（今天就有消费方），定位是给那一批**打样** —— 仍等批 I 的 RawArtifact 形状落地之后才写得出它的分发提示词 |
 | H（包结构重组） | 排在最后 —— 它会让期间所有其他批次的 diff 变脏 |
 
