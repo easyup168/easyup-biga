@@ -1023,7 +1023,10 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         离线复核内容：diff 摘要 + 五道探针红灯（P2 脱树两道独立复核亲手验红）+
         全量 1254 条测试 + audit_public.sh 十一项，均已过。
         - [ ] 待 live：P6 —— 真飞书 /card → main 认出 → 脱树出卡 → 推回飞书；
-              首个真 event 对着 `inbound-trigger-debug.log` 核实幂等键取值
+              `inbound-trigger-debug.log` 随 MCP 工具一起删了（那是给"入参一堆键、
+              认哪个"这个已不存在的问题用的）——首个真 event 改核实 main 自己
+              transcript 里 `--trigger-id` 传的值，以及它是否原样落进
+              `decision_ids.trigger_id`（教程第 37 章「验证」一节已更新）
 - [x] 批 K · Agent Registry —— **已落地（2026-09-23）**。roster 收编前散在
       五处（`_contract` 两个字面量、`orchestrator.py` 两个独立字面量、
       `adapter_spike.py` 零测试覆盖的一处），现在收成 `_contract/registry.py`
