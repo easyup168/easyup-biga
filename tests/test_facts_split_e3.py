@@ -91,14 +91,22 @@ def _ev(field, value=1.0):
 
 
 def _up(agent, field="trade_date", value="20260302"):
-    """一条上游 AgentVerdict 桩（risk 读它）。"""
+    """一条上游 AgentVerdict 桩（risk 读它）。
+
+    ⚠️ 除了 `field`，固定再带一个 risk 的**阈值可比字段**（批 5）：
+    批 5 起「一个阈值都比不了」会进一条 missing、risk 转 UNKNOWN。
+    那是对的行为（把未知说成未知），但会让只给 trade_date 的桩变得不现实 ——
+    实测生产 23 次决策里 22 次上游都有 3–4 个可比字段。
+    """
     t = now_cn()
     stance = next(s for s in STANCE_VOCAB[agent] if s != "无法判定")
+    fields = {field: value, "volume_ratio": 1.0}
     return AgentVerdict(
         task_id=TID, agent=agent, status="completed", verdict="PASS",
-        result={field: value}, data_completeness=1.0,
-        evidence=[Evidence(field=field, source=f"derived:{agent}", value=value,
-                           as_of=t - timedelta(seconds=60), retrieved_at=t)],
+        result=fields, data_completeness=1.0,
+        evidence=[Evidence(field=k, source=f"derived:{agent}", value=v,
+                           as_of=t - timedelta(seconds=60), retrieved_at=t)
+                  for k, v in fields.items()],
         stance=stance, elapsed_ms=1)
 
 

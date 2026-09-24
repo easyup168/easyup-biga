@@ -334,12 +334,24 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
                 warnings.append(f"[{code}] {why}（{v.agent}.{field}={v.result[field]}）")
                 break
     # 阈值比对的输入是被比的那些字段的证据 —— 阈值本身是常量，随 CALC_VERSION 版本化。
-    # ⚠️ 上游一个阈值字段都没有时，`tripped_thresholds=[]` 读起来像「比过了，没触发」，
-    #    实际是「没东西可比」—— R-3 的形状。本批先如实标成未归类（不声称 derived）；
-    #    把它变成一条 missing 是独立的一块，已记进 TODO。
+    #
+    # 🔴 上游一个可比字段都没有时**不产出这个字段**（批 5）。
+    #    以前无论如何都报 `tripped_thresholds=[]`，而空列表在卡面上读起来是
+    #    「比过了，没有触发」—— 实际是「没东西可比」。同一个 `[]` 表示两件相反的事：
+    #    一个是「已核对，安全」，一个是「没核对」。这正是 R-3 要防的形状，
+    #    而且方向最坏：它把**未知**显示成**安全**。
+    #
+    #    判据用 `_th`（输入证据）而不是「字段在不在 result 里」：没有输入就是没比过，
+    #    两者在这里是同一件事，用前者顺带保证了产出的那条一定说得出出处。
     _th = _ids_of(*{f for f, *_ in THRESHOLDS})
-    add("tripped_thresholds", tripped, "被触发的风险阈值",
-        kind=_derived_if(_th), origins=_th)
+    if _th:
+        add("tripped_thresholds", tripped, "被触发的风险阈值",
+            kind="derived", origins=_th)
+    else:
+        missing.append(MissingItem(
+            "风险阈值 —— 上游一个可比字段都没有（炸板率/量能比/涨跌家数占比…全缺），"
+            "无法判断有没有触发。**空列表不等于没触发**",
+            "risk.thresholds.nothing_to_check"))
 
     # --- 被声明的重复事实：两个 agent 从同一个源取同一个值 ---
     # 🔴 裁定 15 的受控例外：允许重复，**前提是有人核对**。

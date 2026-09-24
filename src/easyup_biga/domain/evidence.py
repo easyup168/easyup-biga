@@ -132,16 +132,20 @@ class Evidence:
                 raise ValueError(
                     f"Evidence.derived_from 里 kind={o.kind!r} 的 ref 必须是 64 位"
                     f"十六进制内容哈希，收到 {o.ref!r}")
-        if self.kind == "derived" and not self.raw_hash and not self.derived_from:
+        if self.kind in ("observed", "derived") and not self.raw_hash \
+                and not self.derived_from:
             raise ValueError(
-                f"Evidence(field={self.field!r}, kind='derived') 既没有 raw_hash 也没有 "
-                f"input_evidence_ids —— 派生值必须说得出它是从**什么**算出来的。\n"
+                f"Evidence(field={self.field!r}, kind={self.kind!r}) 既没有 raw_hash 也没有 "
+                f"derived_from —— 声明了类别的证据必须说得出它**出自什么**。\n"
                 f"  · 从**一份**原始响应算出来（MA、涨跌幅…）⇒ raw_hash 指回那一份；\n"
                 f"    source 写成 `derived:<那个真实来源>`，`resolve_provenance` 会填上。\n"
                 f"  · 出自别的东西（另几条证据 / 多份 raw / 上游 verdict / 事实层）\n"
                 f"    ⇒ 声明 derived_from，用 evidence_origins / raw_origins /\n"
                 f"       verdict_origins / fact_origin 构造。\n"
-                f"  两者都没有 = 这个数是从哪来的没人答得上来，而它会印在卡面上。")
+                f"  两者都没有 = 这个数是从哪来的没人答得上来，而它会印在卡面上。\n"
+                f"  ⚠️ `observed` 也受这条约束（批 5）：「我观察到的」如果指不回任何一份\n"
+                f"     响应，那它和「我编的」在卡面上长得一模一样。\n"
+                f"     历史证据 `kind=None`（未声明）不受约束 —— 三段式的旧卡可读那一段。")
         if self.kind == "parameter" and self.derived_from:
             raise ValueError(
                 "Evidence.kind='parameter' 却声明了 derived_from —— 参数是我们"

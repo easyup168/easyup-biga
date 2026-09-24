@@ -138,10 +138,23 @@ class TestThresholds:
         wired[1] = up("market", result={"trade_date": "20260918", "volume_ratio": 1.0})
         assert build([1]).result["tripped_thresholds"] == ()
 
-    def test_字段缺失不算触发(self, wired):
-        """上游没给这个字段 ≠ 阈值没被碰到，但也不能算碰到了。"""
-        wired[1] = up("market")
+    def test_有可比字段时没越线就是空列表(self, wired):
+        """上游给了可比字段、但都没越线 ⇒ `[]` 名副其实：比过了，没触发。"""
+        wired[1] = up("market", result={"trade_date": "20260918", "volume_ratio": 1.0})
         assert build([1]).result["tripped_thresholds"] == ()
+
+    def test_一个可比字段都没有时根本不产出这个字段(self, wired):
+        """🔴 批 5：以前无论如何都报 `[]`，而空列表在卡面上读起来是
+        「比过了，没有触发」—— 实际是「没东西可比」。
+
+        同一个 `[]` 表示两件相反的事，而且方向最坏：把**未知**显示成**安全**。
+        现在不产出该字段，并进一条 missing。
+        """
+        wired[1] = up("market")          # 只有 trade_date，没有任何阈值字段
+        v = build([1])
+        assert "tripped_thresholds" not in v.result
+        codes = [m.code for m in v.missing]
+        assert "risk.thresholds.nothing_to_check" in codes, codes
 
 
 class TestUpstreamIntegrity:
@@ -193,7 +206,9 @@ class TestFreshness:
 
 class TestContractShape:
     def test_字段数与data_completeness分母一致(self, wired):
-        wired[1] = up("market")
+        # ⚠️ 必须带一个阈值可比字段：批 5 起 `tripped_thresholds` 只在**比过了**
+        #    的时候产出，缺了它这个夹具描述的就不是「齐备」了。
+        wired[1] = up("market", result={"trade_date": "20260918", "volume_ratio": 1.0})
         wired[2] = up("emotion", stance="修复")
         wired[3] = up("sector", stance=None, verdict="UNKNOWN", status="partial",
                       missing=["x"])
