@@ -36,6 +36,13 @@ from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa
 
 
 def _load(name: str):
+    # 🔴 幂等：已经有别的测试文件 `_load` 过就**复用那个实例**，绝不用新实例覆写
+    #    sys.modules。否则 orchestrator.py 在它自己 import 时绑定的 card_ops 与本文件
+    #    覆写后的不是同一个对象 —— test_orchestrator 的 monkeypatch.setattr(card_ops,
+    #    "persist", …) 打在新实例上、orchestrator 却调旧实例，patch 静默落空（全量里
+    #    才复现的跨文件污染，见 test_run_id_capture.py / 教程第 32 章）。
+    if name in sys.modules:
+        return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod

@@ -15,6 +15,44 @@
 
 ## [未发布]
 
+### 🐛 修复 · 消除动态同名模块 monkeypatch 错位（外部评审 A 节）
+
+`test_run_id_capture.py` 在批 J-II（教程第 32 章）就踩到过并修好一次：
+新测试文件按仓库惯例用 `importlib.util.spec_from_file_location` 从文件路径
+加载 `card_ops`（`decision-card` 目录带连字符，不是能直接 `import` 的包名），
+无条件覆写 `sys.modules["card_ops"]`——而 `orchestrator.py` 自己 `import
+card_ops` 时早已绑定了另一个实例。于是 `test_orchestrator.py` 里
+`monkeypatch.setattr(card_ops, "persist", …)` 打在新实例上、orchestrator
+却调旧实例，patch **静默落空**：单独跑那个文件绿，全量跑（或换个收集顺序）红。
+
+**这次修的是同一个坑的另外 11 处未修实例**，不是新发现：三轮对抗性复核
+指出全仓还有 `test_facts_split.py`/`test_facts_split_e2.py`/
+`test_facts_split_e3.py`/`test_decision_card.py`/`test_emotion_calc.py`/
+`test_market_calc.py`/`test_sector_calc.py`/`test_technical_calc.py`/
+`test_risk_check.py`/`test_snapshot_wiring.py`/`test_stance_and_
+traceability.py`（两处）在用同一份复制粘贴来的、**没有幂等检查**的加载
+逻辑——批 J-II 只改了踩中的那一份，没有推广到其余复制体。真机复现：
+`pytest tests/test_orchestrator.py tests/test_facts_split_e3.py` 会红，
+反序或全量默认收集顺序不会（这也是为什么它潜伏了这么久没被发现）。
+
+`risk_check` 是第二个真正有生产碰撞风险的名字（`orchestrator.py` 自己
+`from risk_check import build_fact_bundle`），其余的
+`market_calc`/`sector_calc`/`technical_calc`/`emotion_calc`/`amend_verdict`
+目前没有证据显示与生产代码碰撞，但同一份"无条件覆写"逻辑一样会在测试文件
+之间造成同名污染——按评审 A 节"消除动态同名模块 monkeypatch 错位"的要求
+一并修掉，不是只堵已经真的红过的那一个洞。
+
+修法：给每一处加载逻辑补一行幂等检查（`if name in sys.modules: return
+sys.modules[name]`），已经被任何人加载过就复用同一个对象，绝不用新实例
+覆写——模块本就该按名字单例，这正是 Python `import` 的默认语义。
+
+新增回归测试：`TestModuleIdentityAcrossTestFiles`（`test_orchestrator.py`）
+直接断言"`orchestrator.py` 绑定的 `card_ops`/`risk_check.build_fact_bundle`"
+与"当前 `import` 同名模块拿到的"必须是同一个对象——不依赖跑两个文件、不需要
+子进程，任何一处幂等检查退化都会让它当场失败。sabotage 验证过：临时让某个
+文件的幂等检查失效，配合"该文件在 `test_orchestrator.py` 之后收集"的顺序，
+两条新测试都能抓到。
+
 ### 🐛 修复 · stale-run reaper 按「起跑时刻」判过期，应该按「最后一次推进」
 
 三轮对抗性复核（真机 PoC）指出：`find_stale_runs()` 用

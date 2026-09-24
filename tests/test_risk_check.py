@@ -21,10 +21,18 @@ sys.path.insert(0, str(SCRIPTS))
 
 from _contract import CN_TZ, VETO_STANCE, AgentVerdict, Evidence  # noqa: E402
 
-spec = importlib.util.spec_from_file_location("risk_check", SCRIPTS / "risk_check.py")
-rc = importlib.util.module_from_spec(spec)
-sys.modules["risk_check"] = rc
-spec.loader.exec_module(rc)
+# 🔴 幂等：已经有别的测试文件 `_load` 过 risk_check 就**复用那个实例**，绝不用
+#    新实例覆写 sys.modules。`orchestrator.py` 自己 `from risk_check import
+#    build_fact_bundle`，它在**它自己**import 时绑定的对象与本文件覆写后的
+#    不是同一个——同一个坑见 test_run_id_capture.py / 教程第 32 章（那次的
+#    载体是 card_ops，risk_check 是 orchestrator.py 直接 import 的第二个同类名字）。
+if "risk_check" in sys.modules:
+    rc = sys.modules["risk_check"]
+else:
+    spec = importlib.util.spec_from_file_location("risk_check", SCRIPTS / "risk_check.py")
+    rc = importlib.util.module_from_spec(spec)
+    sys.modules["risk_check"] = rc
+    spec.loader.exec_module(rc)
 
 AS_OF = datetime(2026, 9, 18, 15, 0, tzinfo=CN_TZ)
 GOT = datetime(2026, 9, 18, 15, 1, tzinfo=CN_TZ)

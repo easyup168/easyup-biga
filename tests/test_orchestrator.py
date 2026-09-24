@@ -802,3 +802,37 @@ class TestBatchFRiskInline:
         assert card.status == "AVOID"
         risk_v = next(v for v in card.verdicts if v.agent == RISK)
         assert risk_v.stance == VETO_STANCE
+
+
+class TestModuleIdentityAcrossTestFiles:
+    """🔴 2026-09-24（A 节，三轮对抗性复核）：`orchestrator.py` 自己 `import
+    card_ops` / `from risk_check import build_fact_bundle`，这两个名字同时被
+    十几个测试文件用 `importlib.util.spec_from_file_location` 各自"重新加载"一份
+    （历史原因：`decision-card`/`risk-check` 目录带连字符，不是能直接 import 的
+    包名）。如果任何一处重新加载时无条件覆写 `sys.modules`（不检查是否已存在），
+    `orchestrator.py` 自己绑定的对象和某个测试文件后来创建的新对象就会静默分裂
+    成两个——`monkeypatch.setattr(card_ops, "persist", …)` 打在新对象上，
+    orchestrator 却调旧对象，patch 悄悄不生效（真机复现过：`pytest
+    tests/test_orchestrator.py tests/test_facts_split_e3.py` 会红，反序不会）。
+
+    这条测试不依赖收集顺序、不需要拉起子进程——它直接断言"这次会话里，
+    orchestrator.py 绑定的模块对象"与"这次会话里任何人现在 `import` 同名模块
+    拿到的对象"必须是**同一个**。只要有任何一处 `_load` helper 退化回无条件
+    覆写，这条断言就会因为收集顺序而变得不稳定/失败——比等一次真实的跨文件
+    monkeypatch 落空更早、更直接地暴露问题。
+    """
+
+    def test_orchestrator绑定的card_ops与现在import拿到的是同一个对象(self):
+        import card_ops
+        assert orch_mod.card_ops is card_ops, (
+            "orchestrator.py 绑定的 card_ops 与当前 sys.modules 里的不是同一个对象——"
+            "某个测试文件的 _load() 无条件覆写了 sys.modules['card_ops']，"
+            "monkeypatch 会打偏（见类文档字符串）")
+
+    def test_orchestrator绑定的risk_check_build_fact_bundle与现在import拿到的是同一个(self):
+        import risk_check
+        assert orch_mod.build_fact_bundle is risk_check.build_fact_bundle, (
+            "orchestrator.py 绑定的 risk_check.build_fact_bundle 与当前 "
+            "sys.modules['risk_check'] 里的不是同一个函数——"
+            "某个测试文件的 _load()/一次性 spec_from_file_location 无条件覆写了 "
+            "sys.modules['risk_check']，monkeypatch 会打偏（见类文档字符串）")

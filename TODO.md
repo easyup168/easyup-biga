@@ -1160,9 +1160,9 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         细分 + set() 合并丢信息"这条经全链路追踪**不成立**：`card_ops.
         synthesize()` 按"代码+文本"复合键去重，不会把不同 agent 的同代码
         缺失项合并掉。测试 1402 → 1408
-  - [ ] 评审 A（发布基线）/E（Contract 与数据质量）/F（Package 与 Registry）/
+  - [ ] 评审 E（Contract 与数据质量）/F（Package 与 Registry）/
         G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理。
-        A 节的 monkeypatch 顺序依赖已确认真实存在，是下一批候选（见批 M-III）
+        A 节的 monkeypatch 顺序依赖已修复，见批 O
 
 - [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
       schema **v16**：`decision_records.run_id`/`.evidence_set_id`、
@@ -1195,6 +1195,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
   - [ ] 评审 §7.2 第四条「在线卡 `input_verdict_refs` 不许为空」—— 它会同时废掉
         `card_ops.synthesize(verdict_refs=None)` 这条**文档里明确允许**的旧路径，
         属于产品决策不是纯加固；要防的危险情形已由契约层覆盖检查挡住，一并留到下一批
+
+- [x] 批 O · 外部评审 A 节：消除动态同名模块 monkeypatch 错位 —— **2026-09-24**。
+      批 J-II（教程第 32 章）只修了 `test_run_id_capture.py` 一处的"无条件覆写
+      sys.modules"坑，全仓另有 11 处一模一样的复制体（`test_facts_split{,_e2,
+      _e3}.py`/`test_decision_card.py`/`test_emotion_calc.py`/
+      `test_market_calc.py`/`test_sector_calc.py`/`test_technical_calc.py`/
+      `test_risk_check.py`/`test_snapshot_wiring.py`/
+      `test_stance_and_traceability.py`两处）从未被推广修复。真机复现：
+      `pytest tests/test_orchestrator.py tests/test_facts_split_e3.py` 会红，
+      反序或默认全量收集顺序不会。给全部 12 处补幂等检查（已加载就复用同一个
+      对象，不重新覆写 `sys.modules`）；新增 `TestModuleIdentityAcrossTestFiles`
+      直接断言 `orchestrator.py` 绑定的 `card_ops`/`risk_check.build_
+      fact_bundle` 与当前 import 拿到的是同一个对象，不依赖收集顺序。
+      测试 1439 → 1441。详见 `docs/tutorial/43-module-identity-idempotent-
+      load.md`、`CHANGELOG.md`
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

@@ -22,11 +22,18 @@ sys.path.insert(0, str(SCRIPTS))
 import _sources as sources  # noqa: E402
 from _contract import CN_TZ  # noqa: E402
 
-spec = importlib.util.spec_from_file_location(
-    "technical_calc", SCRIPTS / "technical_calc.py")
-tc = importlib.util.module_from_spec(spec)
-sys.modules["technical_calc"] = tc
-spec.loader.exec_module(tc)
+# 🔴 幂等：已经有别的测试文件加载过 technical_calc 就**复用那个实例**，绝不用新
+#    实例覆写 sys.modules——否则两个文件各自持有的引用会静默分裂成两个对象，
+#    一份 monkeypatch 打在另一份从来读不到的实例上（同一个坑见
+#    test_run_id_capture.py / 教程第 32 章，那次的载体是 card_ops）。
+if "technical_calc" in sys.modules:
+    tc = sys.modules["technical_calc"]
+else:
+    spec = importlib.util.spec_from_file_location(
+        "technical_calc", SCRIPTS / "technical_calc.py")
+    tc = importlib.util.module_from_spec(spec)
+    sys.modules["technical_calc"] = tc
+    spec.loader.exec_module(tc)
 
 TRADE_DATE = "20260918"
 

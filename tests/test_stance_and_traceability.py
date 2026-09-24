@@ -162,6 +162,12 @@ class TestSkillsEmitTraceableEvidence:
 
     @staticmethod
     def _load(skill, mod):
+        # 🔴 幂等：已经有别的测试文件 `_load` 过同名模块就**复用那个实例**，绝不用
+        #    新实例覆写 sys.modules——否则两个文件各自持有的引用会静默分裂成两个
+        #    对象，一份 monkeypatch 打在另一份从来读不到的实例上（同一个坑见
+        #    test_run_id_capture.py / 教程第 32 章，那次的载体是 card_ops）。
+        if mod in sys.modules:
+            return sys.modules[mod]
         d = REPO / "skills" / skill / "scripts"
         sys.path.insert(0, str(d))
         spec = importlib.util.spec_from_file_location(mod, d / f"{mod}.py")
@@ -231,11 +237,16 @@ class TestMissingCodes:
     def test_同文本不同代码不合并(self):
         """两个源各自不可用却报了同一句话，那是两件事，合并会让统计少一条。"""
         sys.path.insert(0, str(REPO / "skills" / "decision-card" / "scripts"))
-        spec = importlib.util.spec_from_file_location(
-            "card_ops", REPO / "skills/decision-card/scripts/card_ops.py")
-        co = importlib.util.module_from_spec(spec)
-        sys.modules["card_ops"] = co
-        spec.loader.exec_module(co)
+        # 🔴 幂等：见上面 TestSkillsEmitTraceableEvidence._load 的同款说明——
+        #    card_ops 尤其敏感，orchestrator.py 自己 import 的是同一个名字。
+        if "card_ops" in sys.modules:
+            co = sys.modules["card_ops"]
+        else:
+            spec = importlib.util.spec_from_file_location(
+                "card_ops", REPO / "skills/decision-card/scripts/card_ops.py")
+            co = importlib.util.module_from_spec(spec)
+            sys.modules["card_ops"] = co
+            spec.loader.exec_module(co)
 
         a = _v("market", verdict="WARNING", status="partial",
                missing=[MissingItem("数据源不可用", "market.turnover.unavailable")])

@@ -25,6 +25,12 @@ sys.path.insert(0, str(REPO / "skills"))
 
 
 def _load(name: str):
+    # 🔴 幂等：已经有别的测试文件 `_load` 过同名模块就**复用那个实例**，绝不用新
+    #    实例覆写 sys.modules——否则两个文件各自持有的引用会静默分裂成两个对象，
+    #    一份 monkeypatch 打在另一份从来读不到的实例上（同一个坑见
+    #    test_run_id_capture.py / 教程第 32 章，那次的载体是 card_ops）。
+    if name in sys.modules:
+        return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
