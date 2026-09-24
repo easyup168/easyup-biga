@@ -1,3 +1,60 @@
+# ─────────────────────────────────────────────────────────── 打包（批 U-II）
+#
+# 在此之前本文件**只有** [tool.pytest.ini_options] —— `pip install -e .` 这条
+# 外部评审 F 节的验收标准必然失败。批 U-II 补上 [build-system] + [project]。
+#
+# 🔴 本批刻意不删除、不修改任何现有的 `sys.path.insert`（那是批 U-III）。
+#    这一批结束时「旧的能跑的方式」与「新的能跑的方式」**同时成立**。
+
+[build-system]
+# setuptools 而不是 hatchling：这是一个 src-layout 的**纯 Python 零依赖**包，
+# 不需要 hatchling 的任何特性；setuptools 是最无聊、最不会让人意外的选择，
+# 且系统 python 本来就带着它。>=77 是因为下面用了 PEP 639 的 license 写法。
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "easyup-biga"
+# 🔴 版本号不写 0.2.0。最后一个发布版是 v0.2.0（tag 存在），而 HEAD 远在它之后
+#    ——写 0.2.0 等于宣称「这棵树就是那个 tag」，是假的。`.dev0` 是 PEP 440 的
+#    开发版记号，明确表示「在 0.2.0 之后、尚未发布」。
+#    ⚠️ 这个数字现在有两个出处（这里 + CHANGELOG.md），正是 L-3 的形状 ——
+#    由 tests/test_packaging.py 钉住两者不矛盾。发版时两处一起改。
+version = "0.3.0.dev0"
+description = "Multi-Agent A 股短线决策辅助系统：不自动下单，产出证据可追溯、可回放的 Decision Card"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+
+# 🔴 零运行时依赖，这是**扫出来的不是抄来的**：AST 扫 src/ 与 skills/ 下全部
+#    import，非 stdlib 的只有 easyup_biga 自己、以及 skills/*/scripts/ 里几个
+#    互相 import 的兄弟模块。网络采集走 stdlib 的 urllib.request，没有 requests。
+#    由 tests/test_packaging.py 的「声明零依赖 ⇔ 代码里真的没有第三方 import」
+#    双向钉住 —— 哪天有人 `import requests` 忘了声明，那条会红。
+dependencies = []
+
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Private :: Do Not Upload",   # 这是决策辅助系统，不往 PyPI 发
+]
+
+[project.urls]
+Homepage = "https://github.com/easyup168/easyup-biga"
+Changelog = "https://github.com/easyup168/easyup-biga/blob/main/CHANGELOG.md"
+
+# 🔴 没有 [project.scripts]，这是**裁定不是遗漏**（F 节原文点名了这一项）。
+#    理由见 CHANGELOG「批 U-II」条目：tools/verify/*.py 里 8 个靠 __file__ 回溯
+#    仓库根并挂 skills/，是**仓库绑定**的脚本；tools/ 本身没有 __init__.py，
+#    不是 Python 包。要做成 console script 只有两条路，都不属于本批。
+
+[tool.setuptools.packages.find]
+where = ["src"]
+# 显式白名单：src/ 下还有一个空的 data/ 目录（批 H-I 的 DEFAULT_DB_PATH 残留）。
+# 它今天没有 __init__.py 所以 find 本来就不会收它，但判据不该依赖「它碰巧没有」。
+include = ["easyup_biga*"]
+
 [tool.pytest.ini_options]
 # skills/ 是薄壳包根 —— 业务代码一律 `from _contract import ...`（壳会 re-export）。
 # src/ 是真实实现根 —— 契约/存储/采集三层已迁至 easyup_biga.{domain,persistence,
