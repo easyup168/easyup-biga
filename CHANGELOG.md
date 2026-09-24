@@ -15,6 +15,77 @@
 
 ## [未发布]
 
+### ✨ 新增 · F 节批 U-IV：接上 ruff / mypy，拿一个**有人会看**的基线
+
+F 节四个子批的最后一个。范围刻意收窄成**只加配置 + 记一个数，不承诺清空历史
+违规** —— 一个跑了这么久的仓库第一次接 lint，目标若定成「清零」，范围会失控到
+覆盖全仓大部分文件，而那跟 F 节本身（打包与依赖清理）已经不是同一件事。
+
+🔴 **`line-length` 是本批唯一真正重要的决定**，两个数的差别全在它身上：
+
+| 配置 | ruff 报出 |
+|---|---|
+| ruff 默认 `line-length = 88` | **741** 条 |
+| 本批采用 `line-length = 100` | **169** 条 |
+
+741 里 **603 条是 E501，占 81%**，其中 **63% 含中文**。原因是个容易漏的细节：
+**ruff 的 E501 按「显示列宽」算，不按字符数** —— 中日韩字符占两列，88 列
+≈ 44 个汉字，于是「这行中文注释比 44 个汉字长」被报了 383 次。
+
+⇒ 一份没人看的 lint 配置**比没有 lint 更糟：它训练人忽略输出**，而一旦养成
+「ruff 报的都是噪音」的习惯，真问题混在里面也照样被划过去。
+
+所以这个值是**量**出来的不是拍的。实测全仓 36852 行的列宽分布：
+`p50=43 / p90=79 / p98=88 / p99=91 / p99.9=101 / max=114`；
+`limit=88` 超限 616 行（1.67%），`limit=100` 超限 37 行（0.10%），
+`limit=120` 一条不报。⇒ 仓库的事实约定就是 100 列，不是 88。
+收紧到 88 是一次独立的、范围明确的排版工作，不该藏在「接入 lint」里。
+
+- **规则集只开 `E`/`F`/`I`**。`F`（pyflakes）报的是真问题；`B`/`UP`/`SIM`/`ANN`
+  引出的是**写法偏好**（「这里该用推导式」「`Optional[X]` 该写成 `X | None`」），
+  一开就是几百条、每条都要一次「我们到底要不要这么写」的讨论 —— 那是另一件事。
+- **mypy 从宽松开始**：`ignore_missing_imports` + `follow_imports=silent`，
+  strict 系列刻意不开 —— 开了就等于承诺清零，而本批明确不承诺。
+- **工具进 `[project.optional-dependencies].dev`，不进 `dependencies`。**
+  批 U-II 给 `dependencies` 立了「声明 ⇔ 代码双向一致」的守卫，而 ruff/mypy
+  谁也不会被包里的代码 import —— 写进去会当场违反那条守卫，且那也确实是假的：
+  **不装 ruff 照样能跑整套系统**。配置同理放 `pyproject.toml`，不新开两个 dotfile。
+
+**基线（在最终会发布的那棵树上量的，含 batch3）**：
+
+- ruff **169** 条：`I001` 90 / `E501` 36 / `F401` 28 / `E702` 4 /
+  `F541`·`E402`·`E401`·`F811`·`F841` 各 2 / `E741` 1。
+  按目录 `tests/` 96 · `skills/` 44 · `src/` 20 · `tools/` 9，其中 **124 条可自动修**。
+- mypy **35** 条 / 9 个文件（共检查 32 个）：`arg-type` 23 / `attr-defined` 11 /
+  `return-value` 1。
+
+🔴 **基线光给总数没用，得说清根因。** 那 11 条 `attr-defined` 全是同一句话
+（`"MissingItem" has no attribute "code"`）—— `MissingItem` 是手写的 `str` 子类，
+`code` 只在 `__new__` 里经 `object.__setattr__` 赋值、没有类级注解，属性在运行时
+确实存在，**不是 bug**。补一行 `code: str` 能一次消掉 11 条，但那是改契约代码，
+属于另一次有范围的工作。`arg-type` 的 23 条也集中在两桶：9 条是 `list[X]` 传给
+期望 `tuple[X, ...]` 的参数（契约类冻结成 tuple、构造时由 `deep_freeze` 归一，
+诚实的修法是把注解放宽成 `Sequence[X]`）；8 条是 `int(cur.lastrowid)` ——
+⚠️ mypy 指着的正是**教程第 34 章记过的那件事**（`ON CONFLICT DO NOTHING` 冲突时
+`lastrowid` 不可靠 ⇒ 看 `rowcount`）。这 8 处都是普通 INSERT，今天取不到 `None`。
+
+### 🐛 修复 · 3 处注解引用了本文件从未 import 的 `datetime`（ruff F821）
+
+`domain/verdict.py:442` / `providers/eastmoney.py:114` / `providers/sina.py:99`
+三处都写着 `-> datetime | None` 一类的注解，而**文件从头到尾没有 import `datetime`**。
+
+没炸是因为这些模块都有 `from __future__ import annotations` ⇒ 注解是字符串，
+从不求值。🔴 **但要说清它坏在哪、不要说过头**（第 47 章的教训：潜伏 ≠ 正在发生）：
+实测 `typing.get_type_hints(...)` 真的抛 `NameError: name 'datetime' is not defined`，
+而普通 `import` 与构造**完全不受影响**。⇒ 属于**潜伏** —— 任何要解析注解的东西
+（`get_type_hints`、某些序列化/校验库、IDE 类型推断）碰到就会炸，而今天仓库里
+没有这样的调用方。修法是三行 `from datetime import datetime`；
+改完 `get_type_hints` 能正常解出 `datetime.datetime | None`。
+
+这是本批唯一动的运行代码 —— 提示词要求「发现明显是真 bug 的单独修掉并写清楚，
+但不要把这一批变成顺手把看到的都修了」。
+
+
 ### ✨ 新增 · F 节批 U-II：`pyproject.toml` 正式化，这个仓库现在装得上了
 
 此前 `pyproject.toml` **只有** `[tool.pytest.ini_options]` —— 外部评审 F 节那条

@@ -40,6 +40,14 @@ classifiers = [
     "Private :: Do Not Upload",   # 这是决策辅助系统，不往 PyPI 发
 ]
 
+# 开发工具链（批 U-IV）。**不是运行时依赖** —— 不装照样能跑整套系统，
+# 装了才有 ruff/mypy：`pip install -e ".[dev]"`。
+# 放 optional-dependencies 而不是 dependencies，是为了不破坏 U-II 那条
+# 「声明 ⇔ 代码双向一致」的守卫：它查的是 [project.dependencies]，
+# 而 ruff/mypy 谁也不会被包里的代码 import。
+[project.optional-dependencies]
+dev = ["ruff>=0.16", "mypy>=1.11"]
+
 [project.urls]
 Homepage = "https://github.com/easyup168/easyup-biga"
 Changelog = "https://github.com/easyup168/easyup-biga/blob/main/CHANGELOG.md"
@@ -54,6 +62,37 @@ where = ["src"]
 # 显式白名单：src/ 下还有一个空的 data/ 目录（批 H-I 的 DEFAULT_DB_PATH 残留）。
 # 它今天没有 __init__.py 所以 find 本来就不会收它，但判据不该依赖「它碰巧没有」。
 include = ["easyup_biga*"]
+
+# ─────────────────────────────────────────────────── lint / 类型检查（批 U-IV）
+#
+# 🔴 本批范围刻意收窄：**只加配置 + 拿一个基线，不承诺清空历史违规**。
+#    一个跑了这么久的仓库第一次接 lint，目标若是「清零」，范围会失控到覆盖
+#    全仓大部分文件 —— 而那跟 F 节本身（打包与依赖清理）已经不是同一件事。
+
+[tool.ruff]
+# 🔴 100 不是拍的，是量出来的。ruff 的 E501 按**显示列宽**算（中日韩字符占
+#    两列），而本仓库大量中文注释 —— 用 ruff 默认的 88 会报 603 条，其中 63%
+#    只是「这行中文注释比 44 个汉字长」。那种基线没人会看，
+#    而一份没人看的 lint 配置比没有更糟：它训练人忽略输出。
+#
+#    实测全仓 36852 行的**列宽**分布：p50=43 / p90=79 / p98=88 / p99=91 /
+#    p99.9=101 / max=114 ⇒ 仓库的事实约定就是 100 列左右。
+#    取 100 ⇒ 超限 37 行（0.10%），一份看得完、改得动的清单。
+#    ⚠️ 想收紧到 88 是一次独立的、范围明确的排版工作，不该藏在「接入 lint」里。
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# 保守子集：E（pycodestyle 错误）/ F（pyflakes 真问题）/ I（import 排序）。
+# 不开 B/UP/SIM/ANN 等 —— 那些引出的是「写法偏好」，属于另一件事。
+select = ["E", "F", "I"]
+
+[tool.mypy]
+# 同样从宽松开始。目标不是「类型完备」，是拿到一个**能比较的基线**。
+python_version = "3.12"
+ignore_missing_imports = true      # 薄壳与 skills/ 脚本不是包，解析不到很正常
+follow_imports = "silent"
+# strict 系列**刻意不开** —— 开了就等于承诺清零，而本批明确不承诺。
 
 [tool.pytest.ini_options]
 # skills/ 是薄壳包根 —— 业务代码一律 `from _contract import ...`（壳会 re-export）。
