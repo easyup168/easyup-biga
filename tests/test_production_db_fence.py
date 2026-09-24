@@ -23,7 +23,6 @@ from __future__ import annotations
 import pathlib
 import sqlite3  # store-exempt: 本文件测的就是「裸 sqlite3 也被拦住」——
 #                 走 _store 只能证明那一条路被拦，证明不了别的路
-import sys
 
 import pytest
 
@@ -54,7 +53,6 @@ class Test围栏真的会红:
     def test_走_store的connect也被拦(self):
         """🔴 判据要打在**业务真正走的那条路**上，不能只拦裸 sqlite3 ——
         「守卫查的地方和它声称守的地方不是同一处」是本仓库最常见的失效形状。"""
-        sys.path.insert(0, str(REPO / "skills"))
         from _store import connect
         with pytest.raises(Exception) as ei:
             with connect(PROD) as c:

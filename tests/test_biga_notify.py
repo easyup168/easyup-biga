@@ -14,12 +14,10 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
-import sys
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _store import init_schema  # noqa: E402
 from _store.db import _insert_notification, connect  # noqa: E402

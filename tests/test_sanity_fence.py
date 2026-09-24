@@ -22,7 +22,6 @@ from dataclasses import dataclass
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _sources.eastmoney import Board, BoardResult  # noqa: E402
 from _sources.sanity import (  # noqa: E402

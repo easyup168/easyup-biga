@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import json
 import pathlib
-import sys
 from datetime import date, timedelta
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _snapshot import MANIFEST_KIND, SnapshotCoordinator, SnapshotReadError  # noqa: E402
 from _sources import DailyBar, SourceError, parse_index_daily  # noqa: E402

@@ -16,7 +16,6 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "risk-check" / "scripts"
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(SCRIPTS))
 
 from _contract import CN_TZ, VETO_STANCE, AgentVerdict, Evidence  # noqa: E402

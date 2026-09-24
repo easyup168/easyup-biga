@@ -25,7 +25,6 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import CN_TZ, AgentVerdict, Evidence, FactBundle  # noqa: E402
 from _store import (  # noqa: E402

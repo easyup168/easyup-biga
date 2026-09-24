@@ -25,11 +25,9 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import sys
 from datetime import timedelta
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import (  # noqa: E402
     STANCE_VOCAB,

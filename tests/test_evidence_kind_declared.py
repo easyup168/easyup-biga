@@ -14,12 +14,10 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import sys
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import (Evidence, OriginRef, evidence_origins,  # noqa: E402
                        now_cn, verdict_origins)

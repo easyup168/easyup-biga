@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import sys
 import time
 from dataclasses import replace
 from datetime import date, timedelta
@@ -19,7 +18,6 @@ from datetime import date, timedelta
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import now_cn  # noqa: E402
 from _snapshot import SnapshotCoordinator, SnapshotReadError  # noqa: E402

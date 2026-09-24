@@ -16,17 +16,14 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import Evidence, OriginRef, now_cn  # noqa: E402
 
-sys.path.insert(0, str(REPO / "src"))
 from easyup_biga.domain.evidence import EVIDENCE_KINDS  # noqa: E402
 
 CN = timezone(timedelta(hours=8))

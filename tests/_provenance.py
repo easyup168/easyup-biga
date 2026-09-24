@@ -25,11 +25,9 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
-import sys
 from datetime import timedelta
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
     CONTRACT_VERSION,

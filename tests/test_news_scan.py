@@ -9,7 +9,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
-import sys
 from datetime import datetime, timedelta
 
 import pytest
@@ -17,7 +16,6 @@ import pytest
 import _contract.evidence as evidence_mod
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import CN_TZ, new_task_id  # noqa: E402
 from _sources.sina_news import NewsFeed, NewsItem  # noqa: E402

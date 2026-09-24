@@ -8,14 +8,12 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "tests"))
 
 from _contract import (  # noqa: E402
     STANCE_VOCAB,

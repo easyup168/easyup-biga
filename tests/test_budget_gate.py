@@ -18,7 +18,6 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "skills" / "decision-card" / "scripts"))
 
 import budget  # noqa: E402
@@ -162,7 +161,6 @@ class TestCli:
         run("--by", "one", env=env)
         for _ in range(3):
             run("--by", "spam", env=env)
-        sys.path.insert(0, str(REPO / "skills"))
         with db.connect(tmp_path / "e.db", readonly=True) as c:
             n = c.execute("SELECT count(*) FROM decision_ids").fetchone()[0]
         assert n == 1, f"被拦了 3 次却占掉了 {n} 个号"

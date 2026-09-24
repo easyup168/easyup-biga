@@ -18,13 +18,10 @@ tests/` 一条不命中。改一个没有基线的函数，等于在猜。
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills"))
 
 from _contract import CN_TZ  # noqa: E402
 from _sources.tradetime import market_is_open, session_in_progress  # noqa: E402

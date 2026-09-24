@@ -16,12 +16,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills"))
 
 from _contract import CN_TZ  # noqa: E402
 from _sources import szse  # noqa: E402

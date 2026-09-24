@@ -14,17 +14,14 @@ from __future__ import annotations
 
 import json
 import pathlib
-import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "tests"))
 
 from _contract import AgentVerdict, Evidence, FactBundle, now_cn  # noqa: E402
 
-sys.path.insert(0, str(REPO / "src"))
 from easyup_biga.domain._freeze import deep_freeze, thaw  # noqa: E402
 from easyup_biga.domain.verdict import _same_value  # noqa: E402
 
