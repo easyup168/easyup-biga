@@ -29,6 +29,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+/build/
+/dist/
 
 # === Windows 残留 ===
 # 从 Windows 复制文件到 WSL 时产生的 NTFS 备用数据流标记

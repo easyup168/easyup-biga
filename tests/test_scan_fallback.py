@@ -101,7 +101,12 @@ def test_把仓库剥掉git之后守卫仍然全绿(tmp_path):
             #    被原样复制进沙盒，于是三条出卡路径测试全部拿到 rc=3。
             #    沙盒要复制的是**代码**，不是这台机器此刻的运行状态。
             ".biga-card-stop", ".biga-card.lock",
-            ".git", "__pycache__", ".pytest_cache", "data", ".claude", "memory"))
+            ".git", "__pycache__", ".pytest_cache", "data", ".claude", "memory",
+            # 🔴 2026-09-24：同一个坑的第二个实例。F 节打包工作开工后，
+            #    `build/`（setuptools 的构建产物）第一次出现在这台机器上，
+            #    这份硬编码名单没跟上——它比对的是 git ls-files 之外的东西，
+            #    不读 .gitignore，加了 .gitignore 条目救不了它。
+            "build", "dist", "*.egg-info"))
     assert not (work / ".git").exists(), "副本里还有 .git，这条测试等于没测"
 
     r = subprocess.run(
