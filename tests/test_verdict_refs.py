@@ -38,6 +38,7 @@ from _store import (  # noqa: E402
     save_fact_bundle,
     save_verdict,
 )
+from _roster import absent_registrations, DEFAULT_ROSTER  # noqa: E402
 
 AMEND = REPO / "skills" / "decision-card" / "scripts" / "amend_verdict.py"
 SYNTH = REPO / "skills" / "decision-card" / "scripts" / "synthesize.py"
@@ -218,9 +219,10 @@ class TestSynthesizeByIds:
         # 🔴 F-8：2 个 agent 到场，另外 4 个天然缺席——roster 判据按计数
         #    比较，4 条 --extra-missing 才够（本文件不测 roster）。
         extra_missing_args = []
-        for i in range(4):
-            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
-                                   f"占位{i}——本文件不测 roster"]
+        # 🔴 批 P：每个缺席的 agent 各一条**对得上号**的登记（代码里带 agent 名）。
+        #    以前是 N 条 supervisor.agent_offline 凑条数——那正是评审 §18 指出的洞。
+        for m in absent_registrations(["market", "emotion"]):
+            extra_missing_args += ["--extra-missing", m.code, str(m)]
         r = self._run("--verdict-ids", f"{a},{b}", "--status", "WAIT",
                       "--headline", "h", "--model-ref", "m",
                       *extra_missing_args,

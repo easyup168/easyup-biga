@@ -48,6 +48,7 @@ from _contract import (  # noqa: E402
     STAGE1_AGENTS,
     SYNTHESIZER_AGENT,
     MissingItem,
+    absent_agent_missing,
     RunContext,
     RunState,
     card_event_type,
@@ -328,8 +329,10 @@ class DecisionOrchestrator:
 
         # 缺席 agent → 缺失项（程序算，不是判官报）。缺席是完整性事实。
         absent = [a for a in (*STAGE1_AGENTS, RISK_AGENT) if a not in present]
-        extra = [MissingItem(f"{a} 未返回结果", "supervisor.agent_no_response")
-                 for a in absent]
+        # 🔴 批 P：代码里带上是**哪个** agent（`supervisor.<agent>.agent_no_response`）。
+        #    共用一个代码的话，「缺了谁」只存在于给人看的那句话里，
+        #    `_check_roster` 就只能比条数、对不上号（评审 §18）。
+        extra = [absent_agent_missing(a) for a in absent]
         return card_ops.Judgment(status=j["status"], headline=j["headline"],
                                  synthesis=j["synthesis"], extra_missing=extra)
 

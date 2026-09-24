@@ -54,6 +54,7 @@ from _store import (  # noqa: E402
     save_fact_bundle,
     verify_verdict_refs,
 )
+from _roster import absent_registrations  # noqa: E402
 from _provenance import (  # noqa: E402
     TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run, provenance_for)
 
@@ -316,10 +317,10 @@ class TestLegacySynthesizeCLI:
         #    先查「给了判断就必须有 stance」，没 stance 会在这道更早的闸门上退出，
         #    那样这两条测的就不是本批新加的那道了（探针纪律：先确认命中的是目标条件）。
         vid = save_verdict(_verdict(), path=db)
-        # 只有 1 个 agent 到场，另外 5 个天然缺席 —— roster 判据按计数比较。
+        # 批 P：每个缺席 agent 各一条对得上号的登记（判据不再是比条数）。
         em = []
-        for i in range(5):
-            em += ["--extra-missing", "supervisor.agent_offline", f"占位{i}"]
+        for m in absent_registrations(["market"]):
+            em += ["--extra-missing", m.code, str(m)]
         return subprocess.run(
             [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
              "--verdict-ids", str(vid), "--status", "WAIT", "--headline", "h",

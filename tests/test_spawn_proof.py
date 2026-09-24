@@ -274,7 +274,8 @@ class TestWiredIntoRealPath:
         return (
             "import sys\n"
             f"sys.path.insert(0, {str(work / 'skills')!r})\n"
-            "from _contract import (AgentVerdict, CONTRACT_VERSION, DecisionCard,\n"
+            "from _contract import (EXPECTED_ROSTER, absent_agent_missing,\n"
+            "                       AgentVerdict, CONTRACT_VERSION, DecisionCard,\n"
             "                       Evidence, FactBundle, VerdictRef, new_run_context,\n"
             "                       now_cn)\n"
             "from _store import (init_schema, load_verdict_meta, open_run,\n"
@@ -309,8 +310,9 @@ class TestWiredIntoRealPath:
             "                 contract_version=CONTRACT_VERSION, run_id=RID)\n"
             "card = DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
             "                    verdicts=[v], synthesis='', model_ref='m',\n"
-            "                    missing=['占位1 —— 本文件不测 roster',\n"
-            "                             '占位2', '占位3', '占位4', '占位5'],\n"
+            # 🔴 批 P：每个缺席 agent 各一条解得出它名字的登记（评审 §18）。
+            "                    missing=[absent_agent_missing(a)\n"
+            "                             for a in EXPECTED_ROSTER if a != 'market'],\n"
             "                    run_id=RID, evidence_set_id='es-stub',\n"
             "                    input_verdict_refs=[ref])\n"
             f"save_card(card, path={str(db)!r})\n"

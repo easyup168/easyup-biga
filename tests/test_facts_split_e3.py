@@ -131,7 +131,7 @@ def _save_outcome(agent, stance, *, missing=None):
         task_id=TID, agent=agent,
         status="completed" if not missing else "partial",
         verdict="PASS" if not missing else "WARNING",
-        result={f"{agent}_x": 1}, data_completeness=1.0,
+        result={f"{agent}_x": 1.0}, data_completeness=1.0,
         evidence=[_ev(f"{agent}_x")], missing=list(missing or []))
     fid = save_fact_bundle(fb)
     return save_assessment(AgentAssessment(task_id=TID, agent=agent, stance=stance),

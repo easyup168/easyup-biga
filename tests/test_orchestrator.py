@@ -294,7 +294,9 @@ class TestPartialAndFailure:
         ctx = new_run_context(origin="cli", non_interactive=True)
         card = orch.run(ctx)
         codes = [m.code for m in card.missing]
-        assert "supervisor.agent_no_response" in codes
+        # 🔴 批 P：代码里带上是**哪个** agent 缺席 —— 共用一个代码的话
+        #    `_check_roster` 只能比条数、对不上号（评审 §18）。
+        assert "supervisor.news.agent_no_response" in codes
         # 状态仍到 COMPLETED（出一张标着缺失的卡，比不出强）
         assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.COMPLETED
 

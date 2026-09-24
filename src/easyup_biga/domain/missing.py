@@ -71,13 +71,61 @@ import re
 from dataclasses import FrozenInstanceError
 from typing import Any
 
-__all__ = ["MissingItem", "LEGACY_CODE", "CODE_RE"]
+__all__ = ["MissingItem", "LEGACY_CODE", "CODE_RE",
+           "ABSENT_REASONS", "absent_agent_code", "absent_agent_of",
+           "absent_agent_missing"]
 
 #: 历史遗留：Phase 1/2 早期落库的裸字符串缺失项。
 LEGACY_CODE = "legacy.unclassified"
 
 #: `<域>.<对象>.<原因>` —— 至少两段，全小写点分。
 CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+
+#: 「某个 agent 缺席」这类缺失项的代码前缀与原因词（批 P，外部评审 §18）。
+#:
+#: 🔴 形状是 `supervisor.<agent>.<reason>` —— **agent 名字进代码**。
+#: 在它之前所有缺席共用一个 `supervisor.agent_no_response`，于是「缺了谁」这件事
+#: 只存在于给人看的那句话里。后果不是卡上少一条（实测不会少：`card_ops.synthesize`
+#: 按「代码+文本」复合键去重，文本不同就都留着），而是**机器无从核对**：
+#: `_check_roster` 只能比较条数，5 个 agent 缺席 + 5 条毫不相干的 missing 照样通过
+#: （实测复现）。
+#:
+#: 为什么以前只比条数：按文本去猜「这条 missing 说的是不是那个缺席的 agent」是
+#: L-13（按字符串形状分类）。**把 agent 放进代码之后，对应关系变成结构化的**，
+#: 不需要猜任何文本 —— 这是本批能收紧那道检查的前提。
+ABSENT_REASONS: frozenset[str] = frozenset({"agent_no_response", "agent_offline"})
+
+
+def absent_agent_code(agent: str, reason: str = "agent_no_response") -> str:
+    """造一条「`agent` 缺席」的缺失项代码。生产方唯一入口。"""
+    if reason not in ABSENT_REASONS:
+        raise ValueError(
+            f"缺席原因只能是 {sorted(ABSENT_REASONS)} 之一，收到 {reason!r}")
+    return f"supervisor.{agent}.{reason}"
+
+
+def absent_agent_missing(agent: str, *, reason: str = "agent_no_response",
+                         detail: str | None = None) -> "MissingItem":
+    """造一条「`agent` 缺席」的缺失项（代码 + 给人看的话）。
+
+    编排器与测试共用它 —— 代码怎么拼只有一份实现，`_check_roster` 的解析端
+    才不会某天与生产端漂移（L-3）。
+    """
+    return MissingItem(detail or f"{agent} 未返回结果", absent_agent_code(agent, reason))
+
+
+def absent_agent_of(code: str) -> str | None:
+    """从代码里解出它说的是哪个 agent 缺席；不是这类代码就返回 None。
+
+    🔴 判据是**结构**（第一段 `supervisor` + 第三段在 `ABSENT_REASONS` 里），
+    不是文本相似度。老卡的 `supervisor.agent_offline` 只有两段、解不出 agent ⇒
+    返回 None —— 那是如实的「这条代码说不出是谁」，不是错误（见
+    `DecisionCard._check_roster` 的三段式）。
+    """
+    parts = str(code).split(".")
+    if len(parts) != 3 or parts[0] != "supervisor" or parts[2] not in ABSENT_REASONS:
+        return None
+    return parts[1]
 
 
 class MissingItem(str):

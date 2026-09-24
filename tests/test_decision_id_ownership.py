@@ -40,6 +40,8 @@ from _contract import (  # noqa: E402
 )
 from _store import db  # noqa: E402
 from _provenance import provenance_for  # noqa: E402
+from _roster import absent_registrations  # noqa: E402
+from _roster import absent_registrations, DEFAULT_ROSTER  # noqa: E402
 
 
 def _verdict(agent: str, task_id: str, *, stance: str | None = None) -> AgentVerdict:
@@ -174,7 +176,7 @@ class TestReservationIsAtomic:
             decision_id=new_task_id(9), status="WAIT", headline="h",
             verdicts=[_verdict("market", new_task_id(9))],
             synthesis="s", model_ref="m",
-            missing=[f"占位{i}——本文件不测 roster" for i in range(5)],
+            missing=absent_registrations([_verdict("market", new_task_id(9))]),
             **dict(zip(("run_id", "evidence_set_id", "input_verdict_refs"),
                        provenance_for(p, new_task_id(9), ["market"]))))
         db.save_card(card, path=p)
@@ -218,9 +220,10 @@ class TestSynthesizeReusesUpstreamId:
         # 🔴 F-8：2 个 agent 到场，另外 4 个天然缺席——roster 判据按计数
         #    比较，4 条 --extra-missing 才够。
         extra_missing_args = []
-        for i in range(4):
-            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
-                                   f"占位{i}——本文件不测 roster"]
+        # 🔴 批 P：每个缺席的 agent 各一条**对得上号**的登记（代码里带 agent 名）。
+        #    以前是 N 条 supervisor.agent_offline 凑条数——那正是评审 §18 指出的洞。
+        for m in absent_registrations(["market", "emotion"]):
+            extra_missing_args += ["--extra-missing", m.code, str(m)]
         r = subprocess.run(
             [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
              "--verdict-ids", ",".join(map(str, ids)), "--status", "WAIT",

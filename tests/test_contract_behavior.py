@@ -27,6 +27,7 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
+from _roster import absent_registrations  # noqa: E402
 
 T0 = now_cn()
 TID = new_task_id(1, day="20260919")
@@ -178,6 +179,64 @@ class TestVerdictIronLaw3:
             evidence=[ev("limit_up", source="em:api/a"), ev("limit_up", source="sina:b")],
         )
         assert len(v.evidence_for("limit_up")) == 2
+
+
+class TestIronLaw3ValuesMustAgree:
+    """铁律 3 的另一半（批 P，外部评审 §16）：有同名证据 ≠ 证据**支持**这个值。
+
+    在这条之前契约只查「result 的键有没有同名 Evidence」，不查两边的**值**。
+    于是评审举的这个例子能被原样接受、落库、上卡：
+
+        result["market.x"] = 100
+        Evidence(field="market.x", value=1)
+
+    一个卖点是「证据可追溯」的系统，最不能有的就是它 —— 卡面那个数与它声称的
+    证据对不上，而每一道既有检查都通过。R-3 的形状：看起来被验过，其实没有。
+
+    ⚠️ 实测生产库 411 个 result 字段，canonical JSON **全部相等**，0 个例外 ——
+       这条加上去不误伤任何存量数据，它拦的是将来手搓 / LLM 填值那类路径。
+    """
+
+    def test_值对不上被拒(self):
+        with pytest.raises(ValueError, match="与它自己的证据对不上"):
+            verdict(result={"limit_up": 100}, evidence=[ev("limit_up", value=1)])
+
+    def test_值一致放行(self):
+        v = verdict(result={"limit_up": 42}, evidence=[ev("limit_up", value=42)])
+        assert v.result["limit_up"] == 42
+
+    def test_int与float算不同(self):
+        """判据是 canonical JSON，与回放比对同口径 —— `1` 与 `1.0` 序列化后不同。
+
+        两处口径不一致的话会出现「契约说相等、回放说不等」这种最难查的矛盾。
+        """
+        with pytest.raises(ValueError, match="与它自己的证据对不上"):
+            verdict(result={"limit_up": 1}, evidence=[ev("limit_up", value=1.0)])
+
+    def test_多条同名证据只要有一条对得上就放行(self):
+        """多来源合成时逐条判等无从谈起 —— 判据是「至少有一条对得上」。"""
+        v = verdict(result={"limit_up": 42},
+                    evidence=[ev("limit_up", value=1, source="em:a"),
+                              ev("limit_up", value=42, source="sina:b")])
+        assert len(v.evidence_for("limit_up")) == 2
+
+    def test_多条同名证据全都对不上仍被拒(self):
+        """🔴 反面：否则加一条对不上的装饰性证据就能绕过整条检查。"""
+        with pytest.raises(ValueError, match="与它自己的证据对不上"):
+            verdict(result={"limit_up": 42},
+                    evidence=[ev("limit_up", value=1, source="em:a"),
+                              ev("limit_up", value=2, source="sina:b")])
+
+    def test_NaN不被误判成对不上(self):
+        """🔴 判据只管「一不一样」，不管「合不合法」。
+
+        第一版用 `allow_nan=False` 序列化，NaN 失败后退回 `==`，而 `nan != nan`
+        ⇒ 两边**本来就相同**的 NaN 被判成对不上，抢在真正该报错的那道
+        （写边界的严格 JSON）前面报了个不相干的错。
+        """
+        nan = float("nan")
+        v = verdict(result={"limit_up": nan}, evidence=[ev("limit_up", value=nan)])
+        assert v.result["limit_up"] != v.result["limit_up"]   # 确实是 NaN
 
 
 class TestVerdictIronLaw4:
@@ -406,17 +465,24 @@ class TestCardRoster:
     skeleton、agent 掉线都是合法场景），但**缺席且解释不够**才是错误——
     那正是"静默"两个字要防的东西。
 
-    评审 F-8（对 F-6 的第二轮独立复核）指出："解释不够"最初的判据只问
-    「missing 是不是非空」，不问「够不够」——5 个 agent 缺席，随便挂 1 条
-    毫不相关的 missing 也能通过。收紧成**计数**：`missing` 条数必须不少于
-    缺席 agent 数，不比较任何文本（`_check_roster` 的 docstring 里写了
-    为什么不比较文本——L-13）。
+    评审 F-8（对 F-6 的第二轮独立复核）把判据从「missing 非空」收紧成**计数**：
+    条数必须不少于缺席 agent 数。当时只能比条数——按文本去猜「这条 missing 说的
+    是不是那个缺席的 agent」属于 L-13（按字符串形状分类）。
+
+    🔴 批 P（外部评审 §18）又往前推了一步：**计数挡不住「条数够但对不上号」**。
+    实测复现：5 个 agent 缺席 + 5 条毫不相干的 `risk.upstream.coverage_incomplete`，
+    旧判据照样放行。把 agent 名字放进代码（`supervisor.<agent>.<reason>`，见
+    `_contract.absent_agent_code`）之后，对应关系变成**结构化**的，不需要猜任何
+    文本——这是能收紧的前提，不是放弃了 L-13 那条纪律。
+
+    ⇒ 现在的判据：**每个缺席的 agent 都要有一条解出它自己名字的缺失项**。
     """
 
-    #: F-8 之后的用例需要"缺席几个就给几条解释"——内容不必精确对应
-    #: 哪个 agent（判据本来就不比较文本），这里凑够 5 条只是为了可读。
-    _FIVE_EXPLANATIONS = [f"{a} agent 尚未上线"
-                         for a in ("market", "sector", "technical", "news", "risk")]
+    #: 批 P：每个缺席 agent 各一条**对得上号**的登记。
+    #: ⚠️ 以前这里是 5 条「内容不必精确对应哪个 agent」的解释——那正是新判据要拦的。
+    @staticmethod
+    def _registrations(present=("emotion",)):
+        return absent_registrations(present)
 
     def test_重复agent被拒(self):
         """探针：造一个重复 agent —— 两条判定，同一个 agent 名字。"""
@@ -436,38 +502,45 @@ class TestCardRoster:
         这条对应设计文档表格字面探针「缺席也报红」；F-6 之前的版本
         在这里只报告不拒绝，评审指出与表格不一致，折中方案把这条补上。
         """
-        with pytest.raises(ValueError, match="缺席.*但 missing 只有 0 条"):
+        with pytest.raises(ValueError, match="没有对应的缺失项"):
             card(verdicts=[verdict(agent="emotion")], missing=[])
 
-    def test_缺席多于missing条数仍被拒(self):
-        """F-8 的回归：只解释了一部分缺席，不该被"非空"这么弱的判据放行。
-
-        5 个 agent 缺席，只给 1 条解释——F-6 最初的版本会放行这个场景
-        （只问"非空"），F-8 之后必须拒绝（1 < 5）。
-        """
-        with pytest.raises(ValueError, match="但 missing 只有 1 条"):
+    def test_只解释了一部分缺席仍被拒(self):
+        """F-8 的回归（判据换了，结论不变）：漏登记一个也不许过。"""
+        with pytest.raises(ValueError, match="没有对应的缺失项"):
             card(verdicts=[verdict(agent="emotion")],
-                 missing=["risk agent 尚未上线"])
+                 missing=self._registrations()[:-1])
 
-    def test_缺席数与missing条数相等就放行(self):
-        """5 个 agent 缺席、5 条解释——计数够了，哪怕内容不精确对应任何一个。"""
-        c = card(verdicts=[verdict(agent="emotion")], missing=self._FIVE_EXPLANATIONS)
+    def test_条数够了但对不上号也被拒(self):
+        """🔴 批 P 新增，本批存在的理由。
+
+        5 个 agent 缺席 + 5 条毫不相干的 missing —— **条数完全够**，旧的计数判据
+        放行（实测复现过）。缺席与解释之间没有任何对应关系被检查，而卡面上看起来
+        「缺席都登记了」。
+        """
+        junk = [MissingItem(f"跟缺席毫无关系的第{i}条",
+                            "risk.upstream.coverage_incomplete") for i in range(5)]
+        with pytest.raises(ValueError, match="没有对应的缺失项"):
+            card(verdicts=[verdict(agent="emotion")], missing=junk)
+
+    def test_每个缺席各有一条对应登记就放行(self):
+        c = card(verdicts=[verdict(agent="emotion")], missing=self._registrations())
         assert set(STANCE_VOCAB) - {"emotion"} == set(c.absent_agents)
 
-    def test_missing条数多于缺席数也放行(self):
-        """判据是"不少于"，不是"恰好等于"——多给解释不该被拒。"""
+    def test_多给解释不被拒(self):
+        """判据是「每个缺席都对得上」，不是「条数恰好相等」——多给不该被拒。"""
         c = card(verdicts=[verdict(agent="emotion")],
-                 missing=self._FIVE_EXPLANATIONS + ["额外一条"])
+                 missing=self._registrations() + [MissingItem("额外一条", "supervisor.evidence_conflict")])
         assert set(STANCE_VOCAB) - {"emotion"} == set(c.absent_agents)
 
     def test_旧卡里缺席无解释只警告不拒(self):
         """新卡严格，旧卡可读——与重复 agent 同一套三段式。"""
         c = card(verdicts=[verdict(agent="emotion")], missing=[], from_store=True)
-        assert c.roster_warning and "但 missing 只有 0 条" in c.roster_warning
+        assert c.roster_warning and "没有对应的缺失项" in c.roster_warning
 
     def test_absent_agents报出缺席(self):
         """探针：同一个缺席场景，`absent_agents` 必须如实报出来。"""
-        c = card(verdicts=[verdict(agent="emotion")], missing=self._FIVE_EXPLANATIONS)
+        c = card(verdicts=[verdict(agent="emotion")], missing=self._registrations())
         assert "emotion" not in c.absent_agents
         assert set(STANCE_VOCAB) - {"emotion"} == set(c.absent_agents)
         assert len(c.absent_agents) >= 5
@@ -482,7 +555,7 @@ class TestCardRoster:
         卡面是"谁会去找它"判据下最低成本的消费方：不需要新增巡检工具，
         render() 本来就会被每一次出卡调用。
         """
-        c = card(verdicts=[verdict(agent="emotion")], missing=self._FIVE_EXPLANATIONS)
+        c = card(verdicts=[verdict(agent="emotion")], missing=self._registrations())
         text = c.render()
         assert "已建成 roster 缺席" in text
         for a in c.absent_agents:

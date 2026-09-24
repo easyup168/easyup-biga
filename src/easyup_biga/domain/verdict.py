@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import json
+
 import re
 from dataclasses import dataclass, field as dc_field
 from types import MappingProxyType
@@ -162,6 +164,29 @@ def new_task_id(seq: int, *, day: str | None = None) -> str:
 #    ⇒ 事实层的铁律只有 `check_fact_invariants` 一份；stance 的只有
 #      `check_stance_vocab` + `check_stance_vs_verdict` 两份。谁要校验都调它们。
 
+
+def _same_value(a: Any, b: Any) -> bool:
+    """两个证据值算不算「同一个值」—— 取 canonical JSON，与回放比对同口径。
+
+    🔴 不用 `==`：`1 == 1.0` 为真，但序列化后是 `1` 与 `1.0`，而回放比的是序列化
+    之后的字节。两处口径不一致的话，会出现「契约说相等、回放说不等」这种查起来
+    最费劲的矛盾。
+    🔴 `allow_nan=True`：这里问的是「两个值**一不一样**」，不是「这个值**合不合法**」。
+    NaN/Infinity 合不合法由写边界那道严格 JSON 校验回答（`allow_nan=False`），
+    与这里是两件事。第一版写成 `allow_nan=False`，于是 `NaN` 序列化失败 → 退回
+    `==` → 而 `nan != nan` → 一份 result 与 evidence **本来就相同**的 NaN 被判成
+    「对不上」，抢在真正该报错的那道检查前面报了个不相干的错（实测打红了
+    `TestP4StrictJSON` 六条）。判据搞混「相等」和「合法」就是这个下场。
+
+    序列化不了的值（非 JSON 类型）退回 `==`，在能判的范围内如实回答。
+    """
+    try:
+        return (json.dumps(a, ensure_ascii=False, sort_keys=True, allow_nan=True)
+                == json.dumps(b, ensure_ascii=False, sort_keys=True, allow_nan=True))
+    except (TypeError, ValueError):
+        return a == b
+
+
 def check_fact_invariants(
     *,
     agent: str,
@@ -205,6 +230,51 @@ def check_fact_invariants(
         raise ValueError(
             f"[{agent}] result 字段无证据支撑: {orphan} —— "
             f"已有证据覆盖 {sorted(covered)}。无据之言不入 Card（铁律 3）"
+        )
+
+    # --- 铁律 3 的另一半：有证据还不够，证据得**支持这个值**（批 P，外部评审 §16）---
+    #
+    # 🔴 在这条之前，契约只查「result 的键有没有同名 Evidence」，不查两边的**值**。
+    #    于是这样一份事实能被原样接受并落库上卡：
+    #
+    #        result["market.x"] = 100
+    #        Evidence(field="market.x", value=1)
+    #
+    #    一个卖点是「证据可追溯」的系统，最不能有的就是这个 —— 卡面上那个数
+    #    与它声称的证据对不上，而每一道既有检查都通过。这是 R-3 的形状：
+    #    看起来被验过，其实没有。
+    #
+    # 判据取 canonical JSON 而不是 `==`：`1 == 1.0` 为真但两者序列化后不同，
+    # 而回放比对走的是序列化后的字节 —— 判等口径必须与回放口径一致，否则会出现
+    # 「契约说相等、回放说不等」。
+    # ⚠️ 实测生产库 411 个 result 字段：canonical JSON **全部相等**，0 个例外 ——
+    #    这条加上去不会误伤任何存量数据（它拦的是将来手搓/LLM 填值那类路径）。
+    #
+    # 同名证据不止一条时判据是「**至少有一条**对得上」：多条同名证据意味着这个值
+    # 有多个来源，逐条判等无从谈起；但也不能因此放行 —— 否则加一条对不上的装饰性
+    # 证据就能绕过整条检查。
+    # ⚠️ 「这个值是好几条证据**推导**出来的」这种情况应当显式声明
+    #    `input_evidence_ids`（评审 §16.1），而不是靠一条同名证据冒充直接事实 ——
+    #    那一半留给下一批（实测 244/411 条证据是 `source=derived:*`，涉及六个
+    #    skill、39 种 (agent, field)，是独立的一块工作，不是契约层改一改的事）。
+    unsupported = []
+    for key, value in result.items():
+        same_named = [e for e in evidence if e.field == key]
+        if not same_named:
+            continue                       # 上面的 orphan 检查已经拦过了
+        if not any(_same_value(e.value, value) for e in same_named):
+            unsupported.append(
+                f"{key}: result={value!r}，同名证据的值是 "
+                + " / ".join(repr(e.value) for e in same_named))
+    if unsupported:
+        raise ValueError(
+            f"[{agent}] result 的值与它自己的证据对不上：\n  "
+            + "\n  ".join(unsupported)
+            + "\n  「有同名证据」不等于「证据支持这个值」——"
+            "对不上的话卡面那个数就是无据之言（铁律 3）。\n"
+            "  ⚠️ 判据是 canonical JSON，与回放比对同口径：`1` 与 `1.0` 算**不同**"
+            "（两边要么都写整数、要么都写浮点）。\n"
+            "  如果这个值是多条证据推导出来的，别用一条同名证据冒充直接事实。"
         )
 
     # --- 铁律 1：算不出来不许说 PASS ---

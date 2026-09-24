@@ -38,6 +38,7 @@ from _contract import (  # noqa: E402
     Evidence,
     now_cn,
 )
+from _roster import absent_registrations  # noqa: E402
 
 #: 无日期字段的实时端点 → 它喂出来的字段必须走 `add_live`。
 #:
@@ -125,7 +126,7 @@ class TestCardRendersWarnings:
         #    计数比较，5 条占位才够（本测试类不测 roster）。
         return DecisionCard(decision_id="BIGA-20260921-001", status="WAIT",
                             headline="h", verdicts=[v], synthesis="s", model_ref="m",
-                            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
+                            missing=absent_registrations([v]))
 
     def test_warning_出现在卡面上(self):
         text = self._card(["涨跌家数接口不返回交易日字段"]).render()
@@ -154,7 +155,7 @@ class TestMixedAsOfIsVisible:
             ])
         text = DecisionCard(decision_id="BIGA-20260921-001", status="WAIT",
                             headline="h", verdicts=[v], synthesis="s", model_ref="m",
-                            missing=[f"占位{i}——本文件不测 roster" for i in range(5)]).render()
+                            missing=absent_registrations([v])).render()
         assert old.strftime("%m-%d %H:%M") in text
         assert now.strftime("%m-%d %H:%M") in text, \
             "两个 as_of 必须都出现在卡上 —— 否则读的人以为它们是同一时刻"
@@ -192,7 +193,7 @@ class TestDecisionIdentity:
         #    agent 数），5 条占位覆盖所有调用点的最坏情况（只传 1 个
         #    tid 时缺席数最多，为 5）。这组测试要验的是决策身份，
         #    不该被 roster 判据挡住。
-        kw.setdefault("missing", [f"占位{i}——本文件不测 roster" for i in range(5)])
+        kw.setdefault("missing", absent_registrations(kw.get("verdicts") or []))
         return DecisionCard(
             decision_id=did, status="WAIT", headline="h",
             verdicts=[self._v(names[i], t) for i, t in enumerate(tids)],

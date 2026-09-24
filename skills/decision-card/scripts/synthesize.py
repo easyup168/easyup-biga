@@ -99,7 +99,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--extra-missing", action="append", default=[], nargs=2,
                     metavar=("CODE", "TEXT"),
                     help="Supervisor 自己发现的缺失项：机器可读代码 + 人话，可重复。"
-                         "例如 supervisor.agent_offline \"risk agent 尚未上线\"")
+                         "🔴 登记某个 agent 缺席要用 supervisor.<agent>.agent_no_response"
+                         "（批 P：代码里带 agent 名，roster 检查靠它对号；共用一个 "
+                         "supervisor.agent_offline 的写法对不上号、会被拒）。"
+                         "例如 supervisor.risk.agent_offline \"risk agent 尚未上线\"")
     ap.add_argument("--model-ref", required=True, help="做这次合成的模型标识")
     ap.add_argument("--decision-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
     ap.add_argument("--elapsed-ms", type=int, default=0, help="端到端耗时")
