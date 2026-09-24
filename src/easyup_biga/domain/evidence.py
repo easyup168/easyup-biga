@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ._freeze import deep_freeze, thaw
+from .provenance import OriginRef
 
 __all__ = ["Evidence", "EVIDENCE_KINDS", "SHA256_RE", "CN_TZ", "now_cn"]
 
@@ -92,10 +93,13 @@ class Evidence:
     evidence_set_id: str | None = None
     #: 这条证据是哪一类 —— 见 `EVIDENCE_KINDS`。`None` = 未声明（批 1 的常态）。
     kind: str | None = None
-    #: 派生值的输入：它是从**哪几条证据**算出来的（各自的 `evidence_id`）。
-    #: ⚠️ 批 1 只接住不强制 —— 现在没有任何 skill 会填它。批 2 起 `kind="derived"`
-    #:    必须非空。粒度按字段定（裁定 16），规格在 `TODO.md`「批 1 / 批 2 输入」。
-    input_evidence_ids: tuple[str, ...] = ()
+    #: 这条证据**出自什么**（裁定 16 批 4）。一个列表表达四种来源：
+    #: 另一条证据 / 一份原始响应 / 一份上游判定 / 事实层的一行。见 `OriginRef`。
+    #:
+    #: 🔴 取代了批 1/3 的 `input_evidence_ids`（只能表达「另一条证据」）——
+    #:    风险类字段依据的是「哪些 verdict 到场了」、跨源聚合出自**多份** raw，
+    #:    两者用证据 id 都表达不了，硬塞就是裁定 16 禁止的硬凑。
+    derived_from: tuple[OriginRef, ...] = ()
     #: 🔴 内容寻址的身份：本条证据除 `evidence_id` 外全部内容的 canonical JSON 的 sha256。
     #:
     #: **只由内容算出，不接受构造方传入**（`init=False`）。理由：允许外部传就等于允许
@@ -113,29 +117,35 @@ class Evidence:
         #    一个窗口，而 `value` 里 14.7% 是 dict/list —— 调用方手上那个
         #    原始对象改一下，已经过检的证据就变了，且不会再触发任何校验。
         object.__setattr__(self, "value", deep_freeze(self.value))
-        object.__setattr__(self, "input_evidence_ids", tuple(self.input_evidence_ids))
+        object.__setattr__(self, "derived_from", tuple(self.derived_from))
         if self.kind is not None and self.kind not in EVIDENCE_KINDS:
             raise ValueError(
                 f"Evidence.kind 必须是 {sorted(EVIDENCE_KINDS)} 之一或 None（未声明），"
                 f"收到 {self.kind!r}")
-        for i in self.input_evidence_ids:
-            if not isinstance(i, str) or not SHA256_RE.match(i):
+        for o in self.derived_from:
+            if not isinstance(o, OriginRef):
                 raise ValueError(
-                    f"Evidence.input_evidence_ids 的每一项都必须是 64 位十六进制的 "
-                    f"evidence_id（小写），收到 {i!r}")
-        if self.kind == "derived" and not self.raw_hash and not self.input_evidence_ids:
+                    f"Evidence.derived_from 的每一项都必须是 OriginRef，收到 {o!r} —— "
+                    f"用 `evidence_origins` / `verdict_origins` / `raw_origins` / "
+                    f"`fact_origin` 构造，别自己拼字符串。")
+            if o.kind in ("raw", "evidence") and not SHA256_RE.match(o.ref):
+                raise ValueError(
+                    f"Evidence.derived_from 里 kind={o.kind!r} 的 ref 必须是 64 位"
+                    f"十六进制内容哈希，收到 {o.ref!r}")
+        if self.kind == "derived" and not self.raw_hash and not self.derived_from:
             raise ValueError(
                 f"Evidence(field={self.field!r}, kind='derived') 既没有 raw_hash 也没有 "
                 f"input_evidence_ids —— 派生值必须说得出它是从**什么**算出来的。\n"
                 f"  · 从**一份**原始响应算出来（MA、涨跌幅…）⇒ raw_hash 指回那一份；\n"
                 f"    source 写成 `derived:<那个真实来源>`，`resolve_provenance` 会填上。\n"
-                f"  · 从**别的值**算出来（炸板率 = 炸板/(涨停+炸板)）⇒ 声明 input_evidence_ids，\n"
-                f"    用 `input_ids_for(evidence, ('limit_up_count', 'broken_board_count'))`。\n"
+                f"  · 出自别的东西（另几条证据 / 多份 raw / 上游 verdict / 事实层）\n"
+                f"    ⇒ 声明 derived_from，用 evidence_origins / raw_origins /\n"
+                f"       verdict_origins / fact_origin 构造。\n"
                 f"  两者都没有 = 这个数是从哪来的没人答得上来，而它会印在卡面上。")
-        if self.kind == "parameter" and self.input_evidence_ids:
+        if self.kind == "parameter" and self.derived_from:
             raise ValueError(
-                "Evidence.kind='parameter' 却声明了 input_evidence_ids —— 参数是我们"
-                "自己的设定，没有数据输入。要么它其实是 derived，要么这串 id 是凑的。")
+                "Evidence.kind='parameter' 却声明了 derived_from —— 参数是我们"
+                "自己的设定，没有数据输入。要么它其实是 derived，要么这串来源是凑的。")
         for name in ("field", "source"):
             v = getattr(self, name)
             if not isinstance(v, str) or not v.strip():
@@ -258,7 +268,7 @@ class Evidence:
             "raw_hash": self.raw_hash,
             "evidence_set_id": self.evidence_set_id,
             "kind": self.kind,
-            "input_evidence_ids": list(self.input_evidence_ids),
+            "derived_from": [o.to_dict() for o in self.derived_from],
             "evidence_id": self.evidence_id,
         }
 
@@ -278,5 +288,6 @@ class Evidence:
             #    「旧卡可读」那一段）。`evidence_id` **故意不从 d 取**：它 init=False，
             #    一律由内容重算。存量里那个值不被信任，也就不可能出现「id 与内容不符」。
             kind=d.get("kind"),
-            input_evidence_ids=tuple(d.get("input_evidence_ids") or ()),
+            derived_from=tuple(OriginRef.from_dict(o)
+                               for o in (d.get("derived_from") or ())),
         )

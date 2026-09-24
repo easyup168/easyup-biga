@@ -69,7 +69,8 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
-    input_ids_for,
+    evidence_origins,
+    raw_origins,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -335,12 +336,18 @@ def build_fact_bundle(
         # 批 E-I：只有读冻结的 source 在 c.es_ids 里；其余（腾讯/涨跌家数）返回 None。
         return resolve_provenance(source, c.es_ids)
 
+    def _kline_origins() -> tuple:
+        """沪深两份日线快照的原始响应 —— 跨源聚合的来源（批 4）。"""
+        return raw_origins(c.hashes.get(f"sina:kline/{sym}")
+                           for sym, _ in MARKETS.values())
+
     def add(field: str, value: Any, label: str, source: str, *,
-            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+            kind: str | None, inputs: tuple[str, ...] = (),
+            origins: tuple = ()) -> None:
         """产出一条证据。`kind` **没有默认值** —— 强制每个调用点自己说清楚（裁定 16）。
 
-        ⚠️ `kind=None` 是合法的「**尚未归类**」，不是漏写。本 skill 有四个跨 symbol
-        聚合暂时留空，原因写在各自的调用点上。
+        `origins` 收**已构造好的** `OriginRef`（跨源聚合用，指回多份原始响应）；
+        `inputs` 收字段名（同 verdict 内由别的值算出来时用）。两者可并存。
         """
         result[field] = value
         evidence.append(Evidence(
@@ -350,7 +357,7 @@ def build_fact_bundle(
             raw_hash=_raw_hash_for(source),
             evidence_set_id=_es_id_for(source),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field),
+            derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins),
         ))
 
 
@@ -370,7 +377,8 @@ def build_fact_bundle(
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
     def add_live(field: str, value: Any, label: str, source: str, *,
-            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+            kind: str | None, inputs: tuple[str, ...] = (),
+            origins: tuple = ()) -> None:
         """实时快照类证据：as_of = 取回时刻。`kind` 同 `add`，无默认值。"""
         result[field] = value
         evidence.append(Evidence(
@@ -380,15 +388,15 @@ def build_fact_bundle(
             raw_hash=_raw_hash_for(source),
             evidence_set_id=_es_id_for(source),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
+            derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins)))
 
     if trade_date:
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
             c.warnings.append(as_of_warning)
-        # kind 暂缺：trade_date 取自两份日线（沪/深）共同报告的交易日，
-        # 不出自单一响应；它也不是"算"出来的。归类留给批 4 连同下面三个一起定。
-        add("trade_date", trade_date, "交易日", "sina:kline", kind=None)
+        # 两份日线共同报告的交易日 —— 观察到的，但出自两份响应。
+        add("trade_date", trade_date, "交易日", "sina:kline",
+            kind="observed", origins=_kline_origins())
 
         # ── 守卫 2：腾讯与新浪必须说的是同一天 ──────────────────────
         quotes_usable = bool(c.quotes)
@@ -467,19 +475,18 @@ def build_fact_bundle(
         if c.daily and all(v is not None for v in mas.values()):
             today_vol = sum(d.last.volume for d in c.daily.values())
             base_vol = sum(mas.values())
-            # 🔴 下面三个的 kind 留空（未声明），**不是漏写**：
-            #    它们是两份日线快照的跨源聚合 —— 既不出自单一响应（raw_hash 填不了），
-            #    也不是从某几条**已有证据**算出来的（今天没有 per-symbol 的成交量证据，
-            #    volume_ma20 更是用了 20 天的历史序列，不是任何一条现成证据）。
-            #    硬编一组 inputs 就是裁定 16 明令禁止的"硬凑"。
-            #    ⇒ 批 4 要么补 per-symbol 成交量证据，要么让 Evidence 支持多来源引用。
-            #       在那之前留 None（合法的"尚未归类"），不编。
+            # 🔴 下面三个是**跨源聚合**：出自沪深两份日线快照，没有单一 raw_hash，
+            #    也不是从某几条已有证据算出来的（volume_ma20 用的是 20 天的历史序列）。
+            #    批 4 起用 `raw_origins` 直接指向**那两份原始响应** ——
+            #    这正是 `OriginRef` 要解决的形状。
             add("volume_total", round(today_vol / _YI, 2), "两市成交量(亿股)",
-                "sina:kline", kind=None)
+                "sina:kline", kind="derived", origins=_kline_origins())
             add("volume_ma20", round(base_vol / _YI, 2),
-                f"两市{MA_WINDOW}日均量(亿股，不含今日)", "derived:sina:kline", kind=None)
+                f"两市{MA_WINDOW}日均量(亿股，不含今日)", "derived:sina:kline",
+                kind="derived", origins=_kline_origins())
             add("volume_ratio", round(today_vol / base_vol, 4) if base_vol else None,
-                f"量能比(今日/{MA_WINDOW}日均)", "derived:sina:kline", kind=None)
+                f"量能比(今日/{MA_WINDOW}日均)", "derived:sina:kline",
+                kind="derived", origins=_kline_origins())
         else:
             short = [MARKETS[k][1] for k, v in mas.items() if v is None]
             c.missing.append(MissingItem(

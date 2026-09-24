@@ -1,23 +1,43 @@
 [
   {
+    "_why_changed": "批 4（2026-09-24）把 input_evidence_ids 换成结构化的 derived_from(OriginRef)，字段集变了 ⇒ 全部 evidence_id 随之变化，本文件的向量同批更新。",
+    "_why_allowed": "🔴 更新冻结向量必须先回答「存量引用怎么办」。这次能更新的理由是**量过**：生产库 3152 条证据里带 evidence_id / derived_from / kind 的是 0 条（批 1–4 从未在生产跑过）⇒ 没有任何存量引用会被打断。下次若不是这个情况，先迁移存量，别直接改这里。"
+  },
+  {
     "note": "典型的 observed 证据 —— 全字段都给值",
     "evidence": {
-      "field": "market.sh_close", "source": "sina:kline/sh000001", "value": 3200.5,
-      "as_of": "2026-09-20T15:00:00+08:00", "retrieved_at": "2026-09-20T15:00:30+08:00",
-      "calc_version": "market-calc/1", "label": "上证收盘",
+      "field": "market.sh_close",
+      "source": "sina:kline/sh000001",
+      "value": 3200.5,
+      "as_of": "2026-09-20T15:00:00+08:00",
+      "retrieved_at": "2026-09-20T15:00:30+08:00",
+      "calc_version": "market-calc/1",
+      "label": "上证收盘",
       "raw_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "evidence_set_id": "ES-20260920-001", "kind": "observed"
+      "evidence_set_id": "ES-20260920-001",
+      "kind": "observed"
     },
-    "sha256": "abf1989f5a213b8918e10ee1fe99d13ae89b812daa0cdd110c161b306c39b287"
+    "sha256": "2523508386e8333761e92ef96767a3dfd01dc5d14d909f2c3feb5b003c2ed9c3"
   },
   {
     "note": "嵌套结构的 value —— 钉住「身份算在解冻后的 JSON 形式上」",
     "evidence": {
-      "field": "f", "source": "s:x", "value": {"a": [1, 2]},
-      "as_of": "2026-09-20T15:00:00+08:00", "retrieved_at": "2026-09-20T15:00:00+08:00",
-      "calc_version": null, "label": null, "raw_hash": null,
-      "evidence_set_id": null, "kind": null
+      "field": "f",
+      "source": "s:x",
+      "value": {
+        "a": [
+          1,
+          2
+        ]
+      },
+      "as_of": "2026-09-20T15:00:00+08:00",
+      "retrieved_at": "2026-09-20T15:00:00+08:00",
+      "calc_version": null,
+      "label": null,
+      "raw_hash": null,
+      "evidence_set_id": null,
+      "kind": null
     },
-    "sha256": "1c69ec414a15b5f0e387776c351eb8f34a79a6eb7a55b0ae62ea1837b3bbe77a"
+    "sha256": "0344e1eddf06b2a1b4b7f36ef61f179648a58a34d5d93bf487c03c5d4576e87d"
   }
 ]

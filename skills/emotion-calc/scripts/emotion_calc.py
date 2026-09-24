@@ -69,7 +69,8 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
-    input_ids_for,
+    evidence_origins,
+    raw_origins,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     CN_TZ,
@@ -262,7 +263,8 @@ def build_fact_bundle(
         return resolve_provenance(source, c.hashes)
 
     def add(field: str, value: Any, label: str, source: str, *,
-            kind: str, inputs: tuple[str, ...] = ()) -> None:
+            kind: str | None, inputs: tuple[str, ...] = (),
+            origins: tuple = ()) -> None:
         """产出一条证据。
 
         `kind` **没有默认值**，强制每个调用点自己说清楚（裁定 16）——
@@ -278,7 +280,7 @@ def build_fact_bundle(
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field),
+            derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins),
         ))
 
     if qdate and c.pools and all(r.total == 0 for r in c.pools.values()) \
@@ -353,7 +355,12 @@ def build_fact_bundle(
             c.missing.append(MissingItem("情绪分 —— 需要涨停家数 / 最高板 / 炸板率三项齐备",
                                          "emotion.score.incomplete"))
 
-        add("trade_date", qdate, "交易日", "em:push2ex/qdate", kind="observed")
+        # 🔴 三个股池各自报 qdate，取**共识**（不一致就是 None）⇒ 它出自那几份响应，
+        # 不是任何单一一份。批 4 之前这里没有 raw_hash 也说不清为什么，
+        # 曾被我错判成「表键对不上的 bug」—— 实际是跨源，用 raw_origins 指回全部。
+        add("trade_date", qdate, "交易日", "em:push2ex/qdate", kind="observed",
+            origins=raw_origins(c.hashes.get(f"em:push2ex/{name}")
+                                for name in c.pools))
     else:
         c.missing.append(MissingItem("全部情绪指标 —— 没有任何股池返回可用的交易日",
                                      "emotion.trade_date.undetermined"))

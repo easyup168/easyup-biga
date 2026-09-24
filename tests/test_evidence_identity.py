@@ -24,7 +24,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "skills"))
 
-from _contract import Evidence, now_cn  # noqa: E402
+from _contract import Evidence, OriginRef, now_cn  # noqa: E402
 
 sys.path.insert(0, str(REPO / "src"))
 from easyup_biga.domain.evidence import EVIDENCE_KINDS  # noqa: E402
@@ -64,9 +64,9 @@ class Test身份是内容寻址的:
         表现是两条**不同**的证据拿到**同一个** id，而那是静默的。"""
         assert _ev(**kw).evidence_id != _ev().evidence_id
 
-    def test_input_evidence_ids不同则id不同(self):
-        assert _ev(kind="derived", input_evidence_ids=("a" * 64,)).evidence_id != \
-               _ev(kind="derived", input_evidence_ids=("b" * 64,)).evidence_id
+    def test_derived_from不同则id不同(self):
+        assert _ev(kind="derived", derived_from=(OriginRef("evidence", "a" * 64),)).evidence_id != \
+               _ev(kind="derived", derived_from=(OriginRef("evidence", "b" * 64),)).evidence_id
 
     def test_构造方传不进evidence_id(self):
         """允许外部传 id = 允许传一个与内容不符的 id，而「引用对不上」正是
@@ -117,6 +117,8 @@ class Test身份的冻结向量:
                            .read_text(encoding="utf-8"))
         assert vectors, "向量文件是空的，这条测试就等于没测"
         for case in vectors:
+            if "evidence" not in case:      # 说明条目（_why_changed 那种），跳过
+                continue
             got = Evidence.from_dict(dict(case["evidence"])).evidence_id
             assert got == case["sha256"], (
                 f"{case['note']}：身份算法变了。\n"
@@ -137,20 +139,33 @@ class Test类别的自洽校验:
         with pytest.raises(ValueError):
             _ev(kind=k)
 
-    def test_parameter不许带输入(self):
+    def test_parameter不许带来源(self):
         """参数是我们自己的设定，没有数据输入。带了 ⇒ 要么它其实是 derived，
-        要么这串 id 是凑的 —— 两种都得当场说出来。"""
+        要么这串来源是凑的 —— 两种都得当场说出来。"""
         with pytest.raises(ValueError):
-            _ev(kind="parameter", input_evidence_ids=("a" * 64,))
+            _ev(kind="parameter", derived_from=(OriginRef("evidence", "a" * 64),))
 
     @pytest.mark.parametrize("bad", ["", "xyz", "A" * 64, "a" * 63, 123])
-    def test_输入id必须是合法指纹(self, bad):
+    def test_内容哈希类来源的ref必须是合法指纹(self, bad):
+        """⚠️ 只有 raw / evidence 的 ref 是内容哈希；verdict 是行号、fact 是定位串，
+        统一校验成 sha256 会把合法的那两类误杀。"""
         with pytest.raises(ValueError):
-            _ev(kind="derived", input_evidence_ids=(bad,))
+            _ev(kind="derived", derived_from=(OriginRef("evidence", bad),))
 
-    def test_输入被规范成tuple(self):
-        e = _ev(kind="derived", input_evidence_ids=["a" * 64])
-        assert e.input_evidence_ids == ("a" * 64,)
+    def test_verdict与fact的ref不套哈希格式(self):
+        assert _ev(kind="derived", derived_from=(OriginRef("verdict", "41"),)).kind == "derived"
+        assert _ev(kind="derived",
+                   derived_from=(OriginRef("fact", "fact_trading_calendar/20260924"),)
+                   ).kind == "derived"
+
+    def test_来源被规范成tuple(self):
+        e = _ev(kind="derived", derived_from=[OriginRef("evidence", "a" * 64)])
+        assert e.derived_from == (OriginRef("evidence", "a" * 64),)
+
+    def test_不许拿裸字符串当来源(self):
+        """用构造器（evidence_origins / verdict_origins / …），别自己拼。"""
+        with pytest.raises(ValueError):
+            _ev(kind="derived", derived_from=("a" * 64,))
 
     def test_derived必须说得出出处(self):
         """🔴 批 3 翻转了批 1 的留白。派生值有两条合法出路，**不能两者皆无**：
@@ -167,7 +182,8 @@ class Test类别的自洽校验:
 
     def test_derived两条出路各自成立(self):
         assert _ev(kind="derived", raw_hash="a" * 64).kind == "derived"
-        assert _ev(kind="derived", input_evidence_ids=("b" * 64,)).kind == "derived"
+        assert _ev(kind="derived",
+                   derived_from=(OriginRef("evidence", "b" * 64),)).kind == "derived"
 
     def test_未声明kind的历史证据不受这条约束(self):
         """三段式的「旧卡可读」：`kind=None` 是未声明，不是 derived。"""
@@ -180,10 +196,10 @@ class Test旧卡可读:
         #    手写的那份既会被铁律 4 判成第二套契约，也只是「我以为历史长这样」。
         legacy = _ev(field="market.x", source="sina:kline/sh000001", value=1.5,
                      calc_version="m/1", raw_hash="b" * 64).to_dict()
-        for k in ("kind", "input_evidence_ids", "evidence_id"):
+        for k in ("kind", "derived_from", "evidence_id"):
             legacy.pop(k)
         e = Evidence.from_dict(legacy)
-        assert e.kind is None and e.input_evidence_ids == ()
+        assert e.kind is None and e.derived_from == ()
         assert e.evidence_id
 
     def test_存量里的evidence_id不被信任而是重算(self):

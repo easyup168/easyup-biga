@@ -1228,13 +1228,22 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         自己标注"后续阶段"（非当前必需）；G 需要飞书真实触发一次 + 新会话
         验证，无法靠改代码单方面完成；H 的验收条件（tag/schema 说明/
         migration 回滚说明等）依赖 G 先过，目前排它之后
-  - [ ] F 节"当前必需"部分（跨包引用清理 / pyproject 正式化 / console
-        scripts / ruff / mypy，不含三项 Registry）的开工提示词已写好，
-        拆成 U-I（跨包清理，可立即开工，方案已定死）/ U-II（pyproject
-        正式化，建议排 U-I 之后）/ U-III（移除 sys.path，必须排 U-II
-        之后，82 个文件高风险）/ U-IV（ruff/mypy，只拿基线不清零，可并行）
-        四个子批，见 `docs/guide/f-node-packaging-kickoff-prompt.md`。
-        批次字母用 **U**（TODO.md 已用到 T），开工前先确认没被并行会话占用
+  - [ ] F 节"当前必需"部分（不含三项 Registry）—— **4 个子批已完成 3 个**，
+        见 `docs/guide/f-node-packaging-kickoff-prompt.md`：
+        - [x] **U-I** 跨包引用清理（`b06e6bf`，教程第 51 章）
+        - [x] **U-II** `pyproject.toml` 正式化（`c7a89a9`，教程第 52 章）。
+              含裁定：console scripts **不做**（`tools/` 不是包、10 个脚本里
+              8 个靠 `__file__` 回溯仓库根），理由与守卫都在那一批里
+        - [x] **U-IV** ruff/mypy 基线（`f6e1c82`，教程第 54 章）。
+              基线 ruff **169** / mypy **35**，只记不清零
+        - [ ] 🔴 **U-III** 移除动态 `sys.path` 依赖 —— **仅剩这一项**。
+              ⚠️ 实测 **130 处 / 84 个文件**（提示词写的 82 已过期）：
+              `tests/` 55 · `skills/` 16 · `tools/` 10 · `src/` 2 · `deploy/` 1。
+              前置条件已齐（U-II 让包真能装、U-IV 的 ruff 能自动查孤儿 import）。
+              💡 U-IV 落地后多了一条便宜的判据：删掉一处 `sys.path.insert` 之后，
+              `import sys` / `import pathlib` / `# noqa: E402` 会不会变成孤儿，
+              `ruff --select F401,E402` 直接回答——不用逐文件人肉看
+              （这正是 U-I 教程第 51 章「坑 3」踩过的那类，它们不报错）
   - [ ] 🔴 **三项 Registry 排除在外的完整理由 + 唤醒条件**（2026-09-24，
         免得只存在于对话记录里）。排除依据：评审自己的推荐实施顺序把 F 排
         最后一步、且写"不要先增加更多 Dataset"；核实过的 Release Gate（15
@@ -1303,7 +1312,18 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
     批 2 把溯源归属收成一份并改对写宽的规则（770 条派生值拿回 raw_hash）；
     批 3 落地铁律「derived ⇒ raw_hash 或 input_evidence_ids」+ 五个 skill 声明 kind。
 
-    **批 4 的输入**（剩下这些，各有各的原因）：
+    ✅ **批 4 已完成**（2026-09-24）：`OriginRef` 四类来源取代 `input_evidence_ids`；
+    risk 11 个字段全部接线；批 3 的 6 处 `kind=None` 全部消化，全仓再无留白。
+    **评审 E 节（§16–§20）至此全部完成。**
+
+    **批 5 的输入**（两条独立的小块）：
+
+    | 待办 | 卡在哪 |
+    |---|---|
+    | `tripped_thresholds` 空列表的 R-3 形状 | 上游一个阈值字段都没有时 `[]` 读起来像「比过了没触发」，实际是「没东西可比」⇒ 应当变成一条 missing |
+    | `observed ⇒ 必须有 raw_hash` | 直接证据缺 raw_hash 的比例 09-24 实测仍有 13.8%，在收敛但仍在产生 ⇒ 要么补齐采集端，要么三段式 enforce |
+
+    **原「批 4 的输入」（已全部做掉，留档）**：
 
     | 待办 | 条数 | 卡在哪 |
     |---|---|---|
