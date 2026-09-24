@@ -1147,6 +1147,11 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         实测 `_contract.now_cn is easyup_biga.domain.now_cn` 为 True，
         但这只是**手工验过一次**（教程第 51 章验证第 4 条），没有测试钉住。
         两条路给出两个对象就是 L-3，而它不会报错。
+  - [ ] 🔴 **给后续批次的提醒**（批 3 完成时点出来，转告 U-II/U-III 的开工者）：
+        裁定 16 批 2/3 往 `src/easyup_biga/domain/__init__.py` 加了四个新导出——
+        `resolve_provenance` / `input_ids_for` / `EVIDENCE_KINDS` / `SHA256_RE`。
+        U-III 逐一核实 82 处 `sys.path.insert` 时如果也要过一遍 `domain/__init__.py`
+        的 `__all__`，别把这四个当成"批 U-I 之前就有的"——它们比 U-I 晚落地。
 
 - [x] 批 M · 外部评审 C/D 部分（飞书可靠性 + 生命周期收敛）—— **独立复核通过
       （2026-09-24）**。核实来源：`docs/external/biga-latest-deep-review-classified/`
