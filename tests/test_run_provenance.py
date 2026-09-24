@@ -357,3 +357,20 @@ class TestLegacySynthesizeCLI:
 
     def test_只渲染不落库时放行(self, db):
         assert self._run(db, "--no-store").returncode == 0
+
+
+class TestSaveVerdictRunValidation:
+    """P1-1 补完：save_verdict 在线模式必须核验 run_id 真的存在于 decision_runs。
+
+    sabotage 验证：把 db.py 里那行 `_assert_run_owns_decision` 注释掉，下面这两条会红。
+    """
+
+    def test_save_verdict_伪造run_id被拒(self, db):
+        v = _verdict()
+        with pytest.raises(ValueError, match="decision_runs"):
+            save_verdict(v, run_id="no-such-run-" + "x" * 20, path=db)
+
+    def test_save_verdict_合法run_id放行(self, db):
+        v = _verdict()
+        vid = save_verdict(v, run_id=TEST_RUN_ID, path=db)
+        assert vid > 0

@@ -904,6 +904,8 @@ def save_verdict(
     #    `tests/test_write_boundary.py` 钉了这一点，别让它变红。
     try:
         with connect(path) as conn:
+            if run_id is not None:
+                _assert_run_owns_decision(conn, run_id=run_id, decision_id=v.task_id)
             cur = conn.execute(
                 """INSERT INTO agent_verdicts
                    (task_id, agent, amends, amend_reason,

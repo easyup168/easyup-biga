@@ -88,3 +88,62 @@ class TestPassthrough:
         init_schema(p)
         r = _run("--not-a-real-flag", env_extra={"BIGA_DB_PATH": str(p)})
         assert r.returncode != 0
+
+
+class TestSingleInstanceLock:
+    """P2-4：并发两个 worker 只有一个发出通知，另一个因拿不到锁直接退出。
+
+    sabotage 验证：把 bin/biga-notify 里的 flock 块注释掉，
+    两个进程都会跑到 deliver，send_count 变成 2。
+    """
+
+    def test_并发两个worker只发送一次(self, tmp_path):
+        p = tmp_path / "t.db"
+        init_schema(p)
+        with connect(p) as conn:
+            _insert_notification(conn, event_type="card_completed",
+                                 aggregate="BIGA-C-001", payload={"decision_id": "BIGA-C-001"})
+
+        # 慢桩：sleep 1.5s，保证两个进程真的会重叠
+        counter_file = tmp_path / "send_count"
+        counter_file.write_text("0")
+        slow_stub = tmp_path / "slow-biga"
+        slow_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            f"n=$(cat '{counter_file}')\n"
+            f"echo $((n+1)) > '{counter_file}'\n"
+            "sleep 1.5\n"
+            "echo '{\"payload\":{\"ok\":true}}'\n",
+            encoding="utf-8")
+        slow_stub.chmod(0o755)
+
+        env = {**os.environ,
+               "BIGA_DB_PATH": str(p),
+               "BIGA": str(slow_stub),
+               "BIGA_FEISHU_OWNER_ID": "ou_test"}
+        import threading
+        procs = []
+        errs = []
+
+        def launch():
+            r = subprocess.run(
+                ["bash", str(REPO / "bin" / "biga-notify")],
+                cwd=REPO, env=env, capture_output=True, text=True, timeout=10)
+            procs.append(r)
+            if "Traceback" in r.stderr:
+                errs.append(r.stderr)
+
+        t1 = threading.Thread(target=launch)
+        t2 = threading.Thread(target=launch)
+        t1.start()
+        t2.start()
+        t1.join(timeout=12)
+        t2.join(timeout=12)
+
+        assert not errs, f"进程 stderr 里出现了 Traceback：{errs}"
+        assert all(r.returncode == 0 for r in procs), [r.stderr for r in procs]
+        send_count = int(counter_file.read_text().strip())
+        assert send_count == 1, (
+            f"两个并发 worker 发了 {send_count} 次，flock 没有拦住重复投递"
+        )
