@@ -1215,17 +1215,17 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         （ZIP/Git 双模式已由更早一轮评审修好、stdout/stderr 契约与
         subprocess cleanup 排查后无可复现缺陷、Isolation Registry 漂移
         已修）见批 S。**A 节收口**
-  - [ ] **E 节现状**（2026-09-24 复核时的快照，随时可能被下一批推进）：
-        E-16 前半 + E-18 见批 P；E-17/E-19/E-20 见批 R；批 T 是复核 批R 合并时
-        独立撞见的一处未清理冲突标记，与评审清单无关。**E-16 后半**（派生值
-        `input_evidence_ids`）—— 裁定 16（口径：按字段分粒度，元数据类引
-        verdict、值类引具体 Evidence，全量类引上游全部 Evidence；risk 10
-        字段逐字段定死、观测到两个会绊住实现的障碍）已核实并合并进 main
-        （commit `2fbd671`），**只有决策，实现尚未开始**——批 1/批 2 的输入
-        规格见下方「口径已定」小节。E 节至此**只剩这一项未完成**
-  - [ ] **F（Package 与 Registry）/ G（Live Acceptance）/ H（Baseline 冻结）
-        —— 均未开始**。F 的 Dataset/Provider/Pipeline Registry 三项评审
-        自己标注"后续阶段"（非当前必需）；G 需要飞书真实触发一次 + 新会话
+  - [x] **E 节全部完成**（2026-09-24）：E-16 前半 + E-18 见批 P；E-17/E-19/E-20
+        见批 R；批 T 是复核 批R 合并时独立撞见的一处未清理冲突标记，与评审清单
+        无关。**E-16 后半**（裁定 16 的派生值溯源）拆成批 1（身份字段）/批 2
+        （溯源归属收成一份）/批 3（`kind` 铁律落地）/批 4（`OriginRef` 四类
+        来源取代 `input_evidence_ids`，risk 11 字段全接线）四批做完，
+        全部已合并进 main。**E 节收口，五项全清**——详见下方「口径已定」小节
+        与批 1–4 各自的完成记录
+  - [ ] **F（当前必需部分）进行中，4 个子批完成 3 个**（U-I/U-II/U-IV，
+        仅剩 U-III）；**F 的三项 Registry / G（Live Acceptance）/ H（Baseline
+        冻结）—— 均未开始**。三项 Registry 评审自己标注"后续阶段"（非当前
+        必需）；G 需要飞书真实触发一次 + 新会话
         验证，无法靠改代码单方面完成；H 的验收条件（tag/schema 说明/
         migration 回滚说明等）依赖 G 先过，目前排它之后
   - [ ] F 节"当前必需"部分（不含三项 Registry）—— **4 个子批已完成 3 个**，
