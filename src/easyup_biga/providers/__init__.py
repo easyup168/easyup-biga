@@ -19,7 +19,9 @@
 
 用法::
 
-    from _sources import fetch_pool, fetch_breadth, SourceError
+    from easyup_biga.providers import fetch_pool, fetch_breadth, SourceError
+
+存量调用方写的 `from _sources import ...` 经 skills/_sources 薄壳等价可用。
 """
 
 from .eastmoney import (

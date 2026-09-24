@@ -3,7 +3,9 @@
 上层（C-II 的 DecisionOrchestrator）只跟 `OpenClawRuntimeAdapter` 打交道，
 不碰运行时的 MCP 工具名、JSON-RPC、也不碰运行时的原始状态措辞。
 
-    from _runtime import OpenClawRuntimeAdapter, SpawnStatus
+    from easyup_biga.runtime import OpenClawRuntimeAdapter, SpawnStatus
+
+存量调用方写的 `from _runtime import ...` 经 skills/_runtime 薄壳等价可用。
 """
 
 from .adapter import (

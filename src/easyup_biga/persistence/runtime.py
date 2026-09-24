@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from _contract import CN_TZ
+from easyup_biga.domain import CN_TZ
 
 __all__ = ["RuntimeProbe", "AgentTurn", "ToolCall", "read_turns", "read_tool_calls",
            "read_task_runs", "list_agents", "OPENCLAW_HOME"]

@@ -23,7 +23,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from typing import Any
 
-from _contract import (
+from easyup_biga.domain import (
     NOTIFICATION_EVENT_TYPES,
     RUN_FAILED,
     AgentAssessment,

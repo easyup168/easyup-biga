@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from _contract import now_cn
+from easyup_biga.domain import now_cn
 
 from .http import SourceError, get_json_and_text
 
@@ -216,10 +216,10 @@ def refresh_trading_calendar(
         path: 库路径，透传给 `_store`（测试指向 tmp 库）。
 
     🔴 **直接调 `save_raw_snapshot`，不接 `SnapshotCoordinator`**（理由见模块头）。
-    `_store` 在函数内惰性 import —— 让 `parse`/`fetch` 两层保持零 `_store` 依赖，
+    `persistence` 在函数内惰性 import —— 让 `parse`/`fetch` 两层保持零存储层依赖，
     离线解析测试的 import 图因此是干净的。
     """
-    from _store import save_raw_snapshot, save_trading_calendar  # 惰性：见 docstring
+    from easyup_biga.persistence import save_raw_snapshot, save_trading_calendar  # 惰性：见 docstring
 
     retrieved = now_cn()
     cal = (fetcher or fetch_trading_calendar)(year, month)

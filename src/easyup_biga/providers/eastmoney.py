@@ -50,7 +50,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
-from _contract import now_cn
+from easyup_biga.domain import now_cn
 
 from .http import SourceError, get_json_and_text
 from .tradetime import as_of_for_trade_date

@@ -23,7 +23,7 @@ import pathlib
 import sqlite3
 from typing import Any
 
-from _contract import (
+from easyup_biga.domain import (
     INITIAL_STATE,
     LEGAL_TRANSITIONS,
     RunContext,

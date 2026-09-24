@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from _contract import CN_TZ
+from easyup_biga.domain import CN_TZ
 
 from .http import SourceError, get_json_and_text
 

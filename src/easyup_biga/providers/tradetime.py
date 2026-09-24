@@ -30,22 +30,18 @@ Phase 1 一直没撞上，纯粹因为那几天的实测都发生在**收盘后�
 from __future__ import annotations
 
 import pathlib
-import sys
 from datetime import date, datetime, time as dtime
 
-# 原来这里写的是 `__import__("pathlib").Path(...)` —— 省了一行 import，
-# 但那个写法正是 F12 用来绕开 sqlite 扫描的同一种手法。
-# 业务代码里不该出现它，所以老老实实 import。
+# 🔴 批 U-I：这里原来有一段 `sys.path.insert(0, 仓库根/"skills")` 的自举——
+#    它存在的唯一理由是让下面那行当时写作 `from _contract import CN_TZ` 能解析
+#    （经薄壳 → 薄壳再把 src/ 挂上）。本批把跨包引用改成 `easyup_biga.*` 绝对
+#    导入之后，那段自举**连一个消费方都不剩**：本模块要的 `easyup_biga.domain`
+#    与 `easyup_biga.persistence` 跟 skills/ 无关。
 #
-# 🔴 批 H-I：本文件从 skills/_sources/tradetime.py 迁到 src/easyup_biga/providers/，
-#    深了一层。这里要挂上 sys.path 的始终是 skills/（`from _contract import` 经薄壳
-#    解析，薄壳再把 src/ 挂上），不是本文件的父目录——迁移后父目录成了 easyup_biga/，
-#    里面没有 _contract/_store。故从新位置回退到仓库根（providers→easyup_biga→src→根）
-#    再取 skills/。
-_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "skills"))
-
-from _contract import CN_TZ  # noqa: E402
+#    ⚠️ 删它不属于批 U-III（"逐一核实 sys.path.insert 还有没有用"）——
+#    U-III 要判断的是"这行现在还有没有用"，而这一处的唯一用途是**同一次编辑
+#    删掉的那行**，不需要判断。留着它只会留下一条指向已不存在的机制的注释。
+from easyup_biga.domain import CN_TZ
 
 __all__ = ["MARKET_CLOSE", "as_of_for_trade_date", "market_is_open",
            "session_in_progress"]
@@ -91,8 +87,8 @@ def market_is_open(now: datetime, *, path: pathlib.Path | str | None = None) -> 
     """
     n = now.astimezone(CN_TZ)
     # 🔴 惰性 import：让本模块的 import 图保持纯（时间数学层不在导入期拉起存储层），
-    #    只有真的要查日历时才碰 _store。
-    from _store import is_trading_day
+    #    只有真的要查日历时才碰持久化层。
+    from easyup_biga.persistence import is_trading_day
 
     known = is_trading_day(n.strftime("%Y%m%d"), path=path)   # True / False / None
     if known is None:

@@ -1121,14 +1121,18 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         共享包"（同裁定 15 的同源理由：第二个消费方出现才是抽取的时刻）。
         `application/` 目前唯一有资格放的是 `SnapshotCoordinator`
         （H-II 的范围），不是 `orchestrator.py`
-  - [ ] 跨包引用清理（H-II 已落地，前置条件基本满足）——`easyup_biga.persistence`/
-        `providers`/`application`（coordinator）内部仍是 `from _contract import ...`
-        （旧写法），只挂 `src/` 不挂 `skills/` 会 `ModuleNotFoundError`。自足情况实测：
-        `domain` 与 `runtime`（adapter/mcp 无跨包导入）已自足；带跨包旧写法的是
-        **persistence / providers / application 三处**（H-II 复核记下的账，H-I 记的
-        那两处并入）。这三处一次性改成 `from easyup_biga.xxx import ...`，不要分批改
-        ——分批改等于同一件事做两次，且中途状态更难判断"改没改全"。H-III 是留白
-        （不搬新包），不阻塞本清理
+  - [x] 跨包引用清理 —— **批 U-I 已完成（2026-09-24）**。实际范围是 **3 个包 /
+        9 个文件 / 13 行**（提示词写的"3 个文件"是把"3 个包"记错了数，范围结论对）：
+        `persistence` 3 处、`providers` 5 处、`application` 1 处，一次改完未分批。
+        连带删掉 `providers/tradetime.py` 一处 `sys.path.insert` —— 它**不属于批 U-III**，
+        因为 U-III 要判断的是"这行现在还有没有用"，而这一处的唯一消费方就是同一次
+        编辑删掉的那行（剩余 81 处仍归 U-III）。
+        🔴 本批真正的交付物是 `tests/test_package_self_contained.py`（7 条）而不是那
+        13 行 import：实测把一行改回旧写法，`tests/test_store.py` **47 条全绿**，
+        只挂 `src/` 的隔离 import 当场 `ModuleNotFoundError` —— pytest 的 `pythonpath`
+        同时挂着 `skills/` 与 `src/`，测不出这件事。判据用 **AST 不用 grep**
+        （文档字符串示例/相对导入下划线兄弟模块会误报，函数内惰性 import 与
+        `__import__("…")` 会漏报）。见教程第 50 章
 
 - [x] 批 M · 外部评审 C/D 部分（飞书可靠性 + 生命周期收敛）—— **独立复核通过
       （2026-09-24）**。核实来源：`docs/external/biga-latest-deep-review-classified/`

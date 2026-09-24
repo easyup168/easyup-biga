@@ -5,7 +5,11 @@
 
 用法::
 
-    from _contract import Evidence, AgentVerdict, DecisionCard, now_cn
+    from easyup_biga.domain import Evidence, AgentVerdict, DecisionCard, now_cn
+
+仓库内既有代码写的是 `from _contract import ...` —— skills/_contract 薄壳
+会 re-export 本包，两种写法等价。壳是给**存量调用方**的兼容层，新代码用
+上面那行绝对导入（批 U-I：本包内部已全部改成绝对导入，不再经薄壳）。
 """
 
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
