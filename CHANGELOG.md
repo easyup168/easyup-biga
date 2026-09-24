@@ -17,6 +17,31 @@
 
 ---
 
+## [0.3.2] - 2026-09-25
+
+### 修复 · I 节补完 —— 三项遗漏守卫 + 故障注入测试
+
+专家评审 checklist 对照（2026-09-25 remediation pack）发现 v0.3.1 三处未覆盖：
+
+**P1-1 补完：`save_verdict()` 在线路径加 `run_id` 校验**
+`save_fact_bundle` / `save_evidence_set` 在线路径已有 `_assert_run_owns_decision`，
+`save_verdict` 漏掉了：传了 `run_id` 也不核验它是否存在于 `decision_runs`。
+填字符串仍可绕过。补上后在线路径三条写入口（fact/verdict/evidence_set）全部一致。
+附 sabotage 验证：注释掉守卫后两条新测试立即变红。
+
+**P2-1 补完：migration 故障注入测试**（`tests/test_migration_atomicity.py`）
+`_apply_migration` 实现正确但缺验证测试。四条探针 M1-M4：坏 SQL 触发异常；
+异常后 `user_version` 不变（可重试）；相同版本用正确 SQL 可补跑（重试真的通）；
+部分 DDL 被整体回滚（无半建好的表残留）。
+
+**P2-4 补完：并发 Worker 只发一次测试**（`TestSingleInstanceLock`）
+慢桩（sleep 1.5s）+ 两个线程同时起子进程，确认 `flock -n` 拦住第二个、
+`send_count` 恰好等于 1、stderr 无 Traceback。
+
+同步测试条数：1813 条（1806 → 1813，守卫通过）
+
+---
+
 ## [0.3.1] - 2026-09-25
 
 ### 新增 · I 节 Architecture Baseline Hardening — 七项防御加固
@@ -7363,7 +7388,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.1...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/easyup168/easyup-biga/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/easyup168/easyup-biga/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/easyup168/easyup-biga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/easyup168/easyup-biga/compare/v0.1.0...v0.2.0
