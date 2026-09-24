@@ -199,11 +199,23 @@ class DecisionOrchestrator:
                                      self._specialist_task(a, did, esid, ctx.run_id),
                                      group_id=gid, run_timeout_sec=run_timeout))
                 except Exception:
-                    for h in handles:
-                        with contextlib.suppress(Exception):
-                            ad.cancel(h)
+                    self._cancel_stragglers(ad, handles)
                     raise
-                r1 = ad.wait(handles, self._stage_timeout(deadline, self.stage1_sec))
+                # 🔴 `_stage_timeout()` 拆成单独一句先算：写成
+                #    `ad.wait(handles, self._stage_timeout(...))` 时，若后者抛出
+                #    OrchestratorTimeout，Python 先算参数再调用，ad.wait() 根本不会
+                #    执行——handles 里已经起来的会话既没被等过也没被取消（同一个坑，
+                #    这次是「总预算耗尽」触发，不是「start() 中途出错」）。
+                try:
+                    stage1_budget = self._stage_timeout(deadline, self.stage1_sec)
+                except OrchestratorTimeout:
+                    self._cancel_stragglers(ad, handles)
+                    raise
+                r1 = ad.wait(handles, stage1_budget)
+                # 🔴 `ad.wait()` 正常返回但某个 handle 到期未完成 ⇒ 本地记 TIMEOUT，
+                #    运行时那一侧的会话未必真的停了——同样要收。
+                self._cancel_stragglers(
+                    ad, [r.handle for r in r1 if r.status == SpawnStatus.TIMEOUT])
                 state = self._to(ctx.run_id, state, RunState.STAGE1_COMPLETED,
                                  detail=self._stage_detail(r1))
 
@@ -236,7 +248,14 @@ class DecisionOrchestrator:
                     rh = ad.start(RISK_AGENT, did,
                                   self._risk_task(did, risk_ref, risk_fb),
                                   group_id=gid_r, run_timeout_sec=max(30, self.risk_sec))
-                    r2 = ad.wait([rh], self._stage_timeout(deadline, self.risk_sec))
+                    try:
+                        risk_budget = self._stage_timeout(deadline, self.risk_sec)
+                    except OrchestratorTimeout:
+                        self._cancel_stragglers(ad, [rh])
+                        raise
+                    r2 = ad.wait([rh], risk_budget)
+                    self._cancel_stragglers(
+                        ad, [r.handle for r in r2 if r.status == SpawnStatus.TIMEOUT])
 
                 # ── Stage 3：判官给综合判断，程序组装 Card ──
                 state = self._to(ctx.run_id, state, RunState.SYNTHESIZING,
@@ -319,7 +338,14 @@ class DecisionOrchestrator:
         sh = ad.start(SYNTHESIZER_AGENT, did, task, group_id=gid,
                       run_timeout_sec=max(30, self.synth_sec),
                       output_schema=JUDGMENT_SCHEMA)
-        [sres] = ad.wait([sh], self._stage_timeout(deadline, self.synth_sec))
+        try:
+            synth_budget = self._stage_timeout(deadline, self.synth_sec)
+        except OrchestratorTimeout:
+            self._cancel_stragglers(ad, [sh])
+            raise
+        [sres] = ad.wait([sh], synth_budget)
+        self._cancel_stragglers(
+            ad, [r.handle for r in [sres] if r.status == SpawnStatus.TIMEOUT])
         j = sres.structured if isinstance(sres.structured, dict) else None
         if sres.status != SpawnStatus.SUCCEEDED or not j \
                 or not all(k in j for k in ("status", "headline", "synthesis")):
@@ -337,6 +363,27 @@ class DecisionOrchestrator:
                                  synthesis=j["synthesis"], extra_missing=extra)
 
     # ── 预算收窄（C3-4）────────────────────────────────────────────────────
+    @staticmethod
+    def _cancel_stragglers(ad, handles) -> None:
+        """尽力取消每一个还挂着的 handle —— 超时收敛的统一出口。
+
+        🔴 覆盖两种「掉线」，缺一都会留下白跑的会话：
+           ① `_stage_timeout()` 在总预算耗尽时直接抛异常——call site 因此
+              从没机会调 `ad.wait()`，handle 完全没被等过就被扔下了；
+           ② `ad.wait()` 正常返回，但某个 handle 到期仍没完成，本地记成
+              `SpawnStatus.TIMEOUT`——那只是**我们等烦了**，运行时那一侧
+              的会话未必真的停了（`OpenClawRuntimeAdapter.wait()` 的
+              超时分支是本地生成的 `SpawnResult`，不是运行时报告「已停」）。
+           两种都不取消，代价是同一件事：钱在花、会话在跑，没人喊停。
+
+        `ad.cancel()` 本身幂等且安全：目标已经不在活跃列表里就静默返回
+        （见其文档字符串「取消一个已结束的东西不是错误」），cancel 失败
+        也不该盖住原始异常或中断收尾，所以每个都单独 suppress。
+        """
+        for h in handles:
+            with contextlib.suppress(Exception):
+                ad.cancel(h)
+
     def _stage_timeout(self, deadline: float, stage_budget: int) -> float:
         """这一段 `ad.wait()` 实际能等多久：`min(该阶段固定预算, 总 deadline 剩余)`。
 

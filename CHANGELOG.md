@@ -15,6 +15,32 @@
 
 ## [未发布]
 
+### 🐛 修复 · 编排器超时/等到期不取消刚启动的 spawn（G 节 Live Acceptance 第 12 项）
+
+核实 G 节「无残留 Session / 子进程」这一项时发现：`_stage_timeout()` 判定总预算
+耗尽时直接 `raise OrchestratorTimeout`，而调用方写的是
+`ad.wait(handles, self._stage_timeout(...))`——Python 先算参数再调用，
+`_stage_timeout()` 一抛，`ad.wait()` 根本没被执行，risk/synth（或 Stage 1
+五路）刚启动的 handle 既没被等过也没被取消。三处 wait 调用（Stage 1、risk、
+synthesizer）全部是这个形状。
+
+另一条更容易撞见的路：`ad.wait()` 正常返回，但某个 handle 到期仍没收到结果，
+`OpenClawRuntimeAdapter.wait()` 会**在本地**记一条 `SpawnStatus.TIMEOUT` 就返回——
+那只是「我们等烦了」，不代表运行时那一侧的会话真的停了。编排器拿到这个结果后
+只用它算 `_stage_detail`，从没检查过要不要顺手 cancel。
+
+⇒ 新增 `_cancel_stragglers()`，在三处 wait 调用外面都套一层：`_stage_timeout()`
+抛出前先收已启动的 handle；`ad.wait()` 正常返回后再收其中状态是 `TIMEOUT` 的那些。
+`ad.cancel()` 本身幂等（目标已经不在活跃列表里就静默返回），失败也不盖住原始异常。
+
+> 这是 Stage 1 已有「start() 中途出错就 cancel 兄弟」那条防线（批 C-III）的
+> 延伸——同一个"钱在花、没人喊停"的问题，只是触发条件从「起不来」换成了
+> 「等不完」，旧防线覆盖不到。
+
+新增 2 条测试（`test_orchestrator.py` 扩了一条既有断言 + 新增一条覆盖全员超时未
+响应的场景），复用既有的 `FakeAdapter.cancelled` 记账，无需新增测试基础设施。
+2 处 sabotage（还原两条修复各自的保护，确认对应断言会红）。
+
 ### 🔧 变更 · F 节批 U-III：删掉 56 处冗余 `sys.path.insert`，F 节四个子批收官
 
 126 处 → **70 处**。删的全在 `tests/`，另清掉被删出来的 **24 个**孤儿 import。

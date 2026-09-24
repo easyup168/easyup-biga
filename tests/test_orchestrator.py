@@ -420,7 +420,7 @@ class TestDeadlineBudget:
         状态必须是 `RunState.TIMEOUT`。探针：把 `run()` 里 `except
         OrchestratorTimeout` 那个分支删掉（或把它挪到 `except OrchestratorError`
         之后），这条就会退回 FAILED、变红。"""
-        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
 
         def boom(deadline, stage_budget):
             raise OrchestratorTimeout("总预算耗尽（人工注入）")
@@ -430,6 +430,28 @@ class TestDeadlineBudget:
         with pytest.raises(OrchestratorTimeout):
             orch.run(ctx)
         assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.TIMEOUT
+        # 🔴 G 节 Live Acceptance 第 12 项：Stage 1 五路已经 start() 成功，
+        #    `_stage_timeout()` 抛出发生在 `ad.wait()` 的参数求值阶段——Python
+        #    先算参数再调用，wait() 因此从未被执行，这五个 handle 既没被等过
+        #    也没被取消。当场验证过：改回没有 `_cancel_stragglers` 保护的旧
+        #    写法（`ad.wait(handles, self._stage_timeout(...))`），这条断言会红。
+        assert len(fake.started_handles) == len(STAGE1_AGENTS)
+        assert set(fake.cancelled) == set(fake.started_handles)
+
+    def test_stage1全员到期未响应_也会被cancel(self, db):
+        """与 `test_stage1中途start失败_已启动的handle被cancel` 不同的坑：
+        这次 5 个 start() 全部成功，只是 `ad.wait()` 等到期都没收到结果——本地
+        记 `SpawnStatus.TIMEOUT`。这不是「没启动」，是「等烦了」：运行时那一侧
+        的会话未必真的停了（`OpenClawRuntimeAdapter.wait()` 的超时分支是本地
+        生成的 `SpawnResult`，不是运行时报告「已停」）。5 个全部到期不该只在
+        start() 中途出错这一种坑里才收，等出这个结果也要收。"""
+        orch, fake, _ = _make_orch(db, judgment=_GOOD_JUDGMENT, absent=list(STAGE1_AGENTS))
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        orch.run(ctx)  # 批 F 起：全员缺席不再 FAILED，照常出卡（见上面那条测试）
+        stage1_handles = [h for h in fake.started_handles if h.agent in STAGE1_AGENTS]
+        assert len(stage1_handles) == len(STAGE1_AGENTS)
+        assert set(fake.cancelled) >= set(stage1_handles), (
+            "全部 TIMEOUT 但没有一个被 cancel —— 会话会空跑到各自 run_timeout_sec 才停")
 
 
 class TestSnapshotFreeze:

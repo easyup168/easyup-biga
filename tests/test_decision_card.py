@@ -275,6 +275,52 @@ class TestReplay:
         assert replay.main(["BIGA-20260101-999", "--check"]) == 1
 
 
+#: G 节 Live Acceptance 第 9 项要求的「Provider」——回放绝不许导入这些。
+_PROVIDER_ROOTS = ("_sources", "easyup_biga.providers")
+
+
+def _imports_provider_module(path: pathlib.Path) -> str | None:
+    """`path` 里第一个匹配 `_PROVIDER_ROOTS` 的导入名；没有则 `None`。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module]
+        for n in names:
+            if any(n == r or n.startswith(r + ".") for r in _PROVIDER_ROOTS):
+                return n
+    return None
+
+
+class TestReplay不碰Provider:
+    """G 节 Live Acceptance 第 9 项：Replay 不访问外部 Provider。
+
+    🔴 这条性质此前**只是附带成立**：`TestReplay` 的用例本来就在 `tests/conftest.py`
+    autouse 的 `_no_network` 围栏下跑、也确实全部通过，但没有人把它当成一条
+    要守的性质写下来。附带成立是脆弱的——明天 `card_ops.py` 加一个「顺手核对
+    最新行情」的分支，只要没有别的测试恰好踩中那条路径，不会有任何东西报红。
+
+    两条判据缺一不可：静态的只看得见字面导入（惰性 import、间接 import 会漏），
+    动态的只证明「这次测试场景下没联网」（真的连了网但被 mock 掉的调用看不出来）。
+    """
+
+    def test_replay与card_ops不静态导入provider(self):
+        for name in ("replay", "card_ops"):
+            hit = _imports_provider_module(SCRIPTS / f"{name}.py")
+            assert hit is None, f"{name}.py 导入了 Provider 模块 {hit!r}"
+
+    def test_check真跑一次而且没联网(self, db):
+        """动态判据：真调用 `--check`，autouse 的 `_no_network` 围栏没被
+        绕过就是没联网——它会在任何联网点直接抛 `NetworkUsedInTest`。"""
+        c = _synth(decision_id=DID, verdicts=full_roster(),
+                   judgment=judgment(), model_ref="anthropic/claude-sonnet-5",
+                   elapsed_ms=100)
+        card_ops.persist(c)
+        assert replay.main([DID, "--check"]) == 0
+
+
 class TestPersistWritesAgentRunsLedger:
     """🔴 回归：批 C-II 把合成挪进 `card_ops.persist()` 之后，没有一并搬「记账本」
     这一步（旧路径靠 standalone `synthesize.py` 记，新路径不再跑那个脚本）——

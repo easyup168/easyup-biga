@@ -1222,13 +1222,22 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         来源取代 `input_evidence_ids`，risk 11 字段全接线）四批做完，
         全部已合并进 main。**E 节收口，五项全清**——详见下方「口径已定」小节
         与批 1–4 各自的完成记录
-  - [ ] **F（当前必需部分）进行中，4 个子批完成 3 个**（U-I/U-II/U-IV，
-        仅剩 U-III）；**F 的三项 Registry / G（Live Acceptance）/ H（Baseline
-        冻结）—— 均未开始**。三项 Registry 评审自己标注"后续阶段"（非当前
-        必需）；G 需要飞书真实触发一次 + 新会话
-        验证，无法靠改代码单方面完成；H 的验收条件（tag/schema 说明/
+  - [x] **F（当前必需部分）四个子批全部完成**（U-I/U-II/U-III/U-IV）；
+        **F 的三项 Registry / H（Baseline 冻结）—— 仍未开始**。三项 Registry
+        评审自己标注"后续阶段"（非当前必需）；H 的验收条件（tag/schema 说明/
         migration 回滚说明等）依赖 G 先过，目前排它之后
-  - [ ] F 节"当前必需"部分（不含三项 Registry）—— **4 个子批已完成 3 个**，
+  - [ ] **G（Live Acceptance）核实中**（2026-09-24）：13 项逐条核对，5 项已确认
+        满足（`ux_evidence_set_per_run`/`ux_fact_per_task_agent` 唯一索引、
+        `card.py::_check_run_provenance()`、`OrchestratorTimeout`、
+        `stale-run-reaper-biga.timer` 实测在跑）；1 项已知历史缺口不阻塞
+        （`runtime_run_id` 老数据只 36/166 行有值，新数据 capture 齐）；
+        1 项核实后发现**真缺陷已修复**——编排器三处 wait 调用在总预算耗尽
+        或单个 handle 到期时都不会取消已启动的 spawn，见教程第 58 章；
+        1 项补了静态+动态测试（replay 不碰 Provider）；剩 4 项（触发一次真实
+        Run / 只生成一个 Decision / 只生成一个 Run / 飞书结果成功返回）
+        只能靠真实触发验证，且核实结果必须在**新会话**里看（本会话深度参与
+        建造，不适合当裁判）；1 项（完整 pytest 全绿）持续满足
+  - [ ] F 节"当前必需"部分（不含三项 Registry）—— **4 个子批全部完成**，
         见 `docs/guide/f-node-packaging-kickoff-prompt.md`：
         - [x] **U-I** 跨包引用清理（`b06e6bf`，教程第 51 章）
         - [x] **U-II** `pyproject.toml` 正式化（`c7a89a9`，教程第 52 章）。
