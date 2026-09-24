@@ -33,6 +33,12 @@ T = datetime(2026, 9, 20, 15, 0, tzinfo=CN)
 def _ev(**kw) -> Evidence:
     """构造一条测试证据。
 
+    ⚠️ `raw_hash` 默认给值（批 5）：规则收紧到「声明了类别就必须说得出出处」之后，
+    一条裸的 `kind="observed"` 证据本身就是非法的 —— 夹具不该再造它。
+    要测「没有出处」的场景就显式传 `raw_hash=None`。
+    """
+    """构造一条测试证据。
+
     ⚠️ 逐个参数给默认值，**不先搭一个 dict 再 `Evidence(**d)`** —— 那种写法会被
     铁律 4 的守卫判成「手搓字典版契约」，而它判得对：一个带 field/source/value/
     as_of/retrieved_at 的字典就是第二套 Evidence 的形状，哪怕只活在测试里。
@@ -43,6 +49,7 @@ def _ev(**kw) -> Evidence:
         value=kw.pop("value", 1),
         as_of=kw.pop("as_of", T),
         retrieved_at=kw.pop("retrieved_at", T),
+        raw_hash=kw.pop("raw_hash", "d" * 64),
         **kw)
 
 
@@ -174,8 +181,8 @@ class Test类别的自洽校验:
         `raw_hash` 已经完整回答了它的出处，再要一串 id 才是硬凑。
         """
         with pytest.raises(ValueError) as ei:
-            _ev(kind="derived")
-        assert "从**什么**算出来" in str(ei.value)
+            _ev(kind="derived", raw_hash=None)
+        assert "出自什么" in str(ei.value)
 
     def test_derived两条出路各自成立(self):
         assert _ev(kind="derived", raw_hash="a" * 64).kind == "derived"

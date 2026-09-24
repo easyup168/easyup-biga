@@ -31,15 +31,22 @@ SKILLS = ("market-calc/scripts/market_calc.py", "emotion-calc/scripts/emotion_ca
 
 
 def _ev(**kw) -> Evidence:
+    """构造一条测试证据。
+
+    ⚠️ `raw_hash` 默认给值（批 5）：规则收紧到「声明了类别就必须说得出出处」之后，
+    一条裸的 `kind="observed"` 证据本身就是非法的 —— 夹具不该再造它。
+    要测「没有出处」的场景就显式传 `raw_hash=None`。
+    """
     return Evidence(field=kw.pop("field", "f"), source=kw.pop("source", "probe:x"),
-                    value=kw.pop("value", 1), as_of=T, retrieved_at=T, **kw)
+                    value=kw.pop("value", 1), as_of=T, retrieved_at=T,
+                    raw_hash=kw.pop("raw_hash", "d" * 64), **kw)
 
 
 class Test派生值必须说得出出处:
     def test_两者皆无被拒(self):
         with pytest.raises(ValueError) as ei:
-            _ev(kind="derived")
-        assert "从**什么**算出来" in str(ei.value)
+            _ev(kind="derived", raw_hash=None)
+        assert "出自什么" in str(ei.value)
 
     def test_单一来源走raw_hash(self):
         assert _ev(kind="derived", raw_hash="a" * 64).kind == "derived"
@@ -58,9 +65,24 @@ class Test派生值必须说得出出处:
         它的出处 —— 再要一串 evidence id 才是硬凑。两条出路都合法正是这个道理。"""
         assert _ev(kind="derived", raw_hash="a" * 64).derived_from == ()
 
-    def test_observed与parameter不受这条约束(self):
-        assert _ev(kind="observed").raw_hash is None
-        assert _ev(kind="parameter").derived_from == ()
+    def test_observed也必须说得出出处(self):
+        """🔴 批 5 把 observed 也纳入这条约束。
+        「我观察到的」如果指不回任何一份响应，那它和「我编的」在卡面上
+        长得一模一样 —— 而卡面正是人做决策的地方。"""
+        with pytest.raises(ValueError):
+            _ev(kind="observed", raw_hash=None)
+        assert _ev(kind="observed").raw_hash                       # 有 raw_hash 就行
+        from _contract import raw_origins
+        assert _ev(kind="observed", raw_hash=None,                 # 跨源也行
+                   derived_from=raw_origins(["a" * 64, "b" * 64])).kind == "observed"
+
+    def test_parameter仍不受约束(self):
+        """参数是我们自己的设定，本来就没有数据出处 —— 要求它指回一份响应是荒谬的。"""
+        assert _ev(kind="parameter", raw_hash=None).derived_from == ()
+
+    def test_未声明的历史证据仍不受约束(self):
+        """三段式的「旧卡可读」：生产库 3152 条历史证据 kind 全是 None。"""
+        assert _ev(raw_hash=None).kind is None
 
     def test_未声明的历史证据不受约束(self):
         assert _ev().kind is None

@@ -64,12 +64,18 @@ ROSTER = (*STAGE1_AGENTS, RISK)
 def _verdict(agent: str, task_id: str) -> AgentVerdict:
     t = now_cn()
     stance = next(s for s in STANCE_VOCAB[agent] if s != "无法判定")
-    field = f"{agent}_x"
+    # 🔴 每个上游带一个 risk 的**阈值可比字段**（批 5）。
+    #    在此之前夹具只给 `<agent>_x`，于是 risk 一个阈值都比不了 ——
+    #    批 5 起那会进一条 missing、risk 判定转 UNKNOWN，整条编排链因此报错。
+    #    而那是**夹具不现实**，不是编排器坏了：实测生产 23 次决策里 22 次
+    #    上游都有 3–4 个可比字段，「一个都没有」只出现过 1 次。
+    fields = {f"{agent}_x": 1, "volume_ratio": 1.0}
     return AgentVerdict(
         task_id=task_id, agent=agent, status="completed", verdict="PASS",
-        result={field: 1}, data_completeness=1.0,
-        evidence=[Evidence(field=field, source="biga.db:test", value=1,
-                           as_of=t - timedelta(seconds=60), retrieved_at=t)],
+        result=fields, data_completeness=1.0,
+        evidence=[Evidence(field=k, source="biga.db:test", value=v,
+                           as_of=t - timedelta(seconds=60), retrieved_at=t)
+                  for k, v in fields.items()],
         stance=stance, elapsed_ms=100)
 
 
