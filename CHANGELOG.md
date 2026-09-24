@@ -15,6 +15,79 @@
 
 ## [未发布]
 
+### 🐛 修复 · 外部评审 C/D 部分：飞书可靠性 + 生命周期收敛五点
+
+对 `docs/external/biga-latest-deep-review-classified/`（外部专家评审，本地留存不进
+仓库）的 C（飞书可靠性）/D（生命周期收敛）两部分做独立核实后修复。核实过程用两个
+并行 Explore agent 逐条核对评审断言与当前代码的真实状态——不是拿到评审就照单全收：
+确认整体可信度很高（"通知无限重试"这条已被另一次真实生产事故独立印证，见上一条
+CHANGELOG），但也发现"Package 重组已引发 monkeypatch 错位"缺乏实据、"完整 pytest
+不能全绿"很大程度是评审用 zip 快照（非 git checkout）测试触发的环境噪音，不是真实
+生产风险。详见 `docs/tutorial/40-review-c-d-reliability.md`。
+
+**C-1 · 飞书 Trigger 幂等中毒**：占号成功后 `bin/biga-card` 任意一道守卫拒绝，
+`orchestrator.py` 从未启动到，`decision_runs` 永远没有对应行——同一个 trigger 之后
+每次重投都永久收到"正在启动"。`skills/card/scripts/inbound.py::accept_trigger()`
+新增：`hdr is None`（从未启动）或状态已是失败终态，且占号距今超过
+`LAUNCH_RETRY_TIMEOUT_SEC`（900s）⇒ 允许重新拉起一次。阈值刻意大于 Budget Guard
+的 `INFLIGHT_SEC`（600s）与硬超时预算（840s），给 reaper 留出时间先把卡住的 run
+收敛成终态。这个精确范围内"同一 decision 出现第二个 run"不会撞 B 部分（Run
+Provenance，暂缓处理）核实过的 Fact 唯一约束——两种触发场景都还没写过任何 fact。
+新函数 `persistence/db.py::trigger_reserved_at()`。
+
+**C-2 · 飞书通知无限重试 + Worker 假成功**：`notify_worker.py` 曾经对所有失败一视
+同仁、无上限、`main()` 恒定 `return 0`（systemd 因此把失败批次误判成功）。
+`FeishuError` 新增 `retryable` 属性（缺配置类错误不可重试；`bin/biga message send`
+非零退出可重试）；`notification_deliveries.status` 新增第三个值 `'abandoned'`
+（不可重试或达到 `notify_worker.MAX_ATTEMPTS`=5 次后放弃，不再出现在
+`undelivered_notifications()` 里）；`main()` 改为真失败（`failed`，还会重试的）非零
+退出，`abandoned`（已处理完）不算。异常没有 `retryable` 属性时默认当 `True`——
+R-3 方向，判不清就继续重试，不要武断放弃。
+
+**D-1 · `TIMEOUT` 被错误分类为 `FAILED`**：状态机早有 `RunState.TIMEOUT` 终态，
+`orchestrator.py` 却只有一个 `OrchestratorError`，超时和其他失败共用它、都转成
+`FAILED`。新增 `OrchestratorTimeout(OrchestratorError)` 子类，`_stage_timeout()`
+预算耗尽时抛这个；`run()` 的 except 链新增对应分支（🔴 必须排在 `except
+OrchestratorError` **之前**——子类分支排在父类之后永远进不去，第一版就是按这个
+错误顺序写的，靠端到端测试断言"最终状态必须是 TIMEOUT 不是 FAILED"才抓出来）。
+只覆盖应用层能预见的超时；进程被外部信号杀掉来不及抛异常是 D-2 的范围。
+
+**D-2 · 无人收敛非终态 run（stale-run reaper）**：外部信号杀掉 `orchestrator.py`
+时，`run_events` 永远停在最后一次成功转移到的非终态。新增
+`tools/maintenance/stale_run_reaper.py`（`find_stale_runs()` 扫描 + `reap()`
+转移 + CLI，默认 dry-run）。按 `docs/guide/orchestration-kickoff-prompt.md` 早先
+划定的范围：**只做纯函数工具，不接调度**（不创建任何 `.service`/`.timer`）。
+🔴 实现过程中自己的 sabotage 测试抓到一个真实设计缺陷：第一版用"重新
+`current_state()` 读取的当前状态"做 CAS 的 `expected`，这个值永远等于"当前真实
+状态"，保护形同虚设——一个正常推进中的 run 会被直接转去 TIMEOUT。改成用
+`find_stale_runs()` **扫描那一刻**读到的旧状态做 `expected`，两次读取之间状态
+真的变了（无论变成终态还是别的非终态）才会被 CAS 正确拒绝。
+
+**D-3 · 直调 `orchestrator.py` 绕过安全闸门**：`bin/biga-card` 的 Budget/flock/
+总闸三道守卫此前只在 bash 层，直接 `python3 orchestrator.py` 会绕过（不影响飞书
+路径——`inbound.py` 刻意拉起完整的 `bin/biga-card`，这是给"人手滑直接跑"这类边缘
+场景的纵深防御，同已有的 ownership 下沉是同一个模式）。`main()` 新增
+`_preflight_stop_gate()`（复用 `.biga-card-stop` 路径约定）、`_preflight_budget()`
+（直接调用现成的 `budget.check_budget()`，不重新实现规则）、`_preflight_lock()`。
+🔴 flock 不能像前两者一样简单下沉：它是排他资源，子进程重新 `open()` 同一个锁
+文件是全新的 file description，POSIX 语义下与父进程持有的锁**互斥**而非共享——
+正常出卡也会被自己的 Python 层拒绝，这是真实会立刻炸的 bug。`bin/biga-card` 拿到
+锁后新增 `export BIGA_CARD_LOCK_HELD=1` 再调子进程；`orchestrator.py` 看到这个
+变量就信任锁已持有、跳过自检，没有才自己上锁——与 `entry_guard` 靠环境变量识别
+调用方是同一种纵深防御哲学。
+
+另两处过程中的踩坑（详见教程第 40 章"坑"一节）：给锁检查块写的注释里提前出现了
+`orchestrator.py` 这个词，让一条按"字符串首次出现位置"判断守卫顺序的现有测试
+（`test_entry_guard.py::test_守卫排在第一次花钱之前`）意外报错——不是那条测试错了，
+是新注释的用词撞了判据；`orchestrator.py::main()` 新增的锁默认查真实仓库根路径，
+同一 pytest 进程里跨测试会被自己前一个测试拿到、未释放的锁挡住，`test_orchestrator.
+py` 的 `db` fixture 补上 `BIGA_STOP_FILE`/`BIGA_CARD_LOCK_FILE` 隔离到临时路径。
+
+测试 1342 → 1375（新增 33 条：`test_inbound_trigger.py` +8、
+`test_notification_outbox.py` +5、`test_orchestrator.py` +2（D-1）+7（D-3）、
+新文件 `test_stale_run_reaper.py` 12 条）。每一处修复都做过 sabotage 验证（临时
+改坏关键逻辑，确认新测试真的会报出预期的失败信息，而不只是"变红"）。
+
 ### 🐛 修复 · Card 从来没有被推送过 —— 一个没有任何人注入的「必填环境变量」
 
 接着上一条查出来的**第二个、也是真正让人收不到 Card 的**故障。上一条把

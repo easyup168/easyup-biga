@@ -39,7 +39,13 @@ from _store import (  # noqa: E402
     undelivered_notifications,
 )
 
-__all__ = ["Deliverer", "StdoutDeliverer", "deliver_pending", "main"]
+__all__ = ["Deliverer", "StdoutDeliverer", "MAX_ATTEMPTS", "deliver_pending", "main"]
+
+#: 一条通知最多重试几次（2026-09-24，外部评审 §11）。达到这个数还没投成 ⇒ 放弃
+#: （记 status='abandoned'，不再出现在 `undelivered_notifications()` 里）——不这样
+#: 的话，一个非 retryable 也没有分类信息的错误会被无限期重投，且没有任何信号
+#: 表明它已经无望（这正是"通知无限重试 + worker 假成功"这条评审指出的问题）。
+MAX_ATTEMPTS = 5
 
 
 class Deliverer(Protocol):
@@ -77,18 +83,30 @@ def deliver_pending(
     limit: int = 100,
     path: "pathlib.Path | str | None" = None,
 ) -> dict[str, int]:
-    """把 outbox 里还没投成功的通知逐条投出去，返回 `{pending, delivered, failed}`。
+    """把 outbox 里还没投成功的通知逐条投出去，返回
+    `{pending, delivered, failed, abandoned}`。
 
-    每条：调 `deliverer.deliver(...)`；成功 → 记一条 `delivered`，失败 → 记一条
-    `failed`（带 error 文本）并继续下一条（一条失败不连累其余）。attempt 号 =
-    这条 outbox 已有的尝试数 + 1（append 语义，不覆盖历史尝试）。
+    每条：调 `deliverer.deliver(...)`；成功 → 记一条 `delivered`。失败时按
+    2026-09-24（外部评审 §11）的规则分流：
+
+    * 异常带 `retryable=False`（配置类错误，重试不会变好——见 `feishu_deliverer.
+      FeishuError`），或者这次已经是第 `MAX_ATTEMPTS` 次尝试 ⇒ 记 `abandoned`，
+      不再出现在下次 `undelivered_notifications()` 里。
+    * 否则记 `failed`，留在 outbox 里等下次重投。
+
+    异常没有 `retryable` 属性（比如测试/`StdoutDeliverer` 抛的普通异常）时默认当
+    `True`（R-3 方向：不确定该不该放弃时，宁可继续重试，也不要武断放弃一条本来
+    还有机会的通知）。
+
+    一条失败不连累其余（continue 到下一条）。attempt 号 = 这条 outbox 已有的
+    尝试数 + 1（append 语义，不覆盖历史尝试）。
 
     `deliverer` 默认 `StdoutDeliverer`（桩）；测试注入 mock 验证调用与 payload（P4）。
     """
     deliverer = deliverer or StdoutDeliverer()
     channel = getattr(deliverer, "channel", "?")
     pending = undelivered_notifications(limit=limit, path=path)
-    delivered = failed = 0
+    delivered = failed = abandoned = 0
     for row in pending:
         attempt = int(row["attempt_count"]) + 1
         try:
@@ -96,15 +114,24 @@ def deliver_pending(
                               aggregate=row["aggregate"], payload=row["payload"])
         except Exception as e:  # noqa: BLE001
             # 🔴 投递失败只记账、不抛：不连累后面的通知，也不让它成为一个能把
-            #    worker 进程整个带走的未捕获异常。留在 outbox 里等下次重投。
-            record_delivery(outbox_id=row["outbox_id"], attempt=attempt,
-                            status="failed", channel=channel, error=str(e), path=path)
-            failed += 1
+            #    worker 进程整个带走的未捕获异常。
+            retryable = getattr(e, "retryable", True)
+            if not retryable or attempt >= MAX_ATTEMPTS:
+                record_delivery(outbox_id=row["outbox_id"], attempt=attempt,
+                                status="abandoned", channel=channel,
+                                error=str(e), path=path)
+                abandoned += 1
+            else:
+                record_delivery(outbox_id=row["outbox_id"], attempt=attempt,
+                                status="failed", channel=channel,
+                                error=str(e), path=path)
+                failed += 1
             continue
         record_delivery(outbox_id=row["outbox_id"], attempt=attempt,
                         status="delivered", channel=channel, path=path)
         delivered += 1
-    return {"pending": len(pending), "delivered": delivered, "failed": failed}
+    return {"pending": len(pending), "delivered": delivered,
+            "failed": failed, "abandoned": abandoned}
 
 
 def _make_deliverer(name: str) -> Deliverer:
@@ -132,8 +159,12 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     summary = deliver_pending(deliverer=_make_deliverer(a.deliverer), limit=a.limit)
     print(f"待投 {summary['pending']}  投出 {summary['delivered']}  "
-          f"失败 {summary['failed']}", file=sys.stderr)
-    return 0
+          f"失败 {summary['failed']}  放弃 {summary['abandoned']}", file=sys.stderr)
+    # 🔴 2026-09-24（外部评审 §11）：曾经无论失败多少条都 return 0，systemd 因此
+    #    把失败批次误判为成功（Type=oneshot 只看退出码）。`failed`（还会重试的）
+    #    非零就该让调用方知道这次不是全绿——`abandoned` 不算：那些已经处理完了
+    #    （不会再自动重试），不是"这次调用出了问题"。
+    return 1 if summary["failed"] > 0 else 0
 
 
 if __name__ == "__main__":

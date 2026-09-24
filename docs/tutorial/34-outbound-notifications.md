@@ -232,3 +232,12 @@ $ python3 skills/decision-card/scripts/notify_worker.py
 | 7 | 加状态不用自己写守卫：`test_每个状态都有消费方` 逼你在 `STATE_MEANING` 给它一句话（L-1 现成落点）|
 | 8 | append-only 迁移列表的**版本号是共享命名空间**，多批并行会静默撞 —— 先看对方占了没，别假设 |
 | 9 | 这一批**只做推、不接收**：没有飞书输入、没有新攻击面、不涉及 R-2（那都是批 G-II）|
+
+---
+
+> ⏩ **后续变动（2026-09-24，外部评审 C/D 部分）**：第 92-97 节说 TIMEOUT/CANCELLED
+> "今天还没有自动生产方"——现在不完全成立了。`OrchestratorTimeout` 让**应用层能预见
+> 的超时**（`_stage_timeout` 主动判断预算耗尽）真的会产生 TIMEOUT；新增的
+> `tools/maintenance/stale_run_reaper.py` 让**外部信号杀掉进程**这种情况也能事后收敛
+> 成 TIMEOUT（纯函数工具，不接调度）。CANCELLED 依然没有生产方——本次没有涉及。
+> 见 `docs/tutorial/40-review-c-d-reliability.md`。

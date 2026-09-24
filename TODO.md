@@ -1130,6 +1130,22 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         ——分批改等于同一件事做两次，且中途状态更难判断"改没改全"。H-III 是留白
         （不搬新包），不阻塞本清理
 
+- [x] 批 M · 外部评审 C/D 部分（飞书可靠性 + 生命周期收敛）—— **独立复核通过
+      （2026-09-24）**。核实来源：`docs/external/biga-latest-deep-review-classified/`
+      （本地留存不进仓库）。五点修复：Trigger 幂等中毒重试（`inbound.py`）、通知
+      新增 `abandoned` 状态区分可否重试（`notify_worker.py`/`feishu_deliverer.py`）、
+      `OrchestratorTimeout` 让 TIMEOUT 真正被产生、`tools/maintenance/
+      stale_run_reaper.py`（纯函数，不接调度）、Budget/flock/总闸下沉
+      `orchestrator.py`（flock 靠 `BIGA_CARD_LOCK_HELD` 环境变量避开 POSIX
+      互斥陷阱）。测试 1342 → 1375。详见 `docs/tutorial/40-review-c-d-reliability.md`、
+      `CHANGELOG.md`
+  - [ ] 评审 A（发布基线）/B（Run Provenance）/E（Contract 与数据质量）/
+        F（Package 与 Registry）部分——已核实真实性，暂缓处理。B 部分核实结论：
+        Fact 唯一约束确实只按 `(task_id, agent)`、`latest_verdict_ids()` 确实仍按
+        `decision_id` 聚合，**但目前没有任何代码路径会对同一个 decision 开出
+        第二个 run**（`open_run()` 全仓只一处调用），所以是面向未来 Retry 功能的
+        前置修复，不是当前活跃 bug——留到真正要开放 retry 之前再做
+
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），
 并经同日到手的**总体设计**（`baga-full-system-architecture`，位阶最高）复核过。

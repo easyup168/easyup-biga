@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import fcntl
 import json
 import os
 import pathlib
@@ -63,8 +64,12 @@ from _store import (  # noqa: E402
     transition,
 )
 from risk_check import build_fact_bundle  # noqa: E402
+import budget  # noqa: E402
 import card_ops  # noqa: E402
 import entry_guard  # noqa: E402
+
+#: 仓库根 —— 总闸/单实例锁文件路径的锚点，与 `bin/biga-card` 同一约定。
+_ROOT = _HERE.parent.parent.parent.parent
 
 # 🔴 批 K：RISK_AGENT / SNAPSHOT_INDEX_AGENTS 从 `_contract.AGENT_REGISTRY` 派生
 #    （见上面的 import），不再在这里各写一份独立字面量 —— 它俩曾是 roster 散落
@@ -94,6 +99,21 @@ JUDGMENT_SCHEMA = {
 
 class OrchestratorError(RuntimeError):
     """编排失败（判官没给出判断 / 零证据 / 关键步骤挂了）。CLI 据此给退出码。"""
+
+
+class OrchestratorTimeout(OrchestratorError):
+    """超过总预算被提前收（`_stage_timeout` 判定 deadline 已耗尽）。
+
+    🔴 2026-09-24（外部评审 §13）：状态机早就定义了 `RunState.TIMEOUT` 这个终态
+    （见 `domain/run.py`），但超时这里之前一直跟"零证据""判官失败"这些真正的
+    编排失败共用 `OrchestratorError`，`run()` 的 except 链因此把超时也转成了
+    `FAILED`——查死因时看不出"这次是等太久"还是"这次真的跑挂了"，是两回事。
+    单独一个子类，`run()` 据此单独 transition 到 `TIMEOUT`。
+
+    只覆盖**应用层能预见的超时**（`_stage_timeout` 主动判断 deadline 耗尽）；
+    进程被外部信号杀掉（SIGTERM/kill/机器重启）来不及抛任何异常，属于另一个
+    问题（stale-run reaper 事后收敛，见 `tools/maintenance/stale_run_reaper.py`）。
+    """
 
 
 class DecisionOrchestrator:
@@ -263,6 +283,12 @@ class DecisionOrchestrator:
                                          "aggregate": did})
                 self._to(ctx.run_id, state, RunState.COMPLETED)
                 return card
+        except OrchestratorTimeout:
+            # 🔴 子类必须先于父类捕获——OrchestratorTimeout 是 OrchestratorError
+            # 的子类，这个分支若排在下面的 except OrchestratorError 之后，
+            # 永远进不去（2026-09-24，外部评审 §13）。
+            self._fail(ctx.run_id, state, RunState.TIMEOUT)
+            raise
         except OrchestratorError:
             self._fail(ctx.run_id, state, RunState.FAILED)
             raise
@@ -307,12 +333,12 @@ class DecisionOrchestrator:
         🔴 批 C-III（§2 追加 5 §35）：各阶段原本各用各的固定预算、互不感知总
         deadline，三段之和可以超过 `deadline_sec`，只靠外层 bash `timeout` 硬顶
         （纵深防御的最后一层，不该是唯一一层）。这里把「还剩多少」纳进来：
-        剩余 <= 0 就不再等，抛 `OrchestratorError` → `run()` 的 except 据此进
-        FAILED（与零证据/判官失败同一条失败路径）。
+        剩余 <= 0 就不再等，抛 `OrchestratorTimeout` → `run()` 的 except 据此进
+        `TIMEOUT`（2026-09-24 前是 `OrchestratorError` → `FAILED`，见类 docstring）。
         """
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise OrchestratorError(
+            raise OrchestratorTimeout(
                 f"总预算 {self.deadline_sec}s 已耗尽（remaining={remaining:.0f}s）——"
                 f"不再等待后续阶段，提前收（避免三段之和超过总 deadline）。")
         return min(float(stage_budget), remaining)
@@ -418,6 +444,70 @@ class DecisionOrchestrator:
         }
 
 
+# ── Preflight 下沉（外部评审 §15）──────────────────────────────────────────
+#
+# 🔴 `bin/biga-card` 的四道守卫（总闸 → ownership → 单实例锁 → 预算闸门）只有
+# ownership 下沉到了这里（entry_guard，见 main() 里的注释）。直接
+# `python3 orchestrator.py` 仍会绕过总闸/锁/预算——这不影响飞书路径（inbound.py
+# 刻意拉起完整的 bin/biga-card，见它自己的模块 docstring），是给"人手滑直接跑"
+# 或"未来某个入口忘了走 bin/biga-card"这类边缘场景补的纵深防御，同 ownership
+# 那道一样：bin/biga-card 自己那道不删，这里加第二层。
+
+def _preflight_stop_gate() -> str | None:
+    """总闸：`.biga-card-stop` 文件存在就拒绝。返回 None 表示放行，否则是拒绝原因。
+
+    路径与环境变量覆盖跟 `bin/biga-card` 同一约定（`BIGA_STOP_FILE`），这样测试
+    与真实运维操作（`rm` 那个文件解除）在两层都生效，不需要认两个不同的开关。
+    """
+    stop_file = pathlib.Path(os.environ.get("BIGA_STOP_FILE") or (_ROOT / ".biga-card-stop"))
+    if stop_file.exists():
+        return (f"出新卡已被总闸拦下（{stop_file}）。"
+                f"解除：rm {stop_file}（先确认触发源已经停了）。")
+    return None
+
+
+def _preflight_budget(decision_id: str | None) -> str | None:
+    """Budget Guard：直接复用 `budget.check_budget()`——同一套规则只有一份实现，
+    不在这里重写当日上限/最小间隔/inflight 这三条判断。"""
+    reasons = budget.check_budget(exclude_decision_id=decision_id)
+    return "；".join(reasons) if reasons else None
+
+
+#: 模块级持有拿到的锁文件对象——必须活到进程结束（flock 释放靠 fd 关闭/进程退出），
+#: 不能是函数局部变量（函数返回后会被垃圾回收，进而过早释放锁）。
+_lock_fh: object | None = None
+
+
+def _preflight_lock() -> str | None:
+    """单实例锁。
+
+    🔴 与 ownership/budget 不同，flock 是**排他资源**，不能简单"Python 层再上一次
+    同样的锁"：`bin/biga-card` 正常路径下已经用 `exec 9>"$ROOT/.biga-card.lock"` +
+    `flock -n 9` 拿到了锁；子进程 `orchestrator.py` 若自己重新 `open()` 同一个
+    路径再 `flock`，那是一次全新的 file description，POSIX 语义下**不会共享**
+    父进程持有的锁、而是与它互斥——正常出卡也会被这里拒绝，是真实会立刻炸的 bug，
+    不是理论风险。
+
+    ⇒ `bin/biga-card` 拿到锁后设置环境变量 `BIGA_CARD_LOCK_HELD=1` 再调子进程；
+    这里看到这个变量就信任锁已经被持有、跳过自检——与 `entry_guard` 靠环境变量
+    识别调用方是同一种纵深防御哲学（信任协作方如实设置，不是绝对安全边界）。
+    没有这个变量（绕过 bin/biga-card 直接跑）才自己 `open()` + `flock`。
+    """
+    global _lock_fh
+    if os.environ.get("BIGA_CARD_LOCK_HELD"):
+        return None
+    lock_file = pathlib.Path(os.environ.get("BIGA_CARD_LOCK_FILE")
+                             or (_ROOT / ".biga-card.lock"))
+    fh = open(lock_file, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return (f"已经有一次出卡在跑，这次不再起（单实例锁，{lock_file}）。")
+    _lock_fh = fh  # 持有到进程结束，不显式 close——进程退出时 OS 自动释放。
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="程序驱动出卡（DecisionOrchestrator）")
     ap.add_argument("--origin", default="cli", choices=["cli", "feishu", "cron"])
@@ -450,6 +540,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"🔶 发起方判不了（{why}）—— 放行，依赖 bin/biga-card 的锁与预算兜底。",
               file=sys.stderr)
 
+    # 🔴 总闸 / Budget / 单实例锁下沉（外部评审 §15）——纵深防御第二层，
+    #    bin/biga-card 自己那道守卫不删。见三个 _preflight_* 函数的说明。
+    #    🔴 必须真短路（先判总闸，判过了才判 budget，判过了才抢锁）——
+    #    总闸已经决定拒绝时不该再去抢一次 flock，没有意义，还平白占一个文件
+    #    描述符到进程退出。
+    reason = _preflight_stop_gate()
+    if reason:
+        print(f"🔴 {reason}", file=sys.stderr)
+        return 3
+    reason = _preflight_budget(a.decision_id)
+    if reason:
+        print(f"🔴 {reason}", file=sys.stderr)
+        return 3
+    reason = _preflight_lock()
+    if reason:
+        print(f"🔴 {reason}", file=sys.stderr)
+        return 3
+
     ctx = new_run_context(origin=a.origin, non_interactive=True,
                           trigger_id=a.trigger_id, decision_id=a.decision_id)
     print(f"run {ctx.run_id}   （查进度：bin/biga-card --status {ctx.run_id}）",
@@ -457,6 +565,12 @@ def main(argv: list[str] | None = None) -> int:
     orch = DecisionOrchestrator(model_ref=a.model_ref)
     try:
         card = orch.run(ctx)
+    except OrchestratorTimeout as e:
+        # 子类先于父类捕获（同 run() 里的顺序）。退出码沿用 4——外部行为不变，
+        # 只是内部状态记录正确了（RunState.TIMEOUT 不是 FAILED）。
+        print(f"🔴 出卡超时：{e}", file=sys.stderr)
+        print(f"   死在哪一步：bin/biga-card --status {ctx.run_id}", file=sys.stderr)
+        return 4
     except OrchestratorError as e:
         print(f"🔴 出卡失败：{e}", file=sys.stderr)
         print(f"   死在哪一步：bin/biga-card --status {ctx.run_id}", file=sys.stderr)

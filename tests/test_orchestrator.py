@@ -52,7 +52,11 @@ from _store import (  # noqa: E402
 )
 
 import orchestrator as orch_mod  # noqa: E402
-from orchestrator import DecisionOrchestrator, OrchestratorError  # noqa: E402
+from orchestrator import (  # noqa: E402
+    DecisionOrchestrator,
+    OrchestratorError,
+    OrchestratorTimeout,
+)
 
 RISK = orch_mod.RISK_AGENT
 ROSTER = (*STAGE1_AGENTS, RISK)
@@ -170,6 +174,13 @@ def _make_orch(db, **fake_kw):
 def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
+    # 🔴 D-3（外部评审 §15）：main() 新增的 Python 层 preflight（总闸/单实例锁）
+    # 默认查真实仓库根的 .biga-card-stop / .biga-card.lock——测试必须隔离到
+    # 临时路径。真实踩过：flock 按 open file description 算，不因为函数返回
+    # 就释放（模块级 _lock_fh 活到进程结束），同一个 pytest 进程里一个测试
+    # 调 main() 拿到锁之后，同文件里后面的测试会被这把锁跨测试拒掉。
+    monkeypatch.setenv("BIGA_STOP_FILE", str(tmp_path / "no-such-stop-file"))
+    monkeypatch.setenv("BIGA_CARD_LOCK_FILE", str(tmp_path / "biga-card.lock"))
     init_schema(p)
     return p
 
@@ -373,13 +384,32 @@ class TestDeadlineBudget:
         # 剩余很少 → 收窄到剩余
         assert 25 <= orch._stage_timeout(now + 30, 180) <= 30
 
-    def test_stage_timeout预算耗尽则抛错_进而FAILED(self, db):
-        """remaining <= 0 时不再等，抛 OrchestratorError（run() 的 except 据此进
-        FAILED，与零证据/判官失败同一条失败路径）。"""
+    def test_stage_timeout预算耗尽则抛OrchestratorTimeout(self, db):
+        """remaining <= 0 时抛的必须是 `OrchestratorTimeout`（`OrchestratorError`
+        的子类），不是裸 `OrchestratorError`——2026-09-24（外部评审 §13）之前两者
+        共用同一个类型，`run()` 的 except 链因此把超时也转成了 FAILED，查死因时
+        分不清"等太久"还是"真的跑挂了"。`pytest.raises(OrchestratorError, ...)`
+        本来就能捕获子类，这里改用更精确的类型断言，确保真的是新子类。"""
         orch, _, _ = _make_orch(db)
         past = time.monotonic() - 1  # deadline 已经过去
-        with pytest.raises(OrchestratorError, match="预算"):
+        with pytest.raises(OrchestratorTimeout, match="预算"):
             orch._stage_timeout(past, 180)
+
+    def test_端到端_超时进TIMEOUT状态_不是FAILED(self, db, monkeypatch):
+        """完整走一次 `run()`，`_stage_timeout` 抛 `OrchestratorTimeout` ⇒ 最终
+        状态必须是 `RunState.TIMEOUT`。探针：把 `run()` 里 `except
+        OrchestratorTimeout` 那个分支删掉（或把它挪到 `except OrchestratorError`
+        之后），这条就会退回 FAILED、变红。"""
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+
+        def boom(deadline, stage_budget):
+            raise OrchestratorTimeout("总预算耗尽（人工注入）")
+
+        monkeypatch.setattr(orch, "_stage_timeout", boom)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        with pytest.raises(OrchestratorTimeout):
+            orch.run(ctx)
+        assert run_events(ctx.run_id, path=db)[-1]["to_state"] == RunState.TIMEOUT
 
 
 class TestSnapshotFreeze:
@@ -516,6 +546,116 @@ class TestOwnershipGuard:
         rc = m.main([])
         assert rc == 0
         assert "判不了" in capsys.readouterr().err, "UNKNOWN 放行也要把依据打出来（R-3）"
+
+
+class TestPreflightGates:
+    """🔴 Budget / flock / 总闸下沉（外部评审 §15）——纵深防御第二层，
+    `bin/biga-card` 自己那道守卫不删。判据同 `TestOwnershipGuard`：`run()`
+    换成必炸的桩，一旦守卫没拦住、执行流跑到了 run()，测试立刻失败。
+
+    `db` fixture 已经把 `BIGA_STOP_FILE`/`BIGA_CARD_LOCK_FILE` 隔离到临时路径
+    （见 fixture 定义的注释）——这里的用例不会碰真实仓库根的那两个文件。
+    """
+
+    @staticmethod
+    def _boom(self, ctx):
+        raise AssertionError("守卫没拦住，执行流跑到了 run() —— 真机上这里会 spawn 花钱")
+
+    @staticmethod
+    def _human(monkeypatch):
+        monkeypatch.setattr(orch_mod.entry_guard, "classify_caller",
+                            lambda *a, **k: (orch_mod.entry_guard.HUMAN, "人"))
+
+    def test_总闸文件存在时main拒绝_exit3(self, monkeypatch, db, tmp_path):
+        self._human(monkeypatch)
+        stop_file = tmp_path / "stop-marker"
+        stop_file.write_text("测试用\n", encoding="utf-8")
+        monkeypatch.setenv("BIGA_STOP_FILE", str(stop_file))
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run", self._boom)
+        assert orch_mod.main([]) == 3
+
+    def test_总闸文件不存在时放行(self, monkeypatch, db):
+        self._human(monkeypatch)
+
+        class _Card:
+            decision_id = "BIGA-20260101-003"
+            def render(self): return "CARD"
+            def to_dict(self): return {}
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run",
+                            lambda self, ctx: _Card())
+        assert orch_mod.main([]) == 0
+
+    def test_budget不通过时main拒绝_exit3(self, monkeypatch, db):
+        self._human(monkeypatch)
+        monkeypatch.setattr(orch_mod.budget, "check_budget",
+                            lambda **k: ["人工注入的预算拒绝理由（测试）"])
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run", self._boom)
+        assert orch_mod.main([]) == 3
+
+    def test_budget通过时放行(self, monkeypatch, db):
+        self._human(monkeypatch)
+        monkeypatch.setattr(orch_mod.budget, "check_budget", lambda **k: [])
+
+        class _Card:
+            decision_id = "BIGA-20260101-004"
+            def render(self): return "CARD"
+            def to_dict(self): return {}
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run",
+                            lambda self, ctx: _Card())
+        assert orch_mod.main([]) == 0
+
+    def test_两次不带LOCK_HELD的并发调用_第二次被单实例锁拒绝(self, monkeypatch, db):
+        """🔴 真实 flock 语义（不 mock）：第一次调用真的拿到锁且不释放
+        （`_lock_fh` 模块级变量活到进程结束），第二次调用自己重新 open() 同一个
+        锁文件再 flock，会与第一次互斥——这正是单实例锁该有的效果。"""
+        self._human(monkeypatch)
+
+        class _Card:
+            decision_id = "BIGA-20260101-005"
+            def render(self): return "CARD"
+            def to_dict(self): return {}
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run",
+                            lambda self, ctx: _Card())
+        assert orch_mod.main([]) == 0   # 第一次：真的拿到锁，正常跑完
+        assert orch_mod.main([]) == 3   # 第二次：被第一次持有的锁拒绝
+
+    def test_带LOCK_HELD时信任锁已持有_不会被自己的锁挡住(self, monkeypatch, db):
+        """🔴 这是 flock 语义陷阱的直接验证：`bin/biga-card` 拿到锁后传
+        `BIGA_CARD_LOCK_HELD=1`，子进程看到它就跳过自检——如果没有这个跳过
+        逻辑（探针：删掉 `_preflight_lock` 里那个 early return），第二次调用
+        会被第一次自己持有的锁挡住，即便两次调用其实是同一条正常出卡流程的
+        一部分，不是真的并发冲突。"""
+        self._human(monkeypatch)
+
+        class _Card:
+            decision_id = "BIGA-20260101-006"
+            def render(self): return "CARD"
+            def to_dict(self): return {}
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run",
+                            lambda self, ctx: _Card())
+        assert orch_mod.main([]) == 0  # 第一次：真的拿到锁（占着，不释放）
+        monkeypatch.setenv("BIGA_CARD_LOCK_HELD", "1")
+        assert orch_mod.main([]) == 0, \
+            "带 BIGA_CARD_LOCK_HELD 时不该自己抢锁，也就不会被自己占着的锁挡住"
+
+    def test_bin_biga_card真的会设置LOCK_HELD且在flock成功之后(self):
+        """`main()` 里的 `_preflight_lock` 只在函数级测过（上面几条）——这里补
+        `bin/biga-card` 那一侧：`export BIGA_CARD_LOCK_HELD=1` 必须真的写在脚本
+        里，且在 `flock -n 9` 成功（没有触发它自己的 `exit 3`）之后、在真正调用
+        编排器之前。位置判据同 `test_entry_guard.py::test_守卫排在第一次花钱
+        之前`——按字符串在文件里第一次出现的位置比较。"""
+        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
+        run = text.split("# ── 出新卡")[1]
+        for name, needle in (("flock 检查", "flock -n 9"),
+                             ("设置 LOCK_HELD", "BIGA_CARD_LOCK_HELD=1"),
+                             ("调编排器", "skills/decision-card/scripts/orchestrator.py")):
+            assert needle in run, f"出卡流程里找不到「{name}」这一步（{needle}）"
+        i_flock = run.find("flock -n 9")
+        i_held = run.find("BIGA_CARD_LOCK_HELD=1")
+        i_orch = run.find("skills/decision-card/scripts/orchestrator.py")
+        assert i_flock < i_held < i_orch, (
+            "BIGA_CARD_LOCK_HELD 必须设在 flock 成功之后、调用编排器之前——"
+            "设早了锁可能还没拿到，设晚了编排器已经跑了自己的 flock 自检")
 
 
 def _foreign_fact(*, verdict_ids, store, task_id):

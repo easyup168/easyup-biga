@@ -50,14 +50,16 @@ import pathlib
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 
 _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 
-from _contract import RUN_ORIGINS  # noqa: E402
+from _contract import NOTIFY_FAILURE_STATES, RUN_ORIGINS, now_cn  # noqa: E402
 from _store import (  # noqa: E402
     find_run_by_trigger,
     reserve_decision_for_trigger,
+    trigger_reserved_at,
 )
 
 __all__ = ["AckResult", "accept_trigger", "detached_biga_card_launcher", "main"]
@@ -69,6 +71,16 @@ _ROOT = _HERE.parent.parent.parent.parent
 #: （它的 trigger_id 每次都是新的，本就不该去重）。
 _DEDUP_ORIGINS = frozenset({"feishu", "cron"})
 
+#: 🔴 幂等中毒兜底（2026-09-24，外部评审 §10）：占号成功后 `bin/biga-card` 的
+#: 四道守卫（总闸/ownership/flock/budget）任意一道拒绝，`orchestrator.py` 都
+#: 不会被启动到，`decision_runs` 永远不会有这个 trigger 对应的行 —— 这样同一个
+#: trigger 之后每次重投都会永久收到"正在启动"，无法恢复。占号距今超过这个阈值
+#: 就允许重新拉起一次。必须明显大于 Budget Guard 的 `INFLIGHT_SEC`（600s）与硬
+#: 超时预算（`CARD_DEADLINE_SEC+60`=840s）：给 stale-run reaper 留出时间先把
+#: 卡在非终态的 run 收敛成终态，也保证 Budget Guard 的 inflight 窗口早已过期，
+#: 不会跟"允许重新拉起"互相打架。
+LAUNCH_RETRY_TIMEOUT_SEC = 900
+
 
 @dataclasses.dataclass(frozen=True)
 class AckResult:
@@ -77,6 +89,10 @@ class AckResult:
     Attributes:
         accepted:   这次调用**新拉起**了一次出卡运行（`True`）还是没有（重复/被拒）。
         duplicate:  这个 `trigger_id` 之前已经受理过（飞书事件重投）。
+                    🔴 `accepted` 与 `duplicate` **不互斥**——`trigger_id` 是重投
+                    （`duplicate=True`），但上一次尝试超过 `LAUNCH_RETRY_TIMEOUT_SEC`
+                    还没有真的起来/已经失败终态时，这次会重新拉起一次
+                    （`accepted=True`），两者同时为真。
         decision_id: 这次外部请求对应的决策号（新占的或已占的那个）。
         run_state:  已有运行的当前状态（重复受理时补给人看，可能为 None）。
         message:    人类可读的 ACK 文本，投回飞书。
@@ -176,12 +192,44 @@ def accept_trigger(
         trigger_id, by=f"{origin}:{trigger_id[:24]}", path=path)
 
     if not created:
-        # 重投：绝不再拉起一次运行。补一句当前状态（若 run 已 open）给人看。
+        # 重投：默认不再拉起一次运行。补一句当前状态（若 run 已 open）给人看。
         hdr = find_run_by_trigger(trigger_id, path=path)
         state = None
         if hdr is not None:
             from _store import current_state  # 局部导入，避免与上面的批量导入纠缠
             state = current_state(hdr["run_id"], path=path)
+
+        # 🔴 幂等中毒兜底：`hdr is None` ⇒ orchestrator 从未被启动到（守卫拒绝了，
+        # decision_runs 里根本没有这个 trigger 的行）；`state in NOTIFY_FAILURE_STATES`
+        # ⇒ 启动到了但最终失败/超时/取消。两种情况都不会再产生新数据（没到 Stage 1，
+        # 或者已经是终态），"重新拉起"在这个精确范围内是安全的——不会撞
+        # `ux_fact_per_task_agent`（按 task_id+agent 的唯一约束，见评审 B 部分核实）。
+        # 占号太新（还在 Budget Guard 的 inflight 窗口内，或者可能还在正常跑）不重试，
+        # 只在明显过了 `LAUNCH_RETRY_TIMEOUT_SEC` 之后才当作"这次尝试没起来"。
+        if hdr is None or state in NOTIFY_FAILURE_STATES:
+            reserved_at = trigger_reserved_at(trigger_id, path=path)
+            age = None
+            if reserved_at:
+                try:
+                    age = (now_cn() - datetime.fromisoformat(reserved_at)).total_seconds()
+                except ValueError:
+                    age = None
+            if age is not None and age >= LAUNCH_RETRY_TIMEOUT_SEC:
+                try:
+                    launcher(origin, trigger_id, decision_id)
+                except Exception as e:  # noqa: BLE001
+                    return AckResult(
+                        accepted=False, duplicate=True, decision_id=decision_id,
+                        run_state=state,
+                        message=f"决策 {decision_id} 上一次尝试已经 {int(age)}s 没有"
+                                f"动静，重新拉起也失败了：{e}。"
+                                f"请在终端直接跑 bin/biga-card 查原因。")
+                return AckResult(
+                    accepted=True, duplicate=True, decision_id=decision_id,
+                    run_state="RECEIVED",
+                    message=f"决策 {decision_id} 上一次尝试已经 {int(age)}s 没有动静，"
+                            f"已重新拉起一次。约 3 分钟，跑完自动推送给你。")
+
         state_txt = f"（当前 {state}）" if state else "（正在启动）"
         return AckResult(
             accepted=False, duplicate=True, decision_id=decision_id, run_state=state,

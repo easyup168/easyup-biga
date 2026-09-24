@@ -180,6 +180,11 @@ if [ "${BIGA_CARD_NOLOCK:-0}" != "1" ]; then
     echo "   看在跑的那次：bin/biga-card --list 3" >&2
     exit 3
   fi
+  # 🔴 D-3（外部评审 §15）：编排器自己也下沉了一份单实例锁检查（纵深防御，
+  # 同 ownership 那道）。但 flock 是排他资源，子进程重新 open() 同一个锁文件
+  # 会与这里已经拿到的锁互斥而不是共享（不同 file description）——告诉它锁
+  # 已经在手上了，不要再自己抢一次，否则正常出卡也会被自己拦下。
+  export BIGA_CARD_LOCK_HELD=1
 fi
 
 # 🔴 预算闸门要在**第一个花钱的动作之前**跑一次（2026-09-21 21:42 事故）

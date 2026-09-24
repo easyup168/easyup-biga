@@ -95,7 +95,18 @@ class FeishuError(RuntimeError):
     """投递失败（`bin/biga message send` 非零退出，或缺配置）。
 
     worker 据此记一条 failed（不重跑决策、不连累其余通知）。
+
+    Attributes:
+        retryable: 这类失败下次重试有没有意义（2026-09-24，外部评审 §11）。
+            缺收件人这类**配置错误**不可重试——下次还是同一份 live 配置，
+            再试还是同样落空，白白耗掉 `notify_worker.MAX_ATTEMPTS`；
+            `bin/biga message send` 非零退出可能是网络抖动/飞书临时限流，
+            值得重试。
     """
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class FeishuDeliverer:
@@ -182,7 +193,8 @@ class FeishuDeliverer:
                 "  与出卡触发的 owner 白名单同源。先查第 ③ 条读不读得到：\n"
                 f"    bin/biga config get {OWNER_CONFIG_PATH}\n"
                 "  读不到说明飞书压根没接上（网关侧配置缺失），补它，而不是绕过去\n"
-                "  export 一个环境变量——那样两处会各有一份收件人，早晚对不上。")
+                "  export 一个环境变量——那样两处会各有一份收件人，早晚对不上。",
+                retryable=False)
         return receive_id
 
     # ── Deliverer 协议 ───────────────────────────────────────────────────
@@ -202,7 +214,8 @@ class FeishuDeliverer:
             raise FeishuError(
                 f"飞书发消息失败：bin/biga message send 退出码 {r.returncode}\n"
                 f"{(r.stderr or r.stdout or '').strip()}\n"
-                f"（event={event_type} aggregate={aggregate}）")
+                f"（event={event_type} aggregate={aggregate}）",
+                retryable=True)
 
     # ── 消息文本（四类事件各一句人话）────────────────────────────────────
     @staticmethod

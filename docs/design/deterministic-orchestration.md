@@ -274,9 +274,9 @@ P1/P2 live 补验（`71789b5`）**都已经落地**——不照单接收既包�
 | §8-16 | `run_id` 未贯穿 `agent_verdicts`/`evidence_sets`/`DecisionCard`/`VerdictRef`；`latest_verdict_ids` 按 `decision_id` 不按 `run_id` 聚合；`verify_verdict_refs` 不核对 `ref.agent==存量.agent` | ✅ 事实成立，字段确实都不存在。**但评审据此构造的「重试时跨 run 串读」场景目前打不到**——见追加 5.1 |
 | §17-18 | `CARD_PERSISTED` 转移写在 `card_ops.persist()` 之前，`persist()` 抛错会留下「已落库」的假状态 | ✅ 成立，`orchestrator.py` 里 `transition(..., CARD_PERSISTED, ...)` 确实先于 `persist(card)`。真实 bug，值得修——见批 C-III |
 | §19-20 | `SNAPSHOT_FROZEN` 的 `detail` 仍写着「SnapshotCoordinator 未接入」，状态名与事实不符 | ⚠️ **已被 D-II 解决**——现在的 `detail` 是真实的 `{"evidence_set_id":..., "symbols":[...], "bars":120}`，不再是假话 |
-| §26 | `orchestrator.py` 被直接调用能绕过总闸/预算/单实例锁 | 🔶 ownership 这条已被 C-II 评审堵住（`entry_guard.classify_caller()`），但预算与 flock 确实还只在 `bin/biga-card` 的 bash 层——评审说的「三层」里堵了一层，另两层是真缺口 |
+| §26 | `orchestrator.py` 被直接调用能绕过总闸/预算/单实例锁 | ⚠️ **已被 2026-09-24 那份评审的 D-3 解决**——`main()` 新增 `_preflight_stop_gate`/`_preflight_budget`/`_preflight_lock` 三个函数，三层全部下沉到 Python 层（纵深防御，`bin/biga-card` 自己那道不删）。flock 有真实 POSIX 陷阱：排他资源不能简单"下沉"，靠 `BIGA_CARD_LOCK_HELD` 环境变量让子进程信任父进程已持有的锁，见教程第 40 章 |
 | §28 | Stage 1 部分 spawn 成功后没有 cleanup，已启动的会孤儿化 | ✅ 成立，`handles=[ad.start(...) for a in STAGE1_AGENTS]` 中途抛错时，已经 start 成功的 handle 不会被 `cancel()`——真实成本泄漏，见追加 5.2 |
-| §24-25 | 没有 stale-run reaper：进程被外部信号杀掉时，run 可能永久卡在非终态 | ✅ 成立，C-II 的 `trap` 只保证子进程被杀，不保证 `run_events` 写终态；`~/.openclaw-biga/cron` 目前是空的 |
+| §24-25 | 没有 stale-run reaper：进程被外部信号杀掉时，run 可能永久卡在非终态 | ⚠️ **已被 2026-09-24 那份评审的 D-2 部分解决**——`tools/maintenance/stale_run_reaper.py` 提供 `find_stale_runs()`/`reap()`；仍然只是纯函数工具，**不接调度**（`~/.openclaw-biga/cron` 依然是空的，`docs/guide/orchestration-kickoff-prompt.md` 早就把调度接入划给"批 G 的地盘"，本次沿用），需要人手工跑或未来某一批接 systemd timer |
 | §29-30 | `MissingItem` 的「无响应」code 不分 agent；`AgentVerdict`/`DecisionCard` 只是浅冻结 | ✅ 两条都成立，都是精度/硬化类问题，不是安全洞 |
 | §32 | risk 的新鲜度用 `retrieved_at - as_of`（源端延迟），不是「risk 评估那一刻」的年龄 | ✅ 成立，但**评审建议的修法本身没错**——`evaluated_at` 只要在 risk verdict 自己构造时定一次（跟今天 `retrieved_at` 的定法一样），不会破坏回放确定性；这不是「现在的做法错了」，是「现在测的是另一个更早的时间点」 |
 | §35 | 各阶段（Stage1/risk/synth）各自固定预算，互相不感知总 deadline 还剩多少 | ✅ 成立，`self.stage1_sec`/`risk_sec`/`synth_sec` 各自读各自的环境变量，`deadline_sec` 只用来算 grant TTL。外层 bash `timeout` 兜底，不是没有防线，但内层三段预算之和可以超过 `deadline_sec` 而不自知 |

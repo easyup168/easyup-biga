@@ -248,17 +248,32 @@ class TestP3AppendOnly:
 
 
 # ════════════════════════════ P4：worker 投递 ═══════════════════════════════
+class _RetryableError(RuntimeError):
+    """带 `retryable` 属性的假异常 —— 模拟 `feishu_deliverer.FeishuError` 的形状。"""
+
+    def __init__(self, message, *, retryable):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class _Recorder:
-    """记录调用的假投递接口。fail=True 时每次投递都抛（模拟飞书抽风）。"""
+    """记录调用的假投递接口。
+
+    `fail=True` 时每次投递都抛（模拟飞书抽风，不带 `retryable` 属性 —— 测普通
+    异常的默认行为）；`fail_retryable` 显式给 `True`/`False` 时抛带该标记的异常。
+    """
     channel = "test"
 
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, fail_retryable=None):
         self.calls: list[dict] = []
         self.fail = fail
+        self.fail_retryable = fail_retryable
 
     def deliver(self, *, event_type, aggregate, payload):
         self.calls.append({"event_type": event_type, "aggregate": aggregate,
                            "payload": payload})
+        if self.fail_retryable is not None:
+            raise _RetryableError("桩投递故意失败（分类）", retryable=self.fail_retryable)
         if self.fail:
             raise RuntimeError("桩投递故意失败")
 
@@ -287,7 +302,7 @@ class TestP4Worker:
         expect = self._seed_four(db)
         rec = _Recorder()
         summary = notify_worker.deliver_pending(rec, path=db)
-        assert summary == {"pending": 4, "delivered": 4, "failed": 0}
+        assert summary == {"pending": 4, "delivered": 4, "failed": 0, "abandoned": 0}
         got = {c["event_type"] for c in rec.calls}
         assert got == {CARD_COMPLETED, CARD_UNKNOWN, RISK_BLOCK, RUN_FAILED}
         # 🔴 每一条 payload 都带对应决策号
@@ -312,6 +327,57 @@ class TestP4Worker:
         ok = _Recorder()
         assert notify_worker.deliver_pending(ok, path=db)["delivered"] == 4
         assert undelivered_notifications(path=db) == []
+
+    def test_non_retryable错误立刻放弃_不留在队列里(self, db):
+        """🔴 2026-09-24（外部评审 §11）：配置类错误重试不会变好——立刻 abandoned，
+        不再无意义地占着 MAX_ATTEMPTS 次机会。探针：把 `not retryable` 这个判据
+        删掉，这条就会退化成跟普通失败一样留在队列里、变红。"""
+        self._seed_four(db)
+        summary = notify_worker.deliver_pending(
+            _Recorder(fail_retryable=False), path=db)
+        assert summary == {"pending": 4, "delivered": 0, "failed": 0, "abandoned": 4}
+        assert undelivered_notifications(path=db) == [], \
+            "non-retryable 放弃之后不该再出现在待投列表里"
+
+    def test_retryable错误达到上限后放弃(self, db):
+        """试满 MAX_ATTEMPTS 次还没成功 ⇒ 放弃，不再无限期重试。"""
+        self._seed_four(db)
+        outbox_ids = [r["outbox_id"] for r in undelivered_notifications(path=db)]
+        bad = _Recorder(fail_retryable=True)
+        for _ in range(notify_worker.MAX_ATTEMPTS - 1):
+            summary = notify_worker.deliver_pending(bad, path=db)
+            assert summary["failed"] == 4 and summary["abandoned"] == 0, \
+                "没到上限之前应该还是 failed（留着重试），不是 abandoned"
+        # 第 MAX_ATTEMPTS 次：达到上限，放弃
+        summary = notify_worker.deliver_pending(bad, path=db)
+        assert summary["abandoned"] == 4 and summary["failed"] == 0
+        assert undelivered_notifications(path=db) == []
+        for oid in outbox_ids:
+            statuses = [a["status"] for a in list_deliveries(oid, path=db)]
+            assert statuses == ["failed"] * (notify_worker.MAX_ATTEMPTS - 1) + ["abandoned"]
+
+    def test_不带retryable属性的异常默认当作可重试(self, db):
+        """普通异常（没有 `.retryable`）不能被当成"已放弃"处理——R-3 方向：
+        判不了就按更保守的一侧走（继续重试），不要武断放弃。"""
+        self._seed_four(db)
+        summary = notify_worker.deliver_pending(_Recorder(fail=True), path=db)
+        assert summary["failed"] == 4 and summary["abandoned"] == 0
+
+    def test_main有真失败时退出码非零(self, db, monkeypatch):
+        """🔴 2026-09-24（外部评审 §11）：曾经无论失败多少条 main() 都 return 0，
+        systemd（Type=oneshot，只看退出码）因此把失败批次误判为成功。探针：把
+        `return 1 if ... else 0` 改回恒定 `return 0`，这条立刻变红。"""
+        monkeypatch.setattr(notify_worker, "deliver_pending",
+                            lambda *a, **k: {"pending": 4, "delivered": 0,
+                                             "failed": 4, "abandoned": 0})
+        assert notify_worker.main(["--deliverer", "stdout"]) == 1
+
+    def test_main只有abandoned没有failed时退出码为零(self, db, monkeypatch):
+        """abandoned 已经处理完了（不会再自动重试）——不该让调用方以为这次调用坏了。"""
+        monkeypatch.setattr(notify_worker, "deliver_pending",
+                            lambda *a, **k: {"pending": 4, "delivered": 0,
+                                             "failed": 0, "abandoned": 4})
+        assert notify_worker.main(["--deliverer", "stdout"]) == 0
 
     def test_worker默认桩不抛(self, db, capsys):
         """默认 StdoutDeliverer 能把队列清空（L-1：outbox 有一个真能跑的读取方）。"""

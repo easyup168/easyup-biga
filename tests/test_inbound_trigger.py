@@ -27,6 +27,7 @@ import pathlib
 import re
 import sys
 import time
+from datetime import timedelta
 
 import pytest
 
@@ -34,7 +35,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "skills" / "card" / "scripts"))
 
-from _contract import new_run_context  # noqa: E402
+from _contract import RunState, new_run_context  # noqa: E402
 from _store import (  # noqa: E402
     connect,
     find_run_by_trigger,
@@ -42,6 +43,7 @@ from _store import (  # noqa: E402
     open_run,
     reserve_decision_for_trigger,
     reserve_decision_id,
+    transition,
 )
 
 import inbound  # noqa: E402
@@ -165,6 +167,111 @@ class TestAcceptTrigger:
         L = _RecordingLauncher()
         ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
         assert L.calls == [("feishu", "evt-A", ack.decision_id)]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 幂等中毒兜底（外部评审 §10）：占号太久没有对应的 run 出现/收敛 ⇒ 允许重投
+# ══════════════════════════════════════════════════════════════════════════
+class TestLaunchRetryTimeout:
+    """`hdr is None`（守卫拒绝，orchestrator 从未启动）或状态是失败终态，且占号
+    已经超过 `LAUNCH_RETRY_TIMEOUT_SEC`——两种精确场景下允许重新拉起一次。"""
+
+    def _age_past_threshold(self, monkeypatch, extra_sec=1):
+        """把 `inbound.now_cn()` 的返回值往未来推，让已占的号"看起来"很旧。
+
+        不碰 `_store.db` 里的 `now_cn`（不同模块各自绑定，互不影响）——只影响
+        `accept_trigger` 自己算 age 时用的那个引用。
+        """
+        import inbound as _inbound
+        real_now = _inbound.now_cn()
+        future = real_now + timedelta(seconds=_inbound.LAUNCH_RETRY_TIMEOUT_SEC + extra_sec)
+        monkeypatch.setattr(_inbound, "now_cn", lambda: future)
+
+    def test_未超时_hdr是None_仍回正在启动_不重新拉起(self, db):
+        L = _RecordingLauncher()
+        inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert ack.duplicate and not ack.accepted
+        assert "正在启动" in ack.message
+        assert len(L.calls) == 1, "没超时之前不该重新拉起"
+
+    def test_超时_hdr是None_允许重新拉起(self, db, monkeypatch):
+        """守卫拒绝场景：占号成功但 orchestrator 从未被启动到，decision_runs 里
+        没有这个 trigger 的行（find_run_by_trigger 永远 None）——探针：删掉这条
+        分支，这条会一直卡在"正在启动"报不出来。"""
+        L = _RecordingLauncher()
+        inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert ack.accepted and ack.duplicate, "重新拉起：两个字段都真"
+        assert len(L.calls) == 2, "超时之后应该重新拉起一次"
+        assert "重新拉起" in ack.message
+
+    def test_超时但重新拉起也失败_如实上报(self, db, monkeypatch):
+        def boom(*a):
+            raise RuntimeError("systemd-run 又不在了")
+        inbound.accept_trigger(origin="feishu", trigger_id="evt-A",
+                               launcher=_RecordingLauncher(), path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A",
+                                     launcher=boom, path=db)
+        assert not ack.accepted and ack.duplicate
+        assert "重新拉起也失败了" in ack.message
+
+    @pytest.mark.parametrize("terminal_state", [
+        RunState.FAILED, RunState.TIMEOUT, RunState.CANCELLED,
+    ])
+    def test_超时且状态是失败终态_允许重新拉起(self, db, monkeypatch, terminal_state):
+        L = _RecordingLauncher()
+        did, _ = reserve_decision_for_trigger("evt-A", path=db)
+        ctx = new_run_context(origin="feishu", non_interactive=True,
+                              trigger_id="evt-A", decision_id=did)
+        open_run(ctx, path=db)
+        transition(ctx.run_id, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
+        transition(ctx.run_id, RunState.PREFLIGHTED, terminal_state, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert ack.accepted and ack.duplicate
+        assert len(L.calls) == 1, f"{terminal_state} 之后应该允许重新拉起"
+
+    def test_超时但状态是COMPLETED_不重新拉起(self, db, monkeypatch):
+        """已经成功出过卡的，不能因为"占号很旧"就被当成没起来重新触发一次。"""
+        L = _RecordingLauncher()
+        did, _ = reserve_decision_for_trigger("evt-A", path=db)
+        ctx = new_run_context(origin="feishu", non_interactive=True,
+                              trigger_id="evt-A", decision_id=did)
+        open_run(ctx, path=db)
+        for frm, to in [(RunState.RECEIVED, RunState.PREFLIGHTED),
+                        (RunState.PREFLIGHTED, RunState.SNAPSHOT_FROZEN),
+                        (RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING),
+                        (RunState.STAGE1_RUNNING, RunState.STAGE1_COMPLETED),
+                        (RunState.STAGE1_COMPLETED, RunState.RISK_RUNNING),
+                        (RunState.RISK_RUNNING, RunState.SYNTHESIZING),
+                        (RunState.SYNTHESIZING, RunState.CARD_PERSISTED),
+                        (RunState.CARD_PERSISTED, RunState.NOTIFICATION_PENDING),
+                        (RunState.NOTIFICATION_PENDING, RunState.COMPLETED)]:
+            transition(ctx.run_id, frm, to, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert not ack.accepted and ack.duplicate
+        assert len(L.calls) == 0, "COMPLETED 不该被重新拉起"
+        assert "当前 COMPLETED" in ack.message
+
+    def test_超时但正在正常运行_不重新拉起(self, db, monkeypatch):
+        """`hdr` 存在且状态是非终态、非失败态（真的还在跑）——不能被误伤。"""
+        L = _RecordingLauncher()
+        did, _ = reserve_decision_for_trigger("evt-A", path=db)
+        ctx = new_run_context(origin="feishu", non_interactive=True,
+                              trigger_id="evt-A", decision_id=did)
+        open_run(ctx, path=db)
+        transition(ctx.run_id, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
+        transition(ctx.run_id, RunState.PREFLIGHTED, RunState.SNAPSHOT_FROZEN, path=db)
+        transition(ctx.run_id, RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert not ack.accepted and ack.duplicate
+        assert len(L.calls) == 0, "还在正常跑的 run 不该被当成卡死重新拉起"
+        assert "当前 STAGE1_RUNNING" in ack.message
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -393,12 +393,20 @@ def record_delivery(
 ) -> int:
     """追加一条投递尝试记录，返回 `delivery_id`。
 
-    `status` ∈ {'delivered','failed'}（fail-closed 白名单）。「这条 outbox 投没投成」=
-    有没有一条 status='delivered' 的记录（`undelivered_notifications` 就按它过滤）。
+    `status` ∈ {'delivered','failed','abandoned'}（fail-closed 白名单）。
+    「这条 outbox 投没投成」= 有没有一条 status='delivered' 的记录
+    （`undelivered_notifications` 就按它过滤）。
+
+    🔴 `'abandoned'`（2026-09-24，外部评审 §11）：区别于 `'failed'`——`failed` 是
+    「这次没投成，下次还会再试」；`abandoned` 是「不会再自动重试了」（错误本身
+    不值得重试，比如缺配置；或者已经试满 `notify_worker.MAX_ATTEMPTS` 次）。
+    `undelivered_notifications` 把 abandoned 的行也排除在待投列表之外——否则
+    非 retryable 的错误会被永远无意义地重试，这正是"通知无限重试"这条评审
+    指出的问题的根子。
     """
-    if status not in ("delivered", "failed"):
+    if status not in ("delivered", "failed", "abandoned"):
         raise ValueError(
-            f"delivery status 只能 'delivered' / 'failed'，收到 {status!r}")
+            f"delivery status 只能 'delivered' / 'failed' / 'abandoned'，收到 {status!r}")
     with connect(path) as conn:
         cur = conn.execute(
             "INSERT INTO notification_deliveries "
@@ -411,10 +419,12 @@ def record_delivery(
 def undelivered_notifications(
     *, limit: int = 100, path: pathlib.Path | str | None = None
 ) -> list[dict[str, Any]]:
-    """还没投递成功的 outbox 行 —— **worker 的读取方**（批 G-I 的 L-1 消费方）。
+    """还没投递成功、也还没被放弃的 outbox 行 —— **worker 的读取方**（批 G-I 的 L-1 消费方）。
 
-    「没投成」= `notification_deliveries` 里没有这条 outbox 的 status='delivered' 行。
-    附 `attempt_count`（已尝试几次）供 worker 决定第几次投递 / 是否放弃（这一批只投一遍）。
+    「没投成」= `notification_deliveries` 里没有这条 outbox 的 status='delivered' 行；
+    「没被放弃」= 也没有一条 status='abandoned' 行（🔴 2026-09-24，外部评审 §11 —— 不
+    这样排除的话，一条不可重试的错误会被永远无意义地重投，这正是"通知无限重试"）。
+    附 `attempt_count`（已尝试几次）供 worker 决定第几次投递 / 是否该放弃。
     `payload` 已从 JSON 解析回 dict。按 outbox_id 升序（先入队先投）。
     """
     with connect(path, readonly=True) as conn:
@@ -425,7 +435,8 @@ def undelivered_notifications(
                  FROM notification_outbox o
                 WHERE NOT EXISTS (
                       SELECT 1 FROM notification_deliveries d
-                       WHERE d.outbox_id = o.outbox_id AND d.status = 'delivered')
+                       WHERE d.outbox_id = o.outbox_id
+                         AND d.status IN ('delivered', 'abandoned'))
                 ORDER BY o.outbox_id ASC
                 LIMIT ?""",
             (int(limit),),
@@ -587,6 +598,21 @@ def reserve_decision_for_trigger(
                 raise  # trigger 撞了却查不到 —— 不是并发占号，是真异常，别吞
             continue  # decision_id 被抢，重算下一个
     raise RuntimeError("当天 1000 个决策编号全被占用 —— 这不正常，先查 decision_ids 表")
+
+
+def trigger_reserved_at(
+    trigger_id: str, *, path: pathlib.Path | str | None = None
+) -> str | None:
+    """这个 `trigger_id` 占号的时刻（`decision_ids.reserved_at`）。查不到返回 None。
+
+    给入站适配器判断"这个占号是不是已经太久没有对应的 run 出现/收敛"用——
+    与 `reserve_decision_for_trigger` 是同一张表的读取侧，只读不写。
+    """
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT reserved_at FROM decision_ids WHERE trigger_id=?", (trigger_id,)
+        ).fetchone()
+    return row["reserved_at"] if row else None
 
 
 def load_online_card(
