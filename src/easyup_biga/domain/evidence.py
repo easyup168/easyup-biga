@@ -13,16 +13,35 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+import re
+from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ._freeze import deep_freeze, thaw
 
-__all__ = ["Evidence", "CN_TZ", "now_cn"]
+__all__ = ["Evidence", "EVIDENCE_KINDS", "SHA256_RE", "CN_TZ", "now_cn"]
+
+#: 64 位小写十六进制 —— 本仓库所有内容哈希（`content_sha256` / `evidence_id` /
+#: `raw_hash`）的统一形状。放在这里是因为本模块定义了「内容寻址的身份」这件事；
+#: `verdict_ref` 反过来引用它，**只有一份**（L-3）。
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # A 股市场时区。证据的时间一律带 tzinfo —— naive datetime 在跨日聚合时会静默错位。
 CN_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+#: 证据的三种类别（裁定 16）。**显式声明，不靠 `source` 的字符串前缀猜** ——
+#: 靠前缀判就是 L-13（按字符串形状分类），而且正好落在一条不变式的关键路径上。
+#:
+#: * ``observed``  —— 源数据直接落地，指回 raw（`raw_hash`）
+#: * ``derived``   —— 从别的值算出来，**必须声明 `input_evidence_ids`**（批 2 起强制）
+#: * ``parameter`` —— 我们自己的设定（回看窗口这类），两者都不要求
+#:
+#: ⚠️ ``None`` = **未声明**，不是第四类。批 1 只加字段不强制，全仓暂时都是 None；
+#:    批 2 把各 skill 改成显式声明后，这一档才会消失。
+EVIDENCE_KINDS: frozenset[str] = frozenset({"observed", "derived", "parameter"})
 
 #: 允许 `retrieved_at` 超前真实时钟多少秒。
 #: 只为机器间的时钟抖动留口子 —— 不是为了容忍错误的日期推断。
@@ -71,6 +90,22 @@ class Evidence:
     label: str | None = None
     raw_hash: str | None = None
     evidence_set_id: str | None = None
+    #: 这条证据是哪一类 —— 见 `EVIDENCE_KINDS`。`None` = 未声明（批 1 的常态）。
+    kind: str | None = None
+    #: 派生值的输入：它是从**哪几条证据**算出来的（各自的 `evidence_id`）。
+    #: ⚠️ 批 1 只接住不强制 —— 现在没有任何 skill 会填它。批 2 起 `kind="derived"`
+    #:    必须非空。粒度按字段定（裁定 16），规格在 `TODO.md`「批 1 / 批 2 输入」。
+    input_evidence_ids: tuple[str, ...] = ()
+    #: 🔴 内容寻址的身份：本条证据除 `evidence_id` 外全部内容的 canonical JSON 的 sha256。
+    #:
+    #: **只由内容算出，不接受构造方传入**（`init=False`）。理由：允许外部传就等于允许
+    #: 传一个与内容不符的 id，而「引用对不上」正是这套东西要防的事。
+    #:
+    #: 为什么用内容寻址而不是分配器：risk 要引用**别的 verdict 里**的证据，
+    #: 序号类 id 得先限定属于哪份 verdict 才有意义；内容哈希天然全局可比，
+    #: 且同一条证据在哪次运行算出来都是同一个 id（回放友好）。
+    #: 口径与仓库既有的 `content_sha256` 一致。
+    evidence_id: str = dc_field(init=False, default="", compare=False, repr=False)
 
     def __post_init__(self) -> None:
         # 🔴 先冻结再校验（批 R，评审 E-17）：这样「被校验的那份内容」与
@@ -78,6 +113,20 @@ class Evidence:
         #    一个窗口，而 `value` 里 14.7% 是 dict/list —— 调用方手上那个
         #    原始对象改一下，已经过检的证据就变了，且不会再触发任何校验。
         object.__setattr__(self, "value", deep_freeze(self.value))
+        object.__setattr__(self, "input_evidence_ids", tuple(self.input_evidence_ids))
+        if self.kind is not None and self.kind not in EVIDENCE_KINDS:
+            raise ValueError(
+                f"Evidence.kind 必须是 {sorted(EVIDENCE_KINDS)} 之一或 None（未声明），"
+                f"收到 {self.kind!r}")
+        for i in self.input_evidence_ids:
+            if not isinstance(i, str) or not SHA256_RE.match(i):
+                raise ValueError(
+                    f"Evidence.input_evidence_ids 的每一项都必须是 64 位十六进制的 "
+                    f"evidence_id（小写），收到 {i!r}")
+        if self.kind == "parameter" and self.input_evidence_ids:
+            raise ValueError(
+                "Evidence.kind='parameter' 却声明了 input_evidence_ids —— 参数是我们"
+                "自己的设定，没有数据输入。要么它其实是 derived，要么这串 id 是凑的。")
         for name in ("field", "source"):
             v = getattr(self, name)
             if not isinstance(v, str) or not v.strip():
@@ -116,6 +165,10 @@ class Evidence:
                 f"对共模误差免疫），所以这条必须锚在真实时钟上。\n"
                 f"  容差 {_FUTURE_TOLERANCE_SEC}s，只为机器间的时钟抖动留口子。"
             )
+
+        # 🔴 **最后**才算身份：前面的 deep_freeze 与各项校验都可能改变/拒绝内容，
+        #    在那之前算出来的指纹描述的是一个还没定型的对象。
+        object.__setattr__(self, "evidence_id", self._compute_evidence_id())
 
     @property
     def source_lag_sec(self) -> int:
@@ -160,6 +213,23 @@ class Evidence:
         """
         return self.age_at(now_cn())
 
+    def _compute_evidence_id(self) -> str:
+        """本条证据的内容指纹 —— 除 `evidence_id` 自身外的全部内容。
+
+        🔴 `allow_nan=True`：这里回答的是「它是哪一条」，不是「它合不合法」。
+        NaN 合不合法由写边界那道 `allow_nan=False` 的严格校验回答。
+        两个问题混在一起的下场，批 P 已经踩过一次（见 `verdict._same_value`）。
+
+        ⚠️ 格式一旦改动，全仓 `evidence_id` 会集体变化，而 `input_evidence_ids`
+        里的引用是按旧格式存的 —— 引用会**静默失效**。
+        `tests/test_evidence_identity.py` 钉了一条冻结向量，改了就红。
+        """
+        d = self.to_dict()
+        d.pop("evidence_id", None)
+        blob = json.dumps(d, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=True)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
     @property
     def display_label(self) -> str:
         return self.label or self.field
@@ -178,6 +248,9 @@ class Evidence:
             "label": self.label,
             "raw_hash": self.raw_hash,
             "evidence_set_id": self.evidence_set_id,
+            "kind": self.kind,
+            "input_evidence_ids": list(self.input_evidence_ids),
+            "evidence_id": self.evidence_id,
         }
 
     @classmethod
@@ -192,4 +265,9 @@ class Evidence:
             label=d.get("label"),
             raw_hash=d.get("raw_hash"),
             evidence_set_id=d.get("evidence_set_id"),
+            # 🔴 旧行没有这三个键 —— `.get` 的默认值让它们照常读得出来（三段式的
+            #    「旧卡可读」那一段）。`evidence_id` **故意不从 d 取**：它 init=False，
+            #    一律由内容重算。存量里那个值不被信任，也就不可能出现「id 与内容不符」。
+            kind=d.get("kind"),
+            input_evidence_ids=tuple(d.get("input_evidence_ids") or ()),
         )

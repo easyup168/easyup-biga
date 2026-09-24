@@ -25,13 +25,12 @@ TestVerdictContentShaIsHashOfStoredText` 钉死为**错误**答案——
 
 from __future__ import annotations
 
-import re
+from .evidence import SHA256_RE as _SHA256_RE
 from dataclasses import dataclass
 from typing import Any
 
 __all__ = ["VerdictRef", "CONTRACT_VERSION"]
 
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: 契约形状的版本号。A-II 改了 AgentVerdict/DecisionCard/MissingItem 的
 #: 不变量与字段（frozen、confidence→data_completeness……），这是那次改动
