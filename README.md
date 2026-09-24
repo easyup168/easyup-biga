@@ -1,273 +1,428 @@
 <div align="center">
 
-<img src="images/LOGO_BigA01.png" alt="EasyUp for BigA" width="480">
+<img src="images/LOGO_BigA01.png" alt="BigA" width="460">
 
-# EasyUp for BigA 2.0
+# BigA
 
-### 基于 OpenClaw 的 Multi-Agent 个人 A 股智能交易平台
+### 基于 OpenClaw 的可追溯 Multi-Agent A 股决策内核
 
-![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
-![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/1788%20TESTS-PASSING-2ea043)
-![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v17%20%C2%B7%2011%20tables-555)
-![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-47%20%E7%AB%A0-8957e5)
-![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
-![IM](https://img.shields.io/badge/%E9%A3%9E%E4%B9%A6-%E5%B7%B2%E6%8E%A5%E9%80%9A-1f6feb)
-![NoTrade](https://img.shields.io/badge/%E4%B8%8D%E8%87%AA%E5%8A%A8%E4%B8%8B%E5%8D%95-%E7%8E%B0%E9%98%B6%E6%AE%B5-555)
+[![Status](https://img.shields.io/badge/status-architecture%20baseline%20v1-2ea043)](TODO.md)
+[![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)](docs/design/phase-2-specialists.md)
+[![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)](#pipeline-中有哪些-agent)
+[![Tests](https://img.shields.io/badge/1798%20TESTS-PASSING-2ea043)](#当前实现状态)
+[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20v17-555)](docs/tutorial/04-store-layer.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
+[![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
 
-***发现共识，锁定核心，让每一笔交易都有逻辑***
+**发现共识，锁定核心，让每一笔判断都有证据。**
 
 </div>
 
 ---
 
-**当前阶段：Multi-Agent 决策辅助，不自动执行交易。** 产出一张证据可追溯、可回放的
-Decision Card，最终决策由人做——这是通往自动化交易平台的第一个 Kernel，
-不是这个项目的终态（见下方「为什么重新做一套」）。
+## BigA 是什么
 
----
+BigA 是一个建立在 [OpenClaw](https://docs.openclaw.ai) 之上的个人 A 股 Multi-Agent 系统。
 
-## 为什么重新做一套？
+**当前仓库首先建设的是 Decision Kernel：**
 
-已经有第一代 EasyUp 了，为什么还要重建？
-
-**原因一：OpenClaw 升级到了 2.0。** Multi-Agent 协同支持大幅提升 ——
-这是重新设计架构的最佳时机。
-
-**原因二：做对第一次比打补丁更值得。** 与其在旧代码上修修补补，
-不如从零重建，把结构做对，让它能撑住未来几年的演进。
-
-所以 BigA 2.0 是一次**全程公开的重建过程** ——
-架构决策、踩过的坑、放弃的方案，全部记录在 [`docs/tutorial/`](docs/tutorial/README.md)。
-
-**现在这个多 Agent DecisionCard 闭环不是终点。** 它是一个更长期的个人交易平台的
-第一块 Kernel——后续如果有选股 / 计划 / 风控 / 组合 / 复盘 / 回测这类能力，
-设想中是围着这个 Kernel 长出来，不是另起一套系统。当前阶段的施工范围仍然只是
-Decision Card 闭环本身，见下方「确定性编排升级」。
-
----
-
-## 架构
-
-```
-人 ──► BigA Supervisor（main）
-         │
-         │ Stage 1：并行 5 个分析 Agent
-         ├──► Emotion（情绪）──┐
-         ├──► Sector（板块）  ─┤
-         ├──► News（新闻）    ─┼──► AgentVerdict × 5（含 Evidence）
-         ├──► Technical（技术）┤
-         └──► Market（市场）  ─┘
-         │
-         │ Stage 2：制衡 Agent（输入 = Stage 1 的冻结证据）
-         └──► Risk（风险）——BLOCK / WARNING / PASS
-              （Discipline·纪律 设计上也在这一层，Phase 3 才建——见下方状态表）
-         │
-         │ Stage 3：Supervisor 合成
-         ▼
-   BigA Decision Card ──► 落库（可回放）──► Human-in-the-loop
+```text
+Trigger
+  → Run
+  → Frozen Evidence
+  → Specialist Agents
+  → Risk
+  → DecisionCard
+  → Replay / Verification / Notification
 ```
 
-**1 个 Supervisor · 7 个专家 Agent** —— 每个 Agent 只做自己领域的事，
-用 Evidence 说话，不猜，不编。
+它的产物不是自动交易指令，而是一张：
+
+- 有来源；
+- 有时间；
+- 有缺失项；
+- 可追溯；
+- 可回放；
+- 可以证明 Agent 真实运行过；
+
+的 `DecisionCard`。
+
+**长期目标**是在这个内核周围继续建设完整的个人交易系统：
+
+```text
+Data
+  → Features
+  → Screening
+  → Trading Plan
+  → Realtime Tracking
+  → AI Decision
+  → Risk
+  → Execution
+  → Portfolio
+  → Review / Backtest
+```
+
+当前多 Agent 闭环是 BigA 的第一块完整 Vertical Slice，不是项目终点。
+
+> ⚠️ 当前阶段不接券商账户、不自动下单，也不构成投资建议。最终决定由人做。
 
 ---
 
-## 三条设计地基
+## 为什么这个项目值得重新做
 
-**`UNKNOWN` ≠ `PASS`**
-算不出来必须说算不出来，进「缺失项」并显示在卡片上。
-静默 fail-open 是本项目最优先防范的失败模式。
+BigA 不是把一批 Agent 名字放进 Prompt 里。
 
-**数据与智能分离**
-有唯一正确答案的计算归 Python Skill，需要取舍的判断归 Agent。
-Agent 不在 prompt 里做算术；任何数字必须来自工具返回值并附 Evidence。
+它重点验证并固化的是更难的部分：
 
-**事实可追溯**
-每条 Evidence 带 `source` / `as_of` / `retrieved_at`。
-证据冻结后可重跑合成，用于换模型对比、提示词回归、事后复盘。
+1. **程序控制流程，Agent 负责判断。**
+2. **不知道就是 `UNKNOWN`，不能静默变成 `PASS`。**
+3. **同一次运行的事实、判断、风险和 Card 必须能追溯到同一条身份链。**
+4. **OpenClaw Runtime 的真实记录，而不是 Agent 自报，才算 spawn 证据。**
+5. **在线与回放共用同一套组装逻辑。**
+6. **同机另一套 OpenClaw 实例必须保持隔离。**
+7. **成本、超时、递归和通知失败都必须有机器级守卫。**
 
----
-
-## 开发教程系列
-
-本仓库同时是一份**从零开始的开发教程**。
-
-这不是普通教程 —— 它有一个真实约束：
-**同机上已经跑着另一套长期运行的 OpenClaw 实例，不能碰它一根手指。**
-新系统必须在它旁边安全地长出来。
-
-> 多数「把新系统装崩老系统」的事故，不是因为有人做了危险操作，
-> 而是因为**默认行为在共享资源上悄悄生效**了。
-
-教程里大量篇幅在讲「为什么这条看起来无害的命令有毒」 —— 这是它与普通教程最大的区别。
-
-| # | 章节 | 主题 |
-|---|---|---|
-| 01 | [隔离安装](docs/tutorial/01-isolated-install.md) | 在已有实例旁装第二套，两个必踩的陷阱 |
-| 02 | [Profile 初始化](docs/tutorial/02-profile-setup.md) | `setup --baseline` + `config patch`，为什么不走向导 |
-| 03 | [契约层](docs/tutorial/03-contract-layer.md) | Evidence / AgentVerdict / DecisionCard，AST 扫描钉死唯一实现 |
-| 04 | [数据层](docs/tutorial/04-store-layer.md) | SQLite WAL 单一入口，只追加触发器，回放不覆盖 |
-| 05 | [第一个技能](docs/tutorial/05-first-skill.md) | 真采 A 股情绪数据；与会静默骗人的接口打交道 |
-| 06 | [建 Agent](docs/tutorial/06-agents.md) | 脚手架默认值多半不是你要的；角色契约写在 AGENTS.md |
-| 07 | [端到端](docs/tutorial/07-end-to-end.md) | 三层认证迷宫；怎么**证明** Specialist 真的被调用过 |
-| 08 | [回放](docs/tutorial/08-replay.md) | 冻结证据；在线与回放共用同一份组装代码 |
-| 09 | [隔离演练](docs/tutorial/09-isolation-drill.md) | `kill -9` 自己，逐项核对已有实例毫发无伤 |
-| 10 | [延迟与成本](docs/tutorial/10-latency-and-cost.md) | 216s→75s；延迟其实是正确性 bug 的症状 |
-
-这十章是 Phase 1（Walking Skeleton）的建造过程。第 11 章起是「确定性编排升级」
-系列（把工作流从提示词搬进程序，见下方同名小节），现在已经写到第 **47 章**——
-完整索引在 [`docs/tutorial/README.md`](docs/tutorial/README.md)。
-
-配套抖音系列同步更新 · **关注 易涨EasyUp** 不迷路
+开发过程中真实发生过的事故、错误假设和修复过程，全部保留在
+[`docs/tutorial/`](docs/tutorial/README.md) 中（目前 60 章）。
 
 ---
 
-## 当前状态
+## 当前架构
 
-**Phase 1 · Walking Skeleton 已完成。**
+```text
+                    Feishu / CLI / Cron
+                              │
+                              ▼
+                 Entry Guard / Budget / Lock
+                              │
+                              ▼
+                  DecisionOrchestrator
+                 （确定性程序控制流程）
+                              │
+                 ┌────────────┴────────────┐
+                 ▼                         ▼
+        SnapshotCoordinator          OpenClaw Runtime
+        冻结共享数据切片                   │
+                 │             ┌───────────┼───────────┐
+                 │             ▼           ▼           ▼
+                 └────────► Market      Sector       News
+                               │           │           │
+                               ├──── Technical ────────┤
+                               └──── Emotion ──────────┘
+                                           │
+                                  Stage 1 Facts /
+                                  Agent Assessments
+                                           │
+                                           ▼
+                                   Risk（制衡层）
+                                           │
+                                           ▼
+                               Synthesizer（综合判官）
+                                           │
+                                           ▼
+                                     DecisionCard
+                                      │          │
+                                      ▼          ▼
+                                  SQLite       Notification
+                                  Replay       Feishu
+```
 
-| 项 | 状态 |
+### OpenClaw 与 BigA 的边界
+
+**OpenClaw 负责：**
+
+```text
+Agent Session
+模型调用
+Tool Policy
+Subagent
+Runtime Run ID
+Agent Timeout
+```
+
+**BigA 负责：**
+
+```text
+Trigger
+Decision / Run Identity
+状态机
+数据冻结
+EvidenceSet
+Risk
+Card
+Replay
+预算
+通知意图
+```
+
+一句话：
+
+> **OpenClaw 是智能运行时；BigA 是业务系统。**
+
+---
+
+## Pipeline 中有哪些 Agent
+
+### 交互入口
+
+| Agent | 职责 |
 |---|---|
-| Node v24.21.0 + OpenClaw 2026.9.5（隔离安装） | ✅ |
-| `biga` wrapper（强制 profile 隔离，消灭误操作可能性） | ✅ |
-| Workspace 骨架 + git | ✅ |
-| `biga setup`（端口 19789，未接 IM） | ✅ |
-| 契约层 `_contract`（四条铁律构造时拒绝 + AST 唯一实现扫描） | ✅ |
-| 数据层 `_store`（三张表，只追加由触发器强制） | ✅ |
-| `emotion-calc` Skill（真采 A 股情绪数据） | ✅ |
-| `emotion` Agent + Supervisor 委派配置 | ✅ |
-| 合成与回放（两条路径共用同一份组装代码） | ✅ |
-| 隔离演练（`kill -9` 自己，已有实例六项未变） | ✅ |
-| 124 条测试全绿 | ✅ |<!-- 冻结：Phase 1 验收当时的数 -->
-| 端到端 74.8s（预算 90s） | ✅ |
+| `main` | 与人交互、解释结果、查询状态；**不负责出卡编排**（编排是一段程序，`main` 够不到它，见「确定性编排升级」） |
 
-Phase 1 的验收标准由机器逐条核对，`PENDING` 不计为通过：
+### 自动出卡 Pipeline
 
-```bash
-python3 tools/verify/phase1_acceptance.py --baseline data/neighbour-baseline.json --live
+| Stage | Agent | 职责 |
+|---|---|
+| Stage 1 | `market` | 指数、成交额、量能、市场宽度 |
+| Stage 1 | `sector` | 板块强度、资金方向、主线结构 |
+| Stage 1 | `news` | 新闻窗口与消息面判断 |
+| Stage 1 | `technical` | 均线、MACD、RSI、区间位置 |
+| Stage 1 | `emotion` | 涨停、炸板、连板与赚钱效应 |
+| Stage 2 | `risk` | 读取冻结的 Stage 1 事实并行使否决权 |
+| Stage 3 | `synthesizer` | 只做最终综合判断，不采集数据、不 spawn Agent |
+
+`discipline` 已进入长期设计，但目前没有真实的交易行为输入源，因此注册但不启动。
+
+---
+
+## 六条设计地基
+
+### 1. `UNKNOWN` 不等于 `PASS`
+
+```text
+数据不足
+→ UNKNOWN + missing[]
+
+不是：
+数据不足
+→ 没发现问题
+→ PASS
 ```
+
+缺失项是正式业务数据，不是日志噪音。
+
+### 2. 程序决定流程，Agent 决定观点
+
+```text
+什么时候开始
+下一步是谁
+超时多久
+什么算完成
+如何落库
+```
+
+由 `DecisionOrchestrator` 决定。
+
+```text
+事实意味着什么
+市场处于什么状态
+风险如何解释
+```
+
+由 Agent 判断。
+
+### 3. 确定性计算不交给 LLM
+
+数字和有唯一答案的计算归 Python：
+
+```text
+行情
+指标
+覆盖率
+时间差
+风险硬规则
+```
+
+Agent 只解释已经生成的 Facts / Evidence。
+
+### 4. 一个 Run 只能使用自己的数据世界
+
+目标身份链：
+
+```text
+Trigger
+→ Decision
+→ Run
+→ EvidenceSet
+→ OpenClaw RuntimeRun
+→ Verdict
+→ DecisionCard
+```
+
+这条链的 Run Provenance 已经完整落地（schema v16/v17）：一张卡属于哪次执行、
+基于哪份切片，现在是一句 SQL，不必解 `card_json`。
+
+### 5. Runtime Proof 不能由业务代码自证
+
+`agent_runs` 是 BigA 的执行账本，不是 spawn 证明。
+
+真正证明 Specialist 被 OpenClaw spawn 的，是 OpenClaw Runtime 自己记录的运行数据。
+
+### 6. 历史不可覆盖
+
+```text
+原始事实
+Snapshot
+Verdict
+DecisionCard
+Replay
+```
+
+都采用追加或版本化思路。修订产生新版本，不把历史改成"当时就知道"。
+
+---
+
+## 当前实现状态
+
+| 能力 | 状态 |
+|---|---|
+| 隔离 OpenClaw Profile、独立 Runtime、独立 Gateway | ✅ |
+| 确定性 `DecisionOrchestrator` | ✅ |
+| Stage 1 五 Agent 并行 | ✅ |
+| Risk 制衡层 | ✅ |
+| Synthesizer 综合判官 | ✅ |
+| Run 状态机与事件历史 | ✅ |
+| Facts / Assessment 拆分 | ✅ |
+| `index_daily` 冻结快照共享 Vertical Slice | ✅ |
+| Strict JSON、写边界重校验、Amendment 约束 | ✅ |
+| Replay 与组装一致性检查 | ✅ |
+| OpenClaw Runtime spawn 核验 | ✅ |
+| 飞书入站、出站闭环 | ✅ 真机端到端已确认（触发 → 出卡 → 推送成功） |
+| Apache-2.0 开源合规基础 | ✅ |
+| Run → EvidenceSet → Verdict → Card 强身份闭环 | ✅ |
+| 外部 kill 后 stale Run 自动收尾 | ✅ |
+| **确定性编排升级 Baseline 冻结**（`v1-architecture-baseline`） | ✅ 经独立 sign-off |
+| 飞书启动失败重试策略 | 🔶 固定次数重试，无指数退避 |
+| 飞书里用裸自然语言要卡（不发 `/card`） | 🔶 仍会走错编排，别这么用 |
+| **Phase 2 自身两条出口条件**（真实否决端到端落库 / 缺失项跨天累积） | 🔶 仍未达成，见下 |
+| 全量 Dataset / Provider / Pipeline Registry | ⬜ 后续 |
+| 选股、回测、实时交易、Web | ⬜ 长期路线 |
+
+当前仓库有 **1798 条测试，SQLite schema v17**，全部通过。
+
+🔴 **"确定性编排升级"（把工作流从提示词搬进程序）已完成 Baseline 冻结**，
+不代表 **Phase 2 本身**已经收口——两者是并行、互不代表对方的判据。Phase 2
+自己的出口条件仍差两条：`emotion`/`news` 报"今天"、日线类报"上一交易日"，
+`risk` 因此正确地拒绝合并审 ⇒ 攒不到一次真实否决；跨天累积同理。
+详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11、
+[`deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
 
 ---
 
 ## 快速开始
 
+BigA 的安装场景是：**在一台已经运行另一套 OpenClaw 的机器上，并排安装第二套隔离实例。**
+
+请先按安装指南执行：
+
+- [安装与隔离](docs/guide/install.md)
+- [完整使用手册](docs/guide/usage.md)
+
+进入工作区：
+
 ```bash
 cd ~/.openclaw-biga/workspace
+```
 
-bin/biga-card              # 出一张决策卡（约 3 分钟、$1.2）
+### 生成一张新卡
+
+```bash
+bin/biga-card
+```
+
+历史实测约需 3 分钟、约 `$1.2–1.4`；实际耗时和成本受模型、数据源和市场时段影响。
+
+### 查看与验证
+
+```bash
 bin/biga-card --list       # 最近出过哪些
 bin/biga-card --show <号>   # 看某一张
+bin/biga-card --status <run_id>  # 说出某次运行死在哪一步
 bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相同
 ```
 
-完整用法与「怎么确认它没骗你」见 [`docs/guide/usage.md`](docs/guide/usage.md)。
+`--check` 验证的是：
 
-⚠️ **不是交易信号。** 系统不下单、不接账户，最终决定由人做。
+```text
+冻结证据
+→ 落库
+→ 取回
+→ 重新组装
+```
 
-### 手机上能看 —— 飞书已接通
+是否无损；它不是"重新独立推导一次投资结论"。
 
-用 OpenClaw 官方的 `@openclaw/feishu` 通道（长连接，**不需要公网地址**）。
-gateway 跑成 systemd 用户服务，开机自起：
+### 手工投递待发通知
 
 ```bash
-~/.openclaw-biga/bin/biga gateway install   # 单元名带 profile 后缀，见红线 R-2
-~/.openclaw-biga/bin/biga gateway start
-journalctl --user -u openclaw-gateway-biga.service -f
+bin/biga-notify                    # 真投递（默认）
+bin/biga-notify --deliverer stdout # 只打印，不真发（排查用）
 ```
 
-聊天收发已实测通。访问控制与成本闸门都在：
-
-| 项 | 配置 |
-|---|---|
-| 谁能私聊 | `dmPolicy: allowlist` —— 只有名单内 |
-| 群里能不能触发 | `groupPolicy: allowlist` + 空名单 ⇒ **任何群都不响应** |
-| 一次出卡的代价 | 约 3 分钟 / $1.2~1.4 ⇒ 预算闸门在 **Stage 0 占号**处拦 |
-
-✅ **飞书里发 `/card` 是安全的**——已完整端到端实测（真实飞书触发、真实收到结论）。
-`main` 认出这是显式引用的技能后，只跑一个脚本把请求转成结构化 trigger、
-脱树拉起真正的出卡管线（`systemd-run`）——**`main` 自己的会话进程树里完全
-不跑编排**，这正是堵死 2026-09-21 那次事故（4/5 个 agent、顺序反了、
-$0.4 白花）的根本修法，不是加一道检查。
-
-🔴 **别用裸自然语言描述意图去要卡**（比如直接说"帮我出一张卡"而不发
-`/card`）——那种消息不会被 OpenClaw 识别成"引用了 card 技能"，还是会
-交给 `main` 自己临场理解，跟上面这条安全路径不是同一条。
-
-⚠️ **盘中会一直是 `WAIT`**，这是对的行为不是 bug ——
-实时源说「此刻」、日线源说「上一交易日」，风控拒绝把两者当同一天审。
-🔴 **「收盘后就对齐」是错的 —— 实测证伪。**
-
-15:21（收盘 21 分钟后）跑了一次，交易日**仍然分裂**：
-
-```
-technical/market/sector  20260918     ← 日线
-emotion/news             20260921     ← 实时源
-```
-
-查源：15:22 时新浪日线的最后一根还是 `20260918`。
-**当天的日线不在 15:00 发布，有一段未知长度的延迟。**
-
-⚠️ 这条「收盘后跑就好了」是**没有验证就写下的推断**，
-写进了 README、操作手册和教程三处。现在全部改掉。
-
-> 通用原则：**「应该会……」和「实测是……」之间隔着一次运行。**
-> 而这类推断特别危险，因为它听起来太合理了 —— 谁会怀疑「收盘后日线就有了」。
-
-⇒ 正确的说法是：**要等当天日线真正发布之后**。已经测出具体时刻
-（2026-09-21 实测）：**15:32:47–15:37:50 之间，收盘后约 33~38 分钟**。
-不想等这么久或想自己确认今天的情况，直接看：
+### 紧急停止生成新卡
 
 ```bash
-python3 -c "
-import sys;sys.path.insert(0,'skills')
-from _sources.sina import fetch_index_daily
-print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
+printf 'maintenance\n' > .biga-card-stop
 ```
 
-打印出今天的日期，才是出卡的时机。
+恢复前确认触发源已经停止，然后 `rm .biga-card-stop`。
+
+`--list`、`--show`、`--check` 等只读命令不受总闸影响。
 
 ---
 
-## Phase 2 · Specialists（进行中——两条出口条件仍未达成，见下）
+## 怎么确认它没有"自说自话"
 
-| 项 | 状态 |
-|---|---|
-| Agent **7 / 8** —— Stage 1 五个 + Stage 2 `risk` + Supervisor | ✅ |
-| 第 8 个 `discipline` —— **故意不建**（没有输入源，见裁定 13） | — |
-| Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
-| Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
-| schema v17 —— 决策编号原子分配器 + 只追加保护（v6 加事实/判断拆分的 `kind` 列；v10 让 `run_id` 贯穿；v11 令一个 `(task_id, agent)` 至多一份 fact 原件；v12 加外发通知 outbox 两张表；v13 让 raw 层真的存 raw；v14 给 decision_ids 加 trigger_id 做入站幂等键；v15 加 `fact_trading_calendar`——第一张真实的 fact_* 表；v16 加 Run Provenance 三列与 `ux_evidence_set_per_run`——「这张卡属于哪次执行、基于哪份切片」从解 card_json 变成一句 SQL；v17 把 Fact 唯一约束按 run 分区——一次执行一份事实） | ✅ |
-| 1788 条测试 | ✅ |
-| 成本分解 $1.20/次（`main` 占 37%） | ✅ |
-| 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
-| **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
-| **飞书接入** —— 官方通道 + 长连接 + 私聊/群双白名单 | ✅ 聊天已通 |
-| **出卡预算闸门** —— 最小间隔 / 当日上限 / 上一次还在跑 | ✅ |
-| 飞书 `/card` 出卡（Inbound Trigger，`main` 全程不参与编排） | ✅ P6 live 端到端已确认 |
-| 飞书里用裸自然语言要卡（不发 `/card`） | 🔶 仍会走错编排，别这么用 |
-| 两份外部对抗性评审共 29 条发现 | 🔶 15 模式级 / 7 **实例级（模式还在）** / 1 修不干净 |
-| 第三轮深度评审 6 条 —— **全是同一个形状**（守卫不会红，§9 L-13） | ✅ 每条都有探针红灯 |
-| 至少 1 次真实「否决」端到端落库 | ⬜ |
-| 真实缺失项跨天累积 ≥5 次 | 🔶 数够了，但全在同一天 |
+BigA 不把"程序没报错"当作可信证明。
 
-🔴 **最后两条曾经卡在同一个架构问题上**：`emotion`/`news` 报「今天」、
-日线类报「上一交易日」，`risk` 正确地拒绝合并审 ⇒ 每次「无法判定」。
-这是**对的行为**，但它意味着那段时间出不了有把握的卡。
+| 要验证什么 | 命令 | 证明范围 |
+|---|---|---|
+| Card 组装可回放 | `bin/biga-card --check <decision_id>` | 冻结输入到 Card 的管线无损 |
+| Agent 真的运行 | `python3 tools/verify/spawn_check.py <decision_id>` | BigA 账本与 OpenClaw Runtime 双重对账 |
+| Stage 1 真的并行 | `python3 tools/verify/latency_report.py --parallel-check` | Agent 运行时间区间存在结构性重叠 |
+| 同机实例未受影响 | `python3 tools/verify/isolation.py` | Profile、文件、端口与 systemd 命名空间隔离 |
+| 存量数据可读 | `python3 tools/verify/readback_check.py` | 数据库中不存在"写进去了但读不回来"的毒行 |
+| 今日预算与闸门 | `python3 tools/verify/budget_report.py` | 当前是否允许发起一次新的付费 Run |
+| 配置基线未漂移 | `python3 tools/verify/config_baseline.py` | OpenClaw Version / Tool Policy Hash / Agent Config Hash |
 
-⏩ **2026-09-21 17:18 更新**：当天日线发布之后（实测收盘后约 35 分钟）
-跑的 `BIGA-20260921-020`，**六个 Agent 首次报同一个交易日**，
-`risk` 第一次真的裁决（`放行`），缺失项从 8~9 条降到 3 条。
+验证工具使用三态语义：
 
-⇒ **前置条件解决了，但这两条出口条件仍未达成**：
-「放行」不是「否决」—— 要攒到真实否决得等一个真的触发阈值的行情；
-跨天累积同样要等下一个交易日。**别把前置条件当成达成。**
+```text
+0 = PASS
+1 = FAIL
+2 = UNKNOWN / 当前证据不足
+```
 
-详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11。
+`UNKNOWN` 不是"基本通过"。
 
 ---
 
-## 确定性编排升级（主体批次已落地，收尾中）
+## 飞书
+
+BigA 使用 OpenClaw 的飞书 Channel：
+
+```text
+OpenClaw
+→ 管 appId / appSecret / Token / 消息运输
+
+BigA
+→ 管 Trigger / Decision / 消息内容
+```
+
+Agent 和 BigA 业务数据库都不保存 `appSecret`。
+
+当前支持：
+
+- 飞书发送 `/card` 命令触发 BigA（裸自然语言描述意图不会被识别，见上表）；
+- DecisionCard / Run Failure 进入通知路径；
+- `bin/biga-notify` 主动发送待发消息；
+- systemd timer 定期投递。
+
+飞书属于当前架构的最小集成，不是多用户、多租户通知平台。
+
+---
+
+## 确定性编排升级（Baseline 已冻结）
 
 Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错误的决策号上、
 出卡递归成 187 个会话烧掉 \$8.99、飞书路径 4 spawn 缺一个 agent 却没有任何报错。
@@ -276,79 +431,29 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 
 ⇒ 把"下一步跑什么、谁被调用、超时多久、什么算失败"这些**程序说了算**的东西，
 从提示词里搬进一个显式状态机（`DecisionOrchestrator`）；"当前市场是什么状态、
-证据意味着什么"这类**判断**，仍然是 Agent 的事。完整推导、每一批做了什么、
-每次评审怎么复核，见 [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
+证据意味着什么"这类**判断**，仍然是 Agent 的事。
 
 🔴 每一批都经过**独立复核**——不是提出方自己宣布通过：读全部 diff、亲自
 重跑每一道探针（含 sabotage-revert，故意弄坏一遍确认它真的会报红）、
-跑真实数据验证，再决定合并。
+跑真实数据验证，再决定合并。这条纪律在 Baseline 冻结本身上也没有例外——
+真机触发飞书 `/card` 走完整闭环、13 项 Live Acceptance 逐条查库核实、
+两处真缺陷（编排器超时不取消残留 spawn、飞书 ACK 抢在预算闸门前面许诺
+结果）当场发现并修复，最终由另一个会话复核后签字确认。
 
-| 批 | 内容 | 状态 |
-|---|---|---|
-| A – D | 契约收紧、运行身份、Runtime Adapter、Orchestrator 主干、冻结快照 | ✅ 已落地 |
-| E-I / E-II / E-III | 把 `AgentVerdict` 拆成事实（`FactBundle`）与判断（`AgentAssessment`）；六个 skill 全部迁完，退役旧的事后修订路径 | ✅ 已落地 |
-| F | Risk 拆两层——硬规则挪进编排器，省掉注定白花的 LLM 调用 | ✅ 已落地 |
-| G-I / G-II | 外发通知 Outbox + 飞书出卡变结构化 Trigger（`main` 全程不参与编排） | ✅ 已落地 |
-| I | RawArtifact——raw 层第一次真正存 raw | ✅ 已落地 |
-| J-I / J-II | 收敛 `run_id` 这个名字在库里同时指三个不同东西的历史遗留 | ✅ 已落地 |
-| K | Agent Registry——roster 从散落五处收成一处 | ✅ 已落地 |
-| L | `cn.trading_calendar`——第一张真实的 `fact_*` 表，认节假日了 | ✅ 已落地 |
-| H-I / H-II | 外部评审建议的包结构重组：`_contract`/`_store`/`_sources`/`_runtime`/`_snapshot` 迁进 `src/easyup_biga/`，旧路径留兼容薄壳 | ✅ 已落地 |
-| H-III | `integrations`/`cli` 命名空间、把 `orchestrator.py` 等从 skill 里挖出来单独建包 | ⬜ **主动留白**——目前只有一个消费方，没有抽成共享包的依据 |
-
-剩一项收尾：H-I/H-II 迁移时旧写法的跨包引用（`from _contract import ...`）
-还没换成新命名空间，留给一个专门的清理批次一次性做，不分批改。
-
-Phase 2 本身那两条出口条件（真实否决端到端落库、缺失项跨天累积）与这次
-升级并行、互不阻塞——见上方 Phase 2 状态表。
-
-### 关于「徽章全绿」的说明
-
-这里必须说清楚，否则就是粉饰。**端到端徽章绿过两次，两次都改过预算。**
-
-**第一次 60s → 90s。** 60s 从来不是合理的预算 —— 它是四个阶段预估**下界**之和，
-等于要求所有阶段同时命中最优。实测每个阶段都落在自己的区间内，
-超的是那个加法，不是系统本身。
-
-**第二次 90s → 180s。** 这次更需要说清楚，因为**数字变差了**：
-Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大多因数据未形成早退。
-盘中六 Agent 实测 172.6s。
-
-改预算的三个必答问题（缺一条就是作弊）：
-
-1. **旧数字错在哪** —— 在一个 agent 都没有时把四个区间相加得到的，是愿望不是预测
-2. **新数字怎么来的** —— 四次盘中实测，每项取最好值仍需 158s，180s 留 14% 余量
-3. **什么时候它该红** —— 优化后三次都在 158–173s；超 180s 说明有组成异常了
-
-而且要指出**哪部分不在我们控制内**：Stage 1 的最慢项是第三方接口延迟，
-实测并发度调到 4 会触发渐进限流（7.2 → 25.2 → 60.1s）。
-
-**第三次：还没改，因为回答不了第 3 问。** 首次盘后实测 **198s / $1.37**，
-超了 180s。原因清楚 —— 收盘后一小时快讯 **184 条**（盘中约 70 条），
-`news` 单轮从 78.3s 涨到 100.0s。
-
-🔴 但只有一次盘后数据，**说不出「什么时候它不该红」** ——
-而那正是前两次改预算时反复强调的必答问题。
-顺手调到 210s 会让盘中的异常不再报红。⇒ 留作待裁定，先攒实测。
-
-> 注意这三次的共同点：**旧数字之所以不对，都是因为测量窗口没覆盖到某个情形。**
-> 第一次没有 agent，第二次是休市日，第三次是所有实测都在 15:00 之前。
-
-完整推导见[第 10 章](docs/tutorial/10-latency-and-cost.md)与
-[第 17 章](docs/tutorial/17-closing-phase-2.md)。
+完整推导、每一批做了什么、每次评审怎么复核，见
+[`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
 
 ---
 
 ## 目录结构
 
-```
+```text
 .
 ├── agents/          各 Agent 的 workspace（AGENTS.md = 角色契约唯一载体）
-├── src/easyup_biga/ 五个共享基础设施包的真实实现（批 H-I/H-II 迁入，见「确定性编排升级」）
+├── src/easyup_biga/ 五个共享基础设施包的真实实现
 │   ├── domain/      Evidence / AgentVerdict / DecisionCard（唯一实现）；
 │   │               facts.py：事实（FactBundle）与判断（AgentAssessment）已全部拆开
-│   ├── providers/   采集层：五个数据源（新浪日线/快讯、腾讯行情、东财、深交所官方
-│   │               交易日历）+ 重试 + 量级围栏
+│   ├── providers/   采集层：五个数据源 + 重试 + 量级围栏
 │   ├── persistence/ 数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
 │   ├── runtime/     OpenClaw 运行时适配层（Specialist 生命周期唯一入口）
 │   └── application/ SnapshotCoordinator（冻结一次、多处读，跨层协调）
@@ -357,101 +462,142 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 │   │               旧包路径，原地留兼容薄壳（一个字符不改地转发到 src/ 之下）
 │   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
 ├── data/            SQLite 事实层（不入库）
-├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
+├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 配置基线 / 公开审查
 │                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
-├── tests/           1788 条测试
+├── tests/           1798 条测试
 ├── docs/
-│   ├── design/      架构文档（SSOT）+ 安装指南
-│   └── tutorial/    开发教程（47 章，与代码同步）
-└── images/          品牌素材（LOGO_BigA01–04 + 透明底变体，含 C2PA 内容凭证）
+│   ├── design/      架构文档（SSOT）+ 各阶段设计
+│   ├── guide/       操作手册（安装 / 使用 / Schema 回滚）
+│   └── tutorial/    开发教程（60 章，与代码同步）
+└── images/          品牌素材
 ```
 
 ---
 
-## 文档
+## 文档导航
 
-| 文档 | 内容 |
+| 文档 | 用途 |
 |---|---|
-| [`docs/README.md`](docs/README.md) | **文档规约**：放哪、叫什么、谁该更新它（由测试强制） |
-| [`docs/design/architecture.md`](docs/design/architecture.md) | 架构 SSOT：Agent 拓扑、通信契约、数据架构、失败模式清单 |
-| [`docs/design/phase-1-walking-skeleton.md`](docs/design/phase-1-walking-skeleton.md) | Phase 1 设计与验收结果（已冻结） |
-| [`docs/design/phase-2-specialists.md`](docs/design/phase-2-specialists.md) | Phase 2 设计：范围、步骤、关键取舍、出口条件 |
-| [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md) | 确定性编排升级：为什么、各批范围/判据、评审断言复核 |
-| [`docs/guide/usage.md`](docs/guide/usage.md) | **怎么用**：出卡、读卡、以及四个「确认它没骗你」的检查 |
-| [`docs/guide/install.md`](docs/guide/install.md) | 环境安装：在已有 OpenClaw 实例旁并排装第二套 |
-| [`docs/tutorial/`](docs/tutorial/README.md) | 开发教程：46 章，真实建造过程 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 变更历史（每条写「为什么」，不只是「做了什么」） |
+| [架构设计](docs/design/architecture.md) | 当前架构的单一事实源 |
+| [确定性编排](docs/design/deterministic-orchestration.md) | 为什么把流程控制从 Agent 移到程序 |
+| [Phase 1](docs/design/phase-1-walking-skeleton.md) | 第一条端到端 Walking Skeleton |
+| [Phase 2](docs/design/phase-2-specialists.md) | Specialist、Risk 与并行 |
+| [安装指南](docs/guide/install.md) | 与既有 OpenClaw 实例隔离共存 |
+| [使用手册](docs/guide/usage.md) | 出卡、读卡、验证与排错 |
+| [Schema 版本与回滚](docs/guide/schema-rollback.md) | 17 个版本一句话摘要 + 没有 DOWN migration 时怎么办 |
+| [开发教程](docs/tutorial/README.md) | 真实施工过程与事故复盘 |
+| [TODO](TODO.md) | 当前未完成项与机器验收条件 |
+| [CHANGELOG](CHANGELOG.md) | 每次变更及其原因 |
+| [CONTRIBUTING](CONTRIBUTING.md) | 贡献规则 |
+
+文档按生命周期管理：
+
+```text
+design/    当前设计，随代码更新
+guide/     操作手册，跑不通就是错
+tutorial/  建造过程，写完冻结
+external/  外部材料，只读保存
+```
 
 ---
 
-## 运行环境
+## 路线图
 
-| 项 | 值 |
-|---|---|
-| OS | WSL2 · Linux 6.6 |
-| Node | v24.21.0 (LTS Krypton) |
-| OpenClaw | 2026.9.5 |
-| 数据层 | SQLite (WAL) |
-| Gateway 端口 | 19789 |
+### Architecture Baseline v1 —— ✅ 已冻结
+
+`v1-architecture-baseline` tag 标记的这次冻结覆盖：Run Provenance 闭环、
+Run → EvidenceSet 一对一、Strict VerdictRef、TIMEOUT / Kill / Stale Run
+收敛、飞书失败语义、正式 Package 边界、Full Test Baseline。
+
+### Phase 2 收尾 —— 进行中
+
+```text
+真实否决端到端落库（等一次够极端的行情）
+缺失项跨天累积 ≥5 次（等下一个交易日）
+```
+
+### Data Platform
+
+```text
+Dataset Registry
+Provider Registry
+Security Master
+Trading Calendar
+EOD Daily Bars
+Emotion Snapshot
+```
+
+### Research & Decision
+
+```text
+Feature / Factor
+Screening
+CandidateSet
+TradingPlan
+Realtime Tracking
+Review
+Backtest
+```
+
+### Trading Platform
+
+```text
+Portfolio Ledger
+Deterministic Risk Engine
+Paper OMS
+Broker Adapter
+Web
+Controlled Live Trading
+```
+
+BigA 的演进原则是：
+
+> **先用一个真实闭环把基础架构证明正确，再把更多业务能力接入同一套身份、状态、数据和测试体系。**
 
 ---
 
 ## 品牌素材
 
-[`images/`](images/) 目录含五张 Logo：
-
-- `LOGO_BigA01`：横版字标，黑字白底（GitHub 首图 / 浅色背景用）
-- `LOGO_BigA02`：方形图标（头像 / 方形场景用）
-- `LOGO_BigA03`：方案总览
-- `LOGO_BigA04`：方形 App 图标，红底白字圆角
-- `LOGO_BigA01_Transparent`：`LOGO_BigA01` 的**透明底白字**变体（深色背景 / 视频叠加用，
-  与 01 号互补而非替代——它在 GitHub 亮色模式下会整体消失）
-
+[`images/`](images/) 目录含五张 Logo（`LOGO_BigA01`–`04` + 一张透明底变体）。
 五张图由 AI 生成，保留了 C2PA 内容凭证（`caBX` 块）未作剥离。
+
+---
+
+## 贡献
+
+贡献前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+尤其请遵守：
+
+- 不在 Agent 内增加顶层业务编排；
+- 不让自动 Agent 直接访问外部 Provider；
+- 不绕过 Contract、Risk、Budget、Lock 或 Runtime Proof；
+- 行为修改必须有回归测试；
+- 第三方代码和数据条款必须单独核对。
 
 ---
 
 ## License
 
-EasyUp for BigA 2.0 is licensed under the **Apache License, Version 2.0**. See
-[`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
+BigA 使用 [Apache License 2.0](LICENSE)。
 
-Unless explicitly stated otherwise, EasyUp for BigA 2.0-owned source code and
-documentation are provided under Apache-2.0. Third-party components remain
-subject to their respective licenses and attribution requirements; see
-[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
+第三方依赖、改编代码和归属信息见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
-### Market data and third-party content
-
-The Apache-2.0 license applies to the **EasyUp for BigA 2.0 software**, not to
-third-party market data or content accessed through it.
-
-Market data, financial data, news, research reports, regulatory filings,
-web content, and other third-party information may be subject to separate
-provider terms, copyright, licensing, rate limits, access restrictions, and
-redistribution rules. Users are responsible for ensuring that their use of
-each provider complies with the applicable terms.
-
-### Financial disclaimer
-
-EasyUp for BigA 2.0 is software for research, analysis, automation, and
-trading-system experimentation. It does not provide investment advice, a
-recommendation, or a guarantee of investment performance.
-
-Trading and investing involve risk, including possible loss of principal.
-Users remain responsible for reviewing analyses, configuring risk controls,
-complying with applicable rules and broker requirements, and authorizing any
-live trading activity.
-
-### Trademarks
-
-The Apache License 2.0 does not grant trademark rights. Project names, logos,
-and branding are governed separately from the software license.
+软件许可证不等于行情、新闻、研报、公告或其他第三方数据的使用许可。
+使用者仍需遵守各数据源的条款、访问限制和再分发规则。
 
 ---
 
+## 风险声明
+
+BigA 是用于研究、分析、自动化与交易系统实验的软件。
+
+它不构成投资建议，不保证收益。证券交易存在本金损失风险。
+使用者需自行审查分析结果、配置风险控制、遵守适用规则，并对任何交易决定负责。
+
 <div align="center">
 
-⚠️ **本系统不构成投资建议 · 当前阶段不自动下单 · 最终决策由人做**
+**当前阶段：Human-in-the-loop · 不自动下单**
 
 </div>
