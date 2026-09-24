@@ -2,8 +2,6 @@
 
 <img src="images/LOGO_BigA01.png" alt="BigA" width="460">
 
-# BigA
-
 ### 基于 OpenClaw 的可追溯 Multi-Agent A 股决策内核
 
 [![Status](https://img.shields.io/badge/status-architecture%20baseline%20v1-2ea043)](TODO.md)
