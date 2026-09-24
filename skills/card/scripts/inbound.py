@@ -54,6 +54,7 @@ from datetime import datetime
 
 _HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
+sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills" / "decision-card" / "scripts"))
 
 from _contract import NOTIFY_FAILURE_STATES, RUN_ORIGINS, now_cn  # noqa: E402
 from _store import (  # noqa: E402
@@ -62,6 +63,7 @@ from _store import (  # noqa: E402
     reserve_decision_for_trigger,
     trigger_reserved_at,
 )
+from budget import check_budget, explain  # noqa: E402
 
 __all__ = ["AckResult", "accept_trigger", "detached_biga_card_launcher", "main"]
 
@@ -265,6 +267,26 @@ def accept_trigger(
             accepted=False, duplicate=True, decision_id=decision_id, run_state=state,
             message=f"这条出卡请求已经在处理了：决策 {decision_id}{state_txt}。"
                     f"重复的请求不会再跑一遍 —— 卡好了会推送给你。")
+
+    # 🔴 ACK 与真实执行结果之间的信息差（2026-09-24，G 节 Live Acceptance 实测撞见）：
+    #    `launcher()` 只保证「systemd-run 把瞬态单元排上去了」，不等它跑完——`bin/
+    #    biga-card` 自己的预算闸门是在那个单元**内部**才执行的。如果不提前问一次，
+    #    这里会照发"收到，正在出卡……不用等也不用重发"，而单元几乎立刻自己拒绝退出
+    #    （exit code 3），飞书那一侧再没有任何后续——用户收到的是一句关于未来的
+    #    承诺，而那个承诺在发出的同一秒已经不成立了（R-3 的用户可见形态：
+    #    没说"不知道"，说了一句听起来确定、实际落空的话）。
+    #    `check_budget()` 本身只读不写（见其文档字符串），问一次不花钱、不占号；
+    #    `exclude_decision_id` 排掉刚占的这个号，否则「跟自己比 gap 恒为 0s」
+    #    每次都会误拒（`bin/biga-card` 自己那道检查已经踩过这个坑，见那边的注释）。
+    #    ⚠️ 这不是新增一道闸门——真正拦截仍然发生在 `bin/biga-card` 内部，
+    #    这里问一遍只是为了说真话，问错了/漏问了不会漏放任何东西。
+    reasons = check_budget(exclude_decision_id=decision_id, path=path)
+    if reasons:
+        return AckResult(
+            accepted=False, duplicate=False, decision_id=decision_id, run_state=None,
+            message=f"决策 {decision_id} 已占号，但{explain(reasons)}\n"
+                    f"这次没有拉起后台运行，不会再有后续推送——不是没反应，是没起跑。"
+                    f"想跑就按上面的办法，或过一会再发一次 /card。")
 
     # 新请求：异步拉起带守卫的出卡入口，立刻返回。拉起失败不该把已占的号也回滚
     #（号是只追加的、占了就占了）——把失败如实报出来，让上游知道没真的跑起来。

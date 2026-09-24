@@ -178,7 +178,12 @@ class TestAcceptTrigger:
         assert (time.monotonic() - t0) < 1.0, "受理必须立刻返回（异步），不等 170~200s"
         assert ack.accepted and L.calls, "受理后应已把出卡拉到后台"
 
-    def test_不同trigger各拉起一次(self, db):
+    def test_不同trigger各拉起一次(self, db, monkeypatch):
+        """这条测的是**去重按 trigger_id 分**（不同 trigger 不共用一个决策），
+        不是预算闸门时序——两次调用在测试里是背靠背的，真实世界里两次飞书事件
+        隔这么近会被 MIN_GAP 正确拦下（另有专门测试覆盖那件事），这里把闸门
+        本身短路掉，不让它跟本测试要验证的性质搅在一起。"""
+        monkeypatch.setattr(inbound, "check_budget", lambda **kw: [])
         L = _RecordingLauncher()
         inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
         inbound.accept_trigger(origin="feishu", trigger_id="evt-B", launcher=L, path=db)
@@ -200,6 +205,44 @@ class TestAcceptTrigger:
     def test_launcher拿到origin_trigger_decision三样(self, db):
         L = _RecordingLauncher()
         ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert L.calls == [("feishu", "evt-A", ack.decision_id)]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 预算闸门预检（2026-09-24，G 节 Live Acceptance 实测撞见）：
+# ACK 不该抢在闸门前面许诺一件闸门几秒后就会否决的事
+# ══════════════════════════════════════════════════════════════════════════
+class TestAckHonorsBudgetGate:
+    """`check_budget()` 本身的判断逻辑有自己的测试文件（test_budget_gate.py），
+    这里只测**接线**：闸门说不行时，这一层该怎么表现——不拉起、不许假承诺。
+    """
+
+    def test_闸门会拒时不拉起也不假装在处理(self, db, monkeypatch):
+        monkeypatch.setattr(inbound, "check_budget",
+                            lambda **kw: ["距上次占号只有 12s，最小间隔 400s（人工注入）"])
+        L = _RecordingLauncher()
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert L.calls == [], "闸门会拒时不该真的拉起后台运行——白白起一个必然自杀的进程"
+        assert not ack.accepted and not ack.duplicate
+        assert "12s" in ack.message and "没有拉起后台运行" in ack.message
+
+    def test_闸门放行时正常拉起(self, db, monkeypatch):
+        """反向对照：不是"这一层从此什么都不放行了"，闸门说行就照常走。"""
+        monkeypatch.setattr(inbound, "check_budget", lambda **kw: [])
+        L = _RecordingLauncher()
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert L.calls == [("feishu", "evt-A", ack.decision_id)]
+        assert ack.accepted and "正在出卡" in ack.message
+
+    def test_排除刚占的号自己_不会自己跟自己比出gap为0(self, db):
+        """🔴 不 monkeypatch，走真实的 check_budget——这是本条修复要防的原始坑：
+        `accept_trigger` 先占号、再问闸门，如果不排除刚占的这个号，
+        "距上次占号"永远是在跟自己比，gap 恒为 0s，每一次新请求都会被误拒。
+        （`bin/biga-card` 自己那道检查曾经真的踩过这个坑，见 budget.py 与
+        bin/biga-card 里 exclude_decision_id 的文档字符串。）"""
+        L = _RecordingLauncher()
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert ack.accepted, f"孤零零一次新请求被闸门拒了：{ack.message}"
         assert L.calls == [("feishu", "evt-A", ack.decision_id)]
 
 
