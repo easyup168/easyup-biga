@@ -143,7 +143,7 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
     #
     #     verdict: UNKNOWN
     #     result:  coverage_ratio=1.0, trade_date_consistent=True,
-    #              max_staleness_sec=…, tripped_thresholds=[…]
+    #              max_source_lag_sec=…, max_evidence_age_sec=…, tripped_thresholds=[…]
     #     confidence: 0.9          ← 由 len(result) 算出来的
     #     warnings:  [阈值触发…]    ← 从别的决策的证据里算出来的
     #
@@ -249,9 +249,22 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
             "risk.upstream.trade_date_inconsistent"))
 
     # --- 证据新鲜度 ---
-    ages = [e.staleness_sec for v in upstream for e in v.evidence]
-    if ages:
-        add("max_staleness_sec", max(ages), "最旧证据的年龄(秒)")
+    # 🔴 批 R / 评审 E-19：这里以前只报一个数，叫 `max_staleness_sec`，标签写
+    #    「最旧证据的年龄(秒)」—— 而它算的是**取数滞后**（取回时刻 − 数据时刻），
+    #    根本不是年龄。一份三天前冻的快照，只要当初抓取花了 2 秒，它就报 2。
+    #    名字把口径说错了，于是用的人也就用错了。
+    #
+    #    现在两个数都报，各自叫对名字：
+    #      · max_source_lag_sec   —— 数据产生到我们取到它，隔了多久
+    #      · max_evidence_age_sec —— 到**本次风险判断这一刻**为止，最旧证据多老
+    #    后者用 `age_at(retrieved)` 而不是 `age_sec`：基准是 risk 自己这次运行的
+    #    时刻，且这个时刻已随 risk 的证据落库 ⇒ 回放读同一份 verdict 得到同一个数。
+    lags = [e.source_lag_sec for v in upstream for e in v.evidence]
+    if lags:
+        add("max_source_lag_sec", max(lags), "取数滞后：取回时刻−数据时刻，最大值(秒)")
+        add("max_evidence_age_sec",
+            max(e.age_at(retrieved) for v in upstream for e in v.evidence),
+            "最旧证据的年龄(秒)")
     today = retrieved.strftime("%Y%m%d")
     live = (consistent and dates and next(iter(set(dates.values()))) == today
             and (retrieved.hour, retrieved.minute) < _CLOSE_HHMM)
@@ -358,7 +371,10 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
 
 
 #: 数据齐备时应当产出的字段数（同 market/emotion，故意不截断，由测试钉死）。
-_EXPECTED_FIELDS = 10
+#: ⚠️ 手工维护、且**故意不截断到 1.0** —— 加字段忘了改这里，`data_completeness`
+#:    会算出 >1，被契约当场拒掉（批 R 加 `max_evidence_age_sec` 时就是这么发现的：
+#:    11/10 = 1.1 → ValueError）。刺耳但正确：截断会把「口径变了」悄悄抹平。
+_EXPECTED_FIELDS = 11
 
 
 def main(argv: list[str] | None = None) -> int:

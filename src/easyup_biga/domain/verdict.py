@@ -19,10 +19,10 @@ import json
 
 import re
 from dataclasses import dataclass, field as dc_field
-from types import MappingProxyType
 from typing import Any, Literal, Mapping, get_args
 
 from .evidence import Evidence
+from ._freeze import deep_freeze, thaw
 from .missing import MissingItem
 
 __all__ = [
@@ -181,8 +181,13 @@ def _same_value(a: Any, b: Any) -> bool:
     序列化不了的值（非 JSON 类型）退回 `==`，在能判的范围内如实回答。
     """
     try:
-        return (json.dumps(a, ensure_ascii=False, sort_keys=True, allow_nan=True)
-                == json.dumps(b, ensure_ascii=False, sort_keys=True, allow_nan=True))
+        # 🔴 先 thaw 再 dumps（批 R）：E-17 递归冻结之后 a/b 可能是
+        #    mappingproxy/tuple，`json.dumps` 不认前者 → 抛 TypeError → 退回下面
+        #    的 `==` → `1 == 1.0` 又成立了。也就是说**不加这一行，批 R 会把批 P
+        #    刚关上的门重新打开，而且全程不报错**。实测确认过：冻结后
+        #    `_same_value({'n':1}, {'n':1.0})` 返回 True，未冻结时返回 False。
+        return (json.dumps(thaw(a), ensure_ascii=False, sort_keys=True, allow_nan=True)
+                == json.dumps(thaw(b), ensure_ascii=False, sort_keys=True, allow_nan=True))
     except (TypeError, ValueError):
         return a == b
 
@@ -404,7 +409,7 @@ class AgentVerdict:
             self, "missing", tuple(MissingItem.coerce(m) for m in self.missing))
         object.__setattr__(self, "evidence", tuple(self.evidence))
         object.__setattr__(self, "warnings", tuple(self.warnings))
-        object.__setattr__(self, "result", MappingProxyType(dict(self.result)))
+        object.__setattr__(self, "result", deep_freeze(self.result))
 
         # 🔴 事实层铁律走**唯一实现**（批 E-I），不在这里重抄一遍 —— FactBundle
         #    用的是同一份 `check_fact_invariants`，改了自动两边一致（防 L-3）。
@@ -426,9 +431,17 @@ class AgentVerdict:
         return [e for e in self.evidence if e.field == field]
 
     @property
-    def max_staleness_sec(self) -> int:
-        """最旧的一条证据有多旧。全部证据缺失时返回 -1。"""
-        return max((e.staleness_sec for e in self.evidence), default=-1)
+    def max_source_lag_sec(self) -> int:
+        """最大的**取数滞后**（取回时刻 − 数据时刻）。无证据时返回 -1。
+
+        ⚠️ 这不是「最旧证据的年龄」—— 见 `Evidence.source_lag_sec`（批 R / E-19）。
+        要年龄用 `max_age_at(评估时刻)`。
+        """
+        return max((e.source_lag_sec for e in self.evidence), default=-1)
+
+    def max_age_at(self, evaluated_at: datetime) -> int:
+        """相对 `evaluated_at`，最旧那条证据的年龄（秒）。无证据时返回 -1。"""
+        return max((e.age_at(evaluated_at) for e in self.evidence), default=-1)
 
     # --- 序列化 ---
 
@@ -441,7 +454,7 @@ class AgentVerdict:
             # 🔴 显式转回 dict：`self.result` 是 MappingProxyType（A2），
             #    json.dumps 只认 dict 的子类，直接塞一个 mappingproxy 进去
             #    会在落库那一刻才炸 TypeError —— 这里转好，问题在源头暴露。
-            "result": dict(self.result),
+            "result": thaw(self.result),
             "data_completeness": self.data_completeness,
             "evidence": [e.to_dict() for e in self.evidence],
             "warnings": list(self.warnings),

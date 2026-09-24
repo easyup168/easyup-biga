@@ -44,6 +44,15 @@ _BASE = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
          "CN_MarketData.getKLineData")
 _REFERER = "https://finance.sina.com.cn"
 
+#: 🔴 出处标识由**数据源模块自己**声明（批 R，评审 E-20.2）。
+#:   以前 `SnapshotCoordinator` 里写死 `f"sina:kline/{symbol}"`，而 fetcher 是可注入的
+#:   —— 换一个 provider 进去，raw 层照样记「sina」。那是一条**会说谎的出处**：
+#:   落库的 source 描述的是调用方的假设，不是数据真正的来源。
+PROVIDER_ID = "sina"
+#: 解析口径版本。改了 `parse_index_daily` 的字段映射/校验就要升它，
+#: 否则没法清点「哪些历史快照是用旧解析读出来的」。
+ADAPTER_VERSION = "1"
+
 #: 本项目用到的指数。深证用**综指**(399106) 而不是成指(399001)：
 #: 综指覆盖整个深市，与涨跌家数、成交额的口径一致。
 SINA_SYMBOLS = {"sh": "sh000001", "sz": "sz399106"}
@@ -73,6 +82,14 @@ class IndexDaily:
     #: `None` = 这份 IndexDaily 不是从网络响应来的（`parse_index_daily` 对**切片后
     #: 的冻结 raw** 重建时就没有原文可言）——那条路径不落 raw，所以留空无害。
     raw_text: str | None = None
+    #: 出处三件套（批 R）——由本模块声明并一路带到 raw 层，见 PROVIDER_ID 的注释。
+    provider_id: str = PROVIDER_ID
+    adapter_version: str = ADAPTER_VERSION
+
+    @property
+    def source(self) -> str:
+        """raw 层 `source` 列的值。**唯一实现** —— 调用方不要自己拼这个字符串。"""
+        return f"{self.provider_id}:kline/{self.symbol}"
 
     @property
     def last(self) -> DailyBar:

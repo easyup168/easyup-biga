@@ -188,7 +188,7 @@ class TestP2CrossCheckPenetration:
         tid = save_fact_bundle(technical.build_fact_bundle(
             break_source=set(), store=False, task_id=TID, evidence_set_id=esid))
         v = risk.build_fact_bundle(verdict_ids=[mid, tid], store=False, task_id=TID)
-        assert v.result["cross_check_conflict"] == []
+        assert v.result["cross_check_conflict"] == ()
 
     def test_不同evidence_set_id_报冲突且带冻结集与两个esid(self, db):
         """🔴 两次冻结同一份数据 → es-id 不同、但 raw_hash **相同**（实测）。所以只有

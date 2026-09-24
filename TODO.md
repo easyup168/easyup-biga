@@ -1178,13 +1178,35 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         按「代码+文本」复合键去重，卡上五条一条不少）。把 `MissingItem.__eq__`
         只看 `.code` 这个局部属性当成了端到端的数据丢失，没走完全链路就下结论。
         真正的洞在旁边：roster 只比条数，5 个缺席配 5 条毫不相干的 missing 照样放行
-  - [ ] **E 节剩下九项**：E-16 后半（派生值声明 `input_evidence_ids` + `calc_version`）
+  - [ ] **E 节剩下六项**（E-17 / E-19 / E-20 已由批 R 做掉）：
+        E-16 后半（派生值声明 `input_evidence_ids` + `calc_version`）
         —— 实测 411 条证据里 **244 条（59%）** 的 source 以 `derived:` 开头，涉及六个
-        skill、39 种 `(agent, field)`，是独立一块领域工作；本批那条等值检查**拦不到**
-        它（派生值与自造的同名证据天然相等，已写进契约注释免得被读成已覆盖）。
-        E-17 deep_freeze / E-19 `source_lag_sec` + `age_at(evaluated_at)` /
-        E-20 Snapshot 元数据四项 —— 都已实测确认成立，各有独立 blast radius
-        （E-19 会动 risk 的判据口径）
+        skill、39 种 `(agent, field)`，是独立一块领域工作；批 P 那条等值检查**拦不到**
+        它（派生值与自造的同名证据天然相等，已写进契约注释免得被读成已覆盖）
+
+- [x] 批 R · 外部评审 E 节（二）：E-17 递归冻结 + E-19 时间语义 + E-20 采集出处
+      —— **2026-09-24**。三项都先在生产库上量过才动手。
+      **E-17**：`domain/_freeze.py` 新增 `deep_freeze`/`thaw`（唯一实现），接进
+      `Evidence`/`FactBundle`/`AgentVerdict` 的 `__post_init__`，`to_dict` 侧解冻。
+      🔴 旧防护（`frozen=True` + `MappingProxyType(dict(result))`）**只盖第一层**，
+      而铁律在 `__post_init__` 校验、穿透发生在那之后 ⇒ 落库的不是被校验的那份；
+      实测 3152 条证据里 464 条（14.7%）是 dict/list，且与 `result` 顶层值**常是同一对象**
+      ⇒ 一次 mutate 同时满足批 P 的交叉校验。
+      🔴 **本批差点把批 P 的门推开**：冻结后 `_same_value` 的 `json.dumps` 抛 `TypeError`
+      → 退回 `==` → `1==1.0` 又成立，全程不报错且批 P 自己的测试照样绿；已加专门守它的测试。
+      序列化 `thaw` 后 tuple→list ⇒ 卡片与落库**逐字节不变**（8 处断言 `[]`→`()`）。
+      **E-19**：`staleness_sec`→`source_lag_sec`，新增 `age_at(evaluated_at)`（强制传基准）、
+      `AgentVerdict.max_source_lag_sec` / `max_age_at()`；risk 两个数各报各的。
+      ⚠️ 诚实口径：实测最大只差 **87 秒**、且该字段**不在 `THRESHOLDS` 里不闸任何东西**
+      ⇒ 是**潜伏的错名字**，不是正在发生的 fail-open。news 的同名字段（「距最新一条」）
+      没动，两处加注释防止被顺手「统一」。
+      **E-20**：`retrieved_at` 移到抓取**完成后**（偏差单向、只高估新鲜度）；
+      `provider_id`/`adapter_version`/`source` 由 `IndexDaily` 声明并进 manifest
+      （fetcher 可注入 + source 硬编码 = 必然说谎的记录）；读回 raw 时 `_verify_snapshot_hash`
+      重算指纹。🔴 差点写成 R-3 违规（「85.4% 旧行验不了就跳过」），
+      实测 376 行**两种口径各自全部一致、0 例外** ⇒ 不需要「验不了」那一档，直接 fail-closed。
+      顺带 `_EXPECTED_FIELDS` 10→11（加字段忘改会被契约拒掉，正确行为）。
+      新增 37 条探针，9 处 sabotage 全部验证会红。教程第 47 章
 
 - [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
       schema **v16**：`decision_records.run_id`/`.evidence_set_id`、

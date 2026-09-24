@@ -186,7 +186,7 @@ def build_fact_bundle(
         #   深夜 23:50   as_of=15:00   staleness 530 分钟   ← 🔴
         #
         # 而真实情况是最新一条通常只有几分钟前。这会污染
-        # `staleness_sec`、risk 的 `max_staleness_sec`、新鲜度判断、
+        # `staleness_sec`、risk 的 `max_evidence_age_sec`、新鲜度判断、
         # 以及日后所有的数据质量统计。
         #
         # ⚠️ 它**盘中是对的** —— 这正是它躲过一整天测试的原因：
@@ -231,6 +231,10 @@ def build_fact_bundle(
             newest = inwin[0].at
             stale = int((retrieved - newest).total_seconds())
             add("newest_at", newest.isoformat(), "最新一条的时刻", src)
+            # ⚠️ 这个 `staleness_sec` 与 `Evidence.source_lag_sec`（批 R 前叫
+            #    staleness_sec）**不是一回事**：这里是「最新一条快讯距现在多久」，
+            #    量的是**新闻源静不静**；那个量的是**取数滞后**。同名不同义容易
+            #    被顺手「统一」掉 —— 别改，两者各自的标签才是口径。
             add("staleness_sec", stale, "距最新一条(秒)", src)
 
             # 🔴 静默守卫**只在盘中启用**。

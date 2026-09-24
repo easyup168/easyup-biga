@@ -560,7 +560,7 @@ def check_2_verdict(decision_id: str | None) -> Check:
         return c.fail("Card 里没有 emotion 的 Verdict") or c
     ev = [e for e in vs[0].evidence if e.as_of and e.as_of.tzinfo]
     if ev:
-        c.ok(f"{len(ev)} 条带时区 as_of 的证据，最旧 {vs[0].max_staleness_sec}s")
+        c.ok(f"{len(ev)} 条带时区 as_of 的证据，取数滞后最大 {vs[0].max_source_lag_sec}s")
     else:
         c.fail("没有任何一条带 tzinfo 的 as_of")
     return c

@@ -48,6 +48,7 @@ from _sources import IndexDaily, fetch_index_daily, parse_index_daily
 from _store import (
     load_evidence_set,
     load_raw_snapshot,
+    payload_sha256,
     raw_text_sha256,
     save_evidence_set,
     save_raw_snapshot,
@@ -60,6 +61,42 @@ __all__ = ["SnapshotCoordinator", "SnapshotReadError", "MANIFEST_KIND"]
 MANIFEST_KIND = "index_daily"
 
 Fetcher = Callable[..., IndexDaily]
+
+
+def _verify_snapshot_hash(snap: dict[str, Any]) -> None:
+    """读回 raw 快照时重算指纹并比对，对不上就 fail-closed（批 R，评审 E-20.3）。
+
+    🔴 以前 `content_sha256` 只在**写入时**算过一次，此后从没有人验过 ——
+    一个从不被检验的指纹，和没有指纹的区别只在于它让人放心。
+
+    两种口径，由 `raw_text` 是否为 NULL 决定（schema v13 的分界，raw 层只追加、
+    旧行不回填）：
+
+    * `raw_text` 有值 → `raw_text_sha256`（原始响应文本）
+    * `raw_text` 为 NULL → `payload_sha256`（解析后重排的对象，v13 之前的口径）
+
+    ⚠️ 这里**没有「验不了」这一档**，因此也不存在 R-3 要防的静默 fail-open：
+    实测 2026-09-24 生产库 376 行 raw，55 行走新口径、321 行走旧口径，
+    **两边各自全部一致，0 例外**。哪天真出现验不了的行，下面那个 else 会直接抛。
+    """
+    sha = snap.get("content_sha256")
+    raw_text = snap.get("raw_text")
+    if raw_text is not None:
+        actual, how = raw_text_sha256(raw_text), "raw_text_sha256(原始响应文本)"
+    elif snap.get("payload") is not None:
+        actual, how = payload_sha256(snap["payload"]), "payload_sha256(v13 之前的旧口径)"
+    else:
+        raise SnapshotReadError(
+            f"snapshot_id={snap.get('snapshot_id')} 既没有 raw_text 也没有 payload，"
+            f"指纹无法重算 —— 算不出来就是算不出来，不当作通过（R-3）。")
+    if actual != sha:
+        raise SnapshotReadError(
+            f"snapshot_id={snap.get('snapshot_id')} 的内容指纹对不上 —— raw 层这一行\n"
+            f"  落库时记的  content_sha256 = {sha}\n"
+            f"  现在重算得到              = {actual}\n"
+            f"  口径：{how}\n"
+            f"raw 层是只追加的，这本不该发生。要么库被改过，要么哈希口径变了而"
+            f"历史行没跟着走。**不要**绕过这条检查去读它：回放的地基就是这份字节。")
 
 
 class SnapshotReadError(RuntimeError):
@@ -132,9 +169,16 @@ class SnapshotCoordinator:
 
         entries: dict[str, dict[str, Any]] = {}
         for symbol in uniq:
-            retrieved = now_cn()
             d = self._fetch(symbol, bars=bars)      # ← 唯一的真实抓取点
-            source = f"sina:kline/{symbol}"
+            # 🔴 E-20.1：`retrieved_at` 记在**抓取完成之后**，不是发起之前。
+            #    以前这一行在 `_fetch` 上面 —— 记的是「我打算去抓」的时刻。
+            #    抓取耗时全被算进「数据有多新」：一次 30 秒的慢响应，落库的
+            #    retrieved_at 比真正拿到数据早 30 秒，证据因此显得比实际新鲜。
+            #    这个方向是**单向的** —— 只会高估新鲜度，不会低估。
+            retrieved = now_cn()
+            # 🔴 E-20.2：出处问 provider 要，不在这里拼。fetcher 是可注入的，
+            #    硬编码 "sina" 会让任何替换后的数据源都被记成 sina。
+            source = d.source
             as_of = d.server_as_of or retrieved
             snapshot_id = save_raw_snapshot(
                 source=source,
@@ -153,6 +197,10 @@ class SnapshotCoordinator:
                 "content_sha256": raw_text_sha256(d.raw_text),
                 "bar_count": len(d.bars),
                 "trade_date": d.trade_date,
+                # 出处三件套进 manifest（E-20.2）：回放时能回答「这份数据是谁、
+                # 用哪一版解析读出来的」，而不只是「它长什么样」。
+                "provider_id": d.provider_id,
+                "adapter_version": d.adapter_version,
             }
 
         evidence_set_id = new_evidence_set_id()
@@ -196,6 +244,7 @@ class SnapshotCoordinator:
                 f"evidence set {evidence_set_id} 记着 {symbol} 冻在 "
                 f"snapshot_id={entry['snapshot_id']}，但那行 raw_market_snapshot "
                 f"找不到了 —— 冻结登记与 raw 层对不上（raw 层只追加，这本不该发生）。")
+        _verify_snapshot_hash(snap)
         raw = snap["payload"]
         if bars > len(raw):
             raise SnapshotReadError(

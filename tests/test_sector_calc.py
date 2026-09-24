@@ -103,7 +103,7 @@ class TestHappyPath:
     def test_榜单按涨跌幅降序(self, wired):
         top = build().result["industry_top"]
         assert [x["name"] for x in top[:2]] == ["半导体设备", "医疗服务"]
-        assert top == sorted(top, key=lambda x: x["pct"], reverse=True)
+        assert list(top) == sorted(top, key=lambda x: x["pct"], reverse=True)
 
     def test_上涨占比是板块层面的(self, wired):
         """与 market 的 advance_ratio（个股层面）不是同一个事实。"""

@@ -347,10 +347,10 @@ def test_用到无日期源的calc脚本都登记进了_LIVE_FIELDS():
 #
 # 构造一对都比现在晚 3 天、但彼此只差 60 秒的时间戳：
 #
-#     staleness_sec = 60      # 1 分钟 —— 看起来非常新鲜
+#     source_lag_sec = 60     # 1 分钟 —— 看起来非常新鲜
 #     而 as_of 实际比现在晚了 3 天
 #
-# 🔴 要害不在「少查了一项」，而在 `staleness_sec` 是个**差值**：
+# 🔴 要害不在「少查了一项」，而在 `source_lag_sec` 是个**差值**：
 #    只要上游的两个时刻由同一段错误逻辑派生，它对那个错误免疫。
 #    F4 那类错位恰好就是这种形状。
 
@@ -382,7 +382,7 @@ class TestF15ClockAnchor:
         t = now_cn() - timedelta(hours=2)
         e = Evidence(field="x", source="s", value=1,
                      as_of=t - timedelta(seconds=60), retrieved_at=t)
-        assert e.staleness_sec == 60
+        assert e.source_lag_sec == 60
         assert e.age_sec > 7000, "age_sec 锚在真实时钟上，不是两个数之差"
 
     def test_时钟抖动的小幅超前仍然允许(self):
