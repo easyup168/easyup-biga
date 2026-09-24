@@ -1210,6 +1210,18 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       实测 376 行**两种口径各自全部一致、0 例外** ⇒ 不需要「验不了」那一档，直接 fail-closed。
       顺带 `_EXPECTED_FIELDS` 10→11（加字段忘改会被契约拒掉，正确行为）。
       新增 37 条探针，9 处 sabotage 全部验证会红。教程第 47 章
+  - [x] 🔴 **批 T · 独立复核撞见：批 R 的提交里有 6 处未清理的冲突标记**
+        （2026-09-24）。复核时发现 `176b819` rebase 到 main 之后，`CLAUDE.md`
+        / `README.md`（3 处）/ `CHANGELOG.md` / `docs/guide/review-prompt.md`
+        带着字面的 `<<<<<<<`/`=======`/`>>>>>>>` ——是**已提交**内容，不是
+        工作区脏状态。5 处冲突两边内容恰好相同（都是当时的测试条数），手工
+        解决冲突时删错了行。三道既有闸门（pytest / audit_public.sh / docs
+        convention 现有检查）全部合法地视而不见（不是 Python 语法、不是
+        敏感内容、不落在任何正则判据里）。清理 6 处 + 新增
+        `test_docs_convention.py::test_没有未清理的冲突标记`（判据精确到
+        `=======` 整行 7 字符这个真实形状，第一版"看开头像不像"在真仓库上
+        撞上 `architecture.md` 的 RST 表格分隔线假阳性）。测试
+        1532 → 1595。详见 `docs/tutorial/48-unresolved-conflict-markers.md`
 
 - [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
       schema **v16**：`decision_records.run_id`/`.evidence_set_id`、

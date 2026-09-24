@@ -52,6 +52,35 @@ def test_扫到了文档():
     assert len(_md_files()) >= 15
 
 
+#: git 真实吐出来的三行标记：`<<<<<<<`/`>>>>>>>` 后面永远跟一个空格加标签
+#: （分支名/commit），从不裸出现；`=======` 相反，永远是整行只有 7 个 `=`，
+#: 不跟任何东西。判据必须精确到这个形状——本仓库的 RST 风格表格分隔线
+#: （见 `architecture.md`）也用连续 `=`，但长度远超 7 且中间夹着空格分段，
+#: 用「行首是不是 7 个 `=`」这种宽松判据会把它们也当成冲突标记（实测踩过）。
+_CONFLICT_MARKER_RE = re.compile(r"^(<{7}( |$)|={7}$|>{7}( |$))")
+
+
+@pytest.mark.parametrize("path", _md_files(), ids=lambda p: str(p.relative_to(DOCS)))
+def test_没有未清理的冲突标记(path: pathlib.Path):
+    """真实事故（2026-09-24）：一次 rebase 冲突的两边内容恰好相同（都是
+    「测试 1532 条」），标记行却没删——CLAUDE.md / README.md / CHANGELOG.md /
+    docs/guide/review-prompt.md 就这样带着字面的冲突标记提交进了主分支。
+
+    🔴 这类损坏**没有任何自动防线**：Markdown 不是会被结构化解析的格式，
+    `pytest -q` 与 `audit_public.sh` 那十一项都对它视而不见——两边都真的
+    跑绿过，损坏的提交混进去了两轮才被人工发现。原因分别是：
+    冲突标记不是密钥/路径/邻居细节（`audit_public.sh` 不管这类），
+    也不影响任何被测断言的真假（docs_convention 的既有检查都是子串/正则
+    匹配，标记行不巧不落在任何一条正则的判据里）。
+    """
+    text = path.read_text(encoding="utf-8")
+    hits = [ln for ln in text.splitlines() if _CONFLICT_MARKER_RE.match(ln)]
+    assert not hits, (
+        f"{path.name} 里有未清理的冲突标记：{hits}\n"
+        "  多半是 rebase/merge 冲突两边内容刚好相同，手工清理时删错了行——\n"
+        "  留了标记、删了内容之外的东西看不出问题，直到有人打开这份文档。")
+
+
 @pytest.mark.parametrize("path", _md_files(), ids=lambda p: str(p.relative_to(DOCS)))
 def test_文件名符合所在目录的规则(path: pathlib.Path):
     if _is_untracked_local_only(path):

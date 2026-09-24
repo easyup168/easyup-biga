@@ -15,38 +15,28 @@
 
 ## [未发布]
 
-<<<<<<< HEAD
-### 🐛 修复 · Isolation 三态测试的 mock 名单漏了一项，干净机器上假红（外部评审 A 节 · 二）
+### 🐛 修复 · 独立复核撞见：合并进主分支的未清理冲突标记
 
-`tools/verify/isolation.py::main()` 依次调用 5 个检查（`check_i1` / `check_i2` /
-`check_r2` / `check_namespaces` / `check_ports`），而 `tests/test_isolation.py`
-里两条三态测试各自手抄了一份要 monkeypatch 的检查名字元组，漏了
-`check_namespaces`。这台开发机因为已经装好 3 个正确命名的 systemd 单元、
-`check_namespaces` 真实调用恰好返回 `ok`，与被测场景"凑巧"一致，掩盖了名单
-缺一项这件事。
+复核 `e-two` 分支（外部评审 E 节二）时，`git show 176b819:CLAUDE.md` 发现
+它 rebase 到 `main` 之后，`CLAUDE.md` 里带着字面的 `<<<<<<< HEAD` / `=======` /
+`>>>>>>>` ——是**已提交**内容，不是工作区脏状态。全仓扫描确认还有 5 处：
+`README.md` ×3、`CHANGELOG.md` ×1、`docs/guide/review-prompt.md` ×1。其中
+5 处冲突两边内容恰好相同（都是当时的测试条数），手工解决冲突时保留了内容、
+却删错了标记行——这是手工冲突解决最常见的操作失误之一。
 
-实测复现：把 `SYSTEMD_USER` 指到不存在的路径（模拟一台从未装过 BigA 服务的
-干净机器/CI），`check_namespaces` 真实返回 `UNKNOWN`，混进本该纯 "ok" 的模拟
-场景，`test_三态各自的退出码可区分` 假红成 `assert 2 == 0`——错误看起来像三态
-汇总逻辑坏了，实际是测试的 mock 名单比生产代码的检查列表少一项。任何全新
-clone、任何还没跑过 `daemon install` 的 CI 容器，第一次跑 `pytest -q` 就会
-在这条测试上无端失败。
+🔴 三道既有闸门（`pytest -q`、`audit_public.sh`、`test_docs_convention.py`
+现有检查）**全部合法地视而不见**：冲突标记不是 Python 语法、不是密钥/路径/
+邻居细节、也不落在任何一条正则的判据里。`e-two` 自己报的"全绿"是真的，
+只是覆盖不到这个形状——损坏的提交混进去了两轮才被人工看出来。
 
-修法不是加一条"断言两份名单相等"的检查（那只是把重复挪了个位置），是让
-`main()` 和测试共用同一份名单：新增 `isolation.checks(before)` 返回
-`(名字, 可调用对象)` 列表，`main()` 循环调用它，测试从它取要 monkeypatch 的
-名字。`check_i2` 比其余四个多一个 `before` 参数，用 `functools.partial`
-统一成同一种签名，不给其余四个也硬塞一个用不到的参数。
+新增 `test_docs_convention.py::test_没有未清理的冲突标记`，扫全部已跟踪
+`.md` 文件。判据精确到 git 真实吐出来的形状（`=======` 整行只有 7 个字符，
+`<<<<<<<`/`>>>>>>>` 后面永远跟空格加标签）——第一版用"行首像不像"判断，
+在真仓库上就撞上 `architecture.md` 的 RST 表格分隔线假阳性。
 
-顺带核实了外部评审 A 节剩下的三项短语：「验证 ZIP / Git 两种测试模式」
-（`tests/_scan.py` + `tests/test_scan_fallback.py` 早已存在且被真实子进程
-验证过，来自更早一轮评审，评审这次显然看的是旧快照，不需要再做）；
-「统一 stdout/stderr 契约」与「收紧 subprocess cleanup」排查后没有找到可
-复现的具体缺陷（现有 `Popen` 调用点都已是 `try/finally`，仅有的生产
-`Popen` 是故意脱离父进程的异步触发设计），记录下来但不强行改。
+测试 1532 → 1595（新增 19 条，等于当前被跟踪的 `.md` 文件数）。
+详见 `docs/tutorial/48-unresolved-conflict-markers.md`。
 
-测试 1485 → 1486。详见 `docs/tutorial/46-isolation-registry-drift.md`。
-=======
 ### ✨ 新增 · 外部评审 E 节（二）：冻结冻到底 / 时间说清基准 / 出处问来源要
 
 E 节再做三项（E-17 / E-19 / E-20），都先在生产库上量过才动手。
@@ -126,7 +116,37 @@ docstring 其实把这个陷阱写得明明白白（还点名了 F15 共模误�
 
 新增探针 37 条（17 + 12 + 8），9 处 sabotage 全部验证会红。
 详见教程第 47 章。
->>>>>>> 2726832 (feat(contract,snapshot): 外部评审 E 节（二）—— 冻结冻到底 / 时间说清基准 / 出处问来源要)
+
+### 🐛 修复 · Isolation 三态测试的 mock 名单漏了一项，干净机器上假红（外部评审 A 节 · 二）
+
+`tools/verify/isolation.py::main()` 依次调用 5 个检查（`check_i1` / `check_i2` /
+`check_r2` / `check_namespaces` / `check_ports`），而 `tests/test_isolation.py`
+里两条三态测试各自手抄了一份要 monkeypatch 的检查名字元组，漏了
+`check_namespaces`。这台开发机因为已经装好 3 个正确命名的 systemd 单元、
+`check_namespaces` 真实调用恰好返回 `ok`，与被测场景"凑巧"一致，掩盖了名单
+缺一项这件事。
+
+实测复现：把 `SYSTEMD_USER` 指到不存在的路径（模拟一台从未装过 BigA 服务的
+干净机器/CI），`check_namespaces` 真实返回 `UNKNOWN`，混进本该纯 "ok" 的模拟
+场景，`test_三态各自的退出码可区分` 假红成 `assert 2 == 0`——错误看起来像三态
+汇总逻辑坏了，实际是测试的 mock 名单比生产代码的检查列表少一项。任何全新
+clone、任何还没跑过 `daemon install` 的 CI 容器，第一次跑 `pytest -q` 就会
+在这条测试上无端失败。
+
+修法不是加一条"断言两份名单相等"的检查（那只是把重复挪了个位置），是让
+`main()` 和测试共用同一份名单：新增 `isolation.checks(before)` 返回
+`(名字, 可调用对象)` 列表，`main()` 循环调用它，测试从它取要 monkeypatch 的
+名字。`check_i2` 比其余四个多一个 `before` 参数，用 `functools.partial`
+统一成同一种签名，不给其余四个也硬塞一个用不到的参数。
+
+顺带核实了外部评审 A 节剩下的三项短语：「验证 ZIP / Git 两种测试模式」
+（`tests/_scan.py` + `tests/test_scan_fallback.py` 早已存在且被真实子进程
+验证过，来自更早一轮评审，评审这次显然看的是旧快照，不需要再做）；
+「统一 stdout/stderr 契约」与「收紧 subprocess cleanup」排查后没有找到可
+复现的具体缺陷（现有 `Popen` 调用点都已是 `try/finally`，仅有的生产
+`Popen` 是故意脱离父进程的异步触发设计），记录下来但不强行改。
+
+测试 1485 → 1486。详见 `docs/tutorial/46-isolation-registry-drift.md`。
 
 ### ✨ 新增 · 外部评审 E 节（一）：证据得**支持**那个值；缺席得**对得上号**
 
