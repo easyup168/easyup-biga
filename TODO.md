@@ -1133,6 +1133,20 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         同时挂着 `skills/` 与 `src/`，测不出这件事。判据用 **AST 不用 grep**
         （文档字符串示例/相对导入下划线兄弟模块会误报，函数内惰性 import 与
         `__import__("…")` 会漏报）。见教程第 50 章
+  - [ ] 批 U-I 留下的两处账（自评时点出来的，不在 U-I 范围内顺手做）：
+        ① **惰性 import 的运行时覆盖是一份手抄名单。**
+        `test_惰性import的那两处在隔离环境里也成立` 硬编码了 tradetime/szse
+        两处——AST 那条守卫会抓到**新增**的旧写法，所以今天两条合起来是严的；
+        但运行时那一半是手维护的 2 条。本仓库在「手抄名单漏一项」上已经栽过两次
+        （第 46 章 isolation 的 monkeypatch 名单漏 `check_namespaces`、第 35 章
+        roster 散五处），照仓库自己的口径应该**派生**而不是手写：AST 扫出
+        `easyup_biga.*` 的函数级 import，逐个把所在函数调起来。
+        ② **薄壳的「身份等同」没有自动化断言。**
+        U-I 之前包内部经薄壳解析，薄壳路径因此在大多数测试的关键路径上；
+        U-I 之后两条路（`_contract` 与 `easyup_biga.domain`）**真正独立**了。
+        实测 `_contract.now_cn is easyup_biga.domain.now_cn` 为 True，
+        但这只是**手工验过一次**（教程第 50 章验证第 4 条），没有测试钉住。
+        两条路给出两个对象就是 L-3，而它不会报错。
 
 - [x] 批 M · 外部评审 C/D 部分（飞书可靠性 + 生命周期收敛）—— **独立复核通过
       （2026-09-24）**。核实来源：`docs/external/biga-latest-deep-review-classified/`
