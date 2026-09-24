@@ -55,7 +55,12 @@ from _store import (  # noqa: E402
     undelivered_notifications,
 )
 from _store.db import _insert_notification  # noqa: E402
-from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
+from _provenance import open_test_run, provenance_for  # noqa: E402
+
+#: 批 O：卡构造器是纯函数、拿不到 fixture，而在线卡的血缘必须指向**真落库**的行
+#: （见 tests/_provenance.py）。`db` fixture 把库路径放这儿，构造器读它。
+_DB: list = []
+
 
 import notify_worker  # noqa: E402
 from feishu_deliverer import FeishuError  # noqa: E402
@@ -69,6 +74,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
     open_test_run(p)          # 批 N：见 tests/_provenance.py
+    _DB[:] = [p]
     return p
 
 
@@ -88,13 +94,18 @@ def _verdict(agent, did, *, verdict="PASS", stance=None, missing=(), status="com
 
 
 def _card(did, *, status="WAIT", verdicts=None, missing=()):
+    vs = verdicts if verdicts is not None else [_verdict(a, did) for a in sorted(_STANCES)]
+    prov = {}
+    if _DB:
+        # 批 N/O：血缘三件套指向真落库的行（见 tests/_provenance.py）。
+        # ⚠️ `TestCardEventType` 那几条**不用 db fixture**（纯分类、卡不落库）——
+        #    此时 `_DB` 是空的，不备血缘，免得为一条永远不落库的卡凭空落一批 fact 行。
+        rid, esid, refs = provenance_for(_DB[0], did, [v.agent for v in vs])
+        prov = dict(run_id=rid, evidence_set_id=esid, input_verdict_refs=refs)
     return DecisionCard(
         decision_id=did, status=status, headline="核心矛盾一句话",
-        verdicts=verdicts if verdicts is not None
-        else [_verdict(a, did) for a in sorted(_STANCES)],
-        synthesis="", model_ref="anthropic/claude-sonnet-5",
-        missing=list(missing),
-        run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID,   # 批 N
+        verdicts=vs, synthesis="", model_ref="anthropic/claude-sonnet-5",
+        missing=list(missing), **prov,
     )
 
 

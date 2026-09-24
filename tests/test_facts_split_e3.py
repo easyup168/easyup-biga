@@ -49,6 +49,9 @@ from _store import (  # noqa: E402
 
 TID = "BIGA-20260302-001"
 
+#: 批 O：fact 行要归属到一次真实的执行尝试（`load_verdict_ids_for_run` 按 run 取）。
+_RID = "f" * 32
+
 
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, REPO / rel)
@@ -62,12 +65,15 @@ risk = _load("risk_check", "skills/risk-check/scripts/risk_check.py")
 amend = _load("amend_verdict", "skills/decision-card/scripts/amend_verdict.py")
 card_ops = _load("card_ops", "skills/decision-card/scripts/card_ops.py")
 
+from _provenance import open_test_run  # noqa: E402
+
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
+    open_test_run(p, run_id=_RID)     # 批 O：fact 要归属到一次真实的执行尝试
     return p
 
 
@@ -219,15 +225,15 @@ class TestP4AssessFactRisk:
             status="completed" if not missing else "partial", verdict=verdict,
             result={"coverage_ratio": 1.0}, data_completeness=1.0,
             evidence=[_ev("coverage_ratio", 1.0)], missing=list(missing or []))
-        return save_fact_bundle(fb)
+        return save_fact_bundle(fb, run_id=_RID)
 
     def test_risk_fact行加否决stance成功(self, db):
-        from _store import latest_verdict_ids, load_outcome
+        from _store import load_outcome, load_verdict_ids_for_run
         fid = self._risk_fact(db)
         rc = amend.main(["--ref", str(fid), "--stance", VETO_STANCE])
         assert rc == 0
         # 判断落在**新的一行**（AgentAssessment），事实那行没被重打
-        aid = latest_verdict_ids(TID)["risk"]
+        aid = load_verdict_ids_for_run(_RID)["risk"]
         assert aid != fid
         oc = load_outcome(aid)
         assert oc.stance == VETO_STANCE
@@ -294,14 +300,16 @@ class TestBatchFDoubleFactRejected:
         assert n == 1, f"第二次落 fact 后不该并存两条，实际 {n}"
 
     def test_P4_红灯_删掉唯一索引则第二次静默并存(self, db):
-        """🔴 G-1 红灯（内联）：把 ux_fact_per_task_agent 删掉，第二次 save_fact_bundle
+        """🔴 G-1 红灯（内联）：把 ux_legacy_fact_per_task_agent 删掉，第二次 save_fact_bundle
         就**静默成功、并存两条** —— 证明这道守卫真的在拦，不是恒过。tmp 库、跑完即弃。"""
         fb = FactBundle(task_id=TID, agent="risk", status="completed", verdict="PASS",
                         result={"coverage_ratio": 1.0}, data_completeness=1.0,
                         evidence=[_ev("coverage_ratio")])
         save_fact_bundle(fb, path=db)
         with connect(db) as c:
-            c.execute("DROP INDEX ux_fact_per_task_agent")
+            # 批 O：v11 的 ux_fact_per_task_agent 已拆成两条分区索引；这条 CLI
+            #    路径不带 --run-id ⇒ 落的是 run_id IS NULL 的行 ⇒ 受 legacy 那条管。
+            c.execute("DROP INDEX ux_legacy_fact_per_task_agent")
         # 索引没了 ⇒ 第二次不再 IntegrityError，静默插入第二条
         save_fact_bundle(fb, path=db)
         with connect(db, readonly=True) as c:

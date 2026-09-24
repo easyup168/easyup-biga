@@ -85,6 +85,24 @@ class _RecordingLauncher:
 # ══════════════════════════════════════════════════════════════════════════
 # schema v14 + store 层：一个 trigger 至多一个决策（原子）
 # ══════════════════════════════════════════════════════════════════════════
+
+def _save_carded_decision(did, *, path):
+    """给这个决策号落一张**真在线卡** —— `ux_decision_online` 的触发条件。"""
+    from _contract import AgentVerdict, DecisionCard
+    from _store import save_card
+    from _provenance import provenance_for
+    rid, esid, refs = provenance_for(path, did, ["market"])
+    t = now_cn()
+    v = AgentVerdict(task_id=did, agent="market", status="completed", verdict="PASS",
+                     result={"market_x": 1.0}, data_completeness=1.0,
+                     evidence=[Evidence(field="market_x", source="derived:market",
+                                        value=1.0, as_of=t - timedelta(seconds=60),
+                                        retrieved_at=t)], stance="放量上涨")
+    save_card(DecisionCard(
+        decision_id=did, status="WAIT", headline="h", verdicts=[v], synthesis="",
+        model_ref="m", missing=[], expected_roster=("market",),
+        run_id=rid, evidence_set_id=esid, input_verdict_refs=refs), path=path)
+
 class TestStoreIdempotency:
 
     def test_v14_加了trigger_id列与唯一索引(self, db):
@@ -249,16 +267,22 @@ class TestLaunchRetryTimeout:
         assert ack.accepted and ack.duplicate
         assert len(L.calls) == 1, f"{terminal_state} 之后应该允许重新拉起"
 
-    def test_超时且状态是失败终态但已经落过fact_不重新拉起(self, db, monkeypatch):
-        """🔴 2026-09-24（对抗性复核，真机 PoC 复现）：`state in NOTIFY_FAILURE_STATES`
-        不等于"还没写过 fact"——`STAGE1_COMPLETED` 之后一样能合法转移到 TIMEOUT/
-        FAILED/CANCELLED（`LEGAL_TRANSITIONS` 允许），而这个决策号在到达
-        `STAGE1_COMPLETED` 之前 Stage 1 五个 Specialist 已经真的落库过。旧代码在
-        这里会判定"安全"并重新拉起，导致新一轮 Stage 1 全部撞
-        `ux_fact_per_task_agent` 唯一约束抛 ValueError，而编排器不检查 Stage 1
-        结果、直接用 `latest_verdict_ids` 捞到上一轮的旧 fact 去合成——出一张
-        证据是几小时前、时间戳写着"现在"的卡。这条测试确认：一旦真的落过 fact，
-        无论状态名字是什么，一律不重新拉起，把决定权交回人工。"""
+    def test_超时且已经落过fact但还没出卡_现在允许重新拉起(self, db, monkeypatch):
+        """🔴 批 O 把这条测试的结论**翻了过来**，翻的理由比结论本身重要。
+
+        上一版（批 M 二轮复核）判据是"这个决策号名下有没有 fact，有就拒"。那在
+        当时是对的：fact 的唯一约束是 `(task_id, agent)`，第二个 run 根本写不进
+        自己的那一份，只能读到上一轮的旧原件 —— 真机 PoC 复现过后果（用几小时前
+        的证据拼出一张 `generated_at` 是现在的卡）。
+
+        批 O（评审 B-2/B-3）把 fact 的身份换成了 `(run_id, agent)`，编排器也改成
+        按 run 取原件（`load_verdict_ids_for_run`）。于是**那个后果不可能再发生**：
+        第二个 run 写自己的 fact 合法、读也只读得到自己的。继续"有 fact 就拒"
+        会拒掉一次本来安全的重放 —— 把 C-1 想修的永久中毒原样退回来。
+
+        ⚠️ 这就是"加约束和拆守卫必须同批做"的那个拆：约束加了、守卫没跟着改的话，
+        测试照样全绿（它测的是旧判据），只有产品行为悄悄退回去。
+        """
         L = _RecordingLauncher()
         did, _ = reserve_decision_for_trigger("evt-A", path=db)
         ctx = new_run_context(origin="feishu", non_interactive=True,
@@ -269,13 +293,33 @@ class TestLaunchRetryTimeout:
                         (RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING),
                         (RunState.STAGE1_RUNNING, RunState.STAGE1_COMPLETED)]:
             transition(ctx.run_id, frm, to, path=db)
-        _save_fact(did, path=db)  # Stage 1 真的落库了——这是关键前提
+        _save_fact(did, path=db)          # Stage 1 真的落过原件
         transition(ctx.run_id, RunState.STAGE1_COMPLETED, RunState.TIMEOUT, path=db)
         self._age_past_threshold(monkeypatch)
         ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert ack.accepted and ack.duplicate, ack.message
+        assert len(L.calls) == 1, "落过 fact 但没出过卡 ⇒ 第二个 run 现在是安全的"
+
+    def test_超时且已经出过卡_不重新拉起(self, db, monkeypatch):
+        """批 O 之后**剩下的**那条硬约束：`ux_decision_online` —— 一个决策号只能有
+        一张在线卡。上一次跑到 `CARD_PERSISTED` 之后才失败的话，卡已经落库了，
+        重放跑到最后一步必然撞这条唯一索引。
+
+        ⇒ 守卫不是被删掉，是判据从"有没有 fact"收窄成"出没出过卡"。
+        """
+        L = _RecordingLauncher()
+        did, _ = reserve_decision_for_trigger("evt-A", path=db)
+        ctx = new_run_context(origin="feishu", non_interactive=True,
+                              trigger_id="evt-A", decision_id=did)
+        open_run(ctx, path=db)
+        transition(ctx.run_id, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
+        _save_carded_decision(did, path=db)     # 这个号已经出过一张在线卡
+        transition(ctx.run_id, RunState.PREFLIGHTED, RunState.FAILED, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
         assert not ack.accepted and ack.duplicate
-        assert len(L.calls) == 0, "已经落过 fact 的决策号不该被自动重新拉起"
-        assert "落过判定原件" in ack.message
+        assert len(L.calls) == 0, "已经出过卡的决策号不该被自动重放"
+        assert "已经出过一张卡" in ack.message
         assert "另开一个新决策" in ack.message
 
     def test_超时且状态是失败终态但尚未落fact_仍然允许重新拉起(self, db, monkeypatch):

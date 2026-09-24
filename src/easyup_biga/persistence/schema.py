@@ -756,6 +756,63 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_set_per_run
 """
 
 
+
+_V17 = """
+-- ───────────────────────────────────────────────────────────────
+-- v17：Fact 唯一约束按 **run** 分区（批 O，外部评审 B-2 / B-3）
+--
+-- v11 的 `ux_fact_per_task_agent` 说的是「一个 (task_id, agent) 至多一份 fact」。
+-- 当时这句话是对的：一个 decision 只会有一个 run，两者等价。
+--
+-- 🔴 批 M 的 C-1（Trigger 失败终态可重新拉起）**造出了第二个 run**，等价关系断了。
+--    评审 §6.3 提前写出了后果：
+--
+--      > 同一个 Decision 的第二个 Run 无法保存同一 Agent 的新 Fact
+--      > ⇒ 读取时可能混入旧 Run，**写入时又可能阻止新 Run 正常产出**
+--
+--    真实 PoC 复现过：第二轮五个 Specialist 全部撞这条索引落不下 fact，而编排器
+--    不会因此停 —— 它拿到上一轮遗留的旧 verdict_ref，用几小时前的证据合成一张
+--    `generated_at` 是现在的卡。批 N 在卡这一层加了血缘核对把它拦成硬失败；
+--    本批从根上让「第二个 run 写自己的 fact」**本来就合法**。
+--
+-- ⇒ 一份 fact 的身份是 `(run_id, agent)`，不是 `(task_id, agent)`。
+--
+-- 🔴 为什么是**两条分区索引**而不是一条
+-- ------------------------------------------------------------------
+-- 迁移前的 fact 行里有一批 `run_id IS NULL`（实测生产库 2 条）—— 手工跑 skill 落的、
+-- 以及 v10 之前落的。对它们，`(run_id, agent)` 退化成 `(NULL, agent)`，而 SQLite 里
+-- 多行 NULL 不算重复 ⇒ **这批历史行会完全失去唯一约束保护**，v11 堵上的那个洞
+-- （同一 (task_id, agent) 静默产生两份并存原件）会对它们重新打开。
+-- ⇒ 新数据按 run 管，历史数据继续按 task 管，两条各自带 WHERE，互不重叠：
+--      run_id IS NOT NULL  →  UNIQUE(run_id, agent)
+--      run_id IS NULL      →  UNIQUE(task_id, agent)
+-- 这正是评审 §6.4 给的方案。
+--
+-- ⚠️ 加索引前实测生产库（同 v11/v16 的先例 —— CREATE UNIQUE INDEX 遇存量重复直接报错）：
+--      kind='fact' 行：run_id 非空 42 条 / 为空 2 条
+--      (run_id, agent) 重复组：0
+--      run_id 为空那批里 (task_id, agent) 重复组：0
+--    两条索引都建得起来。
+--
+-- 🔴 DROP 掉 v11 那条不是「改已发布的迁移」
+-- ------------------------------------------------------------------
+-- v11 的迁移体一字未动（只许在末尾追加那条规矩没破）。这里是**后续版本**用
+-- DROP + CREATE 表达一次约束演进 —— 与「回头去改 _V11 的 SQL」是两回事：
+-- 前者留下完整的演进史（谁在哪一版把它换掉了、为什么），后者会让已经迁移过的
+-- 库和新建的库长得不一样。
+-- ⚠️ 留着不 DROP 是**错的**：它按 (task_id, agent) 管全部 fact 行，会继续拦住
+--    第二个 run 的合法写入 —— 那就等于这一批什么都没做。
+-- ───────────────────────────────────────────────────────────────
+DROP INDEX IF EXISTS ux_fact_per_task_agent;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fact_per_run_agent
+    ON agent_verdicts(run_id, agent) WHERE kind = 'fact' AND run_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_legacy_fact_per_task_agent
+    ON agent_verdicts(task_id, agent) WHERE kind = 'fact' AND run_id IS NULL;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -774,6 +831,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (14, _V14),
     (15, _V15),
     (16, _V16),
+    (17, _V17),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

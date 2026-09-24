@@ -39,8 +39,7 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _store import db  # noqa: E402
-from _provenance import (  # noqa: E402
-    TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run)
+from _provenance import provenance_for  # noqa: E402
 
 
 def _verdict(agent: str, task_id: str, *, stance: str | None = None) -> AgentVerdict:
@@ -168,7 +167,6 @@ class TestReservationIsAtomic:
         """两张表都要看 —— 只看一张就会重号。"""
         p = tmp_path / "t.db"
         db.init_schema(p)
-        open_test_run(p)          # 批 N：在线卡要带 run（见 tests/_provenance.py）
         first = db.reserve_decision_id(by="t", path=p)
         # 直接往 decision_records 塞一张卡，绕过分配器
         from _contract import DecisionCard
@@ -177,7 +175,8 @@ class TestReservationIsAtomic:
             verdicts=[_verdict("market", new_task_id(9))],
             synthesis="s", model_ref="m",
             missing=[f"占位{i}——本文件不测 roster" for i in range(5)],
-            run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID)
+            **dict(zip(("run_id", "evidence_set_id", "input_verdict_refs"),
+                       provenance_for(p, new_task_id(9), ["market"]))))
         db.save_card(card, path=p)
         nxt = db.reserve_decision_id(by="t", path=p)
         assert nxt not in (first, new_task_id(9))

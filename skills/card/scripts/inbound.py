@@ -58,7 +58,7 @@ sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 from _contract import NOTIFY_FAILURE_STATES, RUN_ORIGINS, now_cn  # noqa: E402
 from _store import (  # noqa: E402
     find_run_by_trigger,
-    latest_verdict_ids,
+    load_online_card,
     reserve_decision_for_trigger,
     trigger_reserved_at,
 )
@@ -204,32 +204,27 @@ def accept_trigger(
         # decision_runs 里根本没有这个 trigger 的行）；`state in NOTIFY_FAILURE_STATES`
         # ⇒ 启动到了但最终失败/超时/取消。
         #
-        # ⚠️ 2026-09-24（对抗性复核，追加 6 之后一轮）：下面这两种状态**不足以**
-        # 断言"还没写过 fact"——`LEGAL_TRANSITIONS` 允许 `STAGE1_COMPLETED` /
-        # `RISK_RUNNING` / `SYNTHESIZING` / `CARD_PERSISTED` 等 Stage 1 之后的
-        # 在途状态直接进 FAILED/TIMEOUT/CANCELLED（真实 PoC 复现：Stage 1 五份
-        # fact 已落库后进 TIMEOUT，属于 NOTIFY_FAILURE_STATES，旧代码会在这里
-        # 判定"安全"）。真正的安全条件不是"状态名字长这样"，是"这个决策号
-        # 名下一份 fact 都还没有"——`ux_fact_per_task_agent` 按 (task_id, agent)
-        # 强制至多一份原件，relaunch 一旦撞上已有 fact 的 task_id：
-        #   1. Stage 1 五个 Specialist 的 save_fact_bundle 全部因唯一约束抛
-        #      ValueError（`_stage_detail` 只记账不检查、不会让编排器停下）；
-        #   2. 但编排器不会因此停：`latest_verdict_ids(did)` 按 task_id 查，
-        #      查到的仍是**上一轮**遗留的旧 verdict_ref——照样非空、fail-fast
-        #      检查不会触发，于是用几小时前的证据合成一张 generated_at=现在
-        #      的卡，spawn 核验也照样通过（它核的是这一轮的 spawn，不是证据
-        #      新鲜度）。这是比"永久卡在正在启动"更坏的失败——从"看得出卡住
-        #      了"变成"看不出任何问题"。
-        # ⇒ 在状态判断之外，直接核实真正的不变量：`latest_verdict_ids(decision_id)`
-        # 是否为空。为空才是原始安全论证真正描述的那种场景；非空一律拒绝
-        # 自动重放，交回人工——这个决策号已经不可能被安全地重新跑一遍
-        # （事实只追加，没有"清掉重来"这个操作）。
+        # ⚠️ 这两种状态**本身不足以**断言重放是安全的。历史上这里栽过一次：
+        # `LEGAL_TRANSITIONS` 允许 `STAGE1_COMPLETED` / `RISK_RUNNING` / `SYNTHESIZING`
+        # / `CARD_PERSISTED` 等 Stage 1 之后的在途状态直接进 FAILED/TIMEOUT/CANCELLED，
+        # 那时五份 fact 早就落库了 —— 而当时的判据只看状态名字，判成"安全"。
+        # **判据不能建在状态名上：状态名是推断，库里有没有东西是事实。**
         #
-        # ⚠️ 这是**给当前 `ux_fact_per_task_agent`（按 task_id+agent）约束**的
-        # 安全阀，不是永久答案。评审 B 部分若真的把 Fact 唯一约束改成
-        # `(run_id, agent)`（B-2），一个新 run 将能安全写自己的 fact，这里的
-        # 拒绝就会变得过度保守——那时需要回来重新评估这道检查，不是自动删除。
-        # 见 `docs/design/deterministic-orchestration.md` 追加 6 的 B 行。
+        # 🔴 批 O 之后，"什么才算不安全"变了一次，这里跟着变
+        # ------------------------------------------------------------------
+        # 上一版的判据是"这个决策号名下有没有 fact"——因为当时 fact 的唯一约束是
+        # `(task_id, agent)`，第二个 run 根本写不进自己的那一份，只能读到上一轮的旧
+        # 原件。批 O（评审 B-2/B-3）把 fact 的身份换成了 `(run_id, agent)`：
+        # **第二个 run 写自己的 fact 现在本来就合法**，编排器也改成按 run 取原件
+        # （`load_verdict_ids_for_run`），读不到别人那一份。于是"有 fact 就拒"
+        # 变成了过度保守 —— 它会拒掉一次本来安全的重放，把 C-1 想修的永久中毒
+        # 原样退回来。
+        #
+        # 真正剩下的那条硬约束是 `ux_decision_online`：**一个 decision 只能有一张
+        # 在线卡**。上一次跑到 `CARD_PERSISTED` 之后才失败的话，卡已经落库了，
+        # 重放跑到最后一步必然撞这条唯一索引 —— 那才是现在唯一不能自动重放的场景。
+        # ⇒ 判据收窄成"这个决策号已经出过卡了没有"。
+        #
         # 占号太新（还在 Budget Guard 的 inflight 窗口内，或者可能还在正常跑）不重试，
         # 只在明显过了 `LAUNCH_RETRY_TIMEOUT_SEC` 之后才当作"这次尝试没起来"。
         if hdr is None or state in NOTIFY_FAILURE_STATES:
@@ -241,15 +236,15 @@ def accept_trigger(
                 except ValueError:
                     age = None
             if age is not None and age >= LAUNCH_RETRY_TIMEOUT_SEC:
-                if latest_verdict_ids(decision_id, path=path):
+                if load_online_card(decision_id, path=path) is not None:
                     return AckResult(
                         accepted=False, duplicate=True, decision_id=decision_id,
                         run_state=state,
-                        message=f"决策 {decision_id} 上一次尝试已经失败"
-                                f"{f'（{state}）' if state else ''}，且 Stage 1 已经"
-                                f"落过判定原件——事实只追加，这个决策号不能再安全地"
-                                f"重新跑一遍（会用旧证据拼出一张看起来是新的卡）。"
-                                f"需要人工核实后另开一个新决策，不会自动重试。")
+                        message=f"决策 {decision_id} 已经出过一张卡了"
+                                f"{f'（这次尝试最终 {state}）' if state else ''}——"
+                                f"一个决策号只能有一张在线卡，重放会撞 "
+                                f"ux_decision_online。要重新评估请另开一个新决策；"
+                                f"看已有的那张：bin/biga-card --show {decision_id}。")
                 try:
                     launcher(origin, trigger_id, decision_id)
                 except Exception as e:  # noqa: BLE001

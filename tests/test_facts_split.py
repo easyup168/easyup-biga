@@ -37,13 +37,14 @@ from _contract import (  # noqa: E402
 from _store import (  # noqa: E402
     connect,
     init_schema,
-    latest_verdict_ids,
     load_outcome,
+    load_verdict_ids_for_run,
     load_verdict,
     save_assessment,
     save_fact_bundle,
     save_verdict,
 )
+from _provenance import open_test_run  # noqa: E402
 
 TID = "BIGA-20260918-001"
 
@@ -199,15 +200,21 @@ class TestCoexistence:
         assert "market.turnover.x" in codes and "emotion.cycle.no_history" in codes
         assert len(card.verdicts) == 6
 
-    def test_latest_verdict_ids_试点取到assessment行(self, db):
+    def test_按run取到assessment行(self, db):
+        """批 O：改用 `load_verdict_ids_for_run`（原 `latest_verdict_ids` 已退役）。
+
+        顺带钉住 assessment 的 run_id **从 fact 行继承**这条不变量——不继承的话
+        按 run 取就会漏掉 tip，只拿到 fact 行。
+        """
+        rid = open_test_run(db)
         fb = FactBundle(task_id=TID, agent="emotion", status="completed", verdict="PASS",
                         result={"limit_up_count": 78}, data_completeness=1.0,
                         evidence=[_ev("limit_up_count", 78)])
-        fid = save_fact_bundle(fb, path=db)
+        fid = save_fact_bundle(fb, run_id=rid, path=db)
         aid = save_assessment(AgentAssessment(task_id=TID, agent="emotion", stance="亢奋"),
                               fact_id=fid, path=db)
         # tip 是 assessment 行；load_verdict 把它压回带 stance 的 AgentVerdict
-        assert latest_verdict_ids(TID, path=db)["emotion"] == aid
+        assert load_verdict_ids_for_run(rid, path=db)["emotion"] == aid
         assert load_verdict(aid, path=db).stance == "亢奋"
 
 
@@ -318,10 +325,11 @@ class TestLegacyAmendRetired:
         fb = FactBundle(task_id=TID, agent="emotion", status="completed", verdict="PASS",
                         result={"limit_up_count": 78}, data_completeness=1.0,
                         evidence=[_ev("limit_up_count", 78)])
-        fid = save_fact_bundle(fb, path=db)
+        rid = open_test_run(db)
+        fid = save_fact_bundle(fb, run_id=rid, path=db)
         rc = amend.main(["--ref", str(fid), "--stance", "亢奋"])
         assert rc == 0
-        aid = latest_verdict_ids(TID, path=db)["emotion"]
+        aid = load_verdict_ids_for_run(rid, path=db)["emotion"]
         assert aid != fid  # 判断落在**新的一行**
         oc = load_outcome(aid, path=db)
         assert oc.stance == "亢奋"

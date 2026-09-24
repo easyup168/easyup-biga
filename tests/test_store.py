@@ -44,7 +44,12 @@ from _store import (
     save_trading_calendar,
 )
 
-from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
+from _provenance import open_test_run, provenance_for  # noqa: E402
+
+#: 批 O：卡构造器是纯函数、拿不到 fixture，而在线卡的血缘必须指向**真落库**的行
+#: （见 tests/_provenance.py）。`db` fixture 把库路径放这儿，构造器读它。
+_DB: list = []
+
 
 TID = new_task_id(1, day="20260919")
 
@@ -56,6 +61,7 @@ def db(tmp_path, monkeypatch):
     init_schema(p)
     # 批 N：在线卡要带 run_id，而它必须追得到 decision_runs（TestRunIdNamespace）。
     open_test_run(p)
+    _DB[:] = [p]
     return p
 
 
@@ -94,10 +100,17 @@ def make_card(**kw) -> DecisionCard:
         verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
         missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
-        # 批 N：在线卡必须说得清属于哪次执行、基于哪份切片（见 tests/_provenance.py）。
-        run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID,
     )
     base.update(kw)
+    # 批 N/O：在线卡必须说得清属于哪次执行、哪份切片、哪些原件（见 tests/_provenance.py）。
+    #   ⚠️ 放在 base.update 之后：调用方可能改了 decision_id / verdicts，
+    #      血缘要跟着那个**最终**的值走，不是默认值。
+    if _DB and "input_verdict_refs" not in kw:
+        rid, esid, refs = provenance_for(
+            _DB[0], base["decision_id"], [v.agent for v in base["verdicts"]])
+        base.setdefault("run_id", rid)
+        base.setdefault("evidence_set_id", esid)
+        base["input_verdict_refs"] = refs
     return DecisionCard(**base)
 
 

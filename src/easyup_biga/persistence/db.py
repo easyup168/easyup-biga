@@ -53,7 +53,7 @@ __all__ = [
     "load_online_card",
     "load_card_by_record_id",
     "load_verdicts",
-    "latest_verdict_ids",
+    "load_verdict_ids_for_run",
     "next_decision_id",
     "reserve_decision_id",
     "record_agent_run",
@@ -253,18 +253,24 @@ def save_card_with_notifications(
     #    落了库却回答不了「这是哪次执行跑出来的、基于哪份冻结数据」。它现在有
     #    `--run-id`/`--evidence-set-id` 两个参数，给不出就只能 `--no-store`。
     #
-    # ⚠️ **没有**要求 `input_verdict_refs` 非空（评审 §7.2 第四条）—— 那一条留给下一批，
-    #    理由写在 CHANGELOG：它会同时废掉 `card_ops.synthesize(verdict_refs=None)` 这条
-    #    **文档里明确允许**的旧调用路径，属于产品决策不是纯加固；而它要防的危险情形
-    #    （引用错的原件）已经由「refs 非空时必须恰好覆盖 + 血缘一致」挡住了。
+    # 🔴 批 O：`input_verdict_refs` 也进必填（评审 §7.2 第四条）。批 N 当时留了它，
+    #    理由是"会废掉 `synthesize(verdict_refs=None)` 这条文档里允许的旧路径、属于
+    #    产品决策"。本批一并做掉，因为那条理由已经不成立了 —— B-2 把 fact 的身份
+    #    换成 `(run_id, agent)` 之后，"这次运行用了哪些原件"是**可以确定地答出来**的
+    #    （`load_verdict_ids_for_run`），一张答不出来的在线卡就不该落库。
+    #    ⚠️ 空 refs 与"refs 非空但对不齐"是两种失败：后者由契约层
+    #    `_check_run_provenance` 拦（构造时就拒），前者只有写边界看得见
+    #    （契约层允许空 —— 历史卡的常态，见 `input_verdict_refs` 字段说明）。
     if replay_of is None:
         lack = [n for n, v in (("run_id", card.run_id),
-                               ("evidence_set_id", card.evidence_set_id)) if not v]
+                               ("evidence_set_id", card.evidence_set_id),
+                               ("input_verdict_refs", card.input_verdict_refs)) if not v]
         if lack:
             raise ValueError(
                 f"拒绝落库：在线卡 {card.decision_id} 缺 {lack} —— "
                 f"一张落库的在线卡必须说得清它属于哪次执行尝试（run_id）、"
-                f"基于哪份冻结的数据切片（evidence_set_id）。\n"
+                f"基于哪份冻结的数据切片（evidence_set_id）、"
+                f"用了哪些判定原件（input_verdict_refs）。\n"
                 "  缺了它们，「这张卡是怎么来的」事后只能靠猜（外部评审 §7-9）。\n"
                 "  出卡走 bin/biga-card（orchestrator 两样都会填）；回放走 "
                 "replay.py --store（它传 replay_of，不受这条约束）。")
@@ -709,9 +715,14 @@ def save_verdict(
     *,
     amends: int | None = None,
     amend_reason: str | None = None,
+    run_id: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
     """把一份 `AgentVerdict` 原件落库，返回 `verdict_id`。
+
+    `run_id`（可选，批 O）：这一行属于哪次执行尝试。`load_verdict_ids_for_run()`
+    按它取原件 —— 不传就是 None，那一行**不属于任何一次执行尝试**，在线路径读不到它
+    （历史行 / 手工落库的正常状态，见那个函数的说明）。
 
     🔴 **这张表存在的意义是：结构化数据不经过 LLM。**
 
@@ -779,11 +790,11 @@ def save_verdict(
             cur = conn.execute(
                 """INSERT INTO agent_verdicts
                    (task_id, agent, amends, amend_reason,
-                    verdict_json, content_sha256, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
+                    verdict_json, content_sha256, created_at, run_id)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (v.task_id, v.agent, amends, amend_reason, blob,
                  hashlib.sha256(blob.encode("utf-8")).hexdigest(),
-                 now_cn().isoformat()),
+                 now_cn().isoformat(), run_id),
             )
             return int(cur.lastrowid)
     except sqlite3.IntegrityError as e:
@@ -798,24 +809,44 @@ def save_verdict(
         ) from e
 
 
-def latest_verdict_ids(
-    task_id: str, *, path: pathlib.Path | str | None = None
+def load_verdict_ids_for_run(
+    run_id: str, *, path: pathlib.Path | str | None = None
 ) -> dict[str, int]:
-    """每个 agent 在这次决策下**最新**那条判定原件的 id（agent → verdict_id）。
+    """**这次执行尝试**下每个 agent 最新那条判定原件的 id（agent → verdict_id）。
 
-    🔴 DecisionOrchestrator 靠它拿 verdict_id，而不是去解析 Specialist 回复文本里的
-    `verdict_ref=NN`——那种解析是 F3/L-13 的形状（把判据落在 LLM 复述的文本上）。
-    这里直接按 `(task_id, agent)` 查库，是结构化、确定性的。
+    🔴 批 O（外部评审 B-4/B-5）：它取代了按 `decision_id` 聚合的
+    `latest_verdict_ids()`。
+    ------------------------------------------------------------------
+    旧函数按 `task_id`（= decision_id）分组。在「一个 decision 只有一个 run」的
+    年代两者等价；批 M 的 C-1 让同一个 decision 可以有第二个 run 之后就不等价了 ——
+    评审 §6.2 管那个后果叫 **Cross-run Contamination**：
 
-    「最新」= amend 链的 tip。amendment 的 verdict_id 一定比它改的原件大
-    （autoincrement，后写），且 schema v6 保证修订线性、同 agent 同 task ——
-    所以 `MAX(verdict_id) GROUP BY agent` 就是每个 agent 的当前判定。
+        Run A：market 成功 / news 成功 / technical 成功
+        Run B：market 成功 / news 失败 / technical 成功
+        按 decision 聚合 ⇒ Run B 读到的 news 是 **Run A 的**
+
+    而且它**不报错** —— 卡上六个 agent 齐全、时间戳都在几十秒内，看不出证据来自
+    两次运行。按 run 取从根上让这件事不可能发生：查不到就是查不到，不会悄悄
+    退回到别人的那一份。
+
+    「最新」= amend 链的 tip，判据与旧函数相同（`MAX(verdict_id) GROUP BY agent`）：
+    amendment 的 verdict_id 一定比它改的原件大（autoincrement，后写），schema v6
+    保证修订线性。assessment 行的 run_id **从它 amends 的 fact 行继承**
+    （`save_assessment`），所以按 run 分组一样能取到 tip。
+
+    ⚠️ `run_id` 为空的历史行取不到 —— 那是**对的**：它们不属于任何一次执行尝试，
+    在线路径不该读到它们。要看那批历史数据，直接查库（它们只读、不参与新决策）。
     """
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(
+            f"load_verdict_ids_for_run 需要一个非空 run_id，收到 {run_id!r} —— "
+            "空值会让查询退化成「取所有 run_id 为 NULL 的历史行」，"
+            "而那正是按 run 取要防的事（fail closed）。")
     with connect(path, readonly=True) as conn:
         rows = conn.execute(
             "SELECT agent, MAX(verdict_id) AS vid FROM agent_verdicts "
-            "WHERE task_id=? GROUP BY agent",
-            (task_id,),
+            "WHERE run_id=? GROUP BY agent",
+            (run_id,),
         ).fetchall()
     return {r["agent"]: int(r["vid"]) for r in rows}
 
@@ -996,31 +1027,48 @@ def save_fact_bundle(
         #    第二份 fact」。fact 行 amends 恒 NULL，v6 的线性索引管不到它 —— 没有这条
         #    分区唯一索引，第二次写会静默产生两条并存原件（编排器算的那条被 MAX 架空）。
         #    报错要报得明确（不是裸 IntegrityError）并指路：手工复核只想看输出加 --no-store。
-        # SQLite 报的是**列名**（`agent_verdicts.task_id, agent_verdicts.agent`），
-        # 不是索引名 —— 与 save_verdict 匹配 `agent_verdicts.amends` 同理。只有
-        # ux_fact_per_task_agent 同时涉及这两列，两者都在才是它。
+        # SQLite 报的是**列名**不是索引名（与 save_verdict 匹配 `agent_verdicts.amends`
+        # 同理）。批 O 起有**两条**分区唯一索引，各自报不同的列组合：
+        #   · ux_fact_per_run_agent          → agent_verdicts.run_id, agent_verdicts.agent
+        #   · ux_legacy_fact_per_task_agent  → agent_verdicts.task_id, agent_verdicts.agent
+        # 两者语义不同，报错也必须不同 —— 混成一句话会把「同一次执行里写了两遍」
+        # 说成「这个决策号已经有 fact 了」，而后者在批 O 之后**是合法的**
+        # （第二个 run 本来就该写自己的那一份）。
         msg = str(e)
-        if not ("agent_verdicts.task_id" in msg and "agent_verdicts.agent" in msg):
+        by_run = "agent_verdicts.run_id" in msg and "agent_verdicts.agent" in msg
+        by_task = "agent_verdicts.task_id" in msg and "agent_verdicts.agent" in msg
+        if not (by_run or by_task):
             raise
         existing = None
         with suppress(sqlite3.Error):
             with connect(path, readonly=True) as conn:
-                row = conn.execute(
-                    "SELECT verdict_id FROM agent_verdicts "
-                    "WHERE task_id=? AND agent=? AND kind='fact' "
-                    "ORDER BY verdict_id LIMIT 1",
-                    (fb.task_id, fb.agent),
-                ).fetchone()
+                if by_run:
+                    row = conn.execute(
+                        "SELECT verdict_id FROM agent_verdicts "
+                        "WHERE run_id=? AND agent=? AND kind='fact' "
+                        "ORDER BY verdict_id LIMIT 1", (run_id, fb.agent)).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT verdict_id FROM agent_verdicts "
+                        "WHERE task_id=? AND agent=? AND kind='fact' AND run_id IS NULL "
+                        "ORDER BY verdict_id LIMIT 1", (fb.task_id, fb.agent)).fetchone()
             existing = row["verdict_id"] if row else None
+        ref = str(existing) if existing else "<那条 fact 的 verdict_ref>"
+        if by_run:
+            head = (f"[{fb.agent}] 本次执行尝试（run {run_id}）里已经有一份 fact 原件了"
+                    + (f"（verdict_ref={existing}）" if existing else "")
+                    + " —— 一个 (run_id, agent) 至多一份事实。\n"
+                    "  这说明同一个 agent 在**同一次运行**里落了两遍：多半是它没听提示词、"
+                    "自己又跑了一遍 skill（编排器已经替它算好并落库了）。\n")
+        else:
+            head = (f"[{fb.agent}] 决策 {fb.task_id} 名下已经有一份 fact 原件了"
+                    + (f"（verdict_ref={existing}）" if existing else "")
+                    + "，而且它**不带 run_id** —— 这类历史行按 (task_id, agent) 管唯一"
+                    "（批 O 的分区约束）。\n"
+                    "  手工跑 skill 落库请带 --run-id，让它归属到一次真实的执行尝试；\n")
         raise ValueError(
-            f"[{fb.agent}] 决策 {fb.task_id} 已经有一份 fact 原件了"
-            + (f"（verdict_ref={existing}）" if existing else "")
-            + " —— 一个 (task_id, agent) 至多一份事实，不许第二次落 fact。\n"
-            "  批 F：risk 的事实由编排器在 spawn 之前算好落库，你不该再自己跑一遍 "
-            "risk_check.py。\n"
-            "  · 要给这份事实加判断：amend_verdict.py --ref "
-            + (str(existing) if existing else "<那条 fact 的 verdict_ref>")
-            + " --stance <词>；\n"
+            head
+            + f"  · 要给这份事实加判断：amend_verdict.py --ref {ref} --stance <词>；\n"
             "  · 只是手工看一眼 skill 的输出：加 --no-store（不落库）。"
         ) from e
 

@@ -32,7 +32,12 @@ from _store import connect, init_schema, list_agent_runs, load_online_card  # no
 
 
 
-from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
+from _provenance import open_test_run, provenance_for  # noqa: E402
+
+#: 批 O：卡构造器拿不到 fixture，而在线卡的血缘必须指向**真落库**的行
+#: （见 tests/_provenance.py）。`db` fixture 把库路径放这儿。
+_DB: list = []
+
 
 
 def _load(name: str):
@@ -81,8 +86,12 @@ def _synth(**kw):
     各写一遍（写漏一个就是一条与被测内容无关的红）。纯函数性质不受影响 ——
     两次调用补的是同一对常量，`synthesize()` 的输入仍然只由入参决定。
     """
-    kw.setdefault("run_id", TEST_RUN_ID)
-    kw.setdefault("evidence_set_id", TEST_EVIDENCE_SET_ID)
+    if _DB and "verdict_refs" not in kw:
+        rid, esid, refs = provenance_for(
+            _DB[0], kw["decision_id"], [v.agent for v in kw["verdicts"]])
+        kw.setdefault("run_id", rid)
+        kw.setdefault("evidence_set_id", esid)
+        kw["verdict_refs"] = refs
     return card_ops.synthesize(**kw)
 
 
@@ -92,6 +101,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
     open_test_run(p)          # 批 N：见 tests/_provenance.py
+    _DB[:] = [p]
     return p
 
 
