@@ -38,7 +38,6 @@ from datetime import datetime, timedelta
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "tools" / "verify"))
 
 import _verdict as _v  # noqa: E402

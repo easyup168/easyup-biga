@@ -27,10 +27,8 @@ from __future__ import annotations
 
 import pathlib
 import re
-import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "tests"))
 
 from _scan import repo_files  # noqa: E402
 

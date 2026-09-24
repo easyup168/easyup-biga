@@ -22,7 +22,6 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "skills" / "decision-card" / "scripts"))
 
 from _contract import (  # noqa: E402

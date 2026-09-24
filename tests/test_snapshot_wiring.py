@@ -21,7 +21,6 @@ from datetime import date, timedelta
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import STANCE_VOCAB, AgentVerdict, Evidence, now_cn  # noqa: E402
 from _snapshot import SnapshotCoordinator, SnapshotReadError  # noqa: E402

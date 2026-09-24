@@ -13,13 +13,11 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import AgentVerdict, Evidence, MissingItem, now_cn  # noqa: E402
 

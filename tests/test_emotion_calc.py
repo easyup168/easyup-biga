@@ -21,7 +21,6 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "emotion-calc" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-sys.path.insert(0, str(REPO / "skills"))
 
 
 def _load(name: str):

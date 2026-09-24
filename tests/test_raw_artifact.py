@@ -21,12 +21,10 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
-import sys
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 import _sources.http as http  # noqa: E402
 import _sources.sina as sina  # noqa: E402

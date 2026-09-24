@@ -33,7 +33,6 @@ from datetime import timedelta
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import (  # noqa: E402
     AgentVerdict,

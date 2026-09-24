@@ -32,7 +32,6 @@ from datetime import timedelta
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "skills" / "card" / "scripts"))
 
 from _contract import Evidence, FactBundle, RunState, new_run_context, now_cn  # noqa: E402

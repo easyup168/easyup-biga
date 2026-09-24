@@ -27,13 +27,11 @@ Fact，并且只读得到自己的**。批 N 在卡那一层把 cross-run 污染
 from __future__ import annotations
 
 import pathlib
-import sys
 from datetime import timedelta
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import (  # noqa: E402
     AgentAssessment,
@@ -218,7 +216,6 @@ class TestLegacyAggregatorRetired:
         「为什么这么改」换一个绿灯。
         """
         import ast
-        sys.path.insert(0, str(REPO / "tests"))
         from _scan import repo_files
         offenders = []
         for f in repo_files():

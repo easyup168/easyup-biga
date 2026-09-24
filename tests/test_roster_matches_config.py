@@ -40,15 +40,12 @@ from __future__ import annotations
 
 import json
 import pathlib
-import sys
 import warnings
 from typing import Callable
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
-sys.path.insert(0, str(REPO / "tests"))
 
 from _contract import STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
 from _consistency import assert_subset_of_source, built_agents  # noqa: E402

@@ -21,8 +21,6 @@ from datetime import datetime
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "skills"))
-sys.path.insert(0, str(REPO / "tests"))
 
 from _contract import (  # noqa: E402
     CN_TZ,

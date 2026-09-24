@@ -23,7 +23,6 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "deploy" / "openclaw"))
 
 import apply_config as ac  # noqa: E402

@@ -20,15 +20,15 @@
 
 from __future__ import annotations
 
+import sys
+
 import ast
 import pathlib
 import subprocess
-import sys
 
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 
 from _contract import (  # noqa: E402
     ADHOC_TASK_SEQ,
@@ -136,7 +136,6 @@ class TestReservationIsAtomic:
 
         def worker(barrier, q, path):
             import sys
-            sys.path.insert(0, str(REPO / "skills"))
             from _store import db as d
             barrier.wait()
             try:

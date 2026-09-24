@@ -27,7 +27,6 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "skills" / "decision-card" / "scripts"))
 
 from feishu_deliverer import FeishuDeliverer, FeishuError  # noqa: E402

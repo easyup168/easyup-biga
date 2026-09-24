@@ -16,7 +16,6 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "technical-calc" / "scripts"
-sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(SCRIPTS))
 
 import _sources as sources  # noqa: E402
