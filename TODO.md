@@ -1160,11 +1160,22 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         细分 + set() 合并丢信息"这条经全链路追踪**不成立**：`card_ops.
         synthesize()` 按"代码+文本"复合键去重，不会把不同 agent 的同代码
         缺失项合并掉。测试 1402 → 1408
-  - [ ] 评审 E（Contract 与数据质量）/F（Package 与 Registry）/
-        G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理。
-        A 节的 monkeypatch 顺序依赖已修复，见批 Q；A 节剩余四项已核实（一项
-        早已修好、两项无可复现缺陷、Isolation Registry 漂移已修），见批 S；
-        E 节前两项见批 P
+  - [x] **A 节全部核实完毕**：monkeypatch 顺序依赖已修复见批 Q；剩余四项
+        （ZIP/Git 双模式已由更早一轮评审修好、stdout/stderr 契约与
+        subprocess cleanup 排查后无可复现缺陷、Isolation Registry 漂移
+        已修）见批 S。**A 节收口**
+  - [ ] **E 节现状**（2026-09-24 复核时的快照，随时可能被下一批推进）：
+        E-16 前半 + E-18 见批 P；E-17/E-19/E-20 见批 R；批 T 是复核 批R 合并时
+        独立撞见的一处未清理冲突标记，与评审清单无关。**E-16 后半**（派生值
+        `input_evidence_ids`）—— 裁定 16（口径：按字段分粒度，元数据类引
+        verdict、值类引具体 Evidence）已在 `e-two` 分支落地（commit
+        `2fbd671`），**只有决策，实现尚未开始**，还没合并进 main。
+        E 节至此**只剩这一项未完成**
+  - [ ] **F（Package 与 Registry）/ G（Live Acceptance）/ H（Baseline 冻结）
+        —— 均未开始**。F 的 Dataset/Provider/Pipeline Registry 三项评审
+        自己标注"后续阶段"（非当前必需）；G 需要飞书真实触发一次 + 新会话
+        验证，无法靠改代码单方面完成；H 的验收条件（tag/schema 说明/
+        migration 回滚说明等）依赖 G 先过，目前排它之后
 
 - [x] 批 P · 外部评审 E 节（一）：E-16 值一致 + E-18 缺席对号 —— **2026-09-24**。
       `check_fact_invariants` 新增「result 的值必须与同名 Evidence 一致」
