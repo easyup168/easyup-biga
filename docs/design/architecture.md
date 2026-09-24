@@ -394,6 +394,13 @@ class Evidence:
     evidence_set_id: str|None = None  # 🔴 批 E-I：指回 evidence_sets.evidence_set_id
                                       #    （读冻结快照的 Specialist 填；risk CROSS_CHECK 直接比它）
 
+# 🔴 上面这个 raw_hash「派生字段允许为空」是**现状**，不是终局。
+#    实测：派生证据占全部证据的 55%（1721/3152），而它们 raw_hash 与
+#    evidence_set_id **全部为空** —— 溯源链停在 `derived:` 那个字符串上。
+#    该怎么办已由**裁定 16** 定死（kind 三分类 + 派生值必须声明输入，粒度按字段定），
+#    规格在 `TODO.md` 的「批 1 / 批 2 输入」。⚠️ **尚未实现**，所以本节不写它的字段 ——
+#    常青文档描述现状，未实现的设计放进来就会变成长期挂着的「设计中」（Phase 1 §11 的教训）。
+
     @property
     def staleness_sec(self) -> int: ...
 

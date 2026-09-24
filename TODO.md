@@ -1183,6 +1183,45 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         ⚠️ 上一版这里写「剩下六项」是**数错了**：那个数把评审的章节号当成了条目数。
         `calc_version` 其实**早就有了**，真正缺的只有 `input_evidence_ids`，
         而它有一个前置条件：**`Evidence` 目前没有 id**，没法被引用
+
+    **口径已定（2026-09-24，裁定 16）** —— 下面是批 1 / 批 2 的输入规格，照着做即可，
+    不要重新讨论粒度问题。全部数字都是当天在生产库上量出来的。
+
+    派生证据按**输入种类**分六类（实测 1721 条派生证据的完整划分）：
+
+    | # | 输入种类 | 条数 | 引用什么 |
+    |---|---|---|---|
+    | 1 | 冻结快照 / 端点 | 1030 | 该快照的 `evidence_set_id` + `content_sha256` |
+    | 2 | 上游 verdict（全是 risk）| 444 | **按字段定**，见下表 |
+    | 3 | 同 verdict 内其他字段 | 57 | 同 verdict 内那几条 Evidence 的 id |
+    | 4 | 交易日历 fact | 47 | `fact_trading_calendar` 的那一行；**回退到 weekday 判据时要能看出来**（三态，R-3）|
+    | 5 | 数据 + 配置上限 | 94 | 新闻条目那几条 Evidence 的 id。⚠️ 现在 source 标成 `derived:config` 是**标错了**，它们有数据输入 |
+    | 6 | 纯参数 | 47 | 无 —— `kind="parameter"`，只有 `news.window_min` 一个字段 |
+
+    risk 那 444 条（10 个字段 × 45 次运行）的粒度，**逐字段定死**：
+
+    | 字段 | 真实输入 | 引用 |
+    |---|---|---|
+    | `upstream_agents` / `coverage_ratio` / `upstream_missing_count` / `stance_conflict` | 上游 verdict **存不存在**及其元数据，不是任何一条证据 | 只引 verdict |
+    | `upstream_trade_date` / `trade_date_consistent` / `tripped_thresholds` | 上游的某个 `result` 字段 | 引**支撑那个字段**的 Evidence |
+    | `max_source_lag_sec` / `max_evidence_age_sec` / `cross_check_conflict` | 上游的**全部** Evidence（取 max / 比 raw_hash）| 引上游全部 Evidence |
+
+    🔴 **已知障碍，批 1 必须按三段式处理，不能一步到位 enforce**：
+
+    * `kind="observed" ⇒ 必须有 raw_hash` **今天还做不到**。实测直接证据缺 raw_hash 的比例
+      按日期是 09-20 100% → 09-21 25.5% → 09-24 **13.8%** —— 在收敛但**仍在产生**。
+    * 今天那 19 条缺口只有 4 个组合，可单独修掉：
+      `market/sina:kline/trade_date`、`market/sina:kline/volume_total`、
+      `emotion/em:push2ex:qdate/trade_date`、`sector/em:clist/board_counts`。
+      前两个的病因已定位：source 写成泛化的 `sina:kline`（不带 symbol），
+      而冻结表的键是 `sina:kline/sh000001` —— `_lookup` 的前缀匹配方向要求
+      **source 比键更长**，泛化 source 匹配不上任何键，静默返回 None。
+    * 历史 1721 条派生证据全部没有 `input_evidence_ids` ⇒ 旧卡可读、新卡严格、落库永远拒
+      （同批 N 的三段式）。
+
+    ⚠️ `Evidence` 的 id 用**内容寻址**（canonical JSON 的 sha256），与仓库既有
+    `content_sha256` / `VerdictRef` 口径一致：不需要分配器、天然可回放、
+    同一条证据在哪次运行算出来都是同一个 id
         —— 实测 411 条证据里 **244 条（59%）** 的 source 以 `derived:` 开头，涉及六个
         skill、39 种 `(agent, field)`，是独立一块领域工作；批 P 那条等值检查**拦不到**
         它（派生值与自造的同名证据天然相等，已写进契约注释免得被读成已覆盖）
