@@ -11,7 +11,13 @@
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, Evidence, now_cn
 from .facts import AgentAssessment, AgentOutcome, FactBundle, LegacyAdapter
-from .missing import LEGACY_CODE, MissingItem
+from .missing import (
+    ABSENT_REASONS,
+    absent_agent_code,
+    absent_agent_missing,
+    absent_agent_of,
+    LEGACY_CODE, MissingItem,
+)
 from .notify import (
     CARD_COMPLETED,
     CARD_EVENT_TYPES,
@@ -67,6 +73,10 @@ __all__ = [
     "CONTRACT_VERSION",
     "LEGACY_CODE",
     "MissingItem",
+    "ABSENT_REASONS",
+    "absent_agent_code",
+    "absent_agent_missing",
+    "absent_agent_of",
     "CARD_COMPLETED",
     "CARD_UNKNOWN",
     "RISK_BLOCK",

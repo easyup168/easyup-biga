@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Literal, get_args
 
-from .missing import LEGACY_CODE, MissingItem
+from .missing import absent_agent_of, LEGACY_CODE, MissingItem
 from .registry import EXPECTED_ROSTER
 from .verdict import VETO_STANCE, AgentVerdict
 from .verdict_ref import VerdictRef
@@ -454,12 +454,30 @@ class DecisionCard:
             problems.append(
                 f"这些 agent 出现了不止一条判定：{dupes} —— "
                 "一次决策里每个 agent 只能给一条判定，多出来的那条不知道该信哪个。")
-        if self.absent_agents and len(self.missing) < len(self.absent_agents):
-            problems.append(
-                f"缺席 {list(self.absent_agents)}（{len(self.absent_agents)} 个），"
-                f"但 missing 只有 {len(self.missing)} 条 —— "
-                "缺席必须每个都显式登记（如 supervisor.agent_offline / "
-                "agent_no_response），不许用一条解释掩盖多个缺席。")
+        # 🔴 批 P（外部评审 §18）：判据从「比条数」升级成「对得上号」。
+        #
+        # 旧判据是 `len(self.missing) < len(self.absent_agents)`。它挡得住
+        # 「5 个缺席只写 1 条解释」，挡不住「5 个缺席配 5 条毫不相干的 missing」——
+        # 实测复现过：absent=[market,news,sector,technical,emotion]，missing 全是
+        # `risk.upstream.coverage_incomplete`，照样构造成功。
+        #
+        # 当时**只能**比条数，是因为按文本去猜「这条 missing 说的是不是那个缺席的
+        # agent」属于 L-13（按字符串形状分类）。批 P 把 agent 名字放进了代码
+        # （`supervisor.<agent>.<reason>`，见 `missing.absent_agent_code`），
+        # 对应关系因此变成**结构化**的 —— 不需要猜任何文本。
+        #
+        # ⚠️ 对应关系成立 ⇒ 条数必然够（每个缺席各占一条不同代码），所以旧那条
+        #    计数判据被**取代**而不是并存：两条都报会让同一个问题出现两遍。
+        if self.absent_agents:
+            explained = {absent_agent_of(m.code) for m in self.missing}
+            unexplained = sorted(set(self.absent_agents) - explained)
+            if unexplained:
+                problems.append(
+                    f"缺席 {list(self.absent_agents)}，但其中 {unexplained} 没有"
+                    f"对应的缺失项 —— 每个缺席的 agent 都要有一条自己的登记"
+                    f"（代码形如 supervisor.<agent>.agent_no_response，"
+                    f"见 _contract.absent_agent_code）。\n"
+                    f"  卡上现有的缺失项代码：{sorted({m.code for m in self.missing})}")
         if not problems:
             return
         msg = f"Card {self.decision_id} 的 roster 有问题：" + "；".join(problems)

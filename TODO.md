@@ -1162,7 +1162,27 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         缺失项合并掉。测试 1402 → 1408
   - [ ] 评审 E（Contract 与数据质量）/F（Package 与 Registry）/
         G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理。
-        A 节的 monkeypatch 顺序依赖已修复，见批 Q
+        A 节的 monkeypatch 顺序依赖已修复，见批 Q；E 节前两项见批 P
+
+- [x] 批 P · 外部评审 E 节（一）：E-16 值一致 + E-18 缺席对号 —— **2026-09-24**。
+      `check_fact_invariants` 新增「result 的值必须与同名 Evidence 一致」
+      （canonical JSON，与回放同口径）；缺席登记代码改成
+      `supervisor.<agent>.<reason>`（新增 `absent_agent_code`/`_of`/`_missing`），
+      `_check_roster` 判据从「比条数」升级成「每个缺席各有一条解得出它名字的登记」。
+      新增 `tests/_roster.py` + `TestIronLaw3ValuesMustAgree` 6 条，`TestCardRoster`
+      重写；6 处 sabotage 验证。详见 `docs/tutorial/45-evidence-must-support.md`
+  - [x] 🔴 **更正一条我自己报错的复核结论**：三轮复核里说过「五个 agent 缺席可能
+        在卡上只显示成一条」——端到端复现证明**不成立**（`card_ops.synthesize()`
+        按「代码+文本」复合键去重，卡上五条一条不少）。把 `MissingItem.__eq__`
+        只看 `.code` 这个局部属性当成了端到端的数据丢失，没走完全链路就下结论。
+        真正的洞在旁边：roster 只比条数，5 个缺席配 5 条毫不相干的 missing 照样放行
+  - [ ] **E 节剩下九项**：E-16 后半（派生值声明 `input_evidence_ids` + `calc_version`）
+        —— 实测 411 条证据里 **244 条（59%）** 的 source 以 `derived:` 开头，涉及六个
+        skill、39 种 `(agent, field)`，是独立一块领域工作；本批那条等值检查**拦不到**
+        它（派生值与自造的同名证据天然相等，已写进契约注释免得被读成已覆盖）。
+        E-17 deep_freeze / E-19 `source_lag_sec` + `age_at(evaluated_at)` /
+        E-20 Snapshot 元数据四项 —— 都已实测确认成立，各有独立 blast radius
+        （E-19 会动 risk 的判据口径）
 
 - [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
       schema **v16**：`decision_records.run_id`/`.evidence_set_id`、

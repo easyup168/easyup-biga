@@ -323,8 +323,8 @@ class TestP4Coexistence:
             task_id=TID, agent=agent,
             status="completed" if not missing else "partial",
             verdict="PASS" if not missing else "WARNING",
-            result={f"{agent}_x": 1}, data_completeness=1.0,
-            evidence=[_ev(f"{agent}_x", 1)], missing=list(missing or []))
+            result={f"{agent}_x": 1.0}, data_completeness=1.0,
+            evidence=[_ev(f"{agent}_x", 1.0)], missing=list(missing or []))
         fid = save_fact_bundle(fb)
         return save_assessment(AgentAssessment(task_id=TID, agent=agent, stance=stance),
                                fact_id=fid)
@@ -333,8 +333,8 @@ class TestP4Coexistence:
         stance = next(s for s in STANCE_VOCAB[agent] if s != "无法判定")
         return save_verdict(AgentVerdict(
             task_id=TID, agent=agent, status="completed", verdict="PASS",
-            result={f"{agent}_x": 1}, data_completeness=1.0,
-            evidence=[_ev(f"{agent}_x", 1)], stance=stance, elapsed_ms=1))
+            result={f"{agent}_x": 1.0}, data_completeness=1.0,
+            evidence=[_ev(f"{agent}_x", 1.0)], stance=stance, elapsed_ms=1))
 
     def test_五新一旧_card聚合六个(self, db):
         ids = []
@@ -371,8 +371,8 @@ class TestP5AmendRouting:
 
     def _fact(self, agent, db):
         fb = FactBundle(task_id=TID, agent=agent, status="completed", verdict="PASS",
-                        result={f"{agent}_x": 1}, data_completeness=1.0,
-                        evidence=[_ev(f"{agent}_x", 1)])
+                        result={f"{agent}_x": 1.0}, data_completeness=1.0,
+                        evidence=[_ev(f"{agent}_x", 1.0)])
         return save_fact_bundle(fb)
 
     @pytest.mark.parametrize("agent", ["market", "sector", "technical", "news"])

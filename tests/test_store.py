@@ -45,6 +45,7 @@ from _store import (
 )
 
 from _provenance import open_test_run, provenance_for  # noqa: E402
+from _roster import absent_registrations  # noqa: E402
 
 #: 批 O：卡构造器是纯函数、拿不到 fixture，而在线卡的血缘必须指向**真落库**的行
 #: （见 tests/_provenance.py）。`db` fixture 把库路径放这儿，构造器读它。
@@ -99,7 +100,7 @@ def make_card(**kw) -> DecisionCard:
         decision_id=did, status="WAIT", headline="核心矛盾一句话",
         verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
-        missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
+        missing=absent_registrations([make_verdict(task_id=did)]),
     )
     base.update(kw)
     # 批 N/O：在线卡必须说得清属于哪次执行、哪份切片、哪些原件（见 tests/_provenance.py）。

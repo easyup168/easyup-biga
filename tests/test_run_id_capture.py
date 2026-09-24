@@ -39,6 +39,7 @@ from _store import (  # noqa: E402
     save_fact_bundle,
     verify_verdict_refs,
 )
+from _roster import absent_registrations  # noqa: E402
 
 TID = "BIGA-20260918-001"
 #: 一个真实形状的 run_id（32 位 hex，与 decision_runs.run_id 同形）。
@@ -84,16 +85,16 @@ def _verdict(agent="emotion") -> AgentVerdict:
         missing=[], stance="亢奋", elapsed_ms=8400)
 
 
-#: 单 agent 的卡：roster 判据要求 missing 条数 ≥ 缺席 agent 数（F-8，5 个缺席）。
-#: 代码须 <域>.<对象>.<原因> 全小写点分，不能带数字。
-_SLOT_CODES = ("probe.slot.aa", "probe.slot.bb", "probe.slot.cc",
-               "probe.slot.dd", "probe.slot.ee")
+#: 单 agent（emotion）的卡：批 P 之后 roster 判据要求**每个缺席 agent 各有一条
+#: 解得出它名字的登记**，凑数的占位 code 不再成立（那正是评审 §18 指出的洞）。
+_SLOT_MISSING = absent_registrations(["emotion"])
+_SLOT_CODES = tuple(m.code for m in _SLOT_MISSING)
 
 
 def _judgment():
     return card_ops.Judgment(
         status="WAIT", headline="核心矛盾一句话", synthesis="理由",
-        extra_missing=[MissingItem(f"占位{c}", c) for c in _SLOT_CODES])
+        extra_missing=list(_SLOT_MISSING))
 
 
 @pytest.fixture()
@@ -196,7 +197,7 @@ class TestP2_HistoricalNull:
         d = {  # contract-exempt: 验 from_dict 对「缺 run_id 键」的向后兼容，见上
             "decision_id": TID, "status": "WAIT", "headline": "h",
             "verdicts": [_verdict().to_dict()],
-            "missing": [f"占位{c}" for c in _SLOT_CODES],
+            "missing": [m.to_dict() for m in _SLOT_MISSING],
             "synthesis": "", "model_ref": "m", "generated_at": now_cn().isoformat(),
             "elapsed_ms": 0,
             # 🔴 故意不放 run_id / input_verdict_refs 键

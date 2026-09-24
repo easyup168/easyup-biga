@@ -50,6 +50,7 @@ from _provenance import open_test_run, provenance_for  # noqa: E402
 _DB: list = []
 
 from _store.db import payload_sha256  # noqa: E402
+from _roster import absent_registrations  # noqa: E402
 
 TID = new_task_id(1, day="20260922")
 
@@ -151,7 +152,11 @@ class TestP4StrictJSON:
         v = AgentVerdict(
             task_id=TID, agent="market", status="completed", verdict="PASS",
             result={"weird": bad}, data_completeness=0.9,
-            evidence=[Evidence(field="weird", source="test", value=1.0,
+            # 🔴 批 P：证据的值要与 result 一致 —— 本测试测的是**写边界的严格 JSON**，
+            #    不是「值对不对得上」。原来这里写死 1.0，于是 result=nan / evidence=1.0
+            #    两边本来就不同，契约层（`_same_value`）会抢在写边界之前拒掉，
+            #    测试就测不到它想测的那道了（探针纪律：先确认命中的是目标条件）。
+            evidence=[Evidence(field="weird", source="test", value=bad,
                                as_of=t - timedelta(seconds=5), retrieved_at=t)],
             stance="放量上涨",
         )
@@ -170,7 +175,11 @@ class TestP4StrictJSON:
         v = AgentVerdict(
             task_id=TID, agent="market", status="completed", verdict="PASS",
             result={"weird": bad}, data_completeness=0.9,
-            evidence=[Evidence(field="weird", source="test", value=1.0,
+            # 🔴 批 P：证据的值要与 result 一致 —— 本测试测的是**写边界的严格 JSON**，
+            #    不是「值对不对得上」。原来这里写死 1.0，于是 result=nan / evidence=1.0
+            #    两边本来就不同，契约层（`_same_value`）会抢在写边界之前拒掉，
+            #    测试就测不到它想测的那道了（探针纪律：先确认命中的是目标条件）。
+            evidence=[Evidence(field="weird", source="test", value=bad,
                                as_of=t - timedelta(seconds=5), retrieved_at=t)],
             stance="放量上涨",
         )
@@ -178,7 +187,7 @@ class TestP4StrictJSON:
         #    计数比较，给 5 条占位 missing 才够（本测试不测 roster）。
         card = DecisionCard(decision_id=TID, status="WAIT", headline="h",
                             verdicts=[v], synthesis="", model_ref="m",
-                            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
+                            missing=absent_registrations([v]))
         with pytest.raises(ValueError):
             save_card(card, path=db)
 

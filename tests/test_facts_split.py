@@ -68,7 +68,7 @@ card_ops = _load("card_ops", "skills/decision-card/scripts/card_ops.py")
 amend = _load("amend_verdict", "skills/decision-card/scripts/amend_verdict.py")
 
 
-def _ev(field: str, value=1, *, raw_hash=None, evidence_set_id=None) -> Evidence:
+def _ev(field: str, value=1.0, *, raw_hash=None, evidence_set_id=None) -> Evidence:
     t = now_cn()
     return Evidence(field=field, source=f"em:{field}", value=value,
                     as_of=t - timedelta(seconds=60), retrieved_at=t,
@@ -167,7 +167,7 @@ class TestCoexistence:
         v = AgentVerdict(
             task_id=TID, agent=agent, status="completed" if not missing else "partial",
             verdict="PASS" if not missing else "WARNING",
-            result={f"{agent}_x": 1}, data_completeness=1.0,
+            result={f"{agent}_x": 1.0}, data_completeness=1.0,
             evidence=[_ev(f"{agent}_x")],
             missing=list(missing or []), stance=st, elapsed_ms=100)
         return save_verdict(v, path=db)

@@ -33,6 +33,7 @@ from _store import connect, init_schema, list_agent_runs, load_online_card  # no
 
 
 from _provenance import open_test_run, provenance_for  # noqa: E402
+from _roster import absent_registrations  # noqa: E402
 
 #: 批 O：卡构造器拿不到 fixture，而在线卡的血缘必须指向**真落库**的行
 #: （见 tests/_provenance.py）。`db` fixture 把库路径放这儿。
@@ -146,8 +147,10 @@ class TestSynthesize:
         c = _synth(
             decision_id=DID,
             verdicts=[verdict(missing=["A", "B"]), verdict(agent="risk", missing=["B", "C"])],
-            judgment=judgment(extra_missing=["A", "D"]), model_ref="m")
-        assert [m.detail for m in c.missing] == ["A", "B", "C", "D"]
+            judgment=judgment(extra_missing=["A", "D"] + absent_registrations(
+                ["emotion", "risk"])), model_ref="m")
+        # 批 P：缺席登记跟在后面（它们也是 extra_missing）；去重保序只看前四条。
+        assert [m.detail for m in c.missing][:4] == ["A", "B", "C", "D"]
 
     def test_model_ref带组装版本(self):
         c = _synth(decision_id=DID, verdicts=full_roster(),

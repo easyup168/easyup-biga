@@ -59,7 +59,9 @@ def _ev(field, value=1.0):
 def _save_fact(task_id, agent="market", *, path=None):
     """落一条最小合法的 fact——模拟"Stage 1 已经真的跑完、写过原件"。"""
     fb = FactBundle(task_id=task_id, agent=agent, status="completed", verdict="PASS",
-                    result={f"{agent}_x": 1}, data_completeness=1.0,
+                    # 批 P：result 与 evidence 必须是**同一个值**（canonical JSON
+                    # 判等，`1` 与 `1.0` 算不同）——`_ev` 默认 value=1.0。
+                    result={f"{agent}_x": 1.0}, data_completeness=1.0,
                     evidence=[_ev(f"{agent}_x")])
     save_fact_bundle(fb, path=path)
 

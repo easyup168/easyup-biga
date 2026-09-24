@@ -36,6 +36,8 @@ from _store import (  # noqa: E402
     save_verdict,
     verify_verdict_refs,
 )
+from _roster import absent_registrations  # noqa: E402
+from _roster import absent_registrations, DEFAULT_ROSTER  # noqa: E402
 
 TID = "BIGA-20260922-001"
 _SHA = "a" * 64
@@ -60,7 +62,7 @@ def _card(refs: list[VerdictRef] | None = None, **kw) -> DecisionCard:
     # contract-exempt: 拼的是构造 DecisionCard 的 kwargs，不是第二套契约
     base = dict(decision_id=TID, status="WAIT", headline="h",
                 verdicts=[_verdict()], synthesis="", model_ref="m",
-                missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
+                missing=absent_registrations([_verdict()]),
                 input_verdict_refs=refs or [],
                 # 🔴 批 N：这些用例故意构造「引用与卡上判定对不上」的样本，去验证
                 #    **库层** `verify_verdict_refs()` 抓不抓得到。契约层从批 N 起也
@@ -224,9 +226,10 @@ class TestSynthesizeBuildsRefs:
         # 🔴 F-8：只提交 1 个 agent（market），另外 5 个天然缺席——
         #    roster 判据按计数比较，5 条 --extra-missing 才够。
         extra_missing_args = []
-        for i in range(5):
-            extra_missing_args += ["--extra-missing", "supervisor.agent_offline",
-                                   f"占位{i}——本文件不测 roster"]
+        # 🔴 批 P：每个缺席的 agent 各一条**对得上号**的登记（代码里带 agent 名）。
+        #    以前是 N 条 supervisor.agent_offline 凑条数——那正是评审 §18 指出的洞。
+        for m in absent_registrations(["market"]):
+            extra_missing_args += ["--extra-missing", m.code, str(m)]
         r = subprocess.run(
             [_sys.executable, str(script), "--verdict-ids", str(vid),
              "--status", "WAIT", "--headline", "h", "--model-ref", "m",
