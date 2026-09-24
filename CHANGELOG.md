@@ -15,6 +15,92 @@
 
 ## [未发布]
 
+### ✨ 新增 · F 节批 U-II：`pyproject.toml` 正式化，这个仓库现在装得上了
+
+此前 `pyproject.toml` **只有** `[tool.pytest.ini_options]` —— 外部评审 F 节那条
+「`pip install -e .` + 在无 `PYTHONPATH` 的环境里 `import easyup_biga`」的验收
+标准必然失败。本批补上 `[build-system]`（setuptools）+ `[project]`。
+
+🔴 **本批一个 `sys.path.insert` 都没改**（探针 P2 实测 diff 里零处增删）。
+这一批结束时「旧的能跑的方式」与「新的能跑的方式」同时成立，随时可回退。
+那 128 处路径操作的逐一核实是批 U-III 的事。
+
+提示词要求的五个问题，逐个核实而非凭空定：
+
+- **`skills/` 不进包。** 三条独立理由，任何一条都够：① `skills/` 下 7 个目录名
+  带连字符（`decision-card`/`market-calc`/…），**连字符不是合法 Python 标识符，
+  它们做不成包**；② 五个 `_*` 薄壳的用途 H-I 写得很清楚是「让**全仓**既有导入
+  一字不改」—— 仓库外没有消费方；③ 🔴 装进去会让 `_contract`/`_store`/`_sources`
+  成为任何安装环境的**顶层**模块名 —— 这正是 R-2 的形状（site-packages 是又一个
+  共享命名空间，而顶掉是静默的）。实测验证：非 editable 安装后五个旧名字全部
+  `ModuleNotFoundError`，site-packages 里没有 `skills/` 的任何东西。
+- **零运行时依赖，这是扫出来的不是抄的。** AST 扫 `src/` 与 `skills/` 下全部
+  import，减掉 stdlib 与本仓库自己的名字，剩下的五个逐个 `find` 过去全是
+  `skills/*/scripts/` 里的兄弟模块。网络采集走 stdlib `urllib.request`，没有
+  `requests`。⇒ `dependencies = []`。
+- **版本 `0.3.0.dev0`，不是 `0.2.0`。** 最后一个发布版是 `v0.2.0`（tag 真实存在），
+  而 `[未发布]` 里堆着大量内容 —— 写 `0.2.0` 等于宣称「这棵树就是那个 tag」，是假的。
+  ⚠️ 代价是版本号从此有两个出处（本文件 + `pyproject.toml`）= L-3 的形状，
+  所以配守卫，判据是**不矛盾**（严格大于最后一个已发布版）而不是「两处字面相同」
+  —— 它们本来就不同，这里顶上是 `[未发布]`。
+- **`requires-python = ">=3.12"`。** 代码里找不到 3.11/3.12 专属语法（无 `match`/
+  `tomllib`/`datetime.UTC`/`batched`），所以技术上大概支持更低版本 —— 但这台机器
+  只有 3.12.3、没有 CI、没有任何其他版本被跑过。写 `>=3.10` 是一句**从未被验证过
+  的宣称**。放宽它是一次可测的改动（在 3.10/3.11 上跑全量），不是一次猜测。
+- **console scripts 一个都不做 —— 裁定，不是遗漏**（F 节原文点名了这一项）。
+  形状其实是合适的（`tools/verify/` 下 9 个都是 `main(argv=None) -> int`），
+  **语义不合适**：10 个脚本里 8 个靠 `__file__` 回溯仓库根再挂 `skills/`，
+  它们被设计成「在一份 checkout 里跑」；非 editable 安装后 `__file__` 落在
+  site-packages，回溯出来的「仓库根」不存在。`isolation.py` 尤其明显——它查的是
+  **这台机器这个仓库**的隔离状态。要做只有两条路且都不属于本批：搬进
+  `src/easyup_biga/`（H-I/H-II 形状的重构，需独立设计依据），或把 `tools` 这个
+  极通用的顶层名塞进 site-packages（**又是 R-2**）。
+  🔴 守卫钉的不是「没有 scripts」，是**当初支撑这个决定的两个前提**（`tools/`
+  仍不是包、多数脚本仍仓库绑定）。钉结果只能防别人改，钉前提才能在世界变了的
+  时候提醒你回来重新裁定。
+
+### ✨ 新增 · `tests/test_packaging.py`（9 条）：打包元数据必须描述这棵树的真实情况
+
+打包配置声明的每件事都可能与代码脱钩，**而脱钩不报错**：零依赖声明错了只在干净
+venv 里炸；`packages.find` 少收一个子包 **editable 安装根本测不出来**。
+
+🔴 **提示词给的 P1 探针前提在本仓库不成立** —— 原文是「删掉
+`[project.dependencies]` 里的某一项，断言 import 报错」，而实测依赖列表本来就是
+空的，没有项可删。没有硬跑也没有跳过，而是回到它想证明的那句话重新设计：
+零依赖情况下「列表不是摆设」要证明的是**零确实是对的** ⇒ 判据改成**双向一致**
+（声明了就得真用，用了就得声明）。sabotage：往包里塞一行 `import requests`，
+守卫报红、且干净 venv 里真的 `ModuleNotFoundError: No module named 'requests'`。
+
+🔴 **另一个探针当场证伪了我自己刚写的判据。** 「五个子包都在打包范围内」第一版
+是自己按 `include` 的 glob 重算的；G-1 探针（往配置塞
+`exclude = ["easyup_biga.application*"]`）跑出来**9 条全绿** —— 那一版只看了
+`include`，完全没看 `exclude`。修法不是补上 exclude 的处理，而是**别自己重算**：
+把配置原样交给 `setuptools.find_packages()` 问它会收哪些。自己写一份平行的 glob
+语义就是 L-3，而这里的「另一份实现」是 setuptools 本体，永远不可能赢。
+改完同一个探针当场报红，且非 editable 安装真的 `ModuleNotFoundError`。
+
+### 🐛 修复 · `pip install` 的构建产物会让不变式 I-3 在降级模式下误报
+
+**这个坑是 U-II 自己造出来的**：在此之前 `build/` 在本仓库没有理由存在，
+U-II 之后 `pip install -e .` 是一条写进文档的常规操作 —— 而它会在
+`build/lib/easyup_biga/` 下留下**每个模块的第二份拷贝**。
+
+正常路径不受影响（扫描器走 `git ls-files`，`.gitignore` 挡着）。但扫描器有一条
+**降级路径**：没有 `.git` 时退化成文件系统遍历（为「发布 tarball / 容器
+`COPY . .` / sdist」准备的），**忽略规则对它不生效**。实测探针：副本带着
+`build/`、剥掉 `.git`，`test_A_契约类名只在_contract_下定义`（不变式 I-3
+「契约只有一份实现」）等**五条**守卫集体误报 —— 扫描器把构建产物当成了第二份实现。
+
+⇒ 修在 `tests/_scan.py` 的 `_FALLBACK_SKIP`（新增 `build`/`dist`，另加一条后缀
+规则处理 `*.egg-info` —— 那份名单比的是整段路径名，匹配不了带可变前缀的目录）。
+
+🔴 **修在扫描器里，不是修在某条测试上。** 另一处改动（`0e3cc07`）把 `build/`
+从沙盒测试的复制清单里排掉了 —— 那是对的（沙盒该复制的是代码，不是这台机器此刻
+的构建状态），但它让那条端到端测试**不再复现这个场景**，扫描器本身仍然是错的。
+两件事都要做；且正因为沙盒不再复现，这个不变式需要一条**单独的**测试钉住
+（`test_降级扫描排除构建产物`），否则修完就没人守了。
+
+
 ### 🔧 变更 · F 节批 U-I：让 `src/easyup_biga/` 真的自足（包内部不再走薄壳）
 
 批 H-I/H-II 把五个包从 `skills/_*` 搬到 `src/easyup_biga/`，旧位置留 re-export

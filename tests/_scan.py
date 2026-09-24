@@ -65,7 +65,21 @@ def is_external_reference(p: pathlib.Path) -> bool:
 _FALLBACK_SKIP = {
     ".git", ".claude", "__pycache__", ".pytest_cache", ".ruff_cache",
     "node_modules", "data", "logs", ".venv", "venv",
+    # 🔴 批 U-II：`build/` 与 `dist/` 是 setuptools 的构建产物。在此之前它们
+    #    在本仓库**没有理由存在**；U-II 之后 `pip install -e .` 是一条被写进
+    #    文档的常规操作，而它会在 build/lib/ 下留下**每个模块的第二份拷贝**。
+    #    实测（2026-09-24 探针）：副本里带着 build/、剥掉 .git 之后，
+    #    `test_A_契约类名只在_contract_下定义`（不变式 I-3「契约只有一份实现」）
+    #    等**五条**守卫集体误报 —— 扫描器把构建产物当成了第二份实现。
+    #    ⚠️ 正常 git 路径不受影响（.gitignore 挡着），所以这个坑**只在降级模式下
+    #    出现**，而降级模式正是为「发布 tarball / 容器 COPY / sdist」准备的 ——
+    #    从开发机 `COPY . .` 进容器恰好就会把 build/ 带进去。
+    "build", "dist",
 }
+
+#: 后缀型的构建产物（`easyup_biga.egg-info/`）。`_FALLBACK_SKIP` 比的是**整段
+#: 路径名**，匹配不了这种带可变前缀的目录，所以单列一条。
+_FALLBACK_SKIP_SUFFIX = (".egg-info",)
 
 
 def _git_files() -> list[str] | None:
@@ -86,7 +100,8 @@ def _walk_files() -> list[str]:
         if not p.is_file():
             continue
         rel = p.relative_to(REPO)
-        if any(part in _FALLBACK_SKIP for part in rel.parts):
+        if any(part in _FALLBACK_SKIP
+               or part.endswith(_FALLBACK_SKIP_SUFFIX) for part in rel.parts):
             continue
         out.append(rel.as_posix())
     return out
