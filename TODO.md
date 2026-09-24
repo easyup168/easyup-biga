@@ -1184,6 +1184,20 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         之后，82 个文件高风险）/ U-IV（ruff/mypy，只拿基线不清零，可并行）
         四个子批，见 `docs/guide/f-node-packaging-kickoff-prompt.md`。
         批次字母用 **U**（TODO.md 已用到 T），开工前先确认没被并行会话占用
+  - [ ] 🔴 **三项 Registry 排除在外的完整理由 + 唤醒条件**（2026-09-24，
+        免得只存在于对话记录里）。排除依据：评审自己的推荐实施顺序把 F 排
+        最后一步、且写"不要先增加更多 Dataset"；核实过的 Release Gate（15
+        条 v1 基线验收标准）里不含任何 Registry 条目；README 路线图把
+        "Dataset/Provider Registry 扩展"放在 H（Baseline 冻结）之后才进入
+        的清单里。**不是永久搁置，是排到 v1 基线达成之后。**
+        唤醒条件（同裁定 15 / H-III 留白的同一条原则——第二个真实消费方
+        出现才是抽取的时刻，不是预先设计）：① 同一个数据集需要在多个来源
+        间选（主源/备源/验证源，数据架构材料 §27 的设计）；② 数据源/数据
+        集多到手工 import 管不过来；③ Phase 3 路线图（EOD 数据 / Emotion
+        统一数据迁移 / Screening / Review / Web）真的开工。
+        三者任一出现，回来重新评估——不是拍脑袋定的日期，机制是"每个新会话
+        开工前必读 TODO.md"（CLAUDE.md「会话启动先读」第 4 条），条件命中时
+        应该会被看见，不依赖谁记得
 
 - [x] 批 P · 外部评审 E 节（一）：E-16 值一致 + E-18 缺席对号 —— **2026-09-24**。
       `check_fact_invariants` 新增「result 的值必须与同名 Evidence 一致」
