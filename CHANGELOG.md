@@ -15,6 +15,66 @@
 
 ## [未发布]
 
+### 🎉 新增 · H 节 Baseline 冻结——`v1-architecture-baseline`
+
+G 节独立 sign-off 通过之后，H 节 8 项跟着做完：`tools/verify/config_baseline.py`
+打印 OpenClaw Version / Tool Policy Hash / Agent Config Hash（Agent Config
+子树全是真实 `$HOME` 绝对路径，公开仓库不能抄原文，只记 hash；hash 先把
+`$HOME` 换成 `~` 再算，换机器/换用户名不漂——`tests/test_config_baseline.py`
+的 sabotage 测试钉住这一点）；新建 `docs/guide/schema-rollback.md`（17 个
+schema 版本一句话摘要 + 没有 DOWN migration 时怎么回滚——老实记录"没有
+自动化迁移前快照"这个缺口，17 条迁移全是 additive 只是让"侥幸能退"成立，
+不是设计出来的能力）；`architecture.md` 新增 L-15/L-16 两条本项目自己踩出来的
+失败模式（超时收敛只挂在一条退出路径上；ACK 承诺的是尚未确定的未来），
+§12 路线图吸收 remediation checklist 自己列的 Phase 3 具体范围，§5.3 修正
+`notification_outbox`/`notification_deliveries` 的版本号误标（v11 应为
+v12）；`v1-architecture-baseline` tag 打在这次收尾提交上。
+
+🔴 收尾时顺带发现一个过程问题：工作区里已经有一段以"新会话独立复核"
+措辞写好、但从未提交的 G 节记录，且这个仓库当时有 31 个并行会话在跑——
+无法仅凭仓库状态确认它真的来自独立视角。逐条核实内容属实后仍先向用户
+当面确认，得到肯定答复才把结论落定，过程详见教程第 60 章。
+
+### ✅ 变更 · G 节 Live Acceptance 13 项独立 sign-off 通过，本节关闭
+
+建造那次会话自己点明了不该自己判自己：编排器取消、ACK 抢跑两处真缺陷是它发现
+并修复的，由它宣布"验收通过"等于**用同一双眼睛既当作者又当裁判**——而这两处恰恰
+都是"离线探针测不出、只有真链路暴露"的那类，正是最需要第二双眼睛的地方。
+于是证据集齐后停在 `- [ ]`，把 sign-off 留给新会话；用户随后确认另开了一个
+新会话做这轮复核。
+
+复核**没有**重新触发真实运行（那会多花一次钱，也不是复核要解决的问题），
+做的是三件建造方无法替自己做的事：
+
+1. **对回权威原文**——13 项逐条对 `2026-09-24-biga-remediation-checklist.md` §G，
+   不照 `TODO.md` 自己的转述。转述与原文之间正是最容易悄悄走样的一段。
+2. **直接查生产库**，不信任何一层叙述：两次真实触发各自 1 Decision / 1 Run /
+   1 EvidenceSet，6 条 `agent_runs` 的 `orchestration_run_id` 与全部 verdict 的
+   `run_id` 同为一值，飞书投递 `delivered`/`attempt=1`。
+3. 🔴 **三处 sabotage 亲手验证守卫会红**——这条是关键：修复存在 ≠ 修复被守住。
+   改回内联 `ad.wait(handles, self._stage_timeout(...))`、删掉 `r1` 的 TIMEOUT
+   cancel、去掉 ACK 前的 `check_budget()` 预检，三条对应测试各自当场变红，
+   且红的理由与教程第 58/59 章写的一字不差（"5 个 handle 起了、0 个被取消"）。
+
+结果：全量当时 1808 passed / 40 skipped / 0 failed（此后 H 节又加了测试，
+数字继续往上走，不是回归），两张真实卡 `--check` 逐字段相同，
+`audit_public.sh` 十一项全绿，无残留进程与瞬态单元。**G 节关闭。**
+
+顺带纠正三处陈旧陈述（都不影响结论，但会误导下一个读的人）：
+`TODO.md` 里写的 `ux_fact_per_task_agent` 是 schema v17 拆分前的旧索引名；
+`deterministic-orchestration.md` 批 M 快照表的 G 行把 13 项写成 12 项
+（**只改计数并加前向指针，不改写批 M 当时的判断**——那张表记录的是那一次的
+核实范围，改了就成了篡改历史）；全库 `runtime_run_id` 覆盖已从 36/166 变成
+54/184，且所有 NULL 行都早于 2026-09-21 的 capture 落地，属老数据，
+与"本次 live 验收的两个 run 可不可追溯"是两件事（后者 12/12 齐）。
+
+🔴 **这条本身差点被记成一个更麻烦的问题**：写好之后没能在同一时间提交，
+compaction 把上下文切断，下一轮回合只看到工作区里这段没有署名的详细记录——
+`git log` 能证明它不在任何一次提交里，但证明不了它是谁写的，"新会话复核"
+还是"建造方自己换了口吻"从文字本身分不出来。逐条重新核实内容为真之后，
+仍然先向用户当面确认了这一点，确认后才敢把结论落成 ✅。见
+[教程第 60 章](docs/tutorial/60-baseline-freeze.md) 坑 3。
+
 ### 🐛 修复 · 飞书 ACK 抢在预算闸门前面许诺了一件闸门几秒后会否决的事
 
 G 节 Live Acceptance 真机实测撞见（不是读代码找的）：自己先用 CLI 触发一次真实

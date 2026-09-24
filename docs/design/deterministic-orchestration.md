@@ -371,10 +371,10 @@ Orchestrator 调用 cancel()"，谁负责把这条残留风险补掉（见 `TODO
 | B | 全部 13 项（`agent_verdicts.run_id` 强制 / Fact 唯一约束改 `(run_id,agent)` / `DecisionCard`/`decision_records`/`agent_runs` 各字段必填 / `VerdictRef` 严格验证 / `evidence_sets.run_id NOT NULL UNIQUE`）与 7 项回归测试 | ❌ 全部未做，且这一行原来的理由是错的——⚠️ **2026-09-24 二轮对抗性复核纠正**：这里曾写"目前没有任何代码路径会对同一 decision 开出第二个 run"，但 C-1（`inbound.py::accept_trigger`）本来就是这样一条路径：`launcher(origin, trigger_id, decision_id)` 重新拉起时，`new_run_context()` 照常铸一个全新 `run_id`，`decision_id` 不变——**relaunch 从批 M 提交的那一刻起就已经是"对同一 decision 开第二个 run"**，不是假设中的未来状态。二轮复核修复的 fact 唯一性检查（`latest_verdict_ids(decision_id)` 非空则拒绝 relaunch）与 B-2 的方向**互为反面**：前者是 fail-closed 收窄（事实已存在 ⇒ 拒绝重放，交回人工），后者是放开重放（唯一约束改 `(run_id,agent)` ⇒ 第二个 run 本来就该能写自己的 fact，不需要拒绝）。两者不能同时是"最终状态"——现在保留前者，因为它是**给当前 `(task_id,agent)` 约束**的正确安全阀，且已经修复了一个真实、可复现的严重 bug（生成一张用陈旧证据合成的卡）；B-2 一旦真正实施（连带 7 项回归测试、`latest_verdict_ids` 的调用方迁移），`inbound.py` 这道 fact 存在性检查需要**同步重新评估**是否还需要、要不要收紧成"检查这个 run_id 自己的 fact"而不是"整个 task_id 的 fact"——不是自动删除，是要有人回来看一眼。⇒ 见 `inbound.py` 里对应注释与本文件追加 6 的交叉引用；`latest_verdict_ids` 现在有四个调用方（Stage 1→Stage 2、Stage 3 合成、`verify_verdict_refs` 一类核对、以及这里新加的 relaunch 守卫）——B-4 计划废弃它时，这是需要一并处理的第四处，不是历史遗留的三处 |
 | C | 13 项主清单 + 6 项回归测试 | ✅ 已做 9/13（Trigger 可恢复重启、Worker `max_attempts`、Retryable 分类、失败 exit non-zero、飞书失败不回滚 Card——本来就是；systemd 环境读取 target 已被独立事故修复）。**未采纳**：显式 `RESERVED/LAUNCHING/STARTED/LAUNCH_FAILED` 四态（改用更简单的 reserved_at+超时阈值，目标等价）、`EnvironmentFile`/env 文件权限/内容（已有更好方案，不依赖环境变量注入）。**真遗漏**：`timeout 按退避策略重试`——目前固定 `MAX_ATTEMPTS` 次机会，无指数退避，详见教程第 40 章"未完成的部分" |
 | D | 9 项主清单 + 5 项回归测试 | ✅ 已做 7/9（`OrchestratorTimeout`、超时进 TIMEOUT、stale-run-reaper、外部 kill 后收敛、RunPreflight 下沉三项）。**本来就有、未改动**：全局 monotonic deadline 与 `min(stage_budget,remaining)`（批 C-III 已实现）、Stage 1 部分失败 cleanup（同批已实现）。**未做**：CLI/Feishu/Cron/systemd"统一入口"——CLI/Feishu 已统一走 `bin/biga-card`，但 Cron/systemd 目前没有出卡触发入口，N/A 而非真遗漏。回归测试里"SIGTERM 模拟后 Reaper 收尾"是**手工构造过期 run** 再验证收敛逻辑，不是真发信号的端到端集成测试 |
-| E | 全部 11 项主清单 + 5 项回归测试 | ❌ 10/11 未做——`deep_freeze`、Fact/Evidence canonical equality、`input_evidence_ids`、Missing Code 按 agent 细分、`age_at(evaluated_at)`、Snapshot 元数据四项均确认缺失（部分已实测复现，见并行核实报告）。**唯一已做**：canonical payload 与 raw HTTP bytes 命名分开（批 I，`raw_text_sha256`，早于这份评审就解决了） |
-| F | 全部 10 项 | ❌ 8/10 未做，含 `pyproject.toml` 目前**只有** `[tool.pytest.ini_options]`——没有 `[build-system]`/`[project]`/`[project.scripts]`，`pip install -e .` 这条验收标准现在必然失败；无 `ruff.toml`/`mypy.ini`/`pyrightconfig.json`；Dataset/Provider/Pipeline Registry 未完成（`TODO.md` 早就承认"后续阶段"）。**部分完成**：`domain`/`persistence`/`providers`/`runtime`/`application` 五个包已从 `skills/_*` 迁出（H-I/H-II），但内部仍是 legacy import（"跨包引用清理"待办，`TODO.md`） |
-| G | 全部 12 项 Live Acceptance | ❌ 不适用当前阶段——前置的 B/E/F 大量未做，这一节假设的"每个 Run 恰好一个 EvidenceSet"这类断言依赖 B 部分先落地。本次也没有做真实的飞书端到端验证（需要开新会话，见教程第 40 章"未完成的部分"） |
-| H | 全部 8 项 Baseline 冻结 | ❌ 未做——前序阶段没有全部完成，`v1-architecture-baseline` tag 不存在，这一节的前提条件不成立 |
+| E | 全部 11 项主清单 + 5 项回归测试 | ❌ 10/11 未做——`deep_freeze`、Fact/Evidence canonical equality、`input_evidence_ids`、Missing Code 按 agent 细分、`age_at(evaluated_at)`、Snapshot 元数据四项均确认缺失（部分已实测复现，见并行核实报告）。**唯一已做**：canonical payload 与 raw HTTP bytes 命名分开（批 I，`raw_text_sha256`，早于这份评审就解决了）。<br>⏩ **此后已变**：拆成批 1-4 做完，`input_evidence_ids` 由裁定 16 的 `OriginRef` 四类来源取代（不是原样补一个字段），`kind` 铁律落地。见 `CLAUDE.md` 裁定 16、`TODO.md`"E 节全部完成" |
+| F | 全部 10 项 | ❌ 8/10 未做，含 `pyproject.toml` 目前**只有** `[tool.pytest.ini_options]`——没有 `[build-system]`/`[project]`/`[project.scripts]`，`pip install -e .` 这条验收标准现在必然失败；无 `ruff.toml`/`mypy.ini`/`pyrightconfig.json`；Dataset/Provider/Pipeline Registry 未完成（`TODO.md` 早就承认"后续阶段"）。**部分完成**：`domain`/`persistence`/`providers`/`runtime`/`application` 五个包已从 `skills/_*` 迁出（H-I/H-II），但内部仍是 legacy import（"跨包引用清理"待办，`TODO.md`）。<br>⏩ **此后已变**：当前必需部分（U-I 跨包引用清理 / U-II `pyproject.toml` 正式化 / U-III 移除动态 `sys.path` / U-IV ruff/mypy 基线）四个子批全部完成。console scripts 明确裁定**不做**（`tools/` 不是包，多数脚本靠 `__file__` 回溯仓库根，理由见 U-II）——`pip install -e .` 这条验收标准因此改写为"库代码可装"而非"CLI 脚本可装"，不是遗漏。3 项 Registry 仍未做，评审自己标注"后续阶段"，非当前必需 |
+| G | 全部 13 项 Live Acceptance | ❌ 不适用当前阶段——前置的 B/E/F 大量未做，这一节假设的"每个 Run 恰好一个 EvidenceSet"这类断言依赖 B 部分先落地。本次也没有做真实的飞书端到端验证（需要开新会话，见教程第 40 章"未完成的部分"）。<br>⏩ **此后已变**：G 节 13 项证据于 2026-09-24 全部集齐（含真机飞书触发 `BIGA-20260924-009` 成功走完全程），见 `TODO.md` 对应条目、教程第 58/59 章。独立 sign-off 已于 2026-09-24 由新会话完成（建造会话发现并修复了验证过程中暴露的两处真缺陷，不适合同时当裁判，故交新会话复核），**G 节已关闭**——复核做法与结论见 `TODO.md` 对应条目。本行保留批 M 当时的判断不改写——它记录的是那一次的核实范围，不是今天的状态 |
+| H | 全部 8 项 Baseline 冻结 | ❌ 未做——前序阶段没有全部完成，`v1-architecture-baseline` tag 不存在，这一节的前提条件不成立。<br>⏩ **此后已变**：8 项已全部做完，见本文件「§14 · H 节 Baseline 冻结」 |
 
 **结论**：批 M 只完成了这份 checklist 里 C、D 两节（且 C/D 内部也各有 1-2 项
 真遗漏，见上表），A/B/E/F/G/H 六节基本未动。这不是"忘了"——是核实过范围
@@ -1404,3 +1404,36 @@ Question Bridge（飞书承接 ask_user）—— 批 G 只做 Outbound + Trigger
 | `docs/tutorial/` | 冻结，只追加「⏩ 后续变动」指针；新章节从第 20 章起 |
 | `docs/README.md` | 补第三种文档形状：跨阶段迁移按主题命名 |
 | `CLAUDE.md` | 批 C 之后「Agent 不做算术」要扩写成「Agent 也不做编排」 |
+
+---
+
+## 14. H 节 Baseline 冻结（2026-09-24/25）
+
+追加 6 的表格里「H | 全部 8 项 Baseline 冻结」原来判 ❌，理由是"前序阶段
+没有全部完成"。E/F（当前必需部分）/G 三节此后陆续做完（TODO.md 有完整
+记录，追加 6 表格对应行已同步更正），前提条件不再成立——8 项逐条做完：
+
+| # | 项 | 结果 |
+|---|---|---|
+| 1 | 创建 `v1-architecture-baseline` tag | ✅ 打在本节所在的这次提交上 |
+| 2 | Schema 版本说明 | ✅ [`docs/guide/schema-rollback.md`](../guide/schema-rollback.md)——17 个版本各一句话，权威说明仍在 `schema.py` 逐条迁移体注释里，这份文档只提供入口，不重复叙事 |
+| 3 | Migration 回滚说明 | ✅ 同上一份文档。老实记录了一个真缺口：**没有自动化的迁移前快照机制**，回滚今天只能靠文件级备份；17 条迁移全是 additive 这一点让"不备份也大体能退"成立，但那是运气不是设计 |
+| 4 | 记录 OpenClaw Version | ✅ `OpenClaw 2026.9.5 (ec9c1a1)` |
+| 5 | 记录 Tool Policy Hash | ✅ `sha256:536212eafaedb6177b5325bef17267f5e9edb04a0299452ed5786fbf0f0eafd1` |
+| 6 | 记录 Agent Config Hash | ✅ `sha256:d72fcc48fc78b4a7c691dbbd98baa67c6e75a4d197715c3d511e1473c44aa169` |
+| 7 | 更新 Architecture 文档 | ✅ `architecture.md` 现状描述与 §12 路线图同批更新，见下一行 |
+| 8 | 更新 Roadmap | ✅ `architecture.md` §12——Phase 2 标记基本完成，Phase 3 范围吸收了这份 remediation checklist 自己列的"完成后再进入"清单（Dataset/Provider Registry、EOD、Emotion 统一迁移、Screening、Review、更多 Cron/systemd、Web） |
+
+🔴 **4/5/6 三项为什么是 hash，不是原文**：`openclaw.json` 的 `agents` 子树
+全是真实 `$HOME` 绝对路径，公开仓库纪律不允许抄进文档。计算方法固定在
+`tools/verify/config_baseline.py`（`tests/test_config_baseline.py` 钉住：
+同一份逻辑配置换个用户名跑，hash 必须不变——否则这个 hash 只能证明"在
+这台机器上没变"，证不了"配置本身没变"）：
+
+```bash
+python3 tools/verify/config_baseline.py
+```
+
+✅ **G 节独立 sign-off 已由用户另开的新会话完成**（见追加 6 表格 G 行、
+`TODO.md`、`CHANGELOG.md` 对应条目）——本节 H 节 8 项产出本身不依赖那次
+复核是否已经发生，两者可以并行，但记在这里避免读者以为还悬而未决。

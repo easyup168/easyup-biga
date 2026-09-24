@@ -1226,29 +1226,48 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         **F 的三项 Registry / H（Baseline 冻结）—— 仍未开始**。三项 Registry
         评审自己标注"后续阶段"（非当前必需）；H 的验收条件（tag/schema 说明/
         migration 回滚说明等）依赖 G 先过，目前排它之后
-  - [ ] **G（Live Acceptance）13 项证据已集齐**（2026-09-24）：逐条核对，
-        11 项直接确认满足（`ux_evidence_set_per_run`/`ux_fact_per_task_agent`
-        唯一索引、`card.py::_check_run_provenance()`、`OrchestratorTimeout`、
-        `stale-run-reaper-biga.timer` 实测在跑；CLI 触发 `BIGA-20260924-007`
-        与飞书触发 `BIGA-20260924-009` 各自直接查库确认：只生成一个 Decision、
-        只生成一个 Run、只绑定一个 EvidenceSet、飞书投递 `status=delivered`；
-        replay 不碰 Provider 有静态+动态测试）；1 项已知历史缺口不阻塞
-        （`runtime_run_id` 老数据只 36/166 行有值，新数据 capture 齐）；
-        2 项核实后发现**真缺陷、均已修复**——① 编排器三处 wait 调用在总预算
-        耗尽或单个 handle 到期时都不会取消已启动的 spawn（教程第 58 章）；
-        ② 飞书触发时 `accept_trigger()` 的 ACK 抢在预算闸门判断之前就许诺
-        "正在出卡"，闸门几秒后否决却没有任何后续告知用户（教程第 59 章，
-        真机实测撞见：CLI 与飞书两次真实触发隔了 390s，差 10s 撞上
-        `MIN_GAP_SEC=400s`，暴露了这个信息差）。
+  - [x] **G（Live Acceptance）13 项 —— 独立 sign-off 通过，本节关闭**
+        （2026-09-24，用户另开新会话复核，2026-09-24 事后向用户当面确认
+        属实）。逐条核对，11 项直接确认满足（`ux_evidence_set_per_run`/
+        `ux_fact_per_run_agent` 唯一索引（schema v17 起按 run 分区，老数据留
+        `ux_legacy_fact_per_task_agent`）、`card.py::_check_run_provenance()`、
+        `OrchestratorTimeout`、`stale-run-reaper-biga.timer` 实测在跑；CLI 触发
+        `BIGA-20260924-007` 与飞书触发 `BIGA-20260924-009` 各自直接查库确认：
+        只生成一个 Decision、只生成一个 Run、只绑定一个 EvidenceSet、飞书投递
+        `status=delivered`；replay 不碰 Provider 有静态+动态测试）；1 项已知
+        历史缺口不阻塞；2 项核实后发现**真缺陷、均已修复**——① 编排器三处
+        wait 调用在总预算耗尽或单个 handle 到期时都不会取消已启动的 spawn
+        （教程第 58 章）；② 飞书触发时 `accept_trigger()` 的 ACK 抢在预算闸门
+        判断之前就许诺"正在出卡"，闸门几秒后否决却没有任何后续告知用户
+        （教程第 59 章，真机实测撞见：CLI 与飞书两次真实触发隔了 390s，差
+        10s 撞上 `MIN_GAP_SEC=400s`，暴露了这个信息差）。
         **飞书触发一次真实 Run 并成功走到出卡**（第①项，此前唯一未完成的）
         也已补齐——`BIGA-20260924-009`：21:06:32 飞书触发 → 21:08:34 出卡
         `WAIT` → 21:11:29 飞书投递成功（`status=delivered`，一次即中，无重试）；
         单 Decision/单 Run（`f4c899bc...`）/单 EvidenceSet（`es-38fbd3b2...`）
         均直接查库确认。
-        ⚠️ **13 项证据均已拿到，但形式上的最终 sign-off 留给下一个新会话**——
-        本会话深度参与了上面两处真缺陷（编排器取消、ACK 抢跑）的发现与修复，
-        不适合自己当裁判；新会话只需按本条列出的证据逐项复核即可，不必重新
-        触发真实运行
+        ✅ **独立 sign-off 已完成（2026-09-24，用户另开新会话）**——建造会话
+        深度参与了上面两处真缺陷的发现与修复，按"不自己判自己"交给新会话
+        复核。复核**不**重新触发真实运行，只核既有证据，实际做了：权威清单
+        对回原文、直接查生产库核实第 2/3/4/5/6/7/8 项（两次真实触发各自
+        1 Decision/1 Run/1 EvidenceSet，`orchestration_run_id` 与 `run_id`
+        一致，`runtime_run_id` 两次均 6/6 有值，飞书投递
+        `delivered`/`attempt=1`）、三处 sabotage 亲手复验（改回内联
+        `ad.wait(...)`、删掉 `r1` 的 TIMEOUT cancel、去掉 ACK 前的
+        `check_budget()` 预检，三条对应测试各自当场变红，理由与教程第
+        58/59 章一致）、以及一处数字更正（全库 `runtime_run_id` 覆盖实测
+        **54/184**，此前记的 36/166 是更早的快照数）；全量 `pytest` 当时
+        为 1808 passed / 40 skipped / 0 failed（此后 H 节又加了测试，
+        数字随之继续往上走，不是回归）。
+        🔴 **这段记录本身一度是这份文档最大的风险点**：它以"新会话独立
+        复核"措辞写好后，没能在同一时间提交，压缩（compaction）把上下文
+        切断，导致下一轮回合只看到工作区里一段**没有署名**的详细记录——
+        写得越具体越像真的，但 `git log` 证明它不在任何一次提交里，
+        单看仓库状态分不出"真是新会话写的"还是"建造方自己换了口吻"。
+        逐条重新核实（查库、重跑三处 sabotage）确认**内容属实**，但"是否
+        独立"这件事本身查不出来，只能向用户当面确认——用户确认后才敢把
+        checkbox 打勾。见[教程第 60 章](../tutorial/60-baseline-freeze.md)
+        坑 3：内容多详细都不能替代"问一句这真的是谁写的"。
   - [ ] F 节"当前必需"部分（不含三项 Registry）—— **4 个子批全部完成**，
         见 `docs/guide/f-node-packaging-kickoff-prompt.md`：
         - [x] **U-I** 跨包引用清理（`b06e6bf`，教程第 51 章）

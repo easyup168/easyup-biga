@@ -1,0 +1,96 @@
+# Schema 版本与回滚
+
+> 📄 **操作** · 随环境更新；跑不通就是错的
+> **覆盖**：给定 `data/biga.db` 处于某个 `SCHEMA_VERSION`，需要回退到更早
+> 版本时的实际步骤 ｜ **不覆盖**：每个版本具体加了什么、为什么加——那些
+> 权威说明**只有一份**，在 `src/easyup_biga/persistence/schema.py` 每条
+> 迁移体正上方的注释里；下表只是从那里摘一句话方便查，不是第二套口径
+
+## 当前版本（`v1-architecture-baseline` 冻结时）
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'src')
+from easyup_biga.persistence.schema import SCHEMA_VERSION, MIGRATIONS
+print('SCHEMA_VERSION =', SCHEMA_VERSION, '| 迁移条数 =', len(MIGRATIONS))
+"
+```
+
+```
+SCHEMA_VERSION = 17 | 迁移条数 = 17
+```
+
+| 版本 | 一句话（摘自 `schema.py` 对应迁移体正上方的注释） |
+|---|---|
+| v1 | 初始 schema——`agent_runs` / `raw_market_snapshot` 等基础表 |
+| v2 | 删掉从未被写入的 token 列 |
+| v3 | `agent_verdicts` —— Specialist 的判定原件 |
+| v4 | `decision_ids` —— 决策编号的分配器 |
+| v5 | 给 `decision_ids` 补上只追加触发器 |
+| v6 | 修订链只能线性，不许分叉 |
+| v7 | 运行身份 + 显式状态机 |
+| v8 | `agent_verdicts` 加 `kind`，区分旧 `AgentVerdict` / 新 `FactBundle` / 新 `AgentAssessment` |
+| v9 | 收敛 `run_id` 三同名 |
+| v10 | `run_id` capture 贯穿全链 |
+| v11 | 一个 `(task_id, agent)` 至多一份 fact 原件 |
+| v12 | 外发通知 outbox + 投递日志 |
+| v13 | `raw_market_snapshot` 加 `raw_text` —— 让 raw 层真的存 raw |
+| v14 | 入站幂等 —— `decision_ids` 的号绑一次外部请求 |
+| v15 | `fact_trading_calendar` —— 第一张真正的 `fact_*` 表 |
+| v16 | Run Provenance —— 「这张卡属于哪次执行」变成可查询的列 |
+| v17 | Fact 唯一约束按 **run** 分区 |
+
+## 为什么没有 DOWN migration
+
+三个原因叠在一起，让"代码级自动回滚"投入产出比很低：
+
+1. **迁移体本身只做加法**——`CREATE TABLE`/`ALTER TABLE ADD COLUMN`/追加
+   触发器，17 条里没有一条 `DROP`。逆操作要么是空操作（删一个从未被读的列
+   没有风险但也没有必要），要么本身就危险（删一个可能已经被写入真实数据
+   的列 = 丢数据）。
+2. **SQLite 的 `ALTER TABLE` 没有删列能力**——真要"撤销"一次加列，唯一
+   办法是整表重建（建新表、搬数据、改名），这本身就是一次不比正向迁移
+   更简单的操作，不存在"自动挡"。
+3. **append-only 表由触发器强制**（架构不变式，见 `CLAUDE.md`）——`UPDATE`/
+   `DELETE` 会被触发器直接拒绝，"回滚数据"在这些表上根本不是选项，
+   唯一的路是回到某个更早的**文件级快照**。
+
+⇒ 三条原因都指向同一个结论：**能回滚的不是 schema 代码，是数据文件本身。**
+
+## 实际怎么回滚
+
+🔴 **前提**：下面第 2 步要求迁移前已有一份文件级备份。**本项目目前没有
+自动化的"迁移前自动打快照"机制**——这是老实记录的一个真实缺口，不是
+假装有这个能力。
+
+1. 停掉写入方，确认没有并发写：
+   ```bash
+   systemctl --user list-timers 'biga-card*' 'notify-worker-biga*' 'stale-run-reaper*'
+   # 确认没有正在跑的实例（.biga-card.lock 无人持有）
+   ```
+2. WAL 模式下，数据可能还没从 `-wal` 文件写进主库文件，先 checkpoint：
+   ```bash
+   sqlite3 data/biga.db "PRAGMA wal_checkpoint(TRUNCATE);"
+   ```
+3. 用迁移前的文件级备份整份替换：
+   ```bash
+   cp data/biga.db.bak-<迁移前时间戳> data/biga.db
+   ```
+   **没有备份**：由于全部 17 条迁移都是 additive（新表/新列/新触发器），
+   老代码不认识新列/新表会直接忽略它们——多数情况下"只回退代码、不动
+   数据文件"也能跑（新列多出来的数据老代码读不到，但不会因此报错）。
+   这只是 additive 迁移天然带来的权宜，**不是设计出来的回滚能力**，遇到
+   任何一条迁移改变了已有列的语义（目前没有，但未来可能有）就不成立。
+
+## 验证
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'src')
+from easyup_biga.persistence.schema import SCHEMA_VERSION
+print(SCHEMA_VERSION)
+"
+sqlite3 data/biga.db "PRAGMA integrity_check;"
+```
+
+预期：`SCHEMA_VERSION` 打印出回滚目标那个版本号；`integrity_check` 打印 `ok`。
