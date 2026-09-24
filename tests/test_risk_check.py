@@ -96,7 +96,7 @@ class TestCoverage:
         wired[1], wired[2] = up("market"), up("emotion", stance="修复")
         v = build([1, 2])
         assert v.result["coverage_ratio"] == 0.4
-        assert v.result["upstream_agents"] == ["emotion", "market"]
+        assert v.result["upstream_agents"] == ("emotion", "market")
 
     def test_缺席的agent必须进missing(self, wired):
         wired[1] = up("market")
@@ -136,12 +136,12 @@ class TestThresholds:
 
     def test_没碰到就是空列表不是缺失(self, wired):
         wired[1] = up("market", result={"trade_date": "20260918", "volume_ratio": 1.0})
-        assert build([1]).result["tripped_thresholds"] == []
+        assert build([1]).result["tripped_thresholds"] == ()
 
     def test_字段缺失不算触发(self, wired):
         """上游没给这个字段 ≠ 阈值没被碰到，但也不能算碰到了。"""
         wired[1] = up("market")
-        assert build([1]).result["tripped_thresholds"] == []
+        assert build([1]).result["tripped_thresholds"] == ()
 
 
 class TestUpstreamIntegrity:
@@ -180,7 +180,8 @@ class TestFreshness:
         v = build([1])
         assert v.result["session_live"] is False
         assert "stale_evidence_count" not in v.result
-        assert v.result["max_staleness_sec"] > 0   # 年龄照报，解读交给 Agent
+        assert v.result["max_evidence_age_sec"] > 0   # 年龄照报，解读交给 Agent
+        assert v.result["max_source_lag_sec"] >= 0  # 取数滞后另报，两者不是一回事
 
     def test_盘中且同日才算时段进行中(self, wired, monkeypatch):
         monkeypatch.setattr(rc, "now_cn",
@@ -374,7 +375,7 @@ class TestForeignDecisionUpstream:
         """
         ids = self._full(wired, "BIGA-20260918-999")
         v = build(ids, task_id="BIGA-20260918-001")
-        assert v.result["foreign_task_ids"] == ["BIGA-20260918-999"]
+        assert v.result["foreign_task_ids"] == ("BIGA-20260918-999",)
         assert v.result["upstream_attribution"]["market"] == "BIGA-20260918-999"
         assert {e.field for e in v.evidence} == set(v.result), \
             "result 的每个键都要有证据（铁律 3）"

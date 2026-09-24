@@ -237,7 +237,7 @@ class TestParseFailureIsNotQuietNews:
 #
 #   最新一条 19:58，取回 20:00  ⇒  as_of=15:00  ⇒  staleness 5 小时
 #
-# 实际只有 2 分钟。这会污染 staleness_sec、risk 的 max_staleness_sec、
+# 实际只有 2 分钟。这会污染 staleness_sec、risk 的 max_evidence_age_sec、
 # 新鲜度判断，以及日后所有数据质量统计。
 #
 # 🔴 它**盘中是对的** —— 这正是它躲过一整天实测的原因：

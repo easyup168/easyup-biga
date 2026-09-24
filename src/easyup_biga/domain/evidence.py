@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ._freeze import deep_freeze, thaw
+
 __all__ = ["Evidence", "CN_TZ", "now_cn"]
 
 # A 股市场时区。证据的时间一律带 tzinfo —— naive datetime 在跨日聚合时会静默错位。
@@ -71,6 +73,11 @@ class Evidence:
     evidence_set_id: str | None = None
 
     def __post_init__(self) -> None:
+        # 🔴 先冻结再校验（批 R，评审 E-17）：这样「被校验的那份内容」与
+        #    「将被落库的那份内容」是同一份。反过来（先校验后冻结）中间留着
+        #    一个窗口，而 `value` 里 14.7% 是 dict/list —— 调用方手上那个
+        #    原始对象改一下，已经过检的证据就变了，且不会再触发任何校验。
+        object.__setattr__(self, "value", deep_freeze(self.value))
         for name in ("field", "source"):
             v = getattr(self, name)
             if not isinstance(v, str) or not v.strip():
@@ -91,10 +98,10 @@ class Evidence:
         #    「as_of <= retrieved_at」，**从不与真实当前时刻比较**。
         #    于是一对系统性错位、但彼此只差 60 秒的时间戳：
         #
-        #        staleness_sec = 60        # 1 分钟，看起来非常新鲜
+        #        source_lag_sec = 60       # 1 分钟，看起来非常新鲜
         #        而 as_of 实际比现在晚了 3 天
         #
-        #    `staleness_sec` 是个差值 —— 差值对**共模误差免疫**。
+        #    `source_lag_sec` 是个差值 —— 差值对**共模误差免疫**。
         #    只要上游的 as_of 和 retrieved_at 由同一段错误逻辑派生，
         #    它就会把日期错误完整伪装成「数据是新鲜的」。
         #
@@ -105,29 +112,53 @@ class Evidence:
             raise ValueError(
                 f"Evidence.retrieved_at ({self.retrieved_at.isoformat()}) 在未来 —— "
                 f"当前是 {now_cn().isoformat()}。\n"
-                f"  时间戳整体错位时 staleness_sec 仍会显得很新鲜（它是差值，"
+                f"  时间戳整体错位时 source_lag_sec 仍会显得很新鲜（它是差值，"
                 f"对共模误差免疫），所以这条必须锚在真实时钟上。\n"
                 f"  容差 {_FUTURE_TOLERANCE_SEC}s，只为机器间的时钟抖动留口子。"
             )
 
     @property
-    def staleness_sec(self) -> int:
-        """数据有多旧：取回时刻 − 数据时刻，单位秒。
+    def source_lag_sec(self) -> int:
+        """**取数滞后**：取回时刻 − 数据时刻，单位秒。
 
-        ⚠️ **这是个差值，对共模误差免疫**（F15）——
-        as_of 和 retrieved_at 一起被算错时它不会有任何异常表现。
-        真正的「离现在多久」用 `age_sec`。
+        🔴 改名自 `staleness_sec`（批 R，评审 E-19）。旧名字读起来像「数据有多旧」，
+        于是它**真的被当成年龄用了** —— `risk_check` 把它加进 result 时的标签
+        写的是「最旧证据的年龄(秒)」，而它根本不是年龄。
+
+        它衡量的是「从数据产生到我们取到它，隔了多久」。一份三天前冻结的快照，
+        只要当初抓取只花了 2 秒，这个数就是 **2** —— 看起来无比新鲜。
+
+        ⚠️ **这是个差值，对共模误差免疫**（F15）—— as_of 和 retrieved_at 由
+        同一段错误逻辑一起算错时，它不会有任何异常表现。
+        要问「有多旧」请用 `age_at(评估时刻)`。
         """
         return int((self.retrieved_at - self.as_of).total_seconds())
 
+    def age_at(self, evaluated_at: datetime) -> int:
+        """这条证据描述的时刻，距 `evaluated_at` 多久（秒）。
+
+        🔴 **必须显式传入评估时刻**（批 R，评审 E-19）。读一份历史证据时，
+        「它有多旧」只在「相对于哪一刻」下才有意义：拿今天去减一个月前的决策，
+        得到的是一个每天都在变大、且与当时的判断毫无关系的数。
+        要求调用方把基准时刻说出来，就没法不小心用错基准。
+        """
+        if not isinstance(evaluated_at, datetime):
+            raise TypeError(f"age_at 需要 datetime 基准时刻，收到 {type(evaluated_at).__name__}")
+        if evaluated_at.tzinfo is None:
+            raise ValueError("age_at 的基准时刻必须带时区 —— naive datetime 是时区错位的头号来源")
+        return int((evaluated_at - self.as_of).total_seconds())
+
     @property
     def age_sec(self) -> int:
-        """这条证据描述的时刻，距**现在**多久。
+        """这条证据描述的时刻，距**此刻**多久。
 
-        与 `staleness_sec` 的区别正是 F15 的要害：
+        与 `source_lag_sec` 的区别正是 F15 的要害：
         前者锚在真实时钟上，后者只是两个可能同时错掉的数之差。
+
+        ⚠️ 锚在 `now_cn()` 上 ⇒ **每次调用结果都不同**。任何要落库、上卡、
+        或被回放比对的数字都不能用它，用 `age_at(一个记录下来的时刻)`。
         """
-        return int((now_cn() - self.as_of).total_seconds())
+        return self.age_at(now_cn())
 
     @property
     def display_label(self) -> str:
@@ -139,7 +170,8 @@ class Evidence:
         return {
             "field": self.field,
             "source": self.source,
-            "value": self.value,
+            # 解冻：`value` 冻结后可能是 mappingproxy/tuple，json.dumps 不认前者。
+            "value": thaw(self.value),
             "as_of": self.as_of.isoformat(),
             "retrieved_at": self.retrieved_at.isoformat(),
             "calc_version": self.calc_version,

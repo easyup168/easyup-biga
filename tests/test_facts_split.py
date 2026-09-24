@@ -272,7 +272,9 @@ class TestCrossCheckEvidenceSet:
         wired[1] = _up("market", "sh_close", evidence_set_id="es-SAME")
         wired[2] = _up("technical", "close", evidence_set_id="es-SAME")
         v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
-        assert v.result["cross_check_conflict"] == []
+        # 批 R 起 result 的值是递归冻结的：list → tuple（序列化后仍是数组，
+        # 卡片与落库逐字节不变）。这里比的是**内存形态**，所以写 ()。
+        assert v.result["cross_check_conflict"] == ()
 
     def test_P4_一条没有evidence_set_id则退回raw_hash_不跳过(self, wired):
         # market 有 es-id、technical 没有（老 Specialist）→ 退回比 raw_hash

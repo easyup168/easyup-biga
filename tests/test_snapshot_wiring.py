@@ -178,7 +178,7 @@ class TestCrossCheckJudge:
         wired[1] = _up("market", "sh_close", "HASH_SHARED")
         wired[2] = _up("technical", "close", "HASH_SHARED")
         v = risk.build_fact_bundle(verdict_ids=[1, 2], store=False, task_id=TID)
-        assert v.result["cross_check_conflict"] == []
+        assert v.result["cross_check_conflict"] == ()
 
     def test_P2_退回独立抓取_raw_hash不同_报红(self, wired):
         """🔴 P2：technical 没传 --evidence-set-id 悄悄退回独立抓取 ⇒ 它的 raw_hash

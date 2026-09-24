@@ -119,8 +119,8 @@ class TestEvidence:
         with pytest.raises(ValueError, match="source"):
             Evidence(field="x", source="  ", value=1, as_of=T0, retrieved_at=T0)
 
-    def test_staleness_sec(self):
-        assert ev(ago=90).staleness_sec == 90
+    def test_source_lag_sec(self):
+        assert ev(ago=90).source_lag_sec == 90
 
     def test_序列化往返(self):
         e = ev(label="涨停家数", calc_version="v1")
@@ -279,12 +279,12 @@ class TestVerdictBasics:
 
     def test_max_staleness_取最旧那条(self):
         v = verdict(evidence=[ev(ago=10), ev(ago=900)])
-        assert v.max_staleness_sec == 900
+        assert v.max_source_lag_sec == 900
 
     def test_无证据时max_staleness为负一(self):
         v = verdict(result={}, evidence=[], verdict="UNKNOWN",
                     status="partial", missing=["无数据"])
-        assert v.max_staleness_sec == -1
+        assert v.max_source_lag_sec == -1
 
     def test_序列化往返(self):
         v = verdict(status="partial", verdict="WARNING",

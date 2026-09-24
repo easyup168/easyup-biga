@@ -28,9 +28,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field
-from types import MappingProxyType
 from typing import Any, Mapping
 
+from ._freeze import deep_freeze, thaw
 from .evidence import Evidence
 from .missing import MissingItem
 from .verdict import (
@@ -71,7 +71,7 @@ class FactBundle:
             self, "missing", tuple(MissingItem.coerce(m) for m in self.missing))
         object.__setattr__(self, "evidence", tuple(self.evidence))
         object.__setattr__(self, "warnings", tuple(self.warnings))
-        object.__setattr__(self, "result", MappingProxyType(dict(self.result)))
+        object.__setattr__(self, "result", deep_freeze(self.result))
         check_fact_invariants(
             agent=self.agent, task_id=self.task_id, status=self.status,
             verdict=self.verdict, result=self.result,
@@ -87,7 +87,7 @@ class FactBundle:
             "agent": self.agent,
             "status": self.status,
             "verdict": self.verdict,
-            "result": dict(self.result),
+            "result": thaw(self.result),
             "data_completeness": self.data_completeness,
             "evidence": [e.to_dict() for e in self.evidence],
             "warnings": list(self.warnings),
