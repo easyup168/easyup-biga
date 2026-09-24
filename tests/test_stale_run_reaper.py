@@ -1,4 +1,5 @@
-"""stale_run_reaper：扫非终态 run + 按 created_at 判过期 + CAS 安全收敛（外部评审 §14）。
+"""stale_run_reaper：扫非终态 run + 按最后一次推进时刻判过期 + CAS 安全收敛
+（外部评审 §14）。
 
 探针：
   P1  只有非终态 + 超过阈值的 run 会被找到（`find_stale_runs`，纯读）。
@@ -6,6 +7,8 @@
   P3  真转移会同时入队一条 `run_failed` 通知（`enqueue_run_failed` 幂等）。
   P4  TOCTOU：候选生成之后、真正转移之前状态变了（已经到终态 / 变成别的非终态）
       ⇒ 不误覆盖（CAS 拒绝）。
+  P5  判据是「最后一次推进」不是「起跑时刻」：起跑很久但刚推进的 run
+      不该被误杀（三轮复核真机复现的真实缺陷）。
 
 这是纯函数工具（`docs/guide/orchestration-kickoff-prompt.md` 明确的范围），
 不接调度——不测任何 cron/systemd timer。
@@ -23,7 +26,14 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "tools" / "maintenance"))
 
-from _contract import RunState, new_run_context, now_cn  # noqa: E402
+from _contract import (  # noqa: E402
+    RunContext,
+    RunState,
+    new_run_context,
+    new_run_id,
+    new_trigger_id,
+    now_cn,
+)
 from _store import (  # noqa: E402
     init_schema,
     open_run,
@@ -54,6 +64,19 @@ def _age_past_threshold(monkeypatch, threshold_sec, extra_sec=1):
     monkeypatch.setattr(reaper, "now_cn", lambda: future)
 
 
+def _open_with_old_created_at(db, decision_id, age_sec) -> str:
+    """开一个 `created_at` 是「很久以前」的 run——`decision_runs` 只追加，
+    事后改不了 `created_at`，所以只能在构造 `RunContext` 时就把它定成旧值
+    （`new_run_context()` 自动盖的是真实当前时刻，这里绕开它）。用来验证
+    「起跑很久，但最后一次推进是刚才」不该被误判成 stale（三轮复核真机复现）。
+    """
+    old_created = (now_cn() - timedelta(seconds=age_sec)).isoformat()
+    ctx = RunContext(trigger_id=new_trigger_id("cli"), decision_id=decision_id,
+                     run_id=new_run_id(), evidence_set_id=None, origin="cli",
+                     non_interactive=True, created_at=old_created)
+    return open_run(ctx, path=db)
+
+
 class TestFindStaleRuns:
 
     def test_未超过阈值不算stale(self, db):
@@ -81,6 +104,26 @@ class TestFindStaleRuns:
         _age_past_threshold(monkeypatch, 1200)
         reaper.find_stale_runs(1200, path=db)
         assert run_events(rid, path=db)[-1]["to_state"] == RunState.RECEIVED
+
+    def test_起跑很久但刚推进_不算stale(self, db):
+        """🔴 2026-09-24（三轮复核，真机 PoC）：第一版判据用
+        `decision_runs.created_at`（起跑时刻），不是最后一次推进的时刻——
+        一个起跑很久、但刚刚才正常推进的 run 会被误判成 stale。这里构造
+        「起跑于 1300s 前，但最后一条转移是现在」，判据必须看后者。"""
+        rid = _open_with_old_created_at(db, "BIGA-20260101-001", age_sec=1300)
+        transition(rid, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
+        transition(rid, RunState.PREFLIGHTED, RunState.SNAPSHOT_FROZEN, path=db)
+        transition(rid, RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING, path=db)
+        assert reaper.find_stale_runs(1200, path=db) == [], \
+            "起跑很久不该算 stale——刚才还在正常推进"
+
+    def test_起跑很久且真的没再推进_算stale(self, db, monkeypatch):
+        """对照组：起跑很久、且最后一次推进也是很久以前（真的卡住了）——
+        这种才该被判成 stale，确认修法没有连带失效。"""
+        rid = _open_with_old_created_at(db, "BIGA-20260101-001", age_sec=1300)
+        _age_past_threshold(monkeypatch, 1200)  # 把「现在」推到最后一次事件之后
+        stale = reaper.find_stale_runs(1200, path=db)
+        assert len(stale) == 1 and stale[0]["run_id"] == rid
 
 
 class TestReap:

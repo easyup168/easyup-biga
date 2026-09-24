@@ -18,9 +18,19 @@
 地盘」）。调用者手工跑，或者未来某一批接进 systemd timer，这里不管。
 
 判据：`run_events` 最新一条 `to_state` 不在 `TERMINAL_STATES` 里（还在跑）
-+ `decision_runs.created_at` 距今已经超过 `threshold_sec`。两张表都没有
-`deadline_at` 这类字段，用起点时间近似——阈值需要明显宽松于正常出卡耗时
-（170~200s）与硬超时兜底（`CARD_DEADLINE_SEC+60`=840s），默认 20 分钟。
++ 那条事件的 `at`（最后一次真正推进的时刻）距今已经超过 `threshold_sec`。
+阈值需要明显宽松于正常出卡耗时（170~200s）与硬超时兜底
+（`CARD_DEADLINE_SEC+60`=840s），默认 20 分钟。
+
+⚠️ 2026-09-24（三轮复核，真机 PoC）：第一版用的是 `decision_runs.created_at`
+（run **起跑**的时刻），不是最后一次推进的时刻——判据因此其实是"起跑太久"，
+不是"没推进太久"。真机复现：一个起跑很久、但刚刚才正常推进到 `STAGE1_RUNNING`
+的 run 会被误判成 stale 并收成 TIMEOUT，编排器接着想推进时被 CAS 正确拒绝
+（不会静默覆盖），但一次健康的运行就此被打断。走 `bin/biga-card` 撞不到默认
+配置（外层硬超时 840s < 阈值 1200s，会先被外层杀掉），但把
+`BIGA_CARD_DEADLINE_SEC` 调过 1140s，或直接跑 `orchestrator.py`（没有外层
+timeout——正是 D-3 要防的场景），就会撞上。改用 `run_events` 最新一条的
+`at` 修正。
 
 转移时用 `find_stale_runs` 扫描到的**那一刻**的状态做 `expected`（防
 TOCTOU——`transition()` 内部的 `UNIQUE(run_id, seq)` CAS 会核对 `expected` 是否
@@ -61,16 +71,17 @@ DEFAULT_THRESHOLD_SEC = 1200
 def find_stale_runs(
     threshold_sec: float, *, path: pathlib.Path | str | None = None
 ) -> list[dict]:
-    """扫描非终态、且已经超过 `threshold_sec` 未推进的 run（只读，不改任何状态）。
+    """扫描非终态、且最后一次推进已经超过 `threshold_sec` 的 run（只读，不改任何状态）。
 
-    「非终态」由每个 run 最新一条 `run_events.to_state` 决定；「太久」用
-    `decision_runs.created_at`（run 开始的时刻）与当前时刻的差近似——没有更精确
-    的 deadline 字段可用。
+    「非终态」由每个 run 最新一条 `run_events.to_state` 决定；「太久」用那条
+    事件自己的 `at`（最后一次真正推进的时刻）与当前时刻的差——**不是**
+    `decision_runs.created_at`（run 起跑的时刻）。用起跑时刻近似会把"起跑很久
+    但刚刚还在正常推进"的 run 误判成 stale（三轮复核真机复现，见模块 docstring）。
     """
     now = now_cn()
     with connect(path, readonly=True) as conn:
         rows = conn.execute(
-            """SELECT dr.run_id, dr.decision_id, dr.created_at, re.to_state
+            """SELECT dr.run_id, dr.decision_id, re.to_state, re.at AS last_at
                  FROM decision_runs dr
                  JOIN run_events re ON re.run_id = dr.run_id
                 WHERE re.seq = (SELECT MAX(seq) FROM run_events
@@ -80,7 +91,7 @@ def find_stale_runs(
     for r in rows:
         if r["to_state"] in TERMINAL_STATES:
             continue
-        age = (now - datetime.fromisoformat(r["created_at"])).total_seconds()
+        age = (now - datetime.fromisoformat(r["last_at"])).total_seconds()
         if age >= threshold_sec:
             stale.append({"run_id": r["run_id"], "decision_id": r["decision_id"],
                          "state": r["to_state"], "age_sec": age})
