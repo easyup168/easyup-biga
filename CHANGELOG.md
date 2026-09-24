@@ -15,6 +15,37 @@
 
 ## [未发布]
 
+### 🐛 修复 · Isolation 三态测试的 mock 名单漏了一项，干净机器上假红（外部评审 A 节 · 二）
+
+`tools/verify/isolation.py::main()` 依次调用 5 个检查（`check_i1` / `check_i2` /
+`check_r2` / `check_namespaces` / `check_ports`），而 `tests/test_isolation.py`
+里两条三态测试各自手抄了一份要 monkeypatch 的检查名字元组，漏了
+`check_namespaces`。这台开发机因为已经装好 3 个正确命名的 systemd 单元、
+`check_namespaces` 真实调用恰好返回 `ok`，与被测场景"凑巧"一致，掩盖了名单
+缺一项这件事。
+
+实测复现：把 `SYSTEMD_USER` 指到不存在的路径（模拟一台从未装过 BigA 服务的
+干净机器/CI），`check_namespaces` 真实返回 `UNKNOWN`，混进本该纯 "ok" 的模拟
+场景，`test_三态各自的退出码可区分` 假红成 `assert 2 == 0`——错误看起来像三态
+汇总逻辑坏了，实际是测试的 mock 名单比生产代码的检查列表少一项。任何全新
+clone、任何还没跑过 `daemon install` 的 CI 容器，第一次跑 `pytest -q` 就会
+在这条测试上无端失败。
+
+修法不是加一条"断言两份名单相等"的检查（那只是把重复挪了个位置），是让
+`main()` 和测试共用同一份名单：新增 `isolation.checks(before)` 返回
+`(名字, 可调用对象)` 列表，`main()` 循环调用它，测试从它取要 monkeypatch 的
+名字。`check_i2` 比其余四个多一个 `before` 参数，用 `functools.partial`
+统一成同一种签名，不给其余四个也硬塞一个用不到的参数。
+
+顺带核实了外部评审 A 节剩下的三项短语：「验证 ZIP / Git 两种测试模式」
+（`tests/_scan.py` + `tests/test_scan_fallback.py` 早已存在且被真实子进程
+验证过，来自更早一轮评审，评审这次显然看的是旧快照，不需要再做）；
+「统一 stdout/stderr 契约」与「收紧 subprocess cleanup」排查后没有找到可
+复现的具体缺陷（现有 `Popen` 调用点都已是 `try/finally`，仅有的生产
+`Popen` 是故意脱离父进程的异步触发设计），记录下来但不强行改。
+
+测试 1485 → 1486。详见 `docs/tutorial/46-isolation-registry-drift.md`。
+
 ### ✨ 新增 · 外部评审 E 节（一）：证据得**支持**那个值；缺席得**对得上号**
 
 E 节 11 项，本批做两项 —— 都是实测复现过的静默 fail-open。其余九项没做，

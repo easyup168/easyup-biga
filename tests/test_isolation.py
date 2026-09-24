@@ -35,6 +35,13 @@ from _scan import repo_files  # noqa: E402
 import isolation  # noqa: E402
 
 
+#: 三态汇总要 monkeypatch 哪些检查——从 `isolation.checks()` 取名字，
+#: 不是自己另抄一份元组。`before=None` 只是为了拿名字，不会被真的调用
+#: （见下面 `_check_names` 的说明）。
+def _check_names() -> list[str]:
+    return [name for name, _ in isolation.checks(before=None)]
+
+
 class TestThreeState:
     """F18：`UNKNOWN` ≠ `PASS`（红线 R-3 在输出上的落点）。"""
 
@@ -61,7 +68,7 @@ class TestThreeState:
         def fake(res, *a, **kw):
             res.unknown("模拟：什么都没扫到")
 
-        for fn in ("check_i1", "check_i2", "check_r2", "check_ports"):
+        for fn in _check_names():
             monkeypatch.setattr(isolation, fn, fake)
         rc = isolation.main([])
         capsys.readouterr()
@@ -73,13 +80,43 @@ class TestThreeState:
         for kind in ("ok", "unknown", "fail"):
             def fake(res, *a, _k=kind, **kw):
                 getattr(res, _k)("模拟")
-            for fn in ("check_i1", "check_i2", "check_r2", "check_ports"):
+            for fn in _check_names():
                 monkeypatch.setattr(isolation, fn, fake)
             codes[kind] = isolation.main([])
             capsys.readouterr()
         assert codes["ok"] == 0
         assert len({codes["unknown"], codes["fail"]}) == 2, codes
         assert 0 not in (codes["unknown"], codes["fail"])
+
+    def test_干净机器上不装systemd服务也不会污染三态模拟(self, monkeypatch, capsys):
+        """🔴 外部深度评审：「Isolation 测试和生产检查项漂移」，实测复现。
+
+        修复前，上面两条测试各自手抄了一份检查名字的元组，漏了
+        `check_namespaces`。干净机器（没装过任何 BigA systemd 服务——
+        全新 clone、CI、或任何还没跑过 `daemon install` 的环境）上
+        `check_namespaces` 真实返回 `UNKNOWN`（`SYSTEMD_USER` 目录不存在），
+        这个没被 mock 掉的真实调用会混进本该纯 "ok" 的场景，
+        `test_三态各自的退出码可区分` 因此假红——红的原因和被测逻辑无关，
+        是环境状态漏进了本该完全受控的单测。
+
+        本测试直接模拟那台"干净机器"（把 `SYSTEMD_USER` 指到不存在的路径，
+        强迫 `check_namespaces` 真实返回 UNKNOWN），断言"ok" 场景依然是纯的
+        —— 证明修复后不会重新踩这个坑，不管跑测试的机器装过什么服务。
+        """
+        monkeypatch.setattr(isolation, "SYSTEMD_USER",
+                             pathlib.Path("/nonexistent/for/this/test"))
+
+        def fake_ok(res, *a, **kw):
+            res.ok("模拟")
+
+        for fn in _check_names():
+            monkeypatch.setattr(isolation, fn, fake_ok)
+        rc = isolation.main([])
+        capsys.readouterr()
+        assert rc == 0, (
+            "干净机器（没有 systemd 用户单元目录）上，纯 \"ok\" 模拟场景"
+            f"的退出码变成了 {rc}——说明有检查没被 mock 到，"
+            "它的真实结果混进了本该完全受控的场景。")
 
 
 class TestNothingToCheck:

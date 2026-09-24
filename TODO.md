@@ -1162,7 +1162,9 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         缺失项合并掉。测试 1402 → 1408
   - [ ] 评审 E（Contract 与数据质量）/F（Package 与 Registry）/
         G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理。
-        A 节的 monkeypatch 顺序依赖已修复，见批 Q；E 节前两项见批 P
+        A 节的 monkeypatch 顺序依赖已修复，见批 Q；A 节剩余四项已核实（一项
+        早已修好、两项无可复现缺陷、Isolation Registry 漂移已修），见批 R；
+        E 节前两项见批 P
 
 - [x] 批 P · 外部评审 E 节（一）：E-16 值一致 + E-18 缺席对号 —— **2026-09-24**。
       `check_fact_invariants` 新增「result 的值必须与同名 Evidence 一致」
@@ -1243,6 +1245,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         依赖顺序）。且批 Q 自己改过的 `test_risk_check.py` 又漏了一处
         （`TestStageTopology._lr()` 加载 `latency_report`）——同一个文件、
         同一次提交，仍然漏网，已补上。测试 1441 → 1445。
+
+- [x] 批 R · 外部评审 A 节剩余四项核实 + Isolation Registry 漂移修复 —— **2026-09-24**。
+      A4（ZIP/Git 双模式）发现在更早一轮评审（`d83ff2c`/`d20bed1`/`72cce1b`）
+      已经修好，`tests/test_scan_fallback.py` 真的把仓库剥掉 `.git` 跑真实子
+      进程验证过，评审这次看的是旧快照，**不需要再做**；A3（stdout/stderr
+      契约）、A5（subprocess cleanup）排查后没找到可复现的具体缺陷，记录但
+      不强行改。A2（Isolation Registry 漂移）核实为真：`isolation.py::main()`
+      调 5 个检查，`tests/test_isolation.py` 的三态测试手抄的 mock 名单漏了
+      `check_namespaces`，这台机器因为已装好 3 个服务、该检查恰好返回 ok 而
+      掩盖了漏洞；🔴 真实复现：把 `SYSTEMD_USER` 指到不存在路径模拟干净机器，
+      `test_三态各自的退出码可区分` 假红成 `assert 2 == 0`。修法是新增
+      `isolation.checks(before)` 作唯一名单，`main()` 与测试共用，
+      `check_i2` 的额外参数用 `functools.partial` 统一形状。测试
+      1485 → 1486。详见 `docs/tutorial/46-isolation-registry-drift.md`、
+      `CHANGELOG.md`
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

@@ -36,10 +36,12 @@ R-2         nvm 的 bin 目录里没有 openclaw
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import pathlib
 import re
 import sys
+from typing import Callable
 
 # 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -374,6 +376,33 @@ def check_i2(res: Result, before: str | None) -> None:
                  "🔴 要么是我们写的，要么是邻居自己在跑 —— 必须查清楚是哪一种")
 
 
+def checks(before: str | None) -> list[tuple[str, Callable[[Result], None]]]:
+    """三态汇总要跑哪些检查 —— `main()` 和它自己的测试共用这一份名单。
+
+    🔴 外部深度评审：「Isolation 测试和生产检查项漂移」。实测复现过的后果——
+    `tests/test_isolation.py::TestThreeState` 手抄了一份检查名字的元组，
+    漏了 `check_namespaces`。干净机器（还没装过任何 BigA systemd 服务，
+    比如全新 clone 或 CI）上 `check_namespaces` 真实返回的是 `UNKNOWN`
+    （`SYSTEMD_USER` 目录都不存在），这个未被 mock 掉的真实调用会混进
+    本该纯 "ok" 的模拟场景，`main()` 的三态汇总因此判成 `UNKNOWN`
+    而不是 `PASS` —— 测试在这台机器上假红，且红的原因与被测逻辑无关。
+
+    ⇒ 名单只写这一处，`main()` 循环调用它，测试从同一个函数取要 monkeypatch
+    的名字 —— 不是「测试的名单」与「生产的名单」两份手抄，是同一份。
+    新增一个检查只改这里，两边不可能不同步。
+
+    `check_i2` 需要额外的 `before` 参数，其余检查只吃 `res` 一个参数——
+    用 `functools.partial` 把两种形状统一成 `Callable[[Result], None]`。
+    """
+    return [
+        ("check_i1", check_i1),
+        ("check_i2", functools.partial(check_i2, before=before)),
+        ("check_r2", check_r2),
+        ("check_namespaces", check_namespaces),
+        ("check_ports", check_ports),
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="BigA 隔离自检（只读）")
     ap.add_argument("--before", help="之前记录的邻居状态库 mtime_ns，用于 I-2 比对")
@@ -387,11 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         return _v.PASS
 
     res = Result()
-    check_i1(res)
-    check_i2(res, a.before)
-    check_r2(res)
-    check_namespaces(res)
-    check_ports(res)
+    for _, check in checks(a.before):
+        check(res)
     print(res.render())
     # 🔴 R-3：`UNKNOWN` ≠ `PASS` ⇒ 判不了也必须是非零退出码，
     #    否则「跑完没报错」这个最常用的读法会把它读成通过。
