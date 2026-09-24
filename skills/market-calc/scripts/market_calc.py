@@ -69,6 +69,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
     FactBundle,
@@ -326,25 +327,12 @@ def build_fact_bundle(
     retrieved = now_cn()
     as_of: datetime | None = None
 
-    def _lookup(source: str, table: dict[str, str]) -> str | None:
-        """在 source→X 的表里查这条证据的 X（raw_hash / evidence_set_id 共用一套匹配）。
-
-        派生字段（`derived:` 开头）没有单一来源，返回 None ——
-        **不硬凑**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。
-        """
-        if source.startswith("derived:"):
-            return None
-        if source in table:
-            return table[source]
-        cand = [k for k in table if source.startswith(k)]
-        return table[max(cand, key=len)] if cand else None
-
     def _raw_hash_for(source: str) -> str | None:
-        return _lookup(source, c.hashes)
+        return resolve_provenance(source, c.hashes)
 
     def _es_id_for(source: str) -> str | None:
         # 批 E-I：只有读冻结的 source 在 c.es_ids 里；其余（腾讯/涨跌家数）返回 None。
-        return _lookup(source, c.es_ids)
+        return resolve_provenance(source, c.es_ids)
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value

@@ -1230,12 +1230,17 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
 
     * `kind="observed" ⇒ 必须有 raw_hash` **今天还做不到**。实测直接证据缺 raw_hash 的比例
       按日期是 09-20 100% → 09-21 25.5% → 09-24 **13.8%** —— 在收敛但**仍在产生**。
-    * 今天那 19 条缺口只有 4 个组合，可单独修掉：
+    * 今天那 19 条缺口只有 4 个组合：
       `market/sina:kline/trade_date`、`market/sina:kline/volume_total`、
       `emotion/em:push2ex:qdate/trade_date`、`sector/em:clist/board_counts`。
-      前两个的病因已定位：source 写成泛化的 `sina:kline`（不带 symbol），
-      而冻结表的键是 `sina:kline/sh000001` —— `_lookup` 的前缀匹配方向要求
-      **source 比键更长**，泛化 source 匹配不上任何键，静默返回 None。
+      🔴 **上一版这里的病因判断是错的，批 2 已更正**：原文说「source 写成泛化的
+      `sina:kline`，前缀匹配方向要求 source 比键更长 ⇒ 匹配不上」——
+      那句**机制描述是对的**，但推出的结论错了。`volume_total` 是
+      `sum(d.last.volume for d in c.daily.values())`，**沪深两市之和**，
+      它真的没有单一来源；泛化 source 与 `raw_hash=None` 都是诚实的。
+      4 个组合里 3 个是跨源（`volume_total` / `trade_date` / `board_counts`），
+      要用 `input_evidence_ids` 表达（批 3）；只有 `emotion` 的
+      `em:push2ex/qdate` 是真的键对不上（表键是 `em:push2ex/<pool>`）。
     * 历史 1721 条派生证据全部没有 `input_evidence_ids` ⇒ 旧卡可读、新卡严格、落库永远拒
       （同批 N 的三段式）。
 

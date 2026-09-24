@@ -69,6 +69,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    resolve_provenance,
     ADHOC_TASK_SEQ,
     CN_TZ,
     Evidence,
@@ -248,11 +249,7 @@ def build_fact_bundle(
     as_of: datetime | None = None
 
     def _raw_hash_for(source: str) -> str | None:
-        """这条证据出自哪份原始响应。派生字段没有单一来源，返回 None ——
-        **不硬凑**：凑出来的溯源比没有溯源更糟，它会让人以为查得到。"""
-        if source.startswith("derived:"):
-            return None
-        return c.hashes.get(source)
+        return resolve_provenance(source, c.hashes)
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value

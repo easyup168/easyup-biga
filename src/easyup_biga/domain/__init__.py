@@ -9,7 +9,8 @@
 """
 
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
-from .evidence import CN_TZ, Evidence, now_cn
+from .evidence import CN_TZ, EVIDENCE_KINDS, SHA256_RE, Evidence, now_cn
+from .provenance import DERIVED_PREFIX, resolve_provenance, underlying_source
 from .facts import AgentAssessment, AgentOutcome, FactBundle, LegacyAdapter
 from .missing import (
     ABSENT_REASONS,
@@ -70,6 +71,11 @@ from .verdict import (
 
 __all__ = [
     "CN_TZ",
+    "DERIVED_PREFIX",
+    "EVIDENCE_KINDS",
+    "SHA256_RE",
+    "resolve_provenance",
+    "underlying_source",
     "CONTRACT_VERSION",
     "LEGACY_CODE",
     "MissingItem",

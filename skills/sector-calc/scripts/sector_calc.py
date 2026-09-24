@@ -59,6 +59,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
     FactBundle,
@@ -228,10 +229,10 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     as_of: datetime | None = None
 
     def raw_hash_for(source: str) -> str | None:
-        return None if source.startswith("derived:") else c.hashes.get(source)
+        return resolve_provenance(source, c.hashes)
 
     def es_id_for(source: str) -> str | None:
-        return None if source.startswith("derived:") else c.es_ids.get(source)
+        return resolve_provenance(source, c.es_ids)
 
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
