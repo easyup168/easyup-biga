@@ -119,11 +119,23 @@ class TestReap:
         assert run_events(r1, path=db)[-1]["to_state"] == RunState.TIMEOUT
         assert run_events(r2, path=db)[-1]["to_state"] == RunState.TIMEOUT
 
-    def test_TOCTOU_扫描后已经自己到终态_不覆盖(self, db, monkeypatch):
-        """🔴 P4：`find_stale_runs` 扫到的时候还是非终态，但在真正 `reap` 之前
-        run 自己已经正常走到 COMPLETED 了——不能被"收成 TIMEOUT"覆盖掉一个已经
-        成功的结果。这里用手工构造候选列表（绕过 `find_stale_runs` 的实时扫描）
-        来模拟这个时间窗口。"""
+    def test_扫描后已经自己到终态_不覆盖(self, db, monkeypatch):
+        """P4：`find_stale_runs` 扫到的时候还是非终态，但在真正 `reap` 之前
+        run 自己已经正常走到终态了——不能被"收成 TIMEOUT"覆盖掉一个已经
+        终结的结果。这里用手工构造候选列表（绕过 `find_stale_runs` 的实时扫描）
+        来模拟这个时间窗口。
+
+        ⚠️ 2026-09-24（对抗性复核指出的命名问题）：这条测试**不**验证 TOCTOU
+        安全的 `expected` 取值来源（真正验证那个的是下面
+        `test_扫描后状态变成别的非终态_CAS拒绝不覆盖`）——探针证实了这一点：
+        把 `reap()` 里的 `expected` 从"扫描时的旧状态"改回"实时重读当前状态"
+        这个已知有缺陷的第一版实现，这条测试**依然通过**。原因是终态在
+        `LEGAL_TRANSITIONS` 里没有任何出边（见 `domain/run.py::TERMINAL_STATES`
+        与 `_FAILURE`/`_ORCHESTRATED` 的构造），`transition(rid, 任何终态, TIMEOUT)`
+        无论 `expected` 传的是新是旧都必然是非法转移——这条测试实际验证的是
+        「终态在状态机层面已经出不去」这条 DAG 性质，不是 reaper 自己的
+        TOCTOU 保护。名字曾经写着 `TOCTOU_` 前缀，容易让人误以为两条测试各自
+        独立覆盖了 TOCTOU 的两半——已去掉，只保留下面那条真正承担这个职责。"""
         rid = _open(db, decision_id="BIGA-20260101-001")
         transition(rid, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
         # 模拟"扫描时还是非终态"的候选（数据已经过时）
@@ -137,9 +149,15 @@ class TestReap:
         assert run_events(rid, path=db)[-1]["to_state"] == RunState.CANCELLED, \
             "已经到终态的不该被 reaper 覆盖"
 
-    def test_TOCTOU_扫描后状态变成别的非终态_CAS拒绝不覆盖(self, db, monkeypatch):
-        """扫描时是 PREFLIGHTED，真正处理前已经正常推进到 STAGE1_RUNNING（还在
-        跑）——`transition()` 的 CAS 用扫描时的旧状态做 expected，会被拒绝。"""
+    def test_扫描后状态变成别的非终态_CAS拒绝不覆盖(self, db, monkeypatch):
+        """🔴 这条才是真正验证 TOCTOU 安全的 `expected` 取值来源（见上一条测试
+        新加的说明）：扫描时是 PREFLIGHTED，真正处理前已经正常推进到
+        STAGE1_RUNNING（还在跑，非终态）——如果 `reap()` 错误地实时重读当前
+        状态当 `expected`（而不是用扫描时的旧状态），会读到 STAGE1_RUNNING，
+        而 `(STAGE1_RUNNING, TIMEOUT)` 本身合法，`transition()` 会真的把一个
+        正常运行中的 run 转去 TIMEOUT——这正是原始设计缺陷（见模块 docstring）。
+        用扫描时的旧状态 `PREFLIGHTED` 做 `expected`，CAS 因为对不上现在的
+        真实状态而拒绝，才是这里应该发生的事。"""
         rid = _open(db, decision_id="BIGA-20260101-001")
         transition(rid, RunState.RECEIVED, RunState.PREFLIGHTED, path=db)
         stale_snapshot = [{"run_id": rid, "decision_id": "BIGA-20260101-001",

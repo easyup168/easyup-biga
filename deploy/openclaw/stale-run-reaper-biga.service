@@ -1,0 +1,7 @@
+[Unit]
+Description=BigA stale-run-reaper —— 把卡在非终态太久的 run 收成 TIMEOUT（profile: biga）
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw-biga/workspace
+ExecStart=%h/.openclaw-biga/workspace/bin/biga-reap

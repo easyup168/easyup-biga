@@ -289,10 +289,19 @@ if [ "$ORCH_RC" -ne 0 ] || [ "$NOW" = "$BEFORE" ]; then
   echo >&2
   if [ "$ORCH_RC" -eq 124 ]; then
     echo "🔴 出卡超时（外层 $(( CARD_DEADLINE_SEC + 60 ))s 硬超时兜底触发）。" >&2
+    echo "   run_id 见上方 orchestrator 打印；查死在哪一步：bin/biga-card --status <run_id>" >&2
+  elif [ "$ORCH_RC" -eq 3 ]; then
+    # 🔴 2026-09-24（对抗性复核）：rc=3 是 orchestrator.py 自己的三道 preflight
+    #    守卫（总闸/预算/单实例锁）之一拒绝——这三处全在 new_run_context() 之前
+    #    return，压根没建过 run，没有 run_id 可查。旧消息无条件说"见上方打印…
+    #    --status <run_id>"，此时是一句指向不存在的东西的话（报错要指路，不能
+    #    指向空）；具体原因已经是上面 orchestrator 自己打的那行 🔴。
+    echo "🔴 出卡没有起：被内层守卫拦下了（原因见上面 orchestrator 打的那行）。" >&2
+    echo "   这次根本没建 run，没有 run_id 可查。" >&2
   else
     echo "🔴 出卡失败（orchestrator rc=$ORCH_RC，没有新卡落库）。" >&2
+    echo "   run_id 见上方 orchestrator 打印；查死在哪一步：bin/biga-card --status <run_id>" >&2
   fi
-  echo "   run_id 见上方 orchestrator 打印；查死在哪一步：bin/biga-card --status <run_id>" >&2
   exit 4
 fi
 

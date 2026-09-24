@@ -35,7 +35,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "skills"))
 sys.path.insert(0, str(REPO / "skills" / "card" / "scripts"))
 
-from _contract import RunState, new_run_context  # noqa: E402
+from _contract import Evidence, FactBundle, RunState, new_run_context, now_cn  # noqa: E402
 from _store import (  # noqa: E402
     connect,
     find_run_by_trigger,
@@ -43,10 +43,25 @@ from _store import (  # noqa: E402
     open_run,
     reserve_decision_for_trigger,
     reserve_decision_id,
+    save_fact_bundle,
     transition,
 )
 
 import inbound  # noqa: E402
+
+
+def _ev(field, value=1.0):
+    t = now_cn()
+    return Evidence(field=field, source=f"derived:{field}", value=value,
+                    as_of=t - timedelta(seconds=60), retrieved_at=t)
+
+
+def _save_fact(task_id, agent="market", *, path=None):
+    """落一条最小合法的 fact——模拟"Stage 1 已经真的跑完、写过原件"。"""
+    fb = FactBundle(task_id=task_id, agent=agent, status="completed", verdict="PASS",
+                    result={f"{agent}_x": 1}, data_completeness=1.0,
+                    evidence=[_ev(f"{agent}_x")])
+    save_fact_bundle(fb, path=path)
 
 
 @pytest.fixture()
@@ -233,6 +248,55 @@ class TestLaunchRetryTimeout:
         ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
         assert ack.accepted and ack.duplicate
         assert len(L.calls) == 1, f"{terminal_state} 之后应该允许重新拉起"
+
+    def test_超时且状态是失败终态但已经落过fact_不重新拉起(self, db, monkeypatch):
+        """🔴 2026-09-24（对抗性复核，真机 PoC 复现）：`state in NOTIFY_FAILURE_STATES`
+        不等于"还没写过 fact"——`STAGE1_COMPLETED` 之后一样能合法转移到 TIMEOUT/
+        FAILED/CANCELLED（`LEGAL_TRANSITIONS` 允许），而这个决策号在到达
+        `STAGE1_COMPLETED` 之前 Stage 1 五个 Specialist 已经真的落库过。旧代码在
+        这里会判定"安全"并重新拉起，导致新一轮 Stage 1 全部撞
+        `ux_fact_per_task_agent` 唯一约束抛 ValueError，而编排器不检查 Stage 1
+        结果、直接用 `latest_verdict_ids` 捞到上一轮的旧 fact 去合成——出一张
+        证据是几小时前、时间戳写着"现在"的卡。这条测试确认：一旦真的落过 fact，
+        无论状态名字是什么，一律不重新拉起，把决定权交回人工。"""
+        L = _RecordingLauncher()
+        did, _ = reserve_decision_for_trigger("evt-A", path=db)
+        ctx = new_run_context(origin="feishu", non_interactive=True,
+                              trigger_id="evt-A", decision_id=did)
+        open_run(ctx, path=db)
+        for frm, to in [(RunState.RECEIVED, RunState.PREFLIGHTED),
+                        (RunState.PREFLIGHTED, RunState.SNAPSHOT_FROZEN),
+                        (RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING),
+                        (RunState.STAGE1_RUNNING, RunState.STAGE1_COMPLETED)]:
+            transition(ctx.run_id, frm, to, path=db)
+        _save_fact(did, path=db)  # Stage 1 真的落库了——这是关键前提
+        transition(ctx.run_id, RunState.STAGE1_COMPLETED, RunState.TIMEOUT, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert not ack.accepted and ack.duplicate
+        assert len(L.calls) == 0, "已经落过 fact 的决策号不该被自动重新拉起"
+        assert "落过判定原件" in ack.message
+        assert "另开一个新决策" in ack.message
+
+    def test_超时且状态是失败终态但尚未落fact_仍然允许重新拉起(self, db, monkeypatch):
+        """对照组：同样先跑到 `STAGE1_COMPLETED` 再进终态，但**不**落 fact——
+        证明守卫认的是"有没有 fact"，不是"状态名字是不是 STAGE1_COMPLETED
+        之后"。状态本身从来不是安全论证的判据，fact 的存在与否才是。"""
+        L = _RecordingLauncher()
+        did, _ = reserve_decision_for_trigger("evt-A", path=db)
+        ctx = new_run_context(origin="feishu", non_interactive=True,
+                              trigger_id="evt-A", decision_id=did)
+        open_run(ctx, path=db)
+        for frm, to in [(RunState.RECEIVED, RunState.PREFLIGHTED),
+                        (RunState.PREFLIGHTED, RunState.SNAPSHOT_FROZEN),
+                        (RunState.SNAPSHOT_FROZEN, RunState.STAGE1_RUNNING),
+                        (RunState.STAGE1_RUNNING, RunState.STAGE1_COMPLETED),
+                        (RunState.STAGE1_COMPLETED, RunState.TIMEOUT)]:
+            transition(ctx.run_id, frm, to, path=db)
+        self._age_past_threshold(monkeypatch)
+        ack = inbound.accept_trigger(origin="feishu", trigger_id="evt-A", launcher=L, path=db)
+        assert ack.accepted and ack.duplicate
+        assert len(L.calls) == 1, "没有任何 fact 落库时，同样的状态路径应该仍允许重新拉起"
 
     def test_超时但状态是COMPLETED_不重新拉起(self, db, monkeypatch):
         """已经成功出过卡的，不能因为"占号很旧"就被当成没起来重新触发一次。"""

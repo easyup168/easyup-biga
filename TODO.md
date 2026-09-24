@@ -1137,14 +1137,29 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       `OrchestratorTimeout` 让 TIMEOUT 真正被产生、`tools/maintenance/
       stale_run_reaper.py`（纯函数，不接调度）、Budget/flock/总闸下沉
       `orchestrator.py`（flock 靠 `BIGA_CARD_LOCK_HELD` 环境变量避开 POSIX
-      互斥陷阱）。测试 1342 → 1375。详见 `docs/tutorial/40-review-c-d-reliability.md`、
+      互斥陷阱）。测试 1342 → 1375（⚠️ 这个数字同步时就已经错了，实测是
+      1379——见批 M-II）。详见 `docs/tutorial/40-review-c-d-reliability.md`、
       `CHANGELOG.md`
-  - [ ] 评审 A（发布基线）/B（Run Provenance）/E（Contract 与数据质量）/
-        F（Package 与 Registry）部分——已核实真实性，暂缓处理。B 部分核实结论：
+  - [x] 批 M-II · 二轮对抗性复核（2026-09-24）—— 对批 M 提交本身做真机
+        sabotage/PoC 攻击（不是重新核实评审文档）。修复：C-1 安全论证的真实
+        缺陷（relaunch 可能用陈旧证据合成卡，判据从"状态名称"改成直接核实
+        `latest_verdict_ids(decision_id)` 是否为空）、C-2 的 `abandoned` 未计入
+        退出码（静默永久丢弃，精确重新关闭了上一次真实事故的发现信号）、D-3
+        两层守卫不认同一个 `BIGA_CARD_FORCE` 开关、一条名不副实的 TOCTOU 测试、
+        `stale_run_reaper.py` 全仓零调度方（已补 `stale-run-reaper-biga.timer`
+        并装上 `enable --now`）。测试 1379 → 1402。详见
+        `docs/tutorial/41-adversarial-review-round-2.md`、`CHANGELOG.md`
+  - [ ] 评审 A（发布基线）/E（Contract 与数据质量）/F（Package 与 Registry）
+        部分——已核实真实性，暂缓处理
+  - [ ] B 部分（Run Provenance）—— **另一个并行会话正在处理**（worktree
+        `b-provenance`），本清单不重复跟踪其进度。原核实结论（供该会话对照）：
         Fact 唯一约束确实只按 `(task_id, agent)`、`latest_verdict_ids()` 确实仍按
-        `decision_id` 聚合，**但目前没有任何代码路径会对同一个 decision 开出
-        第二个 run**（`open_run()` 全仓只一处调用），所以是面向未来 Retry 功能的
-        前置修复，不是当前活跃 bug——留到真正要开放 retry 之前再做
+        `decision_id` 聚合；⚠️ 曾在这里写"目前没有任何代码路径会对同一个
+        decision 开出第二个 run"，二轮对抗性复核指出这个前提是错的——C-1 的
+        relaunch 机制本来就会对同一 decision_id 开出一个新 run_id，只是**在
+        当前约束下**被 fail-closed 拒绝（见批 M-II）。B-2（约束改
+        `(run_id,agent)`）与批 M-II 的 fail-closed 修法方向相反，B-2 落地时
+        需要回来重新评估 `inbound.py` 那道检查
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

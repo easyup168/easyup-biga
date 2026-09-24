@@ -468,7 +468,16 @@ def _preflight_stop_gate() -> str | None:
 
 def _preflight_budget(decision_id: str | None) -> str | None:
     """Budget Guard：直接复用 `budget.check_budget()`——同一套规则只有一份实现，
-    不在这里重写当日上限/最小间隔/inflight 这三条判断。"""
+    不在这里重写当日上限/最小间隔/inflight 这三条判断。
+
+    🔴 `BIGA_CARD_FORCE=1` 时跳过——与 `bin/biga-card` 自己那道 Budget Guard
+    认同一个开关、同一个语义（只越过预算，不越过总闸/锁）。2026-09-24 对抗性
+    复核真机复现：wrapper 层放行之后，这里之前不认这个变量、无条件再查一遍，
+    wrapper 自己打印的"确实要跑：BIGA_CARD_FORCE=1 bin/biga-card"那条恢复路径
+    因此必然失败——两层要么都认，要么都不认，不能只有外层认。
+    """
+    if os.environ.get("BIGA_CARD_FORCE") == "1":
+        return None
     reasons = budget.check_budget(exclude_decision_id=decision_id)
     return "；".join(reasons) if reasons else None
 

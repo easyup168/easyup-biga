@@ -57,6 +57,7 @@ from _store import (  # noqa: E402
 from _store.db import _insert_notification  # noqa: E402
 
 import notify_worker  # noqa: E402
+from feishu_deliverer import FeishuError  # noqa: E402
 
 DAY = "20260923"
 
@@ -372,12 +373,17 @@ class TestP4Worker:
                                              "failed": 4, "abandoned": 0})
         assert notify_worker.main(["--deliverer", "stdout"]) == 1
 
-    def test_main只有abandoned没有failed时退出码为零(self, db, monkeypatch):
-        """abandoned 已经处理完了（不会再自动重试）——不该让调用方以为这次调用坏了。"""
+    def test_main只有abandoned没有failed时退出码也非零(self, db, monkeypatch):
+        """🔴 2026-09-24（对抗性复核推翻本条原有的断言）：这里曾经断言退出码为零，
+        理由是"abandoned 已经处理完了，不是这次调用的问题"。真机验证（收件人未
+        配置的 FeishuDeliverer）证明这个理由是反的——abandoned 是**永远不会再被
+        看见**的那一种（undelivered_notifications 永久排除、无 requeue 路径），
+        比 failed 更需要人去看，不是更不需要。退出码为零只会让 systemd 每 2 分钟
+        看到一次假绿色。"""
         monkeypatch.setattr(notify_worker, "deliver_pending",
                             lambda *a, **k: {"pending": 4, "delivered": 0,
                                              "failed": 0, "abandoned": 4})
-        assert notify_worker.main(["--deliverer", "stdout"]) == 0
+        assert notify_worker.main(["--deliverer", "stdout"]) == 1
 
     def test_worker默认桩不抛(self, db, capsys):
         """默认 StdoutDeliverer 能把队列清空（L-1：outbox 有一个真能跑的读取方）。"""
@@ -385,6 +391,58 @@ class TestP4Worker:
         summary = notify_worker.deliver_pending(path=db)
         assert summary["delivered"] == 4
         assert "[notify]" in capsys.readouterr().out
+
+
+class _RealFeishuErrorDeliverer:
+    """🔴 2026-09-24（对抗性复核 sabotage S7）：本类之前不存在——`TestP4Worker`
+    的全部失败场景都经 `_RetryableError`（本文件自造、只是"形状像"
+    `feishu_deliverer.FeishuError` 的假异常）触发。把真 `FeishuError.__init__`
+    里 `self.retryable = retryable` 破坏成恒 `True`，`TestP4Worker` 与
+    `test_feishu_deliverer.py` 两份测试**全部保持绿色**——消费方（worker 怎么
+    处理 `.retryable`）测了，生产方（真 `FeishuError` 到底会不会带对 `.retryable`
+    值）没有任何测试把两者接在一起。这个投递器把真异常类接进 `deliver_pending`，
+    补上这根断掉的线。"""
+    channel = "test-real-feishu-error"
+
+    def __init__(self, *, retryable: bool):
+        self.retryable = retryable
+
+    def deliver(self, *, event_type, aggregate, payload):
+        raise FeishuError("桩：真 FeishuError 类，模拟配置类失败", retryable=self.retryable)
+
+
+class TestP4WorkerRealFeishuErrorWiring:
+    """真 `FeishuError` 到 `deliver_pending`/`main()` 退出码的端到端线路。"""
+
+    def _seed_one(self, db):
+        did = _did(60)
+        ctx = new_run_context(origin="cli", non_interactive=True, decision_id=did)
+        open_run(ctx, path=db)
+        enqueue_run_failed(ctx.run_id, reason="boom", path=db)
+        return did
+
+    def test_真FeishuError_retryable为False_立刻abandoned(self, db):
+        self._seed_one(db)
+        summary = notify_worker.deliver_pending(
+            _RealFeishuErrorDeliverer(retryable=False), path=db)
+        assert summary == {"pending": 1, "delivered": 0, "failed": 0, "abandoned": 1}
+
+    def test_真FeishuError_retryable为True_留在队列里(self, db):
+        self._seed_one(db)
+        summary = notify_worker.deliver_pending(
+            _RealFeishuErrorDeliverer(retryable=True), path=db)
+        assert summary == {"pending": 1, "delivered": 0, "failed": 1, "abandoned": 0}
+
+    def test_真FeishuError配置类失败_main退出码非零(self, db, monkeypatch):
+        """端到端：真 `FeishuError(retryable=False)` → `abandoned` → `main()` 非零。
+        这条断言把「消费方」「生产方」「退出码」三段第一次接在同一条测试里。
+        `db` fixture 已经把 `BIGA_DB_PATH` 指到临时库（见 fixture 定义），
+        `main()` 走默认 `path=None` 也能读到同一份。"""
+        monkeypatch.setattr(
+            notify_worker, "_make_deliverer",
+            lambda name: _RealFeishuErrorDeliverer(retryable=False))
+        self._seed_one(db)
+        assert notify_worker.main(["--deliverer", "stdout"]) == 1
 
 
 # ════════════════════════ P5：NOTIFICATION_PENDING 转移 ══════════════════════

@@ -8,7 +8,7 @@
 
 ![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)
 ![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)
-![Tests](https://img.shields.io/badge/1375%20TESTS-PASSING-2ea043)
+![Tests](https://img.shields.io/badge/1402%20TESTS-PASSING-2ea043)
 ![Store](https://img.shields.io/badge/SQLITE-WAL%20%C2%B7%20v15%20%C2%B7%2011%20tables-555)
 ![Tutorial](https://img.shields.io/badge/%E6%95%99%E7%A8%8B-40%20%E7%AB%A0-8957e5)
 ![Latency](https://img.shields.io/badge/%E7%AB%AF%E5%88%B0%E7%AB%AF-%E7%9B%98%E4%B8%AD%20172.6s%20%C2%B7%20%E7%9B%98%E5%90%8E%20198s-dbab09)
@@ -238,7 +238,7 @@ print(fetch_index_daily('sh000001',bars=1).bars[-1].day)"
 | Stage 1 **五个实测并行**（区间相交 27.9s，墙钟 64.2s vs 串行 227.3s） | ✅ |
 | Stage 2 拿的是冻结证据（结构保证 + AST 测试） | ✅ |
 | schema v15 —— 决策编号原子分配器 + 只追加保护（v6 加事实/判断拆分的 `kind` 列；v10 让 `run_id` 贯穿；v11 令一个 `(task_id, agent)` 至多一份 fact 原件；v12 加外发通知 outbox 两张表；v13 让 raw 层真的存 raw；v14 给 decision_ids 加 trigger_id 做入站幂等键；v15 加 `fact_trading_calendar`——第一张真实的 fact_* 表） | ✅ |
-| 1375 条测试 | ✅ |
+| 1402 条测试 | ✅ |
 | 成本分解 $1.20/次（`main` 占 37%） | ✅ |
 | 隔离自检 `tools/verify/isolation.py` **三态**，`UNKNOWN` 不计入通过 | ✅ |
 | **spawn 核验** —— 每次出卡自动对账，`agent_runs` 不算凭证 | ✅ |
@@ -359,7 +359,7 @@ Phase 1 的 74.8s 是**休市日**测的，那时只有一个 Specialist 且大�
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 公开审查
 │                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
-├── tests/           1375 条测试
+├── tests/           1402 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 安装指南
 │   └── tutorial/    开发教程（40 章，与代码同步）

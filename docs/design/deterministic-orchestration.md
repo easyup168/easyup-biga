@@ -348,6 +348,39 @@ Orchestrator 调用 cancel()"，谁负责把这条残留风险补掉（见 `TODO
 ⇒ 严格 JSON 分两个函数：**新的**规范序列化（含 separators）用于新增载荷；
 `payload_sha256` **只加 `allow_nan=False`**，分隔符维持现状。由测试钉住历史向量。
 
+### 追加 6 · 2026-09-24 那份评审的 remediation checklist —— 逐节复核（批 M）
+
+配套文件：`docs/external/biga-latest-deep-review-classified/docs/review/
+2026-09-24-biga-remediation-checklist.md`（0 节 + A-H 八个阶段）。这是一份
+**行动清单**，不是叙事性断言，逐条核对"做了 / 没做 / 为什么"比追加 5 那种
+表格更直接。批 M（`7d30639`）只做了 C、D 两节；这里把 0 节与 A/B/E/F/G/H
+也过一遍，不要因为"这次只排了 C/D"就让其余部分停留在"没人看过"的状态。
+
+| 节 | 条目 | 状态 |
+|---|---|---|
+| 0 | 创建 Git tag/checkpoint、保存数据库备份、保存 OpenClaw 配置 Hash | ❌ 均未做——本项目走的是"每批独立 commit + 测试全绿才继续"，没有走这份 checklist 假设的"先打 tag 再动手"流程。`git tag -l` 只有 `v0.2.0` |
+| 0 | 暂停自动 Retry | N/A——本项目现在没有自动 Retry 机制，无需暂停 |
+| 0 | 暂停新增大量 Cron/systemd Job | ✅ 遵守——D-2 的 reaper 明确不接调度，本批没有新增任何 `.service`/`.timer` |
+| 0 | 保留 `.biga-card-stop` 可用 | ✅ 一直可用，未改动 |
+| A | 消除动态同名模块 monkeypatch 错位；测试不再依赖执行顺序 | 🔶 `test_facts_split_e3.py` 的 `card_ops` 双实例问题是真实存在、已知、**本批未修**的一处（`TODO.md`"既有测试隔离脆弱性"，与 H-I/H-II 的 legacy import 共存是两回事——后者经核实"查无实据说已引发故障"，见批 H-II 独立复核记录） |
+| A | Isolation 检查改用统一 Registry | ❌ 未做——`isolation.py::check_namespaces` 仍是硬编码扫描，不是 Registry 模式。追加 5 的 §4-6 复核已经说明"结构性观察成立，但当前环境不会真的失败" |
+| A | 统一 stdout/stderr 契约 | ❌ 未做，但对应的具体断言本身"查无此测试"（追加 5 的 §6 复核） |
+| A | 测试同时支持 Git worktree 与 ZIP walk 模式 | 🔶 部分——`tests/_scan.py` 已有 git-fallback 机制（`is_external_reference` 等），但没有专门针对"ZIP walk"模式验证过 |
+| A | subprocess 测试结束时被回收 | 🔶 各测试各自处理（`Popen`/`subprocess.run` 各自管理生命周期），没有统一的 Registry 式强制回收保障 |
+| A | 完整 pytest 通过；更新 README 测试数量 | ✅ 两条都做——1379 条全绿（git checkout 环境下）；每次改动后同步 README/CLAUDE/review-prompt 三处徽章。⚠️ 这个数字本身在批 M 里第一次同步时错写成 1375——`sync_test_count.sh` 在一棵还没加完最后几条测试的树上跑过一次，之后又加了测试没有重新跑；见 CHANGELOG 本条 |
+| B | 全部 13 项（`agent_verdicts.run_id` 强制 / Fact 唯一约束改 `(run_id,agent)` / `DecisionCard`/`decision_records`/`agent_runs` 各字段必填 / `VerdictRef` 严格验证 / `evidence_sets.run_id NOT NULL UNIQUE`）与 7 项回归测试 | ❌ 全部未做，且这一行原来的理由是错的——⚠️ **2026-09-24 二轮对抗性复核纠正**：这里曾写"目前没有任何代码路径会对同一 decision 开出第二个 run"，但 C-1（`inbound.py::accept_trigger`）本来就是这样一条路径：`launcher(origin, trigger_id, decision_id)` 重新拉起时，`new_run_context()` 照常铸一个全新 `run_id`，`decision_id` 不变——**relaunch 从批 M 提交的那一刻起就已经是"对同一 decision 开第二个 run"**，不是假设中的未来状态。二轮复核修复的 fact 唯一性检查（`latest_verdict_ids(decision_id)` 非空则拒绝 relaunch）与 B-2 的方向**互为反面**：前者是 fail-closed 收窄（事实已存在 ⇒ 拒绝重放，交回人工），后者是放开重放（唯一约束改 `(run_id,agent)` ⇒ 第二个 run 本来就该能写自己的 fact，不需要拒绝）。两者不能同时是"最终状态"——现在保留前者，因为它是**给当前 `(task_id,agent)` 约束**的正确安全阀，且已经修复了一个真实、可复现的严重 bug（生成一张用陈旧证据合成的卡）；B-2 一旦真正实施（连带 7 项回归测试、`latest_verdict_ids` 的调用方迁移），`inbound.py` 这道 fact 存在性检查需要**同步重新评估**是否还需要、要不要收紧成"检查这个 run_id 自己的 fact"而不是"整个 task_id 的 fact"——不是自动删除，是要有人回来看一眼。⇒ 见 `inbound.py` 里对应注释与本文件追加 6 的交叉引用；`latest_verdict_ids` 现在有四个调用方（Stage 1→Stage 2、Stage 3 合成、`verify_verdict_refs` 一类核对、以及这里新加的 relaunch 守卫）——B-4 计划废弃它时，这是需要一并处理的第四处，不是历史遗留的三处 |
+| C | 13 项主清单 + 6 项回归测试 | ✅ 已做 9/13（Trigger 可恢复重启、Worker `max_attempts`、Retryable 分类、失败 exit non-zero、飞书失败不回滚 Card——本来就是；systemd 环境读取 target 已被独立事故修复）。**未采纳**：显式 `RESERVED/LAUNCHING/STARTED/LAUNCH_FAILED` 四态（改用更简单的 reserved_at+超时阈值，目标等价）、`EnvironmentFile`/env 文件权限/内容（已有更好方案，不依赖环境变量注入）。**真遗漏**：`timeout 按退避策略重试`——目前固定 `MAX_ATTEMPTS` 次机会，无指数退避，详见教程第 40 章"未完成的部分" |
+| D | 9 项主清单 + 5 项回归测试 | ✅ 已做 7/9（`OrchestratorTimeout`、超时进 TIMEOUT、stale-run-reaper、外部 kill 后收敛、RunPreflight 下沉三项）。**本来就有、未改动**：全局 monotonic deadline 与 `min(stage_budget,remaining)`（批 C-III 已实现）、Stage 1 部分失败 cleanup（同批已实现）。**未做**：CLI/Feishu/Cron/systemd"统一入口"——CLI/Feishu 已统一走 `bin/biga-card`，但 Cron/systemd 目前没有出卡触发入口，N/A 而非真遗漏。回归测试里"SIGTERM 模拟后 Reaper 收尾"是**手工构造过期 run** 再验证收敛逻辑，不是真发信号的端到端集成测试 |
+| E | 全部 11 项主清单 + 5 项回归测试 | ❌ 10/11 未做——`deep_freeze`、Fact/Evidence canonical equality、`input_evidence_ids`、Missing Code 按 agent 细分、`age_at(evaluated_at)`、Snapshot 元数据四项均确认缺失（部分已实测复现，见并行核实报告）。**唯一已做**：canonical payload 与 raw HTTP bytes 命名分开（批 I，`raw_text_sha256`，早于这份评审就解决了） |
+| F | 全部 10 项 | ❌ 8/10 未做，含 `pyproject.toml` 目前**只有** `[tool.pytest.ini_options]`——没有 `[build-system]`/`[project]`/`[project.scripts]`，`pip install -e .` 这条验收标准现在必然失败；无 `ruff.toml`/`mypy.ini`/`pyrightconfig.json`；Dataset/Provider/Pipeline Registry 未完成（`TODO.md` 早就承认"后续阶段"）。**部分完成**：`domain`/`persistence`/`providers`/`runtime`/`application` 五个包已从 `skills/_*` 迁出（H-I/H-II），但内部仍是 legacy import（"跨包引用清理"待办，`TODO.md`） |
+| G | 全部 12 项 Live Acceptance | ❌ 不适用当前阶段——前置的 B/E/F 大量未做，这一节假设的"每个 Run 恰好一个 EvidenceSet"这类断言依赖 B 部分先落地。本次也没有做真实的飞书端到端验证（需要开新会话，见教程第 40 章"未完成的部分"） |
+| H | 全部 8 项 Baseline 冻结 | ❌ 未做——前序阶段没有全部完成，`v1-architecture-baseline` tag 不存在，这一节的前提条件不成立 |
+
+**结论**：批 M 只完成了这份 checklist 里 C、D 两节（且 C/D 内部也各有 1-2 项
+真遗漏，见上表），A/B/E/F/G/H 六节基本未动。这不是"忘了"——是核实过范围
+之后有意选择优先做 C/D（直接影响当前实际在用的飞书路径），B/E/F/G/H 留给
+后续批次，见 `TODO.md`"批 M"条目。
+
 ---
 
 ## 3. 目标架构

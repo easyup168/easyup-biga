@@ -15,6 +15,57 @@
 
 ## [未发布]
 
+### 🐛 修复 · 二轮对抗性复核：批 M 修复本身的两个真实缺陷 + 三个较小问题
+
+批 M（上一条 CHANGELOG）提交并推送后，请另一个 agent 对**这版修复本身**做对抗性
+复核——真机 sabotage + PoC，不是重新读一遍评审文档。核实后修复：详见
+`docs/tutorial/41-adversarial-review-round-2.md`。
+
+**C-1 安全论证的真实缺陷（最严重）**：原判据"`hdr is None` 或状态是失败终态 ⇒
+还没写过 fact"对第二种情况不成立——`LEGAL_TRANSITIONS` 允许 `STAGE1_COMPLETED` 之后
+的在途状态直接进失败终态，而到达 `STAGE1_COMPLETED` 时 Stage 1 早已写完 fact。真机
+PoC 复现：relaunch 后新一轮 Stage 1 全部因 `ux_fact_per_task_agent` 唯一约束抛
+`ValueError`，但编排器不检查、直接用 `latest_verdict_ids(did)` 捞到上一轮的旧
+verdict_ref 去合成——产出一张证据是几小时前、`generated_at` 是现在的卡，spawn 核验
+照样通过。修法：`accept_trigger()` 在状态判断之外新增
+`latest_verdict_ids(decision_id)` 非空即拒绝 relaunch，交回人工——不再靠状态名称
+推断"是否已写过 fact"，直接核实这个不变量本身。⚠️ 这与另一个并行会话正在做的 B-2
+（Fact 唯一约束改 `(run_id,agent)`，让新 run 能安全写自己的 fact）方向相反——当前
+保留本次修法作为现有约束下的安全阀，B-2 落地时需要回来重新评估，已在 `inbound.py`
+注释与设计文档追加 6 的 B 行写明这个耦合。
+
+**C-2 的 `abandoned` 静默永久丢弃**：`abandoned` 不计入 `main()` 退出码的原始理由
+（"已经处理完了，不是这次调用的问题"）是反的——它恰恰是永远不会再被看见的那种
+（`undelivered_notifications()` 永久排除、无 requeue 路径）。真机验证（收件人未配置）
+证实：第一次尝试即 `abandoned`，退出码 0，`notify-worker-biga.service` 每 2 分钟看到
+一次假绿色——精确重新关闭了上一次真实事故（Card 推送从未成功过）能被发现的信号
+来源。修法：`abandoned > 0` 与 `failed > 0` 同样触发非零退出码。另外补上一处测试
+缺口：原有失败场景全部经自造的 `_RetryableError`（"模拟 FeishuError 形状"）触发，
+sabotage 证实把真 `FeishuError.retryable` 破坏成恒 `True` 后两份相关测试全绿——消费方
+测了，生产方没测，两者之间那根线从没被验证过。新增 `_RealFeishuErrorDeliverer` 接入
+真实 `FeishuError` 类补上这根线。
+
+**D-3 两层守卫不认同一个开关**：`bin/biga-card` 打印"确实要跑：`BIGA_CARD_FORCE=1`"
+这条恢复路径，但 `orchestrator.py::_preflight_budget()` 不检查这个变量，无条件再拦
+一次——人已经显式说了"确实要跑"仍被拒绝。修法：`_preflight_budget()` 认
+`BIGA_CARD_FORCE=1`，与 wrapper 那道认同一个开关、同一个语义（只越过预算，不越过
+总闸/锁）。同时修正 `bin/biga-card` 的误导性消息：`ORCH_RC=3`（内层守卫拒绝）时
+从未建过 run，不该打印"查 run_id：`--status <run_id>`"——报错要指路，得指向真实
+存在的东西。
+
+**测试命名与实际覆盖不符**：`test_TOCTOU_扫描后已经自己到终态_不覆盖` 的名字宣称
+验证 TOCTOU 安全的 `expected` 取值来源，sabotage 证明它验证的是状态机"终态无出边"
+这条不相关的性质（naive 实现在这个场景下依然会被 `LEGAL_TRANSITIONS` 挡住，不需要
+`expected` 来源正确）。去掉两条测试名字里的 `TOCTOU_` 前缀，写清楚各自实际覆盖
+什么、真正验证 TOCTOU 的是哪一条。
+
+**stale_run_reaper 全仓零调度方**：违反 CLAUDE.md 自己那条"新增写数据模块必须有
+被证明的读取方"。批 40 明确"只做纯函数不接调度"是有意的范围限制，但这不是纯粹
+面向未来的选择——进程被 SIGTERM 杀在非终态后没有调度方去收敛，C-1 声称修好的
+症状原样保留一半。新增 `stale-run-reaper-biga.timer`/`.service`（与已在跑的
+`notify-worker-biga.timer` 同构）+ `deploy/openclaw/install_reap_timer.py` +
+`bin/biga-reap`（固化默认 `--apply`），已装上并 `enable --now`。
+
 ### 🐛 修复 · 外部评审 C/D 部分：飞书可靠性 + 生命周期收敛五点
 
 对 `docs/external/biga-latest-deep-review-classified/`（外部专家评审，本地留存不进

@@ -162,9 +162,19 @@ def main(argv: list[str] | None = None) -> int:
           f"失败 {summary['failed']}  放弃 {summary['abandoned']}", file=sys.stderr)
     # 🔴 2026-09-24（外部评审 §11）：曾经无论失败多少条都 return 0，systemd 因此
     #    把失败批次误判为成功（Type=oneshot 只看退出码）。`failed`（还会重试的）
-    #    非零就该让调用方知道这次不是全绿——`abandoned` 不算：那些已经处理完了
-    #    （不会再自动重试），不是"这次调用出了问题"。
-    return 1 if summary["failed"] > 0 else 0
+    #    非零就该让调用方知道这次不是全绿。
+    #
+    # ⚠️ 同一天的对抗性复核推翻了这里原来的另一半：`abandoned` **曾经**不算，
+    #    理由是"已经处理完了、不是这次调用的问题"——但真机验证（收件人未配置
+    #    的 FeishuDeliverer）证明这个理由是反的：`abandoned` 恰恰是**永远不会
+    #    再有人知道**的那一种（`undelivered_notifications()` 永久排除它，全仓
+    #    没有 requeue 路径）。放它不计入退出码 = systemd 每 2 分钟看到一次绿色
+    #    「成功」，而一条通知已经被永久放弃——这正是上一个真实事故（Card 推送
+    #    从未成功过）能被发现的信号来源，被这里的"优化"重新关掉了。
+    #    ⇒ `abandoned` 与 `failed` 同样非零：两者都是"这次调用没有全部投递成功"，
+    #    只是原因不同（一个还会重试，一个永远不会）——退出码不区分这个差异，
+    #    人去看 `--limit` 输出 / outbox 里的 status 字段再区分。
+    return 1 if summary["failed"] > 0 or summary["abandoned"] > 0 else 0
 
 
 if __name__ == "__main__":

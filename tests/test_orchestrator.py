@@ -604,6 +604,34 @@ class TestPreflightGates:
                             lambda self, ctx: _Card())
         assert orch_mod.main([]) == 0
 
+    def test_budget不通过但BIGA_CARD_FORCE为1时放行(self, monkeypatch, db):
+        """🔴 2026-09-24（对抗性复核）：`bin/biga-card` 自己那道 Budget Guard
+        认 `BIGA_CARD_FORCE=1`（打印"确实要跑：BIGA_CARD_FORCE=1 bin/biga-card"
+        这条恢复路径），但这里之前不认——wrapper 放行之后编排器自己又拦一次，
+        人已经显式说了"确实要跑"却还是被拒。两层必须认同一个开关。"""
+        self._human(monkeypatch)
+        monkeypatch.setenv("BIGA_CARD_FORCE", "1")
+        monkeypatch.setattr(orch_mod.budget, "check_budget",
+                            lambda **k: ["人工注入的预算拒绝理由（测试）"])
+
+        class _Card:
+            decision_id = "BIGA-20260101-004b"
+            def render(self): return "CARD"
+            def to_dict(self): return {}
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run",
+                            lambda self, ctx: _Card())
+        assert orch_mod.main([]) == 0
+
+    def test_BIGA_CARD_FORCE不为1时仍然生效budget检查(self, monkeypatch, db):
+        """探针：确认上一条不是"FORCE 让检查整个失效"——只有精确等于字符串
+        "1" 才越过，其余取值（包括常见的误用 "true"/"0"）一律仍然拒绝。"""
+        self._human(monkeypatch)
+        monkeypatch.setenv("BIGA_CARD_FORCE", "true")
+        monkeypatch.setattr(orch_mod.budget, "check_budget",
+                            lambda **k: ["人工注入的预算拒绝理由（测试）"])
+        monkeypatch.setattr(orch_mod.DecisionOrchestrator, "run", self._boom)
+        assert orch_mod.main([]) == 3
+
     def test_两次不带LOCK_HELD的并发调用_第二次被单实例锁拒绝(self, monkeypatch, db):
         """🔴 真实 flock 语义（不 mock）：第一次调用真的拿到锁且不释放
         （`_lock_fh` 模块级变量活到进程结束），第二次调用自己重新 open() 同一个
