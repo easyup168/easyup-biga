@@ -109,4 +109,6 @@ class TestE19旧名字不许复活:
         """⚠️ `news_scan` 的 result 里有个 `staleness_sec`，意思是「距最新一条」——
         与证据的取数滞后是两回事。改名只动契约层，不许顺手「统一」掉它。"""
         src = (REPO / "skills/news-scan/scripts/news_scan.py").read_text()
-        assert 'add("staleness_sec", stale, "距最新一条(秒)", src)' in src
+        # 判据只看「字段名 + 标签」这对组合还在不在 —— 不钉整行，
+        # 否则任何给 add() 加参数的改动都会把它弄红（批 3 加 kind= 时就发生过）。
+        assert 'add("staleness_sec", stale, "距最新一条(秒)"' in src

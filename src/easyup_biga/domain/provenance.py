@@ -51,7 +51,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-__all__ = ["DERIVED_PREFIX", "underlying_source", "resolve_provenance"]
+__all__ = ["DERIVED_PREFIX", "underlying_source", "resolve_provenance",
+           "input_ids_for"]
 
 #: 派生值 source 的约定前缀。`derived:<真实来源>` 表示「从那一份算出来的」。
 DERIVED_PREFIX = "derived:"
@@ -88,3 +89,38 @@ def resolve_provenance(source: str, table: Mapping[str, str]) -> str | None:
     # 若表里还有更长的键，更长的那个才是它真正出自的那一份。
     cand = [k for k in table if key.startswith(k)]
     return table[max(cand, key=len)] if cand else None
+
+
+def input_ids_for(evidence, fields, *, of: str = "") -> tuple[str, ...]:
+    """把「我是从这几个字段算出来的」翻译成它们的 `evidence_id`（裁定 16 批 3）。
+
+    Args:
+        evidence: **已经产出**的证据序列（各 skill 自己那个 `evidence` 列表）。
+        fields: 输入的 `field` 名。调用方写字段名，不碰哈希。
+        of: 谁在声明（只用于报错信息）。
+
+    Returns:
+        去重保序的 `evidence_id` 元组。
+
+    Raises:
+        ValueError: 声明了一个**还没有证据**的输入字段。
+
+    🔴 找不到就抛，不是跳过。声明「我从 X 算出来」而 X 不在场，只有两种可能：
+       字段名写错了，或者算的时候它根本不存在 —— 两种都是错的，
+       而静默跳过会产出一条**输入列表不完整**的派生证据：
+       它看起来声明过血缘，实际漏了一截，比完全没声明更难发现（R-3 的形状）。
+
+    ⚠️ 同名多条证据时**全部**收进去（多来源合成同一个字段是允许的），
+       顺序按 `evidence` 里的出现顺序，可回放。
+    """
+    ids: list[str] = []
+    for f in fields:
+        hits = [e.evidence_id for e in evidence if e.field == f]
+        if not hits:
+            raise ValueError(
+                f"{of or '某个派生值'} 声明输入字段 {f!r}，但此刻还没有任何证据支撑它。\n"
+                f"  已有字段：{sorted({e.field for e in evidence})}\n"
+                f"  要么字段名写错了，要么 add({f!r}, ...) 排在了它后面 —— "
+                f"输入必须先于使用它的派生值产出。")
+        ids.extend(hits)
+    return tuple(dict.fromkeys(ids))

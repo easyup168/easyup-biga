@@ -10,7 +10,8 @@
 
 from .card import DECISION_ID_RE, CardStatus, DecisionCard
 from .evidence import CN_TZ, EVIDENCE_KINDS, SHA256_RE, Evidence, now_cn
-from .provenance import DERIVED_PREFIX, resolve_provenance, underlying_source
+from .provenance import (DERIVED_PREFIX, input_ids_for, resolve_provenance,
+                         underlying_source)
 from .facts import AgentAssessment, AgentOutcome, FactBundle, LegacyAdapter
 from .missing import (
     ABSENT_REASONS,
@@ -74,6 +75,7 @@ __all__ = [
     "DERIVED_PREFIX",
     "EVIDENCE_KINDS",
     "SHA256_RE",
+    "input_ids_for",
     "resolve_provenance",
     "underlying_source",
     "CONTRACT_VERSION",

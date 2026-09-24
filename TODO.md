@@ -1226,7 +1226,21 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
     | `upstream_trade_date` / `trade_date_consistent` / `tripped_thresholds` | 上游的某个 `result` 字段 | 引**支撑那个字段**的 Evidence |
     | `max_source_lag_sec` / `max_evidence_age_sec` / `cross_check_conflict` | 上游的**全部** Evidence（取 max / 比 raw_hash）| 引上游全部 Evidence |
 
-    🔴 **已知障碍，批 1 必须按三段式处理，不能一步到位 enforce**：
+    ✅ **批 1 / 批 2 / 批 3 已完成**（2026-09-24）：
+    批 1 给 Evidence 身份（内容寻址 id + kind + input_evidence_ids，capture 不 enforce）；
+    批 2 把溯源归属收成一份并改对写宽的规则（770 条派生值拿回 raw_hash）；
+    批 3 落地铁律「derived ⇒ raw_hash 或 input_evidence_ids」+ 五个 skill 声明 kind。
+
+    **批 4 的输入**（剩下这些，各有各的原因）：
+
+    | 待办 | 条数 | 卡在哪 |
+    |---|---|---|
+    | risk 跨 verdict 引用 | 444 | 要引用**别的 verdict 里的**证据，机制与同 verdict 不同；粒度表见上 |
+    | 跨源聚合留白的 6 个字段 | — | `volume_total`/`volume_ma20`/`volume_ratio`/`trade_date`（market）、`board_counts`（sector）、`market_open`（news）。**Evidence 今天只能记一个 raw_hash，而它们有多个来源** ⇒ 要么补 per-symbol 证据，要么让 Evidence 支持多来源引用 |
+    | `emotion.trade_date` 的键对不上 | 6/天 | source 写的是 `em:push2ex/qdate`，而表键是 `em:push2ex/<pool>` —— 这是 4 个「缺口组合」里**唯一**真的对不上的那个 |
+    | `observed ⇒ 必须有 raw_hash` | — | 仍不能 enforce，见下 |
+
+    🔴 **已知障碍，`observed ⇒ raw_hash` 仍不能一步到位 enforce**：
 
     * `kind="observed" ⇒ 必须有 raw_hash` **今天还做不到**。实测直接证据缺 raw_hash 的比例
       按日期是 09-20 100% → 09-21 25.5% → 09-24 **13.8%** —— 在收敛但**仍在产生**。
