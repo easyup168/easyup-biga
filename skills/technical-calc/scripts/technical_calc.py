@@ -52,6 +52,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    input_ids_for,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -178,14 +179,19 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     _hash_tbl: dict[str, str] = {}
     _es_tbl: dict[str, str] = {}
 
-    def add(field: str, value: Any, label: str, source: str) -> None:
+    def add(field: str, value: Any, label: str, source: str, *,
+            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+        """`kind` 无默认值 —— 强制每个调用点自己说清楚（裁定 16）。
+        `kind=None` 是合法的「尚未归类」，调用点会写明原因。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=resolve_provenance(source, _hash_tbl),
-            evidence_set_id=resolve_provenance(source, _es_tbl)))
+            evidence_set_id=resolve_provenance(source, _es_tbl),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
 
     if daily is not None:
         src = f"sina:kline/{SYMBOL}"
@@ -215,14 +221,15 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                               payload=daily.raw, raw_text=daily.raw_text)
 
         closes = [b.close for b in daily.bars]
-        add("trade_date", trade_date, "交易日", src)
+        add("trade_date", trade_date, "交易日", src, kind="observed")
 
         if daily.last.close <= 0:
             missing.append(MissingItem(
                 f"{SYMBOL_LABEL}收盘价 —— 数据源给出 {daily.last.close}，不是有效点位",
                 "technical.close.invalid_value"))
         else:
-            add("close", round(daily.last.close, 2), f"{SYMBOL_LABEL}收盘", src)
+            add("close", round(daily.last.close, 2), f"{SYMBOL_LABEL}收盘", src,
+                kind="observed")
 
             short_ma = []
             for n in MA_WINDOWS:
@@ -230,7 +237,7 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                 if v is None:
                     short_ma.append(n)
                 else:
-                    add(f"ma{n}", v, f"MA{n}", f"derived:{src}")
+                    add(f"ma{n}", v, f"MA{n}", f"derived:{src}", kind="derived")
             if short_ma:
                 missing.append(MissingItem(
                     f"MA{'/'.join(map(str, short_ma))} —— 日线只有 {len(closes)} 根，"
@@ -241,14 +248,14 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             if ma20:
                 add("price_vs_ma20_pct",
                     round((daily.last.close / ma20 - 1) * 100, 2),
-                    "收盘相对 MA20(%)", f"derived:{src}")
+                    "收盘相对 MA20(%)", f"derived:{src}", kind="derived")
 
             have = [n for n in MA_WINDOWS if f"ma{n}" in result]
             if len(have) >= 2:
                 # 确定性观察，不是判断：把大小关系摆出来，Agent 不用自己比
                 order = sorted(have, key=lambda n: result[f"ma{n}"], reverse=True)
                 add("ma_order", ">".join(f"ma{n}" for n in order),
-                    "均线大小关系", f"derived:{src}")
+                    "均线大小关系", f"derived:{src}", kind="derived")
 
             m = _macd(closes)
             if m is None:
@@ -257,9 +264,9 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                     f"算出来的值不可用",
                     "technical.macd.insufficient_bars"))
             else:
-                add("macd_dif", m[0], "MACD DIF", f"derived:{src}")
-                add("macd_dea", m[1], "MACD DEA", f"derived:{src}")
-                add("macd_hist", m[2], "MACD 柱", f"derived:{src}")
+                add("macd_dif", m[0], "MACD DIF", f"derived:{src}", kind="derived")
+                add("macd_dea", m[1], "MACD DEA", f"derived:{src}", kind="derived")
+                add("macd_hist", m[2], "MACD 柱", f"derived:{src}", kind="derived")
 
             r = _rsi(closes)
             if r is None:
@@ -267,7 +274,7 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                     f"RSI{RSI_WINDOW} —— 日线不足 {RSI_WINDOW + 1} 根",
                     "technical.rsi.insufficient_bars"))
             else:
-                add("rsi14", r, f"RSI{RSI_WINDOW}", f"derived:{src}")
+                add("rsi14", r, f"RSI{RSI_WINDOW}", f"derived:{src}", kind="derived")
 
             if len(closes) >= HL_WINDOW:
                 win = [b for b in daily.bars[-HL_WINDOW:]]
@@ -291,10 +298,10 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             if hi is not None and lo is not None:
                 add("dist_to_high60_pct",
                     round((daily.last.close / hi - 1) * 100, 2),
-                    f"距 {HL_WINDOW} 日高点(%)", f"derived:{src}")
+                    f"距 {HL_WINDOW} 日高点(%)", f"derived:{src}", kind="derived")
                 add("dist_to_low60_pct",
                     round((daily.last.close / lo - 1) * 100, 2),
-                    f"距 {HL_WINDOW} 日低点(%)", f"derived:{src}")
+                    f"距 {HL_WINDOW} 日低点(%)", f"derived:{src}", kind="derived")
             elif len(closes) < HL_WINDOW:
                 missing.append(MissingItem(
                     f"距 {HL_WINDOW} 日高低点 —— 日线只有 {len(closes)} 根",

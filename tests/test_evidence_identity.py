@@ -128,7 +128,9 @@ class Test身份的冻结向量:
 class Test类别的自洽校验:
     @pytest.mark.parametrize("k", sorted(EVIDENCE_KINDS) + [None])
     def test_合法类别(self, k):
-        assert _ev(kind=k).kind == k
+        # derived 另有一条铁律（必须说得出出处，批 3），给它一个 raw_hash 才构造得出来。
+        extra = {"raw_hash": "a" * 64} if k == "derived" else {}
+        assert _ev(kind=k, **extra).kind == k
 
     @pytest.mark.parametrize("k", ["observe", "DERIVED", "", "fact", 1])
     def test_非法类别被拒(self, k):
@@ -150,10 +152,26 @@ class Test类别的自洽校验:
         e = _ev(kind="derived", input_evidence_ids=["a" * 64])
         assert e.input_evidence_ids == ("a" * 64,)
 
-    def test_批1不强制derived声明输入(self):
-        """🔴 显式钉住「还没强制」。不写这条，下一个人会以为裁定 16 已经落地了，
-        而实际上全仓 kind 都还是 None。强制是批 2。"""
-        assert _ev(kind="derived").input_evidence_ids == ()
+    def test_derived必须说得出出处(self):
+        """🔴 批 3 翻转了批 1 的留白。派生值有两条合法出路，**不能两者皆无**：
+
+        · 从**一份**原始响应算出来（MA、涨跌幅）⇒ `raw_hash` 指回那一份
+        · 从**别的值**算出来（炸板率）⇒ `input_evidence_ids`
+
+        规则不是「派生一律要 inputs」—— technical 的 `ma5` 是从整份 K 线算的，
+        `raw_hash` 已经完整回答了它的出处，再要一串 id 才是硬凑。
+        """
+        with pytest.raises(ValueError) as ei:
+            _ev(kind="derived")
+        assert "从**什么**算出来" in str(ei.value)
+
+    def test_derived两条出路各自成立(self):
+        assert _ev(kind="derived", raw_hash="a" * 64).kind == "derived"
+        assert _ev(kind="derived", input_evidence_ids=("b" * 64,)).kind == "derived"
+
+    def test_未声明kind的历史证据不受这条约束(self):
+        """三段式的「旧卡可读」：`kind=None` 是未声明，不是 derived。"""
+        assert _ev().kind is None
 
 
 class Test旧卡可读:

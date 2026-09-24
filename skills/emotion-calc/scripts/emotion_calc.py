@@ -69,6 +69,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    input_ids_for,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     CN_TZ,
@@ -98,6 +99,10 @@ CALC_VERSION = "emotion-calc/1"
 #: 情绪分参考公式的权重。业内常见口径，**未经本项目验证** ——
 #: 它的区分力要到测量阶段做安慰剂检验后才算数，因此只作为一个内部参考数，
 #: 不参与任何归类，也不单独上 Card。
+#: 情绪分的三个输入。`if` 判齐备与 `inputs=` 声明血缘**共用这一份** ——
+#: 分成两处写死同一组名字，就是第二套口径（L-3），改一处忘另一处不报错。
+_SCORE_INPUTS: tuple[str, ...] = ("limit_up_count", "max_streak", "broken_rate")
+
 _SCORE_W = {"limit_up_div": 150.0, "limit_up_w": 40.0,
             "streak_div": 10.0, "streak_w": 30.0,
             "seal_w": 30.0}
@@ -173,12 +178,17 @@ class Collector:
             self._note(warning=f"{label} 取到的是最近交易日 {r.qdate} 的数据，不是今天")
 
         self._keep(pool, r)
+        # 🔴 指纹**不受 `store` 门控**（批 3）：哈希是这份响应本身的属性，
+        #    与「我们这次存不存盘」无关。原先它写在 `if self.store:` 里面，于是
+        #    `--no-store` 跑出来的证据**全都没有 raw_hash** —— 同一段代码、同一份
+        #    数据，可追溯性却取决于一个与追溯无关的开关。
+        #    市场/板块/快讯三个 skill 本来就是先算哈希再判 store，这里是唯一的例外。
+        with self._lock:
+            # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+            self.hashes[f"em:push2ex/{pool}"] = raw_text_sha256(r.raw_text)
         if self.store:
             got = now_cn()
             snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
-            with self._lock:
-                # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
-                self.hashes[f"em:push2ex/{pool}"] = raw_text_sha256(r.raw_text)
             self._keep_raw(save_raw_snapshot(
                 source=f"em:push2ex/{pool}",
                 as_of=snap_as_of.isoformat(),
@@ -251,13 +261,24 @@ def build_fact_bundle(
     def _raw_hash_for(source: str) -> str | None:
         return resolve_provenance(source, c.hashes)
 
-    def add(field: str, value: Any, label: str, source: str) -> None:
+    def add(field: str, value: Any, label: str, source: str, *,
+            kind: str, inputs: tuple[str, ...] = ()) -> None:
+        """产出一条证据。
+
+        `kind` **没有默认值**，强制每个调用点自己说清楚（裁定 16）——
+        给它一个默认值，等于让「忘了想」和「想过了」写出来一模一样。
+
+        `inputs` 只对「从别的值算出来」的派生值有意义，写**字段名**，
+        由 `input_ids_for` 翻译成 evidence_id。
+        """
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field),
         ))
 
     if qdate and c.pools and all(r.total == 0 for r in c.pools.values()) \
@@ -280,30 +301,34 @@ def build_fact_bundle(
         dt = c.pools.get("limit_down")
 
         if zt:
-            add("limit_up_count", zt.total, "涨停家数", "em:push2ex/limit_up")
+            add("limit_up_count", zt.total, "涨停家数", "em:push2ex/limit_up",
+                kind="observed")
             ladder = _ladder(zt.rows)
             add("max_streak", max(ladder) if ladder else 0, "最高板",
-                "em:push2ex/limit_up")
+                "em:push2ex/limit_up", kind="derived")
             add("streak_2plus_count", sum(v for k, v in ladder.items() if k >= 2),
-                "连板家数(≥2)", "em:push2ex/limit_up")
+                "连板家数(≥2)", "em:push2ex/limit_up", kind="derived")
             add("streak_ladder", {str(k): v for k, v in ladder.items()},
-                "连板梯队分布", "em:push2ex/limit_up")
+                "连板梯队分布", "em:push2ex/limit_up", kind="derived")
             never_broken = sum(1 for r in zt.rows if int(r.get("zbc") or 0) == 0)
             add("seal_never_broken_rate",
                 round(never_broken / zt.total, 4) if zt.total else None,
-                "全天未炸板占比", "em:push2ex/limit_up")
+                "全天未炸板占比", "em:push2ex/limit_up", kind="derived")
 
         if zb:
-            add("broken_board_count", zb.total, "炸板家数", "em:push2ex/broken_board")
+            add("broken_board_count", zb.total, "炸板家数", "em:push2ex/broken_board",
+                kind="observed")
         if dt:
-            add("limit_down_count", dt.total, "跌停家数", "em:push2ex/limit_down")
+            add("limit_down_count", dt.total, "跌停家数", "em:push2ex/limit_down",
+                kind="observed")
 
         # 炸板率需要两个池同时在场 —— 缺一个就不是「算出来是 0」，是「算不出来」。
         if zt and zb:
             denom = zt.total + zb.total
             if denom:
                 add("broken_rate", round(zb.total / denom, 4), "炸板率",
-                    "derived:limit_up+broken_board")
+                    "derived:limit_up+broken_board", kind="derived",
+                    inputs=("limit_up_count", "broken_board_count"))
             else:
                 c.missing.append(MissingItem("炸板率 —— 涨停与炸板家数均为 0，分母为零",
                                              "emotion.broken_rate.zero_denominator"))
@@ -312,7 +337,7 @@ def build_fact_bundle(
                                          "emotion.broken_rate.incomplete"))
 
         # 情绪分：确定性公式，三个输入缺一不可。
-        if {"limit_up_count", "max_streak", "broken_rate"} <= set(result):
+        if set(_SCORE_INPUTS) <= set(result):
             w = _SCORE_W
             score = (
                 min(result["limit_up_count"] / w["limit_up_div"], 1.0) * w["limit_up_w"]
@@ -320,12 +345,15 @@ def build_fact_bundle(
                 + (1.0 - result["broken_rate"]) * w["seal_w"]
             )
             add("emotion_score", round(score, 2), "情绪分(参考)",
-                "derived:emotion-calc")
+                "derived:emotion-calc", kind="derived",
+                # 🔴 与上面那个 `if` 检查的三项**同一份名单** —— 两处写死同一组
+                #    字段名就是第二套口径，改了一处忘另一处不会报错。
+                inputs=tuple(_SCORE_INPUTS))
         else:
             c.missing.append(MissingItem("情绪分 —— 需要涨停家数 / 最高板 / 炸板率三项齐备",
                                          "emotion.score.incomplete"))
 
-        add("trade_date", qdate, "交易日", "em:push2ex/qdate")
+        add("trade_date", qdate, "交易日", "em:push2ex/qdate", kind="observed")
     else:
         c.missing.append(MissingItem("全部情绪指标 —— 没有任何股池返回可用的交易日",
                                      "emotion.trade_date.undetermined"))

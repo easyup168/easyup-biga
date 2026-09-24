@@ -59,6 +59,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    input_ids_for,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -142,12 +143,16 @@ def build_fact_bundle(
     #    它会让人以为查得到。
     raw_hashes: dict[str, str] = {}
 
-    def add(field: str, value: Any, label: str, source: str) -> None:
+    def add(field: str, value: Any, label: str, source: str, *,
+            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+        """`kind` 无默认值（裁定 16）。`kind=None` = 尚未归类，调用点写明原因。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, value=value, source=source, label=label,
             as_of=as_of, retrieved_at=retrieved, calc_version=CALC_VERSION,
-            raw_hash=resolve_provenance(source, raw_hashes)))
+            raw_hash=resolve_provenance(source, raw_hashes),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
 
     # 🔴 字段名不能叫 `session_live` —— `risk` 已经有一个同名字段，
     #    但那个问的是「上游数据所属的交易日过完了没」，
@@ -157,8 +162,12 @@ def build_fact_bundle(
     #    technical.close）是镜像问题，同样糟：
     #    前者让人以为是一个数，后者让守卫看不见重复。
     #    单一生产方守卫抓到了这一条 —— 它比的是名字，这次正好对上。
-    add("market_open", live, "此刻是否连续竞价时段", "derived:tradetime")
-    add("window_min", window_min, "回看窗口(分钟)", "derived:config")
+    # kind 暂缺：由交易日历 fact + 时钟算出，输入既不是原始响应也不是
+    # 已有证据。批 4 连同 tradetime 那一类一起定（裁定 16 的第 4 类）。
+    add("market_open", live, "此刻是否连续竞价时段", "derived:tradetime", kind=None)
+    # 🔴 裁定 16 的 parameter：回看窗口是**我们自己的设定**，不是关于市场的事实。
+    # 与 risk 的 THRESHOLDS 同类，只是那边根本不进 evidence、这边要上卡给人看。
+    add("window_min", window_min, "回看窗口(分钟)", "derived:config", kind="parameter")
 
     src = "sina:7x24/zhibo152"
     feed = None
@@ -204,7 +213,8 @@ def build_fact_bundle(
             save_raw_snapshot(source=src, as_of=as_of.isoformat(),
                               retrieved_at=retrieved.isoformat(),
                               payload=feed.raw, raw_text=feed.raw_text)
-        add("trade_date", newest_day, "最新一条所属日期", "derived:sina:7x24")
+        # source 改用真实表键（原来写的 `sina:7x24` 是泛化标签，解析不到指纹）。
+        add("trade_date", newest_day, "最新一条所属日期", f"derived:{src}", kind="derived")
 
         cutoff = retrieved - timedelta(minutes=window_min)
         inwin = [i for i in feed.items if i.at >= cutoff]
@@ -223,19 +233,19 @@ def build_fact_bundle(
                 "这段时间没有被看过，不能说「没有重大消息」",
                 "news.window.incomplete"))
 
-        add("item_count", len(inwin), "窗口内条数", src)
+        add("item_count", len(inwin), "窗口内条数", src, kind="derived")
         add("quote_count", sum(1 for i in inwin if i.is_quote),
-            "其中机器行情播报", src)
+            "其中机器行情播报", src, kind="derived")
 
         if inwin:
             newest = inwin[0].at
             stale = int((retrieved - newest).total_seconds())
-            add("newest_at", newest.isoformat(), "最新一条的时刻", src)
+            add("newest_at", newest.isoformat(), "最新一条的时刻", src, kind="derived")
             # ⚠️ 这个 `staleness_sec` 与 `Evidence.source_lag_sec`（批 R 前叫
             #    staleness_sec）**不是一回事**：这里是「最新一条快讯距现在多久」，
             #    量的是**新闻源静不静**；那个量的是**取数滞后**。同名不同义容易
             #    被顺手「统一」掉 —— 别改，两者各自的标签才是口径。
-            add("staleness_sec", stale, "距最新一条(秒)", src)
+            add("staleness_sec", stale, "距最新一条(秒)", src, kind="derived")
 
             # 🔴 静默守卫**只在盘中启用**。
             #    非盘中静默是常态（夜间实测间隔可达 1830s，周末只会更长），
@@ -250,16 +260,19 @@ def build_fact_bundle(
                     "news.feed.stale"))
 
             tags = collections.Counter(t for i in inwin for t in i.tags)
-            add("tag_counts", dict(tags.most_common()), "来源自带分类分布", src)
+            add("tag_counts", dict(tags.most_common()), "来源自带分类分布", src, kind="derived")
 
             shown = inwin[:max_items]
-            add("items_shown", len(shown), "交给 agent 读的条数", "derived:config")
+            # 🔴 不是 parameter：它是「窗口内条数」被上限截断后的结果 —— 有真实数据输入。
+            # 原先 source 标成 derived:config 掩盖了这一点（批 2 已指出标错）。
+            add("items_shown", len(shown), "交给 agent 读的条数", "derived:config",
+                kind="derived", inputs=("item_count",))
             add("items_truncated", max(0, len(inwin) - len(shown)),
-                "因上限未展示的条数", "derived:config")
+                "因上限未展示的条数", "derived:config", kind="derived", inputs=("item_count",))
             # 🔴 原文随证据冻结 —— 回放要靠它证明「喂进去的是同一批文本」。
             add("items", [{"id": i.id, "at": i.at.strftime("%H:%M"),
                            "quote": i.is_quote, "text": i.text}
-                          for i in shown], "快讯原文", src)
+                          for i in shown], "快讯原文", src, kind="derived")
             # 🔴 截断是**缺失**，不是 warning。
             #    agent 没读过的消息里可能正好有那条重要的，
             #    而它读完展示的部分会理直气壮地说「没有重大消息」。

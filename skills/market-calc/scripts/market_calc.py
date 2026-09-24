@@ -69,6 +69,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    input_ids_for,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -334,7 +335,13 @@ def build_fact_bundle(
         # 批 E-I：只有读冻结的 source 在 c.es_ids 里；其余（腾讯/涨跌家数）返回 None。
         return resolve_provenance(source, c.es_ids)
 
-    def add(field: str, value: Any, label: str, source: str) -> None:
+    def add(field: str, value: Any, label: str, source: str, *,
+            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+        """产出一条证据。`kind` **没有默认值** —— 强制每个调用点自己说清楚（裁定 16）。
+
+        ⚠️ `kind=None` 是合法的「**尚未归类**」，不是漏写。本 skill 有四个跨 symbol
+        聚合暂时留空，原因写在各自的调用点上。
+        """
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
@@ -342,6 +349,8 @@ def build_fact_bundle(
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
             evidence_set_id=_es_id_for(source),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field),
         ))
 
 
@@ -360,21 +369,26 @@ def build_fact_bundle(
     #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
-    def add_live(field: str, value: Any, label: str, source: str) -> None:
-        """实时快照类证据：as_of = 取回时刻。"""
+    def add_live(field: str, value: Any, label: str, source: str, *,
+            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+        """实时快照类证据：as_of = 取回时刻。`kind` 同 `add`，无默认值。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=retrieved, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
-            evidence_set_id=_es_id_for(source)))
+            evidence_set_id=_es_id_for(source),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
 
     if trade_date:
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
             c.warnings.append(as_of_warning)
-        add("trade_date", trade_date, "交易日", "sina:kline")
+        # kind 暂缺：trade_date 取自两份日线（沪/深）共同报告的交易日，
+        # 不出自单一响应；它也不是"算"出来的。归类留给批 4 连同下面三个一起定。
+        add("trade_date", trade_date, "交易日", "sina:kline", kind=None)
 
         # ── 守卫 2：腾讯与新浪必须说的是同一天 ──────────────────────
         quotes_usable = bool(c.quotes)
@@ -411,9 +425,9 @@ def build_fact_bundle(
                         "market.index_quote.out_of_range"))
                 else:
                     add(f"{key}_close", round(d.last.close, 2), f"{label}点位",
-                        f"sina:kline/{symbol}")
+                        f"sina:kline/{symbol}", kind="observed")
                     add(f"{key}_pct", pct, f"{label}涨跌幅(%)",
-                        f"derived:sina:kline/{symbol}")
+                        f"derived:sina:kline/{symbol}", kind="derived")
 
             # ── 守卫 4：两源成交量的单位/口径校验 ─────────────────────
             # 🔴 成交额来自腾讯，**不因新浪日线缺失而连坐**。
@@ -434,12 +448,15 @@ def build_fact_bundle(
 
             if q is not None:
                 yi = round(q.amount_wan / _WAN_TO_YI, 2)
-                add(f"turnover_{key}", yi, f"{label}成交额(亿元)", f"tencent:quote/{symbol}")
+                add(f"turnover_{key}", yi, f"{label}成交额(亿元)",
+                    f"tencent:quote/{symbol}", kind="observed")
                 turnover_total += yi
 
         if {f"turnover_{k}" for k in MARKETS} <= set(result):
+            # 两市之和 —— 输入是上面那两条 per-symbol 证据，血缘可解析。
             add("turnover_total", round(turnover_total, 2), "两市成交额(亿元)",
-                "derived:tencent:quote")
+                "derived:tencent:quote", kind="derived",
+                inputs=tuple(f"turnover_{k}" for k in MARKETS))
         else:
             c.missing.append(MissingItem(
                 "两市成交额 —— 需要两个市场的成交额同时可用，缺一不能合计",
@@ -450,11 +467,19 @@ def build_fact_bundle(
         if c.daily and all(v is not None for v in mas.values()):
             today_vol = sum(d.last.volume for d in c.daily.values())
             base_vol = sum(mas.values())
-            add("volume_total", round(today_vol / _YI, 2), "两市成交量(亿股)", "sina:kline")
+            # 🔴 下面三个的 kind 留空（未声明），**不是漏写**：
+            #    它们是两份日线快照的跨源聚合 —— 既不出自单一响应（raw_hash 填不了），
+            #    也不是从某几条**已有证据**算出来的（今天没有 per-symbol 的成交量证据，
+            #    volume_ma20 更是用了 20 天的历史序列，不是任何一条现成证据）。
+            #    硬编一组 inputs 就是裁定 16 明令禁止的"硬凑"。
+            #    ⇒ 批 4 要么补 per-symbol 成交量证据，要么让 Evidence 支持多来源引用。
+            #       在那之前留 None（合法的"尚未归类"），不编。
+            add("volume_total", round(today_vol / _YI, 2), "两市成交量(亿股)",
+                "sina:kline", kind=None)
             add("volume_ma20", round(base_vol / _YI, 2),
-                f"两市{MA_WINDOW}日均量(亿股，不含今日)", "derived:sina:kline")
+                f"两市{MA_WINDOW}日均量(亿股，不含今日)", "derived:sina:kline", kind=None)
             add("volume_ratio", round(today_vol / base_vol, 4) if base_vol else None,
-                f"量能比(今日/{MA_WINDOW}日均)", "derived:sina:kline")
+                f"量能比(今日/{MA_WINDOW}日均)", "derived:sina:kline", kind=None)
         else:
             short = [MARKETS[k][1] for k, v in mas.items() if v is None]
             c.missing.append(MissingItem(
@@ -478,15 +503,19 @@ def build_fact_bundle(
             b = c.breadth
             c.warnings.append(
                 "涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的")
-            add_live("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np")
-            add_live("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np")
-            add_live("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np")
+            add_live("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np",
+                     kind="observed")
+            add_live("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np",
+                     kind="observed")
+            add_live("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np",
+                     kind="observed")
             # 分母不可能为 0 —— 上面的 not_yet_formed 守卫已经把那种情况挡掉了。
             # 🔴 原来这里有个 `else: 分母为零` 分支，加了守卫之后它**永远走不到** ——
             #    恒假分支就是 L-7，留着只会让人以为还有一条路。
             total = b.advance + b.decline + b.flat
             add_live("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
-                "derived:em:push2delay/ulist.np")
+                     "derived:em:push2delay/ulist.np", kind="derived",
+                     inputs=("advance_count", "decline_count", "flat_count"))
 
     if store:
         for source, payload, src_as_of, raw_text in c.raw:

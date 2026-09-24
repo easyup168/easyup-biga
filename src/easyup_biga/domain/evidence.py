@@ -123,6 +123,15 @@ class Evidence:
                 raise ValueError(
                     f"Evidence.input_evidence_ids 的每一项都必须是 64 位十六进制的 "
                     f"evidence_id（小写），收到 {i!r}")
+        if self.kind == "derived" and not self.raw_hash and not self.input_evidence_ids:
+            raise ValueError(
+                f"Evidence(field={self.field!r}, kind='derived') 既没有 raw_hash 也没有 "
+                f"input_evidence_ids —— 派生值必须说得出它是从**什么**算出来的。\n"
+                f"  · 从**一份**原始响应算出来（MA、涨跌幅…）⇒ raw_hash 指回那一份；\n"
+                f"    source 写成 `derived:<那个真实来源>`，`resolve_provenance` 会填上。\n"
+                f"  · 从**别的值**算出来（炸板率 = 炸板/(涨停+炸板)）⇒ 声明 input_evidence_ids，\n"
+                f"    用 `input_ids_for(evidence, ('limit_up_count', 'broken_board_count'))`。\n"
+                f"  两者都没有 = 这个数是从哪来的没人答得上来，而它会印在卡面上。")
         if self.kind == "parameter" and self.input_evidence_ids:
             raise ValueError(
                 "Evidence.kind='parameter' 却声明了 input_evidence_ids —— 参数是我们"

@@ -59,6 +59,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    input_ids_for,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -234,14 +235,17 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     def es_id_for(source: str) -> str | None:
         return resolve_provenance(source, c.es_ids)
 
-    def add(field: str, value: Any, label: str, source: str) -> None:
+    def add(field: str, value: Any, label: str, source: str, *,
+            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=raw_hash_for(source),
-            evidence_set_id=es_id_for(source)))
+            evidence_set_id=es_id_for(source),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
 
 
     # 🔴 无日期端点的 as_of 不能沿用日线的收盘时刻。
@@ -259,7 +263,8 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
-    def add_live(field: str, value: Any, label: str, source: str) -> None:
+    def add_live(field: str, value: Any, label: str, source: str, *,
+            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
         """实时快照类证据：as_of = 取回时刻。"""
         result[field] = value
         evidence.append(Evidence(
@@ -267,7 +272,9 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             as_of=retrieved, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=raw_hash_for(source),
-            evidence_set_id=es_id_for(source)))
+            evidence_set_id=es_id_for(source),
+            kind=kind,
+            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
 
     if c.daily is None:
         c.missing.append(MissingItem(
@@ -278,7 +285,8 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
             c.warnings.append(as_of_warning)
-        add("trade_date", trade_date, "交易日", f"sina:kline/{_DATE_SYMBOL}")
+        add("trade_date", trade_date, "交易日", f"sina:kline/{_DATE_SYMBOL}",
+            kind="observed")
 
         if c.boards:
             c.warnings.append(
@@ -294,13 +302,13 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             ranked = sorted(r.boards, key=lambda b: b.pct, reverse=True)
             counts[tag] = len(ranked)
             add_live(f"{tag}_top", [_brief(b) for b in ranked[:TOP_N]],
-                f"{label}涨幅前 {TOP_N}", src)
+                f"{label}涨幅前 {TOP_N}", src, kind="derived")
             up = sum(1 for b in ranked if b.pct > 0)
             add_live(f"{tag}_advance_ratio", round(up / len(ranked), 4),
-                f"上涨{label}板块占比", f"derived:{src}")
+                f"上涨{label}板块占比", f"derived:{src}", kind="derived")
             if tag == "industry":
                 add_live("industry_bottom", [_brief(b) for b in ranked[-BOTTOM_N:]],
-                    f"{label}跌幅前 {BOTTOM_N}", src)
+                    f"{label}跌幅前 {BOTTOM_N}", src, kind="derived")
                 # 🔴 外部评审 F6：资金字段可以**独立于 pct** 失效。
                 #    上面那条 pre_session 守卫只看 pct，放行之后资金侧
                 #    若是全缺或全零，排序结果是任意的 —— 而「第一名」
@@ -320,15 +328,17 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                 else:
                     by_money = sorted(known, key=lambda b: b.main_inflow, reverse=True)
                     add_live("main_inflow_top", [_brief(b) for b in by_money[:TOP_N]],
-                        "主力净流入前 5（行业）", src)
+                        "主力净流入前 5（行业）", src, kind="derived")
                     add_live("main_inflow_total_yi",
                         round(sum(b.main_inflow for b in known) / _YI, 2),
-                        "行业主力净流入合计(亿元)", f"derived:{src}")
+                        "行业主力净流入合计(亿元)", f"derived:{src}", kind="derived")
             if any(b.leader is None for b in ranked[:TOP_N]):
                 c.warnings.append(f"{label}榜前 {TOP_N} 中有板块未返回领涨股")
 
         if counts:
-            add_live("board_counts", counts, "各榜板块数", "em:clist")
+            # kind 暂缺：跨行业榜+概念榜两份响应的合计，没有单一来源，
+            # 也不是从某几条已有证据算出来的（同 market 的跨源聚合）。批 4 定。
+            add_live("board_counts", counts, "各榜板块数", "em:clist", kind=None)
         else:
             c.missing.append(MissingItem(
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))
