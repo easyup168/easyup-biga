@@ -59,6 +59,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
     FactBundle,
@@ -146,8 +147,7 @@ def build_fact_bundle(
         evidence.append(Evidence(
             field=field, value=value, source=source, label=label,
             as_of=as_of, retrieved_at=retrieved, calc_version=CALC_VERSION,
-            raw_hash=None if source.startswith("derived:")
-            else raw_hashes.get(source)))
+            raw_hash=resolve_provenance(source, raw_hashes)))
 
     # 🔴 字段名不能叫 `session_live` —— `risk` 已经有一个同名字段，
     #    但那个问的是「上游数据所属的交易日过完了没」，

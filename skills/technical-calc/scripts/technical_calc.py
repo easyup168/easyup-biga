@@ -52,6 +52,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
     FactBundle,
@@ -171,15 +172,20 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             missing.append(MissingItem(f"{SYMBOL_LABEL}日线 —— 数据源不可用: {e}",
                                        "technical.daily.unavailable"))
 
+    # 本 skill 只读一个来源，但溯源归属走**全仓唯一那份实现**（批 2）——
+    # 自己写一个 `None if derived else raw_hash` 就又成了第六份口径。
+    # 下面两张表各只有一条目，在 src/raw_hash/es_id 落定之后填。
+    _hash_tbl: dict[str, str] = {}
+    _es_tbl: dict[str, str] = {}
+
     def add(field: str, value: Any, label: str, source: str) -> None:
         result[field] = value
-        derived = source.startswith("derived:")
         evidence.append(Evidence(
             field=field, source=source, value=value,
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
-            raw_hash=None if derived else raw_hash,
-            evidence_set_id=None if derived else es_id))
+            raw_hash=resolve_provenance(source, _hash_tbl),
+            evidence_set_id=resolve_provenance(source, _es_tbl)))
 
     if daily is not None:
         src = f"sina:kline/{SYMBOL}"
@@ -194,6 +200,11 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
         else:
             # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
             raw_hash = raw_text_sha256(daily.raw_text)
+        # 填表 —— 此后 add() 无论拿到 `sina:kline/…` 还是 `derived:sina:kline/…`
+        # 都解析得到同一份溯源（派生值确实出自这一份 raw）。
+        _hash_tbl[src] = raw_hash
+        if es_id is not None:
+            _es_tbl[src] = es_id
         trade_date = daily.trade_date
         as_of, as_of_warning = as_of_for_trade_date(trade_date, retrieved_at=retrieved)
         if as_of_warning:
