@@ -242,6 +242,40 @@ def save_card_with_notifications(
             + "；".join(f"{a} 写着 {t}" for a, t in foreign) + "\n"
             "  一张卡上的每一条判定都必须属于同一次决策。\n"
             "  历史卡可以读（回放），但不能再写回库。")
+    # 🔴 批 N（外部评审 §7.2）：**在线卡必须说得清自己属于哪次执行、看的哪份数据。**
+    #
+    # 档位判据与上面的 `foreign` 检查同源：`replay_of is None` 才是在线路径
+    # （`replay.py --store` 永远传原始 record_id）。回放不该被要求带 run_id ——
+    # 它本来就不是一次执行尝试，`card_ops.comparable()` 连比较时都把 run_id 剥掉。
+    #
+    # ⚠️ 这条**会拒掉旧的 standalone `synthesize.py`** 的裸落库（它没有 run_id 也没有
+    #    evidence_set_id）。那是有意的：那条路径产出的正是 B 节要消灭的那种卡 ——
+    #    落了库却回答不了「这是哪次执行跑出来的、基于哪份冻结数据」。它现在有
+    #    `--run-id`/`--evidence-set-id` 两个参数，给不出就只能 `--no-store`。
+    #
+    # ⚠️ **没有**要求 `input_verdict_refs` 非空（评审 §7.2 第四条）—— 那一条留给下一批，
+    #    理由写在 CHANGELOG：它会同时废掉 `card_ops.synthesize(verdict_refs=None)` 这条
+    #    **文档里明确允许**的旧调用路径，属于产品决策不是纯加固；而它要防的危险情形
+    #    （引用错的原件）已经由「refs 非空时必须恰好覆盖 + 血缘一致」挡住了。
+    if replay_of is None:
+        lack = [n for n, v in (("run_id", card.run_id),
+                               ("evidence_set_id", card.evidence_set_id)) if not v]
+        if lack:
+            raise ValueError(
+                f"拒绝落库：在线卡 {card.decision_id} 缺 {lack} —— "
+                f"一张落库的在线卡必须说得清它属于哪次执行尝试（run_id）、"
+                f"基于哪份冻结的数据切片（evidence_set_id）。\n"
+                "  缺了它们，「这张卡是怎么来的」事后只能靠猜（外部评审 §7-9）。\n"
+                "  出卡走 bin/biga-card（orchestrator 两样都会填）；回放走 "
+                "replay.py --store（它传 replay_of，不受这条约束）。")
+        # 🔴 引用核对放在写事务**之前** —— 它自己要开只读连接，套在
+        #    `with connect(path)` 里会和写事务抢同一个库。
+        ref_problems = verify_verdict_refs(card, path=path)
+        if ref_problems:
+            raise ValueError(
+                f"拒绝落库：在线卡 {card.decision_id} 的判定原件引用核对不过 —— \n  "
+                + "\n  ".join(ref_problems))
+
     payload = _canonical_dumps(card.to_dict())
     # 🔴 写边界重校验（设计文档 §6 A3）：不信任调用方交进来的对象本身，
     #    只信任「它序列化之后还能不能重建出来」——
@@ -289,11 +323,16 @@ def _insert_card_row(conn: sqlite3.Connection, card: DecisionCard, payload: str,
     抽出来是为了让 `save_card_with_notifications` 能把它和通知入队放进同一个事务 ——
     不各开各的 `connect()`（那就成了两次独立提交，通知失败也拦不住卡已落库）。
     """
+    # 🔴 批 N：run_id / evidence_set_id 与其余派生列同源 —— 全部从 card 对象取，
+    #    调用方无法单独指定，所以不可能出现「列说 run-A、card_json 说 run-B」。
+    #    它们让「这次执行尝试产出了哪张卡 / 这张卡看的是哪份切片」变成一句 SQL，
+    #    而不是把 card_json 解开来读（外部评审 §7-8）。
     cur = conn.execute(
         """INSERT INTO decision_records
            (decision_id, replay_of, status, headline, model_ref,
-            missing_count, card_json, generated_at, elapsed_ms, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            missing_count, card_json, generated_at, elapsed_ms, created_at,
+            run_id, evidence_set_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             card.decision_id,
             replay_of,
@@ -305,6 +344,8 @@ def _insert_card_row(conn: sqlite3.Connection, card: DecisionCard, payload: str,
             card.generated_at,
             card.elapsed_ms,
             now_cn().isoformat(),
+            card.run_id,
+            card.evidence_set_id,
         ),
     )
     return int(cur.lastrowid)
@@ -867,6 +908,34 @@ def verify_verdict_refs(
                 f"卡上记的是 {ref.content_sha256[:12]}…，"
                 f"agent_verdicts 里现在是 {meta['content_sha256'][:12]}… —— "
                 f"这条原件在合成之后被改变过")
+        # 🔴 批 N（外部评审 §7.2）：原件必须属于**这张卡的决策**。
+        #    `_check_identity` 比的是 `AgentVerdict.task_id`（卡上那份**拷贝**里的值），
+        #    这里比的是 `agent_verdicts.task_id`（**库里那一行**的值）—— 两者可以不一致：
+        #    卡上的拷贝是合成时序列化进 card_json 的，库行才是原件。只核拷贝，等于让
+        #    被验证方自己出具证明。
+        if meta["task_id"] != card.decision_id:
+            problems.append(
+                f"[{ref.agent}] verdict_id={ref.verdict_id} 在库里属于决策 "
+                f"{meta['task_id']}，不是本卡的 {card.decision_id} —— "
+                f"一张卡上的每条原件都必须属于同一次决策")
+        # 🔴 批 N（外部评审 §6.2 Cross-run Contamination）：原件必须属于**这次执行尝试**。
+        #    `latest_verdict_ids()` 按 decision_id 聚合，一个 decision 出现第二个 run 时
+        #    它会原样返回上一次遗留的行 —— 卡是新的、证据是旧的，且每一道既有核验都通过。
+        #    这里是唯一一处拿**库里那一行的 run_id** 与卡的 run_id 对质的地方。
+        #    ⚠️ 两边任一为 None 不判（R-3：那是「不知道」，不是「不一致」）——
+        #    历史行没有 run_id 列的值，硬判会让所有老卡的 --check 全红。
+        if card.run_id is not None and meta["run_id"] is not None \
+                and meta["run_id"] != card.run_id:
+            problems.append(
+                f"[{ref.agent}] verdict_id={ref.verdict_id} 是 run {meta['run_id']} "
+                f"产出的，本卡却声明属于 run {card.run_id} —— cross-run 污染："
+                f"卡看起来是新的，证据来自上一次运行")
+        # ref 自称的 run 与库里那一行对不上 ⇒ 这份引用本身是编的（或原件被换过）。
+        if ref.run_id is not None and meta["run_id"] != ref.run_id:
+            problems.append(
+                f"[{ref.agent}] 卡上的引用写着 run {ref.run_id}，"
+                f"但 agent_verdicts 里这一行记的是 run {meta['run_id']} —— "
+                f"引用与原件对不上")
     return problems
 
 
@@ -1080,6 +1149,7 @@ def record_agent_run(
     missing_count: int = 0,
     error: str | None = None,
     runtime_run_id: str | None = None,
+    orchestration_run_id: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
     """记一次 Agent 执行，返回 `ledger_id`（账本行号，批 J-II 从 `run_id` 改名）。
@@ -1088,6 +1158,16 @@ def record_agent_run(
     即 OpenClaw `subagent_runs.run_id`）。在线路径由编排器传入，落库后
     `tools/verify/spawn_check.py` 拿它与运行时做结构化 join（比原先的文本匹配硬）。
     历史行 / 回放路径为 None ⇒ 该列 NULL，核验退回按决策号的 LIKE 判据。
+
+    `orchestration_run_id`（可选，批 N / 外部评审 §8）：**BigA 自己**那次编排执行
+    尝试的 id（`decision_runs.run_id`）。它补上的是这条链缺的中间一环 ——
+
+        decision_runs.run_id → agent_runs.orchestration_run_id → agent_runs.runtime_run_id
+
+    在它之前，「某次 BigA Run 启动了哪些运行时 Run」只能按 `decision_id` 做文本
+    匹配，而一个 decision 可以有多个 run（幂等重投、将来的 Retry），文本匹配会把
+    两次执行的账本行混在一起。⚠️ 与 `runtime_run_id` 是**两个命名空间**：前者是
+    我们的，后者是 OpenClaw 的，列名各自说清是谁的 id（J-II 收敛过一次同名歧义）。
 
     🔴 **这不是 spawn 的证明**（外部评审 P2-3）
     ------------------------------------------
@@ -1115,10 +1195,11 @@ def record_agent_run(
             """INSERT INTO agent_runs
                (decision_id, task_id, agent, model, status, verdict,
                 missing_count, elapsed_ms, error, started_at, finished_at,
-                runtime_run_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                runtime_run_id, orchestration_run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (decision_id, task_id, agent, model, status, verdict, missing_count,
-             elapsed_ms, error, started_at, finished_at, runtime_run_id),
+             elapsed_ms, error, started_at, finished_at, runtime_run_id,
+             orchestration_run_id),
         )
         return int(cur.lastrowid)
 
@@ -1131,16 +1212,18 @@ def record_verdict_run(
     decision_id: str | None = None,
     model: str | None = None,
     runtime_run_id: str | None = None,
+    orchestration_run_id: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
     """从一个 `AgentVerdict` 直接记账，省得调用方手抄字段（抄错就是口径分裂）。
 
-    `runtime_run_id` 透传给 `record_agent_run` —— 见那里的说明。
+    `runtime_run_id` / `orchestration_run_id` 透传给 `record_agent_run` —— 见那里的说明。
     """
     return record_agent_run(
         task_id=v.task_id, agent=v.agent, status=v.status, verdict=v.verdict,
         missing_count=len(v.missing), elapsed_ms=v.elapsed_ms,
         decision_id=decision_id, model=model, runtime_run_id=runtime_run_id,
+        orchestration_run_id=orchestration_run_id,
         started_at=started_at, finished_at=finished_at, path=path,
     )
 

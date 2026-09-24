@@ -61,7 +61,13 @@ def _card(refs: list[VerdictRef] | None = None, **kw) -> DecisionCard:
     base = dict(decision_id=TID, status="WAIT", headline="h",
                 verdicts=[_verdict()], synthesis="", model_ref="m",
                 missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
-                input_verdict_refs=refs or [])
+                input_verdict_refs=refs or [],
+                # 🔴 批 N：这些用例故意构造「引用与卡上判定对不上」的样本，去验证
+                #    **库层** `verify_verdict_refs()` 抓不抓得到。契约层从批 N 起也
+                #    会在构造时拦同一类问题（`_check_run_provenance`），那会让这些
+                #    样本根本造不出来 —— 用 from_store=True 走三段式的中段（旧卡可读、
+                #    问题记在 provenance_warning），把被测的那一层露出来。
+                from_store=True)
     base.update(kw)
     return DecisionCard(**base)
 

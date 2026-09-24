@@ -1149,17 +1149,52 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         `stale_run_reaper.py` 全仓零调度方（已补 `stale-run-reaper-biga.timer`
         并装上 `enable --now`）。测试 1379 → 1402。详见
         `docs/tutorial/41-adversarial-review-round-2.md`、`CHANGELOG.md`
-  - [ ] 评审 A（发布基线）/E（Contract 与数据质量）/F（Package 与 Registry）
-        部分——已核实真实性，暂缓处理
-  - [ ] B 部分（Run Provenance）—— **另一个并行会话正在处理**（worktree
-        `b-provenance`），本清单不重复跟踪其进度。原核实结论（供该会话对照）：
-        Fact 唯一约束确实只按 `(task_id, agent)`、`latest_verdict_ids()` 确实仍按
-        `decision_id` 聚合；⚠️ 曾在这里写"目前没有任何代码路径会对同一个
-        decision 开出第二个 run"，二轮对抗性复核指出这个前提是错的——C-1 的
-        relaunch 机制本来就会对同一 decision_id 开出一个新 run_id，只是**在
-        当前约束下**被 fail-closed 拒绝（见批 M-II）。B-2（约束改
-        `(run_id,agent)`）与批 M-II 的 fail-closed 修法方向相反，B-2 落地时
-        需要回来重新评估 `inbound.py` 那道检查
+  - [x] 批 M-III · 三轮对抗性复核（2026-09-24）—— 对批 M-II 本身再做一次真机
+        PoC。发现并修复：`stale_run_reaper.find_stale_runs()` 按 run **起跑**
+        时刻判过期，应按**最后一次推进**时刻——一个起跑很久、但刚推进的健康
+        run 会被误判 stale 并收成 TIMEOUT。改用 `run_events` 最新一条的 `at`。
+        另确认：A 节"消除动态同名 monkeypatch"（`test_facts_split_e3.py` 一类
+        6 个文件用 `spec_from_file_location` 重载 `card_ops`）是真实、可复现的
+        测试顺序依赖（`pytest tests/test_orchestrator.py tests/test_facts_
+        split_e3.py` 会红，反序不会）——已知未修；E 节"Missing Code 按 agent
+        细分 + set() 合并丢信息"这条经全链路追踪**不成立**：`card_ops.
+        synthesize()` 按"代码+文本"复合键去重，不会把不同 agent 的同代码
+        缺失项合并掉。测试 1402 → 1408
+  - [ ] 评审 A（发布基线）/E（Contract 与数据质量）/F（Package 与 Registry）/
+        G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理。
+        A 节的 monkeypatch 顺序依赖已确认真实存在，是下一批候选（见批 M-III）
+
+- [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
+      schema **v16**：`decision_records.run_id`/`.evidence_set_id`、
+      `agent_runs.orchestration_run_id`、`ux_evidence_set_per_run`（分区唯一）；
+      `DecisionCard.evidence_set_id` 字段；契约层 `_check_run_provenance()`
+      （ref 恰好覆盖 + run 血缘一致，三段式）；库层 `verify_verdict_refs()`
+      补 foreign decision / foreign run 两道；在线落库必填 run_id/evidence_set_id
+      并真跑一遍 ref 核对；旧 standalone `synthesize.py` 落库要显式给两个 id。
+      新增 `tests/test_run_provenance.py`（25 条），11 处 sabotage 验证。
+      详见 `docs/tutorial/42-run-provenance.md`、`CHANGELOG.md`
+  - [x] 🔴 **订正上一条里一句错的核实结论**。批 M 当时写着「目前没有任何代码路径
+        会对同一个 decision 开出第二个 run」——**不成立**：批 M 自己的 C-1
+        （失败终态可重新拉起）就是那条路径，而它拉起时用的是**同一个 decision_id**。
+        对抗性复核用真实 PoC 复现了后果：`STAGE1_COMPLETED` 之后进 TIMEOUT 也属于
+        `NOTIFY_FAILURE_STATES`，那时五份 fact 早已落库 ⇒ 重放时五个 Specialist
+        全部撞 `ux_fact_per_task_agent`，而编排器**不会因此停**（`latest_verdict_ids`
+        查到上一轮的旧 ref、非空 ⇒ 零证据那道 fail-fast 不触发）⇒ 用几小时前的证据
+        合成一张 `generated_at` 是现在的卡，spawn 核验照样通过。
+        ⇒ 评审 §6.3 提前写出了这个 bug，B 因此**不是**「面向未来 Retry 的前置修复」，
+        是一个已发货改动的前置条件
+  - [ ] **B-2 / B-3 / B-4 / B-5 留到下一批，必须与「拆 C-1 那道守卫」同批做**：
+        `ux_fact_per_run_agent`（`(run_id, agent)`，`WHERE run_id IS NOT NULL`）+
+        `ux_legacy_fact_per_task_agent`（`WHERE run_id IS NULL`）+ 废弃
+        `latest_verdict_ids(decision_id)` + 新增 `load_verdict_ids_for_run(run_id)`。
+        🔴 与同期那条 C-1 收窄修复（`latest_verdict_ids` 非空就拒绝自动重放）正面
+        冲突：B-2 落地后重放本来就安全，那道守卫会变成「拒绝一次本来安全的重放」，
+        把永久中毒原样退回来；而 B-4 要删的正是它刚成为第 4 个调用方的那个函数。
+        **加约束 + 拆守卫分开做的失败是静默的**（守卫有自己的测试，测试照样绿，
+        只有产品行为退回去）
+  - [ ] 评审 §7.2 第四条「在线卡 `input_verdict_refs` 不许为空」—— 它会同时废掉
+        `card_ops.synthesize(verdict_refs=None)` 这条**文档里明确允许**的旧路径，
+        属于产品决策不是纯加固；要防的危险情形已由契约层覆盖检查挡住，一并留到下一批
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

@@ -699,6 +699,63 @@ CREATE INDEX IF NOT EXISTS ix_cal_date ON fact_trading_calendar(trade_date);
     "历史日历一旦落地不覆盖；交易所补发调整用更晚 retrieved_at 的新行表达")
 
 
+
+_V16 = """
+-- ───────────────────────────────────────────────────────────────
+-- v16：Run Provenance —— 把「这张卡/这条账本属于哪次执行尝试」变成可查询的列（批 N）
+--
+-- 外部评审 B 节（Run Provenance Closure）§7-9 的三条断言，实测全部成立：
+--   · `decision_records` 完全没有 run_id / evidence_set_id 两列 —— 一张卡属于
+--     哪次执行尝试、看的是哪份冻结切片，只能把 card_json 解开来读，SQL 答不了。
+--   · `agent_runs` 有 runtime_run_id（OpenClaw 的 spawn id），却没有反向指回
+--     **BigA 自己**那次编排的列 ⇒ 「某次 BigA Run 启动了哪些运行时 Run」这个
+--     问题没有结构化答案，只能按 decision_id 做文本匹配（而一个 decision 可以
+--     有多个 run —— 那正是 B 节存在的理由）。
+--   · `evidence_sets.run_id` 可空且无唯一约束 ⇒ 「一个 Run 只绑一套 EvidenceSet」
+--     这句话没有任何东西在守。
+--
+-- 🔴 三列一律 nullable、不回填（同 v10 的立场，L-8）
+-- ------------------------------------------------------------------
+-- 评审原文写的是 `NOT NULL`。**实测生产库后没有照抄**：
+--     decision_records   43 张在线卡，只有 6 张的 card_json 带 run_id
+--     agent_runs         166 行，只有 36 行有 runtime_run_id
+--     evidence_sets      7 行，1 行 run_id 为空
+-- 这些行是迁移之前落的，它们**确实不知道**自己属于哪次 run。NOT NULL 会让迁移
+-- 当场失败；先回填再加约束则是给历史数据编一个当时并不存在的答案 —— 两条都比
+-- 「NULL 如实表达不知道」更糟。
+-- ⇒ 列可空，**必填由写边界强制**（`save_card_with_notifications` 的在线分支），
+--   档位与 `_check_identity` 那条三段式完全一致：读可以宽，写必须严。
+--
+-- 🔴 evidence_sets 的唯一约束做成**分区**索引
+-- ------------------------------------------------------------------
+-- `UNIQUE(run_id)` 会把 7 行里那 1 行 NULL 一并纳入 —— SQLite 里多行 NULL 不算
+-- 重复，所以不会立刻失败，但语义是错的：它声称「没有 run_id 的切片也受唯一约束」，
+-- 而那恰恰是唯一不该被约束的一类。加 `WHERE run_id IS NOT NULL` 说的才是评审真正
+-- 要的那句话：**每个真实的 Run 至多一套 EvidenceSet**。
+-- ⚠️ 加索引前实测过生产库：`run_id IS NOT NULL` 的 6 行里没有任何重复
+--    （同 v11 的先例 —— CREATE UNIQUE INDEX 遇存量重复会直接报错，必须先确认干净）。
+--
+-- 🔴 为什么叫 orchestration_run_id 而不是 run_id
+-- ------------------------------------------------------------------
+-- `agent_runs` 里已经有一个 runtime_run_id（OpenClaw 运行时的 spawn id），那是
+-- **另一个命名空间**（J-II 收敛过一次「三个不同东西共用 run_id」）。再往同一张表
+-- 里塞一个叫 run_id 的列，等于把刚收敛掉的歧义原样请回来。评审给的名字正好把
+-- 「谁的 run」写进了列名，照用。
+--    decision_runs.run_id → agent_runs.orchestration_run_id → agent_runs.runtime_run_id
+-- `tests/test_store.py::TestRunIdNamespace` 的判据同步扩到这个名字（值仍必须追得到
+-- decision_runs.run_id）；runtime_run_id **不**纳入 —— 它本来就是别人的 id。
+-- ───────────────────────────────────────────────────────────────
+ALTER TABLE decision_records ADD COLUMN run_id          TEXT;
+ALTER TABLE decision_records ADD COLUMN evidence_set_id TEXT;
+ALTER TABLE agent_runs       ADD COLUMN orchestration_run_id TEXT;
+
+-- 一个 Run 至多一套 EvidenceSet（评审 §9「Every Run has exactly one EvidenceSet」
+-- 的「至多」那一半；「至少」那一半由写边界要求在线卡必填 evidence_set_id 来保证）。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_set_per_run
+    ON evidence_sets(run_id) WHERE run_id IS NOT NULL;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -716,6 +773,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (13, _V13),
     (14, _V14),
     (15, _V15),
+    (16, _V16),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

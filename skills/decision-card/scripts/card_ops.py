@@ -104,6 +104,7 @@ def synthesize(
     historical: bool = False,
     verdict_refs: list[VerdictRef] | None = None,
     run_id: str | None = None,
+    evidence_set_id: str | None = None,
     expected_roster: tuple[str, ...] | None = None,
 ) -> DecisionCard:
     """把 Verdict 组装成 Card。**纯函数，不碰 IO。**
@@ -131,6 +132,11 @@ def synthesize(
             旧调用方（例如 `_read_verdicts()` 读 JSON 文件的退路）
             没有 verdict_id 可用时留空即可，Card 只是少一份可核对的证据，
             不影响其余字段。核对走 `_store.verify_verdict_refs()`。
+        evidence_set_id: 🔴 批 N：这次决策看的是哪一份被冻结的数据切片
+            （`SnapshotCoordinator.freeze_index_daily` 铸的那个 id）。在线路径由
+            编排器传 `ctx.evidence_set_id`；回放把原卡那份原样带过去，不重铸。
+            没有它，「所有 Specialist 看同一份数据」在卡这一层无从核实
+            （外部评审 §9）。
     """
     seen: set[str] = set()
     missing: list[MissingItem] = []
@@ -157,6 +163,7 @@ def synthesize(
         elapsed_ms=elapsed_ms,
         input_verdict_refs=list(verdict_refs or []),
         run_id=run_id,
+        evidence_set_id=evidence_set_id,
         # 🔴 批 K：在线路径把生成时的期望 roster 冻进卡（编排器传 EXPECTED_ROSTER）；
         #    回放把原卡冻结的那份**原样带过去**（replay.py），不重算 —— 老卡为 None。
         expected_roster=expected_roster,
@@ -205,7 +212,11 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
                                started_at=card.generated_at,
                                finished_at=card.generated_at,
                                model=card.model_ref,
-                               runtime_run_id=(runtime_run_ids or {}).get(v.agent))
+                               runtime_run_id=(runtime_run_ids or {}).get(v.agent),
+                               # 🔴 批 N：账本行指回**我们自己**那次编排执行尝试。
+                               #    取 card.run_id 而不是另传一个参数 —— 卡和账本必须
+                               #    说同一次执行，两个入参就是两套口径的起点。
+                               orchestration_run_id=card.run_id)
         # 🔴 批 G-I：在线路径出卡后，把这张卡分到一类外发通知并入队 —— **与 Card 落库
         #    同一个事务**（save_card_with_notifications）。要么卡和通知一起进库，要么
         #    一起回滚（探针 P1）。event_type 由 `_contract.card_event_type` 从卡本身推

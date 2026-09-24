@@ -123,6 +123,17 @@ class DecisionCard:
     #: Registry（「有就用、缺就退回」，同 J-I run_id / E-I LegacyAdapter 的形状）。
     #: 🔴 **不给老卡回填**（raw/历史永不改写，L-8）—— 缺就靠回退兜底，不事后补写。
     expected_roster: tuple[str, ...] | None = None
+    #: 🔴 批 N（可选、默认 None）：这张卡用的是哪一份被冻结的数据切片
+    #: （`evidence_sets.evidence_set_id`）。外部评审 §7.2 要求在线卡必填它 ——
+    #: 没有它，「所有 Specialist 看的是同一份数据」这句话在卡这一层无从核实
+    #: （`decision_runs.evidence_set_id` 那一列实测 7 行全是 NULL：它在 open_run
+    #: 时写入、而冻结发生在之后，只追加的表补不回去）。
+    #: 在线路径由 `card_ops.synthesize(evidence_set_id=ctx.evidence_set_id)` 填；
+    #: 历史卡与手工合成为 None（capture 不 enforce，必填由写边界管）。
+    evidence_set_id: str | None = None
+    #: 旧卡里检出「判定原件不属于本卡声明的那次执行尝试」时的提示（新卡直接拒）。
+    #: 与 identity_warning / restate_warning / roster_warning 同一套三段式。
+    provenance_warning: str = ""
 
     def __post_init__(self) -> None:
         # 🔴 A2：frozen 之后不能再 `self.x = ...`，改用 object.__setattr__。
@@ -169,6 +180,11 @@ class DecisionCard:
         if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id.strip()):
             raise ValueError(
                 f"run_id 要么是 None，要么是非空字符串，收到 {self.run_id!r}")
+        # 批 N：evidence_set_id 同形 —— 可空，给了就必须是非空字符串（不接受空串冒充）。
+        if self.evidence_set_id is not None and (
+                not isinstance(self.evidence_set_id, str) or not self.evidence_set_id.strip()):
+            raise ValueError(
+                f"evidence_set_id 要么是 None，要么是非空字符串，收到 {self.evidence_set_id!r}")
         # 批 K：expected_roster 可空；给了就必须是一串非空字符串（agentId）。
         if self.expected_roster is not None and not all(
                 isinstance(a, str) and a.strip() for a in self.expected_roster):
@@ -193,6 +209,7 @@ class DecisionCard:
             )
 
         self._check_identity()
+        self._check_run_provenance()
         self._check_roster()
 
         # --- 铁律 2 ---
@@ -308,6 +325,80 @@ class DecisionCard:
         object.__setattr__(self, "identity_warning", (
             f"本卡的判定编号与卡号不一致（{detail}）—— "
             "它早于「Stage 0 统一占号」，证据归属无法核实"))
+
+    def _check_run_provenance(self) -> None:
+        """判定原件的血缘：**每条判定恰好一份原件引用，且都属于本卡声明的那次执行尝试**
+        （批 N，外部评审 §6.2 / §7.2）。
+
+        🔴 它拦的是什么
+        ----------------
+        `latest_verdict_ids(decision_id)` 按**决策号**聚合，不按 run 聚合。一个
+        decision 出现第二个 run 时（幂等重投、将来的 Retry），第二次跑出来的卡会
+        原样拿到**上一次**遗留的 verdict_ref —— 卡上的 `generated_at` 是现在，
+        证据却是几小时前的，而且每一道既有核验都通过（spawn 核验核的是这一轮真的
+        spawn 过，不是证据新鲜度）。评审 §6.2 管这叫 Cross-run Contamination。
+
+        判据不是「按 run 重查一遍」（那是 B-4/B-5 的事，要动 `latest_verdict_ids`
+        的全部调用方），而是**把已经并排放在卡上的两个值对一下**：
+        `card.run_id` 与每条 `VerdictRef.run_id` —— 两者都是从
+        `agent_verdicts.run_id` 那一列直接搬过来的（批 J-I），没有推导、没有猜。
+
+        🔴 R-3：`ref.run_id is None` **不在这里判**
+        ------------------------------------------
+        那表示「这条原件不知道自己属于哪次 run」（迁移前落的行、手工跑 skill 落的
+        行）——是 `UNKNOWN`，不是 `FAIL`。对历史卡它是常态，在这里硬拒会让旧卡
+        全部读不回来。**「必须有」那一半由写边界管**（`save_card_with_notifications`
+        的在线分支），和 `_check_identity` 的分工完全一样：契约层管一致性，
+        写边界管完整性。
+
+        三段式（同 `_check_identity`）：
+          · 新造的卡        —— 直接拒绝
+          · 从库里读的旧卡   —— 可读，问题记在 `provenance_warning` 显示在卡面上
+          · 落库            —— 永远拒绝（见 `persistence/db.py`）
+        """
+        problems: list[str] = []
+
+        # ── (1) 覆盖：每条判定恰好一个 ref，不缺、不多（评审 §7.2）──────────
+        # 🔴 `input_verdict_refs` 为空是**历史卡的常态**（实测 43 张在线卡里 36 张
+        #    没有这份数据），不算不一致 —— 见 `input_verdict_refs` 的字段说明。
+        #    非空就必须对齐：实测 7 张带 ref 的卡全部逐个对齐，0 张部分对齐，
+        #    所以这条硬判据不会误伤任何存量数据。
+        if self.input_verdict_refs:
+            want = sorted(v.agent for v in self.verdicts)
+            got = sorted(r.agent for r in self.input_verdict_refs)
+            if want != got:
+                miss = sorted(set(want) - set(got))
+                extra = sorted(set(got) - set(want))
+                dup = sorted({a for a in got if got.count(a) > 1})
+                bits = []
+                if miss:
+                    bits.append(f"缺 {miss} 的原件引用")
+                if extra:
+                    bits.append(f"多出 {extra} 的原件引用（卡上没有它的判定）")
+                if dup:
+                    bits.append(f"{dup} 有不止一条引用")
+                problems.append("；".join(bits) or f"引用名单 {got} 与判定名单 {want} 对不上")
+
+        # ── (2) 血缘：原件必须属于本卡声明的那次执行尝试（评审 §6.2 cross-run）──
+        if self.run_id is not None:
+            foreign = [(r.agent, r.run_id) for r in self.input_verdict_refs
+                       if r.run_id is not None and r.run_id != self.run_id]
+            if foreign:
+                problems.append(
+                    f"声明属于 run {self.run_id}，却装着别的执行尝试产出的原件："
+                    + "；".join(f"{a} 的原件属于 run {rid}" for a, rid in foreign))
+
+        if not problems:
+            return
+        detail = "；".join(problems)
+        if not self.from_store:
+            raise ValueError(
+                f"Card {self.decision_id} 的判定原件血缘有问题：{detail}\n"
+                "  这是 cross-run 污染的形状：卡看起来是新的，证据却来自上一次运行。\n"
+                "  怎么办：本次运行的每个 agent 都要真的落下自己的原件；"
+                "落不下（撞唯一约束）就不该继续合成，另开一个决策号。")
+        object.__setattr__(self, "provenance_warning", (
+            f"本卡的判定原件血缘有问题（{detail}）—— 证据与执行尝试对不上，结论不可回放"))
 
     def _check_roster(self) -> None:
         """🔴 设计文档 §6 A5：拒绝同一个 agent 出现不止一条判定；
@@ -517,6 +608,8 @@ class DecisionCard:
             "elapsed_ms": self.elapsed_ms,
             "input_verdict_refs": [r.to_dict() for r in self.input_verdict_refs],
             "run_id": self.run_id,
+            # 🔴 批 N：与 run_id 同形 —— 老卡缺这个键，from_dict 用 .get 兜。
+            "evidence_set_id": self.evidence_set_id,
             # 🔴 批 K：冻结名单序列化成 list（老卡 None ⇒ 缺这个键，from_dict 用 .get 兜）。
             "expected_roster": list(self.expected_roster)
             if self.expected_roster is not None else None,
@@ -553,6 +646,8 @@ class DecisionCard:
             # 🔴 批 J-I：历史卡的 JSON 里没有这个键 —— `.get` 缺省 None，
             #    回放据此**不给历史卡凭空捏一个 run_id**（P4）。
             run_id=d.get("run_id"),
+            # 🔴 批 N：老卡的 JSON 里没有这个键 —— 同样 `.get` 缺省 None，不回填。
+            evidence_set_id=d.get("evidence_set_id"),
             # 🔴 批 K：老卡的 JSON 里没有这个键 —— `.get` 缺省 None，
             #    `absent_agents` 据此回退到读今天的 Registry（不给老卡回填，L-8）。
             expected_roster=d.get("expected_roster"),

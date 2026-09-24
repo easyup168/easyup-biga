@@ -80,6 +80,99 @@ sabotage 证实把真 `FeishuError.retryable` 破坏成恒 `True` 后两份相�
 `notify-worker-biga.timer` 同构）+ `deploy/openclaw/install_reap_timer.py` +
 `bin/biga-reap`（固化默认 `--apply`），已装上并 `enable --now`。
 
+### ✨ 新增 · 外部评审 B 部分（Run Provenance）：把「哪次执行、哪份数据、哪些原件」变成可查询、可强制的东西
+
+对同一份外部评审的 **B 节（Run Provenance Closure，§6-9）** 做的第一批修复。
+B 节共 13 项，本批做掉其中 9 项（schema v16 + 契约 + 写边界 + 11 条 sabotage 验证过
+的探针，新增 `tests/test_run_provenance.py`）；**剩下 4 项有意不做**，理由见本条末尾。
+
+🔴 **为什么 B 不是"可以缓的加固"**
+
+评审 §6.3 提前写出了一个当时还没发生的 bug：
+
+> 当前 Fact 唯一约束仍可能是 `UNIQUE(task_id, agent)` ⇒ 同一个 Decision 的第二个
+> Run 无法保存同一 Agent 的新 Fact ⇒ **写入时又可能阻止新 Run 正常产出**
+
+批 M 的 C-1（Trigger 失败终态可重新拉起）**正好造出了那条路径**，而当时的安全论证
+是"这两种场景都还没写过 fact"——对抗性复核用真实 PoC 证明它不成立（`STAGE1_COMPLETED`
+之后进 TIMEOUT 也在 `NOTIFY_FAILURE_STATES` 里，那时五份 fact 早就落库了）。于是
+一次重放会：五个 Specialist 全部撞唯一约束落不下 fact → `latest_verdict_ids(did)`
+仍返回**上一轮**的旧 ref → 用几小时前的证据合成一张 `generated_at` 是现在的卡，
+而 spawn 核验照样通过（它核的是这一轮真的 spawn 过，不是证据新鲜度）。
+
+**比"永久卡在正在启动"更坏**：从"看得出卡住了"变成"看不出任何问题"。
+
+**新增（schema v16）**
+
+* `decision_records.run_id` / `decision_records.evidence_set_id` —— 在此之前，
+  "这张卡属于哪次执行、看的哪份切片"只能把 `card_json` 解开来读，一句 SQL 答不了。
+* `agent_runs.orchestration_run_id` —— 补上 `decision_runs.run_id → agent_runs.
+  orchestration_run_id → agent_runs.runtime_run_id` 这条链缺的中间一环。在它之前
+  "某次 BigA Run 启动了哪些运行时 Run"只能按 `decision_id` 做文本匹配，而一个
+  decision 可以有多个 run —— 文本匹配会把两次执行的账本行混在一起。
+  🔴 **名字没用 `run_id`**：`agent_runs` 里已经有 `runtime_run_id`（OpenClaw 的
+  spawn id），再塞一个 `run_id` 等于把 J-II 刚收敛掉的"三个不同东西共用一个名字"
+  原样请回来。`TestRunIdNamespace` 的判据同步扩到新名字，`runtime_run_id` 明确排除
+  （它是**别人的** id，追不到 `decision_runs` 是它的正常状态，纳进来守卫会恒红）。
+* `ux_evidence_set_per_run`（分区唯一索引）—— 评审 §9「Every Run has exactly one
+  EvidenceSet」的"至多"那一半。🔴 **加了 `WHERE run_id IS NOT NULL`**：不加的话
+  索引声称"没有 run_id 的切片也受唯一约束"，而那恰恰是唯一不该被约束的一类
+  （SQLite 里多行 NULL 不算重复，所以它不会立刻失败 —— 是一条**语义错了但不报错**
+  的约束）。
+* `DecisionCard.evidence_set_id` 字段 + `card_ops.synthesize(evidence_set_id=...)`
+  + 编排器传 `esid`。🔴 为什么卡自己要带：`decision_runs.evidence_set_id` 那一列
+  实测 **7 行全是 NULL** —— 它在 `open_run` 时写入，而冻结发生在之后，而表只追加，
+  补不回去。卡是唯一能记住这件事的地方。
+
+**变更 · 三列一律 nullable、不回填（没照抄评审的 `NOT NULL`）**
+
+实测生产库后有意偏离：`decision_records` 43 张在线卡只有 6 张带 run_id；
+`agent_runs` 166 行只有 36 行有 runtime_run_id；`evidence_sets` 7 行有 1 行 run_id
+为空。这些行是迁移之前落的，它们**确实不知道**自己属于哪次 run。`NOT NULL` 会让
+迁移当场失败；先回填再加约束则是给历史数据编一个当时并不存在的答案 —— 两条都比
+"NULL 如实表达不知道"更糟（L-8）。⇒ **列可空，必填由写边界强制**，档位与
+`_check_identity` 那条三段式完全一致：**读可以宽，写必须严**。
+迁移在**生产库副本**上实跑验证过（44/166/7/338/7 行一行不少，新列全 NULL，
+唯一索引建起来了）—— 同 v11「加索引前先确认存量干净」的先例。
+
+**新增 · 三道守卫（每道都做过 sabotage 验证）**
+
+1. **契约层 `_check_run_provenance()`** —— `input_verdict_refs` 非空时必须**恰好
+   覆盖**每条判定（缺/多/重都拒）；且每条 ref 的 `run_id` 必须等于卡的 `run_id`。
+   三段式：新卡拒 / 旧卡可读并记 `provenance_warning` 显示在卡面上 / 落库永远拒。
+   🔴 `ref.run_id is None` **不在这里判**（R-3：那是"不知道"不是"不一致"，历史行
+   的常态）—— "必须有"那一半由写边界管。契约层管一致性，写边界管完整性。
+2. **库层 `verify_verdict_refs()` 补两道**：原件在库里的 `task_id` 必须等于卡号；
+   原件在库里的 `run_id` 必须等于卡的 run_id。🔴 判据取的是**库里那一行**的值，
+   不是卡上那份拷贝 —— 只核拷贝等于让被验证方自己出具证明。这是唯一一处拿
+   cross-run 污染对质的地方。
+3. **写边界**：在线卡（`replay_of is None`）缺 `run_id`/`evidence_set_id` 一律拒绝
+   落库，且会真的跑一遍 ②（守卫必须接进真实路径，只写函数没人调是 L-1 死配置）。
+   回放不受约束 —— 它本来就不是一次执行尝试，`comparable()` 比较时连 run_id 都剥掉，
+   要求它带一个等于逼回放捏造（L-8）。
+
+**变更 · 旧 standalone `synthesize.py` 落库要显式给血缘**
+
+新增 `--run-id` / `--evidence-set-id`；给不出就只能 `--no-store`。它产出的正是 B 节
+要消灭的那种卡：落了库却回答不了"这是哪次执行跑出来的"。⚠️ 这是一处**产品行为变更**
+（那条路径以前可以裸落库），不是纯加固 —— 单独标出来。
+
+**有意不做的 4 项（B-2 / B-3 / B-4 / B-5）**
+
+`Fact 唯一约束改 (run_id, agent)`、`legacy 分区约束`、`废弃 latest_verdict_ids`、
+`新增 load_verdict_ids_for_run` —— 它们与**同期另一条在途修复**正面冲突：那条修复
+把 C-1 收窄成"`latest_verdict_ids(decision_id)` 非空就拒绝自动重放，交回人工"
+（fail-closed，在唯一约束还是 `(task_id, agent)` 的前提下是当下唯一正确的选择）。
+B-2 落地后前提变了 —— 第二个 run 本来就能写自己的 fact，重放是安全的，那道守卫会
+变成"拒绝一次本来安全的重放"，把 C-1 想修的永久中毒原样退回来；而 B-4 要**删掉**
+的正是那道守卫刚刚成为第 4 个调用方的函数。
+
+🔴 **两件事必须在同一次改动里看见**：加约束 + 拆守卫。分开做就会变成一边加、
+一边忘了拆 —— 而那种失败是静默的（守卫有自己的测试，测试照样绿，只有产品行为退回去）。
+⇒ 留到下一批一起做。同理留下的还有评审 §7.2 第四条"在线卡 `input_verdict_refs`
+不许为空"：它会同时废掉 `card_ops.synthesize(verdict_refs=None)` 这条**文档里明确
+允许**的旧路径，属于产品决策；而它要防的危险情形已经由上面 ① 挡住了。
+
 ### 🐛 修复 · 外部评审 C/D 部分：飞书可靠性 + 生命周期收敛五点
 
 对 `docs/external/biga-latest-deep-review-classified/`（外部专家评审，本地留存不进

@@ -39,6 +39,8 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _store import db  # noqa: E402
+from _provenance import (  # noqa: E402
+    TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run)
 
 
 def _verdict(agent: str, task_id: str, *, stance: str | None = None) -> AgentVerdict:
@@ -166,6 +168,7 @@ class TestReservationIsAtomic:
         """两张表都要看 —— 只看一张就会重号。"""
         p = tmp_path / "t.db"
         db.init_schema(p)
+        open_test_run(p)          # 批 N：在线卡要带 run（见 tests/_provenance.py）
         first = db.reserve_decision_id(by="t", path=p)
         # 直接往 decision_records 塞一张卡，绕过分配器
         from _contract import DecisionCard
@@ -173,7 +176,8 @@ class TestReservationIsAtomic:
             decision_id=new_task_id(9), status="WAIT", headline="h",
             verdicts=[_verdict("market", new_task_id(9))],
             synthesis="s", model_ref="m",
-            missing=[f"占位{i}——本文件不测 roster" for i in range(5)])
+            missing=[f"占位{i}——本文件不测 roster" for i in range(5)],
+            run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID)
         db.save_card(card, path=p)
         nxt = db.reserve_decision_id(by="t", path=p)
         assert nxt not in (first, new_task_id(9))
@@ -223,7 +227,9 @@ class TestSynthesizeReusesUpstreamId:
              "--verdict-ids", ",".join(map(str, ids)), "--status", "WAIT",
              "--headline", "h", "--synthesis", "s", "--model-ref", "m",
              *extra_missing_args,
-             "--json"],
+             # 批 N：这条断言的是 stdout 里的决策号，不需要落库；而落库现在要求
+             # --run-id/--evidence-set-id（旧 standalone 路径没有 RunContext）。
+             "--no-store", "--json"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "BIGA_DB_PATH": str(p)})
         assert r.returncode == 0, r.stderr[-600:]
