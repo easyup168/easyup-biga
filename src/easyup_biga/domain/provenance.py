@@ -50,12 +50,54 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
-__all__ = ["DERIVED_PREFIX", "underlying_source", "resolve_provenance",
-           "input_ids_for"]
+__all__ = ["DERIVED_PREFIX", "ORIGIN_KINDS", "OriginRef", "underlying_source",
+           "resolve_provenance", "evidence_origins", "verdict_origins",
+           "raw_origins", "fact_origin"]
 
 #: 派生值 source 的约定前缀。`derived:<真实来源>` 表示「从那一份算出来的」。
 DERIVED_PREFIX = "derived:"
+
+#: 一条证据可能出自哪几种东西（裁定 16 批 4）。
+#:
+#: * ``raw``      —— 一份原始响应（`raw_market_snapshot.content_sha256`）
+#: * ``evidence`` —— 另一条证据（它的 `evidence_id`）
+#: * ``verdict``  —— 一份上游判定（`agent_verdicts.verdict_id`）。
+#:                   risk 的元数据类字段依据的是「**哪些 verdict 到场了**」，
+#:                   不是任何一条证据的值 —— 拿证据 id 充数就是硬凑。
+#: * ``fact``     —— 事实层的一行（如 `fact_trading_calendar` 的某一天）
+ORIGIN_KINDS: frozenset[str] = frozenset({"raw", "evidence", "verdict", "fact"})
+
+
+@dataclass(frozen=True)
+class OriginRef:
+    """一条证据的**一个**来源。
+
+    🔴 为什么是结构化的而不是 ``"verdict:123"`` 这种前缀字符串：
+       那样消费方就得**解析字符串形状**才知道这是什么，正是 L-13。
+       本仓库刚用两批把 `derived:` 前缀那套收拾干净，不该在同一处再种一个。
+
+    ⚠️ 只有 `raw` / `evidence` 的 `ref` 是内容哈希；`verdict` 是行号、
+       `fact` 是事实表里的定位串。**不要**统一校验成 sha256。
+    """
+
+    kind: str
+    ref: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in ORIGIN_KINDS:
+            raise ValueError(
+                f"OriginRef.kind 必须是 {sorted(ORIGIN_KINDS)} 之一，收到 {self.kind!r}")
+        if not isinstance(self.ref, str) or not self.ref.strip():
+            raise ValueError(f"OriginRef.ref 必须是非空字符串，收到 {self.ref!r}")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "ref": self.ref}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "OriginRef":
+        return cls(kind=d["kind"], ref=d["ref"])
 
 
 def underlying_source(source: str) -> str:
@@ -91,16 +133,13 @@ def resolve_provenance(source: str, table: Mapping[str, str]) -> str | None:
     return table[max(cand, key=len)] if cand else None
 
 
-def input_ids_for(evidence, fields, *, of: str = "") -> tuple[str, ...]:
-    """把「我是从这几个字段算出来的」翻译成它们的 `evidence_id`（裁定 16 批 3）。
+def evidence_origins(evidence, fields, *, of: str = "") -> tuple[OriginRef, ...]:
+    """把「我是从这几个字段算出来的」翻译成 `OriginRef(kind="evidence", ...)`。
 
     Args:
-        evidence: **已经产出**的证据序列（各 skill 自己那个 `evidence` 列表）。
+        evidence: **已经产出**的证据序列。
         fields: 输入的 `field` 名。调用方写字段名，不碰哈希。
         of: 谁在声明（只用于报错信息）。
-
-    Returns:
-        去重保序的 `evidence_id` 元组。
 
     Raises:
         ValueError: 声明了一个**还没有证据**的输入字段。
@@ -108,12 +147,9 @@ def input_ids_for(evidence, fields, *, of: str = "") -> tuple[str, ...]:
     🔴 找不到就抛，不是跳过。声明「我从 X 算出来」而 X 不在场，只有两种可能：
        字段名写错了，或者算的时候它根本不存在 —— 两种都是错的，
        而静默跳过会产出一条**输入列表不完整**的派生证据：
-       它看起来声明过血缘，实际漏了一截，比完全没声明更难发现（R-3 的形状）。
-
-    ⚠️ 同名多条证据时**全部**收进去（多来源合成同一个字段是允许的），
-       顺序按 `evidence` 里的出现顺序，可回放。
+       它看起来声明过血缘、实际漏了一截，比完全没声明更难发现（R-3 的形状）。
     """
-    ids: list[str] = []
+    refs: list[OriginRef] = []
     for f in fields:
         hits = [e.evidence_id for e in evidence if e.field == f]
         if not hits:
@@ -122,5 +158,20 @@ def input_ids_for(evidence, fields, *, of: str = "") -> tuple[str, ...]:
                 f"  已有字段：{sorted({e.field for e in evidence})}\n"
                 f"  要么字段名写错了，要么 add({f!r}, ...) 排在了它后面 —— "
                 f"输入必须先于使用它的派生值产出。")
-        ids.extend(hits)
-    return tuple(dict.fromkeys(ids))
+        refs.extend(OriginRef("evidence", h) for h in hits)
+    return tuple(dict.fromkeys(refs))
+
+
+def verdict_origins(verdict_ids) -> tuple[OriginRef, ...]:
+    """「我依据的是这几份上游判定**到场了**」—— risk 元数据类专用（裁定 16）。"""
+    return tuple(dict.fromkeys(OriginRef("verdict", str(int(v))) for v in verdict_ids))
+
+
+def raw_origins(hashes) -> tuple[OriginRef, ...]:
+    """「我是从这几份原始响应算出来的」—— 跨源聚合专用（沪+深、行业榜+概念榜…）。"""
+    return tuple(dict.fromkeys(OriginRef("raw", h) for h in hashes if h))
+
+
+def fact_origin(table: str, key: str) -> OriginRef:
+    """「我依据的是事实层的这一行」（如交易日历的某一天）。"""
+    return OriginRef("fact", f"{table}/{key}")

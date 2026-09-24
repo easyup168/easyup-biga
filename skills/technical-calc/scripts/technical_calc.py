@@ -52,7 +52,7 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
-    input_ids_for,
+    evidence_origins,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -182,7 +182,7 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     def add(field: str, value: Any, label: str, source: str, *,
             kind: str | None, inputs: tuple[str, ...] = ()) -> None:
         """`kind` 无默认值 —— 强制每个调用点自己说清楚（裁定 16）。
-        `kind=None` 是合法的「尚未归类」，调用点会写明原因。"""
+本 skill 的证据全部出自同一份 K 线 ⇒ `raw_hash` 即完整出处。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
@@ -191,7 +191,7 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             raw_hash=resolve_provenance(source, _hash_tbl),
             evidence_set_id=resolve_provenance(source, _es_tbl),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
+            derived_from=evidence_origins(evidence, inputs, of=field)))
 
     if daily is not None:
         src = f"sina:kline/{SYMBOL}"

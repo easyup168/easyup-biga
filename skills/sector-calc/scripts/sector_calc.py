@@ -59,7 +59,8 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
-    input_ids_for,
+    evidence_origins,
+    raw_origins,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -236,7 +237,8 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
         return resolve_provenance(source, c.es_ids)
 
     def add(field: str, value: Any, label: str, source: str, *,
-            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+            kind: str | None, inputs: tuple[str, ...] = (),
+            origins: tuple = ()) -> None:
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
@@ -245,7 +247,7 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             raw_hash=raw_hash_for(source),
             evidence_set_id=es_id_for(source),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
+            derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins)))
 
 
     # 🔴 无日期端点的 as_of 不能沿用日线的收盘时刻。
@@ -264,7 +266,8 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
     def add_live(field: str, value: Any, label: str, source: str, *,
-            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+            kind: str | None, inputs: tuple[str, ...] = (),
+            origins: tuple = ()) -> None:
         """实时快照类证据：as_of = 取回时刻。"""
         result[field] = value
         evidence.append(Evidence(
@@ -274,7 +277,7 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             raw_hash=raw_hash_for(source),
             evidence_set_id=es_id_for(source),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
+            derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins)))
 
     if c.daily is None:
         c.missing.append(MissingItem(
@@ -336,9 +339,10 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
                 c.warnings.append(f"{label}榜前 {TOP_N} 中有板块未返回领涨股")
 
         if counts:
-            # kind 暂缺：跨行业榜+概念榜两份响应的合计，没有单一来源，
-            # 也不是从某几条已有证据算出来的（同 market 的跨源聚合）。批 4 定。
-            add_live("board_counts", counts, "各榜板块数", "em:clist", kind=None)
+            # 行业榜 + 概念榜两份响应的合计 —— 跨源聚合，用 raw_origins 指回那两份。
+            add_live("board_counts", counts, "各榜板块数", "em:clist", kind="derived",
+                     origins=raw_origins(c.hashes.get(f"em:clist/{k}")
+                                         for k in ("industry", "concept")))
         else:
             c.missing.append(MissingItem(
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))

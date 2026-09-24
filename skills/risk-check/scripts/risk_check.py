@@ -48,6 +48,8 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
+    OriginRef,
+    verdict_origins,
     ADHOC_TASK_SEQ,
     CROSS_CHECK_PAIRS,
     STAGE1_AGENTS,
@@ -111,6 +113,8 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
     warnings: list[str] = []
 
     upstream: list[AgentVerdict] = []
+    #: 真的读出来了的那些 verdict_id —— 元数据类派生值的来源（裁定 16）。
+    loaded_ids: list[int] = []
     for vid in verdict_ids:
         v = load_verdict(vid)
         if v is None:
@@ -119,6 +123,7 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
                 "risk.upstream.verdict_not_found"))
             continue
         upstream.append(v)
+        loaded_ids.append(vid)
 
     # 🔴 Stage 边界的身份守卫（外部评审 P1-2）。
     #
@@ -210,18 +215,63 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
     as_of = min(e.as_of for v in upstream for e in v.evidence) \
         if any(v.evidence for v in upstream) else retrieved
 
-    def add(field: str, value: Any, label: str) -> None:
+    #: 上游全部证据摊平一份 —— risk 的派生值引用的是**别人的**证据，
+    #: 所以 `input_ids_for` 查的是这个池子，不是 risk 自己的 `evidence`。
+    upstream_ev = [e for v in upstream for e in v.evidence]
+
+    def add(field: str, value: Any, label: str, *,
+            kind: str | None, origins: tuple = ()) -> None:
+        """产出一条 risk 证据。
+
+        `kind` 无默认值（裁定 16）。`origins` 收**已构造好的** `OriginRef` ——
+        与各 Specialist 的 `inputs=(字段名,)` 不同：risk 引用的是别人的东西
+        （上游证据、上游 verdict），按字段名查得先指明「在谁的池子里查」。
+
+        ⚠️ risk 的证据没有 `raw_hash`（它不直接碰数据源）⇒ 凡是 `kind="derived"`
+        的都**必须**给出 input_ids，否则契约当场拒绝（批 3 的铁律）。
+        """
         result[field] = value
         evidence.append(Evidence(
             field=field, source="derived:risk-check", value=value,
             as_of=as_of, retrieved_at=retrieved,
-            calc_version=CALC_VERSION, label=label))
+            calc_version=CALC_VERSION, label=label,
+            kind=kind, derived_from=origins))
+
+    def _ids_of(*fields: str) -> tuple:
+        """上游**支撑这些字段**的证据（值类派生的输入，裁定 16）。"""
+        out = []
+        for f in fields:
+            out.extend(OriginRef("evidence", e.evidence_id)
+                       for e in upstream_ev if e.field == f)
+        return tuple(dict.fromkeys(out))
+
+    def _derived_if(ids: tuple[str, ...]) -> str | None:
+        """有输入才叫 derived。
+
+        🔴 一个输入都没有时，这个值**不是从上游算出来的** —— 声明 derived 会把
+        「没东西可比」说成「比过了」。返回 None（尚未归类）让它如实显示。
+
+        ⚠️ 这不是按字符串形状猜类别（L-13），是按**这次运行真的有没有输入**判 ——
+        同一个字段在有上游时是 derived、没上游时未归类，两者描述的确实是两件事。
+        """
+        return "derived" if ids else None
+
+    def _all_upstream_ids() -> tuple:
+        """上游**全部**证据（全量类派生的输入：取 max / 比 raw_hash 那几个）。"""
+        return tuple(dict.fromkeys(OriginRef("evidence", e.evidence_id)
+                                   for e in upstream_ev))
 
     present = sorted(v.agent for v in upstream)
-    add("upstream_agents", present, "到场的上游 Agent")
+    # 🔴 下面四条是**元数据类**（裁定 16）：依据是「哪些上游 verdict 到场了」及其
+    #    元数据，不是任何一条证据的**值**。所以引的是 verdict 本身，不是证据 ——
+    #    拿「上游全部证据 id」充数说的是「我看了这些数」，与「这些 verdict 存不存在」
+    #    是两回事（批 4 之前 Evidence 表达不了这个，故曾留白）。
+    _vo = verdict_origins(loaded_ids)
+    add("upstream_agents", present, "到场的上游 Agent",
+        kind=_derived_if(_vo), origins=_vo)
     add("coverage_ratio",
         round(len([a for a in present if a in STAGE1_AGENTS]) / len(STAGE1_AGENTS), 4),
-        f"Stage 1 覆盖率(应到 {len(STAGE1_AGENTS)})")
+        f"Stage 1 覆盖率(应到 {len(STAGE1_AGENTS)})", kind=_derived_if(_vo), origins=_vo)
 
     absent = [a for a in STAGE1_AGENTS if a not in present]
     if absent:
@@ -231,17 +281,19 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
             "risk.upstream.coverage_incomplete"))
 
     add("upstream_missing_count", sum(len(v.missing) for v in upstream),
-        "上游缺失项总数")
+        "上游缺失项总数", kind=_derived_if(_vo), origins=_vo)
 
     # --- 上游自报的交易日是否一致 ---
     dates = {v.agent: v.result.get("trade_date") for v in upstream
              if v.result.get("trade_date")}
     consistent = len(set(dates.values())) <= 1
-    add("trade_date_consistent", consistent, "上游交易日是否一致")
+    _td = _ids_of("trade_date")
+    add("trade_date_consistent", consistent, "上游交易日是否一致",
+        kind=_derived_if(_td), origins=_td)
     if dates:
         add("upstream_trade_date",
             next(iter(set(dates.values()))) if consistent else sorted(set(dates.values())),
-            "上游自报的交易日")
+            "上游自报的交易日", kind=_derived_if(_td), origins=_td)
     if not consistent:
         missing.append(MissingItem(
             f"风险判断的时间基准 —— 上游报告了不同的交易日 {dates}，"
@@ -261,14 +313,17 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
     #    时刻，且这个时刻已随 risk 的证据落库 ⇒ 回放读同一份 verdict 得到同一个数。
     lags = [e.source_lag_sec for v in upstream for e in v.evidence]
     if lags:
-        add("max_source_lag_sec", max(lags), "取数滞后：取回时刻−数据时刻，最大值(秒)")
+        add("max_source_lag_sec", max(lags), "取数滞后：取回时刻−数据时刻，最大值(秒)",
+            kind="derived", origins=_all_upstream_ids())
         add("max_evidence_age_sec",
             max(e.age_at(retrieved) for v in upstream for e in v.evidence),
-            "最旧证据的年龄(秒)")
+            "最旧证据的年龄(秒)", kind="derived", origins=_all_upstream_ids())
     today = retrieved.strftime("%Y%m%d")
     live = (consistent and dates and next(iter(set(dates.values()))) == today
             and (retrieved.hour, retrieved.minute) < _CLOSE_HHMM)
-    add("session_live", bool(live), "证据所属交易时段是否仍在进行")
+    # 由上游交易日 + risk 自己这次运行的时刻算出 ⇒ 输入是那几条 trade_date 证据。
+    add("session_live", bool(live), "证据所属交易时段是否仍在进行",
+        kind=_derived_if(_td), origins=_td)
 
     # --- 写死阈值 ---
     tripped: list[str] = []
@@ -278,7 +333,13 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
                 tripped.append(code)
                 warnings.append(f"[{code}] {why}（{v.agent}.{field}={v.result[field]}）")
                 break
-    add("tripped_thresholds", tripped, "被触发的风险阈值")
+    # 阈值比对的输入是被比的那些字段的证据 —— 阈值本身是常量，随 CALC_VERSION 版本化。
+    # ⚠️ 上游一个阈值字段都没有时，`tripped_thresholds=[]` 读起来像「比过了，没触发」，
+    #    实际是「没东西可比」—— R-3 的形状。本批先如实标成未归类（不声称 derived）；
+    #    把它变成一条 missing 是独立的一块，已记进 TODO。
+    _th = _ids_of(*{f for f, *_ in THRESHOLDS})
+    add("tripped_thresholds", tripped, "被触发的风险阈值",
+        kind=_derived_if(_th), origins=_th)
 
     # --- 被声明的重复事实：两个 agent 从同一个源取同一个值 ---
     # 🔴 裁定 15 的受控例外：允许重复，**前提是有人核对**。
@@ -321,7 +382,9 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
         elif ha != hb:
             xconf.append(f"{label}: {a}.{fa} 与 {b}.{fb} 出自不同数据"
                          f"（raw_hash {ha[:12]}… ≠ {hb[:12]}…）")
-    add("cross_check_conflict", xconf, "跨源校验：两者是否读同一份冻结数据")
+    _allu = _all_upstream_ids()
+    add("cross_check_conflict", xconf, "跨源校验：两者是否读同一份冻结数据",
+        kind=_derived_if(_allu), origins=_allu)
     if xconf:
         missing.append(MissingItem(
             "风险判断的事实基准 —— " + "；".join(xconf)
@@ -334,7 +397,8 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
     conflicts = [f"{a}={x} 与 {b}={y}"
                  for a, x, b, y in CONFLICT_PAIRS
                  if stances.get(a) == x and stances.get(b) == y]
-    add("stance_conflict", conflicts, "上游判断互相矛盾之处")
+    add("stance_conflict", conflicts, "上游判断互相矛盾之处",
+        kind=_derived_if(_vo), origins=_vo)
     if conflicts:
         warnings.append("上游判断互斥：" + "；".join(conflicts)
                         + " —— 至少有一方是错的，不要各取所需")

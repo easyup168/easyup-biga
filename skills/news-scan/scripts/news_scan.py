@@ -59,7 +59,8 @@ _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 
 from _contract import (  # noqa: E402
-    input_ids_for,
+    evidence_origins,
+    fact_origin,
     resolve_provenance,
     ADHOC_TASK_SEQ,
     Evidence,
@@ -74,6 +75,7 @@ from _sources import (  # noqa: E402
 )
 from _sources.sina_news import STALE_SEC, fetch_feed  # noqa: E402
 from _store import (  # noqa: E402
+    is_trading_day,
     init_schema,
     raw_text_sha256,
     save_fact_bundle,
@@ -144,7 +146,8 @@ def build_fact_bundle(
     raw_hashes: dict[str, str] = {}
 
     def add(field: str, value: Any, label: str, source: str, *,
-            kind: str | None, inputs: tuple[str, ...] = ()) -> None:
+            kind: str | None, inputs: tuple[str, ...] = (),
+            origins: tuple = ()) -> None:
         """`kind` 无默认值（裁定 16）。`kind=None` = 尚未归类，调用点写明原因。"""
         result[field] = value
         evidence.append(Evidence(
@@ -152,7 +155,7 @@ def build_fact_bundle(
             as_of=as_of, retrieved_at=retrieved, calc_version=CALC_VERSION,
             raw_hash=resolve_provenance(source, raw_hashes),
             kind=kind,
-            input_evidence_ids=input_ids_for(evidence, inputs, of=field)))
+            derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins)))
 
     # 🔴 字段名不能叫 `session_live` —— `risk` 已经有一个同名字段，
     #    但那个问的是「上游数据所属的交易日过完了没」，
@@ -162,9 +165,14 @@ def build_fact_bundle(
     #    technical.close）是镜像问题，同样糟：
     #    前者让人以为是一个数，后者让守卫看不见重复。
     #    单一生产方守卫抓到了这一条 —— 它比的是名字，这次正好对上。
-    # kind 暂缺：由交易日历 fact + 时钟算出，输入既不是原始响应也不是
-    # 已有证据。批 4 连同 tradetime 那一类一起定（裁定 16 的第 4 类）。
-    add("market_open", live, "此刻是否连续竞价时段", "derived:tradetime", kind=None)
+    # 由**交易日历 fact** + 时钟算出 —— OriginRef 的第四类（fact）正是为它准备的。
+    # ⚠️ 日历查不到时 `market_is_open` 会回退到纯 weekday 判据，那时依据的不是这一行
+    #    ⇒ 用 `is_trading_day` 的三态结果决定要不要声明这个来源，查不到就不声明。
+    _cal_known = is_trading_day(retrieved.strftime("%Y%m%d"))
+    add("market_open", live, "此刻是否连续竞价时段", "derived:tradetime",
+        kind="derived" if _cal_known is not None else None,
+        origins=((fact_origin("fact_trading_calendar", retrieved.strftime("%Y%m%d")),)
+                 if _cal_known is not None else ()))
     # 🔴 裁定 16 的 parameter：回看窗口是**我们自己的设定**，不是关于市场的事实。
     # 与 risk 的 THRESHOLDS 同类，只是那边根本不进 evidence、这边要上卡给人看。
     add("window_min", window_min, "回看窗口(分钟)", "derived:config", kind="parameter")
