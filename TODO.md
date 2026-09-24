@@ -1139,12 +1139,40 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       `orchestrator.py`（flock 靠 `BIGA_CARD_LOCK_HELD` 环境变量避开 POSIX
       互斥陷阱）。测试 1342 → 1375。详见 `docs/tutorial/40-review-c-d-reliability.md`、
       `CHANGELOG.md`
-  - [ ] 评审 A（发布基线）/B（Run Provenance）/E（Contract 与数据质量）/
-        F（Package 与 Registry）部分——已核实真实性，暂缓处理。B 部分核实结论：
-        Fact 唯一约束确实只按 `(task_id, agent)`、`latest_verdict_ids()` 确实仍按
-        `decision_id` 聚合，**但目前没有任何代码路径会对同一个 decision 开出
-        第二个 run**（`open_run()` 全仓只一处调用），所以是面向未来 Retry 功能的
-        前置修复，不是当前活跃 bug——留到真正要开放 retry 之前再做
+  - [ ] 评审 A（发布基线）/E（Contract 与数据质量）/F（Package 与 Registry）/
+        G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理
+
+- [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
+      schema **v16**：`decision_records.run_id`/`.evidence_set_id`、
+      `agent_runs.orchestration_run_id`、`ux_evidence_set_per_run`（分区唯一）；
+      `DecisionCard.evidence_set_id` 字段；契约层 `_check_run_provenance()`
+      （ref 恰好覆盖 + run 血缘一致，三段式）；库层 `verify_verdict_refs()`
+      补 foreign decision / foreign run 两道；在线落库必填 run_id/evidence_set_id
+      并真跑一遍 ref 核对；旧 standalone `synthesize.py` 落库要显式给两个 id。
+      新增 `tests/test_run_provenance.py`（25 条），11 处 sabotage 验证。
+      详见 `docs/tutorial/41-run-provenance.md`、`CHANGELOG.md`
+  - [x] 🔴 **订正上一条里一句错的核实结论**。批 M 当时写着「目前没有任何代码路径
+        会对同一个 decision 开出第二个 run」——**不成立**：批 M 自己的 C-1
+        （失败终态可重新拉起）就是那条路径，而它拉起时用的是**同一个 decision_id**。
+        对抗性复核用真实 PoC 复现了后果：`STAGE1_COMPLETED` 之后进 TIMEOUT 也属于
+        `NOTIFY_FAILURE_STATES`，那时五份 fact 早已落库 ⇒ 重放时五个 Specialist
+        全部撞 `ux_fact_per_task_agent`，而编排器**不会因此停**（`latest_verdict_ids`
+        查到上一轮的旧 ref、非空 ⇒ 零证据那道 fail-fast 不触发）⇒ 用几小时前的证据
+        合成一张 `generated_at` 是现在的卡，spawn 核验照样通过。
+        ⇒ 评审 §6.3 提前写出了这个 bug，B 因此**不是**「面向未来 Retry 的前置修复」，
+        是一个已发货改动的前置条件
+  - [ ] **B-2 / B-3 / B-4 / B-5 留到下一批，必须与「拆 C-1 那道守卫」同批做**：
+        `ux_fact_per_run_agent`（`(run_id, agent)`，`WHERE run_id IS NOT NULL`）+
+        `ux_legacy_fact_per_task_agent`（`WHERE run_id IS NULL`）+ 废弃
+        `latest_verdict_ids(decision_id)` + 新增 `load_verdict_ids_for_run(run_id)`。
+        🔴 与同期那条 C-1 收窄修复（`latest_verdict_ids` 非空就拒绝自动重放）正面
+        冲突：B-2 落地后重放本来就安全，那道守卫会变成「拒绝一次本来安全的重放」，
+        把永久中毒原样退回来；而 B-4 要删的正是它刚成为第 4 个调用方的那个函数。
+        **加约束 + 拆守卫分开做的失败是静默的**（守卫有自己的测试，测试照样绿，
+        只有产品行为退回去）
+  - [ ] 评审 §7.2 第四条「在线卡 `input_verdict_refs` 不许为空」—— 它会同时废掉
+        `card_ops.synthesize(verdict_refs=None)` 这条**文档里明确允许**的旧路径，
+        属于产品决策不是纯加固；要防的危险情形已由契约层覆盖检查挡住，一并留到下一批
 
 🔴 **批 I / K / L 来自 2026-09-23 复核的数据架构材料**（`docs/external/` 的
 `multi-agent-data-architecture` + `data-platform-development-plan` 两份），

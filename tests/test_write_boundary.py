@@ -42,6 +42,8 @@ from _contract import (  # noqa: E402
     now_cn,
 )
 from _store import connect, init_schema, load_verdict, save_card, save_raw_snapshot, save_verdict  # noqa: E402
+
+from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
 from _store.db import payload_sha256  # noqa: E402
 
 TID = new_task_id(1, day="20260922")
@@ -52,6 +54,7 @@ def db(tmp_path, monkeypatch):
     p = tmp_path / "t.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
+    open_test_run(p)          # 批 N：见 tests/_provenance.py
     return p
 
 
@@ -76,6 +79,7 @@ def _legal_buy_card(**kw) -> DecisionCard:
     base = dict(
         decision_id=did, status="BUY", headline="核心矛盾一句话",
         verdicts=verdicts, synthesis="", model_ref="anthropic/claude-sonnet-5",
+        run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID,   # 批 N
     )
     base.update(kw)
     return DecisionCard(**base)

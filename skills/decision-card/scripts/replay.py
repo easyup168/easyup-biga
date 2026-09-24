@@ -100,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         #    新卡带着它生成时冻结的 roster ⇒ 回放带同一份。这样 comparable() 里
         #    这个字段两边恒等，--check 不会因它误报「组装不一致」（gate 4）。
         expected_roster=original.expected_roster,
+        # 🔴 批 N：同 expected_roster —— 原样带过原卡记的那份切片 id，不重铸。
+        #    它**不**被 comparable() 剥掉（与 run_id 不同）：run_id 描述「这次执行」，
+        #    而 evidence_set_id 描述「这个结论基于哪份数据」，属于结论本身的一部分，
+        #    回放必须落在同一份上，否则「同样的输入 → 同样的结论」这句话没有锚点。
+        evidence_set_id=original.evidence_set_id,
     )
 
     if args.check:

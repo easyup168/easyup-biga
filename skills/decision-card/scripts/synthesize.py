@@ -104,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--decision-id", help="BIGA-YYYYMMDD-NNN，缺省自动生成")
     ap.add_argument("--elapsed-ms", type=int, default=0, help="端到端耗时")
     ap.add_argument("--no-store", action="store_true", help="只渲染不落库")
+    # 🔴 批 N（外部评审 §7-9）：落库的在线卡必须说得清属于哪次执行尝试、基于哪份
+    #    冻结切片。这条旧 standalone 路径没有 RunContext，只能由调用方显式给 ——
+    #    给不出就只能 --no-store（渲染看看可以，落一张来历不明的卡不行）。
+    ap.add_argument("--run-id", help="这次编排执行尝试的 run_id（落库时必填）")
+    ap.add_argument("--evidence-set-id", help="这次决策用的冻结切片 id（落库时必填）")
     ap.add_argument("--json", action="store_true", help="输出 Card 的 JSON 而非文本卡")
     args = ap.parse_args(argv)
 
@@ -186,7 +191,20 @@ def main(argv: list[str] | None = None) -> int:
         model_ref=args.model_ref,
         elapsed_ms=args.elapsed_ms,
         verdict_refs=verdict_refs,
+        run_id=args.run_id,
+        evidence_set_id=args.evidence_set_id,
     )
+
+    if not args.no_store and not (args.run_id and args.evidence_set_id):
+        # 🔴 抢在 save_card 之前给一句能照做的话。`save_card` 也会拒（那才是边界），
+        #    但它的报错是从存储层的角度写的，这里补上「在这条命令上该怎么办」。
+        print(
+            "落库需要 --run-id 与 --evidence-set-id —— 一张在线卡必须说得清它属于\n"
+            "  哪次执行尝试、基于哪份冻结的数据切片（外部评审 §7-9）。\n"
+            "  · 正常出卡请走 bin/biga-card（orchestrator 两样都会填）；\n"
+            "  · 只想看看这批 verdict 合出来什么样：加 --no-store。",
+            file=sys.stderr)
+        return 1
 
     if not args.no_store:
         # 先记每个 Specialist 的执行账本。

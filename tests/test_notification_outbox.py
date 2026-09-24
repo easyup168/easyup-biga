@@ -55,6 +55,7 @@ from _store import (  # noqa: E402
     undelivered_notifications,
 )
 from _store.db import _insert_notification  # noqa: E402
+from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
 
 import notify_worker  # noqa: E402
 
@@ -66,6 +67,7 @@ def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
+    open_test_run(p)          # 批 N：见 tests/_provenance.py
     return p
 
 
@@ -91,6 +93,7 @@ def _card(did, *, status="WAIT", verdicts=None, missing=()):
         else [_verdict(a, did) for a in sorted(_STANCES)],
         synthesis="", model_ref="anthropic/claude-sonnet-5",
         missing=list(missing),
+        run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID,   # 批 N
     )
 
 

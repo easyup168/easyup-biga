@@ -44,6 +44,8 @@ from _store import (
     save_trading_calendar,
 )
 
+from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
+
 TID = new_task_id(1, day="20260919")
 
 
@@ -52,6 +54,8 @@ def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
+    # 批 N：在线卡要带 run_id，而它必须追得到 decision_runs（TestRunIdNamespace）。
+    open_test_run(p)
     return p
 
 
@@ -90,6 +94,8 @@ def make_card(**kw) -> DecisionCard:
         verdicts=[make_verdict(task_id=did)], synthesis="",
         model_ref="anthropic/claude-sonnet-5", elapsed_ms=41000,
         missing=[f"占位缺失项{i}——本文件不测 roster" for i in range(5)],
+        # 批 N：在线卡必须说得清属于哪次执行、基于哪份切片（见 tests/_provenance.py）。
+        run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID,
     )
     base.update(kw)
     return DecisionCard(**base)
@@ -211,6 +217,14 @@ class TestAppendOnly:
                           "VALUES ('x','y','z',0,'a','b')")
 
 
+#: 归属「编排执行尝试」这个命名空间的列名。批 N 加 `orchestration_run_id` ——
+#: 它装的就是 `decision_runs.run_id`，只是因为 `agent_runs` 里已经有一个
+#: `runtime_run_id`（OpenClaw 的 spawn id）才没有直接叫 run_id。
+#: 🔴 `runtime_run_id` **故意不在这里**：它是**别人的** id，追不到 decision_runs
+#:    是它的正常状态，纳进来这道守卫会恒红。
+_RUN_ID_COLUMNS = ("run_id", "orchestration_run_id")
+
+
 def _run_id_namespace_violations(conn):
     """批 J-II 的守卫本体，抽成函数以便自证它两条子句都会红。
 
@@ -229,17 +243,19 @@ def _run_id_namespace_violations(conn):
         "SELECT name FROM sqlite_master WHERE type='table'")]
     type_bad, value_bad, checked = [], [], set()
     for t in tables:
-        cols = [c for c in conn.execute(f"PRAGMA table_info({t})") if c[1] == "run_id"]
+        cols = [c for c in conn.execute(f"PRAGMA table_info({t})")
+                if c[1] in _RUN_ID_COLUMNS]
         if not cols:
             continue
         checked.add(t)
         for c in cols:
             if (c[2] or "").upper() != "TEXT":
-                type_bad.append(f"{t}.run_id 声明为 {c[2]!r}，应为 TEXT")
-        for (val,) in conn.execute(
-                f"SELECT run_id FROM {t} WHERE run_id IS NOT NULL"):
-            if val not in canonical:
-                value_bad.append(f"{t}.run_id={val!r} 追不到 decision_runs")
+                type_bad.append(f"{t}.{c[1]} 声明为 {c[2]!r}，应为 TEXT")
+        for c in cols:
+            for (val,) in conn.execute(
+                    f"SELECT {c[1]} FROM {t} WHERE {c[1]} IS NOT NULL"):
+                if val not in canonical:
+                    value_bad.append(f"{t}.{c[1]}={val!r} 追不到 decision_runs")
     return type_bad, value_bad, checked
 
 
@@ -257,7 +273,9 @@ class TestRunIdNamespace:
         assert type_bad == [], type_bad
         assert value_bad == [], value_bad
         # 🔴 非平凡：必须真的扫到了已知的两处 run_id 列，否则「全绿」可能是没扫到。
-        assert {"decision_runs", "run_events"} <= checked, (
+        # 批 N：decision_records / agent_runs 也进来了（新增的那三列）。
+        assert {"decision_runs", "run_events",
+                "decision_records", "agent_runs"} <= checked, (
             f"守卫没扫到已知的 run_id 列，覆盖坏了：checked={sorted(checked)}")
 
     def test_类型子句会红_加一个run_id_INTEGER列(self, db):
@@ -284,6 +302,33 @@ class TestRunIdNamespace:
         assert type_bad == []                      # 类型没问题
         assert any("_probe_txt" in m for m in value_bad), (
             f"追不到 decision_runs 的 run_id 值没被抓到：{value_bad}")
+
+
+    def test_orchestration_run_id也受同一套判据(self, db):
+        """批 N：新列换了个名字就绕过守卫的话，J-II 收敛掉的歧义会从旁边长回来。
+
+        探针：造一张带 `orchestration_run_id INTEGER` 的表，断言类型子句抓到它 ——
+        证明这个名字真的在判据里，不是「加了列但守卫没看」。
+        """
+        with connect(db) as c:
+            c.execute("CREATE TABLE _probe_orch (orchestration_run_id INTEGER)")
+            type_bad, _, checked = _run_id_namespace_violations(c)
+        assert "_probe_orch" in checked
+        assert any("_probe_orch" in m for m in type_bad), type_bad
+
+    def test_runtime_run_id不受这套判据(self, db):
+        """反向：`runtime_run_id` 是 OpenClaw 的 id，追不到 decision_runs 是常态。
+
+        把它纳进判据会让守卫恒红 —— 这条钉住「故意排除」不是「忘了加」。
+        """
+        with connect(db) as c:
+            c.execute("INSERT INTO agent_runs (task_id, agent, status, missing_count,"
+                      " elapsed_ms, started_at, finished_at, runtime_run_id)"
+                      " VALUES ('BIGA-20260919-001','market','completed',0,1,"
+                      "'t','t','openclaw-run-not-ours')")
+            _, value_bad, _ = _run_id_namespace_violations(c)
+        assert value_bad == [], (
+            "runtime_run_id 被误纳进「编排执行尝试」命名空间 —— 它是别人的 id")
 
 
 class TestDecisionRecords:

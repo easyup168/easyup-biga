@@ -256,6 +256,10 @@ class DecisionOrchestrator:
                 card = card_ops.synthesize(
                     decision_id=did, verdicts=verdicts, judgment=judgment,
                     model_ref=self._model_ref, verdict_refs=refs, run_id=ctx.run_id,
+                    # 🔴 批 N：把这次冻结的切片 id 也钉进卡 —— `decision_runs.evidence_set_id`
+                    #    那一列实测 7 行全是 NULL（它在 open_run 时写入，而冻结发生在之后，
+                    #    只追加的表补不回去），所以卡自己带着它才是唯一可查的记录。
+                    evidence_set_id=esid,
                     # 🔴 批 K：把**当下** AGENT_REGISTRY 算出的期望 roster 冻进卡，
                     #    让 absent_agents 读「生成时期望谁」而非「今天期望谁」。
                     expected_roster=EXPECTED_ROSTER)
