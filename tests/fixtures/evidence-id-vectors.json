@@ -1,0 +1,23 @@
+[
+  {
+    "note": "典型的 observed 证据 —— 全字段都给值",
+    "evidence": {
+      "field": "market.sh_close", "source": "sina:kline/sh000001", "value": 3200.5,
+      "as_of": "2026-09-20T15:00:00+08:00", "retrieved_at": "2026-09-20T15:00:30+08:00",
+      "calc_version": "market-calc/1", "label": "上证收盘",
+      "raw_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "evidence_set_id": "ES-20260920-001", "kind": "observed"
+    },
+    "sha256": "abf1989f5a213b8918e10ee1fe99d13ae89b812daa0cdd110c161b306c39b287"
+  },
+  {
+    "note": "嵌套结构的 value —— 钉住「身份算在解冻后的 JSON 形式上」",
+    "evidence": {
+      "field": "f", "source": "s:x", "value": {"a": [1, 2]},
+      "as_of": "2026-09-20T15:00:00+08:00", "retrieved_at": "2026-09-20T15:00:00+08:00",
+      "calc_version": null, "label": null, "raw_hash": null,
+      "evidence_set_id": null, "kind": null
+    },
+    "sha256": "1c69ec414a15b5f0e387776c351eb8f34a79a6eb7a55b0ae62ea1837b3bbe77a"
+  }
+]
