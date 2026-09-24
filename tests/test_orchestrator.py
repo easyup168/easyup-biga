@@ -42,9 +42,8 @@ from _runtime import SpawnHandle, SpawnResult, SpawnStartError, SpawnStatus  # n
 from _snapshot import SnapshotCoordinator  # noqa: E402
 from _sources import parse_index_daily  # noqa: E402
 from _store import (  # noqa: E402
-    connect,
     init_schema,
-    latest_verdict_ids,
+    connect,
     load_online_card,
     run_events,
     save_assessment,
@@ -99,6 +98,10 @@ class FakeAdapter:
         self.started_handles: list[SpawnHandle] = []  # 成功 start 返回的 handle
         self.cancelled: list[SpawnHandle] = []        # 收到 cancel() 的 handle
         self.wait_calls: list[tuple[tuple[str, ...], float]] = []  # (agents, timeout)
+        #: 🔴 批 O：这次编排的 run_id。真 Adapter 从 attach 的 session_key
+        #: （`agent:main:orchestrator-<run_id>`）知道自己属于哪次执行尝试，假的照做 ——
+        #: Stage 1 落下的原件必须带上它，否则编排器按 run 取的时候一条也看不见。
+        self.run_id: str | None = None
 
     def start(self, agent, task_id, task, *, group_id, run_timeout_sec=None,
               task_name=None, output_schema=None):
@@ -117,12 +120,19 @@ class FakeAdapter:
             #    fact 行（此刻它是 (task_id, risk) 唯一的行），risk 只 amend 一个 stance。
             #    这正是新提示词教它做的（amend_verdict.py --ref <编排器给的> --stance …），
             #    也让「卡上 risk 判定引用的就是编排器预存那条」在测试里真实成立。
-            fact_id = latest_verdict_ids(task_id, path=self.db)[RISK]
+            # 🔴 批 O：不能再用 latest_verdict_ids(task_id)（已按 run 取代）。
+            #    这个假 Adapter 拿不到编排器的 run_id，而它要找的那一行在本测试里
+            #    唯一（一次运行只有一个 risk fact）——直接按 (task_id, agent, fact) 取。
+            with connect(self.db, readonly=True) as _c:
+                fact_id = _c.execute(
+                    "SELECT verdict_id FROM agent_verdicts WHERE task_id=? AND agent=? "
+                    "AND kind='fact' ORDER BY verdict_id DESC LIMIT 1",
+                    (task_id, RISK)).fetchone()[0]
             save_assessment(
                 AgentAssessment(task_id=task_id, agent=RISK, stance=self.risk_stance),
                 fact_id=fact_id, path=self.db)
         else:
-            save_verdict(_verdict(agent, task_id), path=self.db)
+            save_verdict(_verdict(agent, task_id), run_id=self.run_id, path=self.db)
         h = SpawnHandle(runtime_run_id=rid, agent=agent, task_id=task_id,
                         group_id=group_id, session_key=f"sk-{rid}")
         self.started_handles.append(h)
@@ -162,6 +172,8 @@ def _make_orch(db, **fake_kw):
     def attach(session_key, *, ttl_ms, **_):
         attach.last_session = session_key
         attach.last_ttl = ttl_ms
+        # 批 O：`agent:main:orchestrator-<run_id>` —— 与真 Adapter 同一个来源。
+        fake.run_id = session_key.rsplit("-", 1)[-1]
         yield fake
 
     # 注入装了假 fetcher 的 coordinator —— freeze 因此不出网（禁网围栏兜底）。

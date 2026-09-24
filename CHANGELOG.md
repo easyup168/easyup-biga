@@ -87,6 +87,90 @@ sys.modules[name]`），已经被任何人加载过就复用同一个对象，�
 文件的幂等检查失效，配合"该文件在 `test_orchestrator.py` 之后收集"的顺序，
 两条新测试都能抓到。
 
+### ✨ 新增 · 外部评审 B 部分收官：Fact 的身份从「哪个决策」换成「哪次执行」
+
+批 N 做了 B 节 13 项里的 9 项，剩下 4 项（B-2/B-3/B-4/B-5）当时**有意不做**，
+理由写在上一条：它们与同期那条 C-1 收窄修复正面冲突，而**加约束和拆守卫必须在同一次
+改动里看见**（分开做的失败是静默的：守卫有自己的测试，测试照样绿，只有产品行为悄悄
+退回去）。本批把这 4 项连同那道守卫的改写一次做完，并补上评审 §7.2 第四条。
+
+🔴 **一句话**：`(task_id, agent)` 说的是「一个决策只能有一份 market 事实」，
+而真正该成立的是「**一次执行尝试**只能有一份」。批 M 的 C-1 让同一个决策可以有第二个
+run 之后，这两句话就不是一回事了。
+
+**变更（schema v17）· Fact 唯一约束按 run 分区**
+
+```sql
+DROP INDEX ux_fact_per_task_agent;                      -- v11 那条
+CREATE UNIQUE INDEX ux_fact_per_run_agent
+    ON agent_verdicts(run_id, agent) WHERE kind='fact' AND run_id IS NOT NULL;
+CREATE UNIQUE INDEX ux_legacy_fact_per_task_agent
+    ON agent_verdicts(task_id, agent) WHERE kind='fact' AND run_id IS NULL;
+```
+
+* 🔴 **为什么必须 DROP 掉旧的那条**：留着它就按 `(task_id, agent)` 管**全部** fact 行，
+  会继续拦住第二个 run 的合法写入 —— 那等于这一批什么都没做。探针
+  `test_v11那条旧索引已经不在了` 专门钉这一条。
+  ⚠️ 这不是「改已发布的迁移」：`_V11` 的迁移体一字未动，是**后续版本**用 DROP+CREATE
+  表达一次约束演进。回头去改 `_V11` 才是错的（已迁移过的库和新建的库会长得不一样）。
+* 🔴 **为什么是两条而不是一条**：迁移前有一批 `run_id IS NULL` 的 fact 行（实测生产库
+  2 条，手工跑 skill 落的 / v10 之前的）。对它们 `(run_id, agent)` 退化成
+  `(NULL, agent)`，而 **SQLite 里多行 NULL 不算重复** ⇒ 这批历史行会完全失去唯一约束
+  保护，v11 堵上的那个洞（同一 `(task_id, agent)` 静默产生两份并存原件）会对它们重新
+  打开。新数据按 run 管、历史数据继续按 task 管，两条 WHERE 互斥。这正是评审 §6.4 的方案。
+* ⚠️ 加索引前实测生产库（同 v11/v16 先例）：fact 行 run_id 非空 42 / 为空 2，
+  `(run_id, agent)` 重复 0 组，`run_id IS NULL` 那批里 `(task_id, agent)` 重复 0 组。
+  迁移在生产库副本上实跑过，350 行一行不少。
+
+**移除 · `latest_verdict_ids(decision_id)`，改为 `load_verdict_ids_for_run(run_id)`**
+
+旧函数按决策号分组。评审 §6.2 给的例子就是它的后果：
+
+```
+Run A：market 成功 / news 成功 / technical 成功
+Run B：market 成功 / news 失败 / technical 成功
+按 decision 聚合 ⇒ Run B 读到的 news 是 **Run A 的**
+```
+
+而且**不报错** —— 卡上六个 agent 齐全、时间戳都在几十秒内，看不出证据来自两次运行。
+`orchestrator.py` 的两处取原件改成按 `ctx.run_id` 取；空 `run_id` 一律拒绝
+（fail closed：空值会让 `WHERE run_id=?` 退化成「取所有历史 NULL 行」，正好是要防的那件事）。
+退役由**仓库 AST 扫描**钉住（`test_全仓没有残留引用`）——判据不是「我记得都改了」。
+⚠️ 用 AST 不用文本匹配：叙述性文字（说明「它取代了谁」）不算引用，按文本扫会逼人
+删掉说明来换绿灯。
+
+**变更 · `save_verdict` 支持 `run_id`**
+
+否则这条路径落的行永远归不到任何一次执行尝试，按 run 取时一条也看不见。
+
+**变更 · 在线卡 `input_verdict_refs` 进必填（评审 §7.2 第四条）**
+
+批 N 留了它，理由是「会废掉 `synthesize(verdict_refs=None)` 这条文档里允许的旧路径、
+属于产品决策」。那条理由在 B-2 之后不成立了：「这次运行用了哪些原件」现在是**可以确定
+地答出来**的（`load_verdict_ids_for_run`），一张答不出来的在线卡就不该落库。
+
+**🔴 变更 · C-1 那道守卫的判据收窄（这就是「拆守卫」那一半）**
+
+上一批把 C-1 收窄成「`latest_verdict_ids(decision_id)` 非空就拒绝自动重放」。在当时
+那是唯一正确的选择（第二个 run 根本写不进自己的 fact）。B-2 之后前提变了 ——
+**第二个 run 写自己的 fact 本来就合法、读也只读得到自己的**，继续「有 fact 就拒」
+会拒掉一次本来安全的重放，把 C-1 想修的永久中毒原样退回来。
+
+真正剩下的硬约束是 `ux_decision_online`：**一个决策只能有一张在线卡**。上一次跑到
+`CARD_PERSISTED` 之后才失败的话，重放跑到最后一步必然撞它。
+⇒ 判据从「这个号名下有没有 fact」收窄成「**这个号出没出过卡**」。守卫不是被删掉。
+
+对应的那条测试**结论被翻了过来**（`test_超时且已经落过fact但还没出卡_现在允许重新拉起`），
+并新增 `test_超时且已经出过卡_不重新拉起`。翻结论的理由写在 docstring 里 —— 这正是
+「加约束和拆守卫同批做」要防的那件事的现场：约束加了、守卫没跟着改的话，旧测试照样
+全绿（它测的是旧判据）。
+
+**新增 · `tests/test_run_scoped_facts.py`（18 条）**，含评审点名的两条回归测试：
+「同一 Decision 两个 Run 可以分别保存同 Agent Fact」「Retry 不读取旧 Run Verdict」。
+9 处 sabotage 逐一验证过。测试夹具统一走 `tests/_provenance.py::provenance_for()`
+（一次备齐 run/切片/refs 三件套，且每个决策号派生自己的 run_id —— 共用一个会在第二个
+决策号上撞唯一约束，而那是夹具的问题不是被测代码的问题，最难查的那种红）。
+
 ### 🐛 修复 · stale-run reaper 按「起跑时刻」判过期，应该按「最后一次推进」
 
 三轮对抗性复核（真机 PoC）指出：`find_stale_runs()` 用

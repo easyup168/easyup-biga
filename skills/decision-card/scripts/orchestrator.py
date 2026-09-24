@@ -57,7 +57,7 @@ from _runtime import OpenClawRuntimeAdapter, SpawnHandle, SpawnStatus  # noqa: E
 from _snapshot import SnapshotCoordinator  # noqa: E402
 from _store import (  # noqa: E402
     enqueue_run_failed,
-    latest_verdict_ids,
+    load_verdict_ids_for_run,
     open_run,
     reserve_decision_id,
     save_fact_bundle,
@@ -210,7 +210,10 @@ class DecisionOrchestrator:
                 # 🔴 批 F：risk 的事实（build_fact_bundle）由编排器在 spawn 之前**直接、
                 #    免费**地算一遍并落库 —— 老路径要先花一次 LLM 调用去触发 risk 跑这个
                 #    脚本。run_id 走批 J-I 的 capture 路径（与 Stage 1 六个 skill 同一种落法）。
-                stage1_ids = latest_verdict_ids(did)
+                # 🔴 批 O（评审 B-4/B-5）：按 **run** 取，不再按 decision 取。
+                #    按 decision 取的话，同一个决策号的第二个 run 会原样拿到
+                #    上一次遗留的 verdict_ref —— 而且不报错（评审 §6.2 cross-run）。
+                stage1_ids = load_verdict_ids_for_run(ctx.run_id)
                 s1_refs = [stage1_ids[a] for a in STAGE1_AGENTS if a in stage1_ids]
                 state = self._to(ctx.run_id, state, RunState.RISK_RUNNING)
                 # store= 是 risk_check.main 的老参数，build_fact_bundle 内部并不读它；
@@ -237,7 +240,7 @@ class DecisionOrchestrator:
                 # ── Stage 3：判官给综合判断，程序组装 Card ──
                 state = self._to(ctx.run_id, state, RunState.SYNTHESIZING,
                                  detail=self._stage_detail(r2))
-                all_ids = latest_verdict_ids(did)
+                all_ids = load_verdict_ids_for_run(ctx.run_id)   # 批 O：同上，按 run 取
                 ordered = [all_ids[a] for a in (*STAGE1_AGENTS, RISK_AGENT) if a in all_ids]
                 # 🔴 批 F 起这道检查退成纵深防御：risk 现在**总会**落一条 fact（连「完全没有
                 #    上游」都落一条无上游 UNKNOWN），所以正常输入下 ordered 至少有 risk 这条。

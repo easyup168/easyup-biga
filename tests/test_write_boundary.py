@@ -43,7 +43,12 @@ from _contract import (  # noqa: E402
 )
 from _store import connect, init_schema, load_verdict, save_card, save_raw_snapshot, save_verdict  # noqa: E402
 
-from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
+from _provenance import open_test_run, provenance_for  # noqa: E402
+
+#: 批 O：卡构造器是纯函数、拿不到 fixture，而在线卡的血缘必须指向**真落库**的行
+#: （见 tests/_provenance.py）。`db` fixture 把库路径放这儿，构造器读它。
+_DB: list = []
+
 from _store.db import payload_sha256  # noqa: E402
 
 TID = new_task_id(1, day="20260922")
@@ -55,6 +60,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
     open_test_run(p)          # 批 N：见 tests/_provenance.py
+    _DB[:] = [p]
     return p
 
 
@@ -79,8 +85,10 @@ def _legal_buy_card(**kw) -> DecisionCard:
     base = dict(
         decision_id=did, status="BUY", headline="核心矛盾一句话",
         verdicts=verdicts, synthesis="", model_ref="anthropic/claude-sonnet-5",
-        run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID,   # 批 N
     )
+    if _DB:                                   # 批 N/O：血缘三件套（见 _provenance.py）
+        rid, esid, refs = provenance_for(_DB[0], did, [v.agent for v in verdicts])
+        base.update(run_id=rid, evidence_set_id=esid, input_verdict_refs=refs)
     base.update(kw)
     return DecisionCard(**base)
 

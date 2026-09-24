@@ -332,14 +332,15 @@ class DecisionCard:
 
         🔴 它拦的是什么
         ----------------
-        `latest_verdict_ids(decision_id)` 按**决策号**聚合，不按 run 聚合。一个
+        批 O 之前，编排器按**决策号**聚合取原件（旧的 `latest_verdict_ids`），不按 run。一个
         decision 出现第二个 run 时（幂等重投、将来的 Retry），第二次跑出来的卡会
         原样拿到**上一次**遗留的 verdict_ref —— 卡上的 `generated_at` 是现在，
         证据却是几小时前的，而且每一道既有核验都通过（spawn 核验核的是这一轮真的
         spawn 过，不是证据新鲜度）。评审 §6.2 管这叫 Cross-run Contamination。
 
-        判据不是「按 run 重查一遍」（那是 B-4/B-5 的事，要动 `latest_verdict_ids`
-        的全部调用方），而是**把已经并排放在卡上的两个值对一下**：
+        ⚠️ 批 O 已经把取原件换成按 run（`load_verdict_ids_for_run`），上面那条路
+        因此在**产生**环节就堵住了。这道检查保留为纵深防御：它不依赖取原件的实现，
+        只**把已经并排放在卡上的两个值对一下**：
         `card.run_id` 与每条 `VerdictRef.run_id` —— 两者都是从
         `agent_verdicts.run_id` 那一列直接搬过来的（批 J-I），没有推导、没有猜。
 

@@ -274,9 +274,11 @@ class TestWiredIntoRealPath:
         return (
             "import sys\n"
             f"sys.path.insert(0, {str(work / 'skills')!r})\n"
-            "from _contract import (AgentVerdict, DecisionCard, Evidence, now_cn,\n"
-            "                       new_run_context)\n"
-            "from _store import init_schema, open_run, save_card\n"
+            "from _contract import (AgentVerdict, CONTRACT_VERSION, DecisionCard,\n"
+            "                       Evidence, FactBundle, VerdictRef, new_run_context,\n"
+            "                       now_cn)\n"
+            "from _store import (init_schema, load_verdict_meta, open_run,\n"
+            "                    save_card, save_fact_bundle)\n"
             "t = now_cn()\n"
             f"TID = {did!r}\n"
             f"init_schema({str(db)!r})\n"
@@ -293,11 +295,24 @@ class TestWiredIntoRealPath:
             # 🔴 只落 1 个 agent，另外 5 个天然缺席——F-8 之后 roster 判据按计数
             #    比较（missing 条数 >= 缺席 agent 数），给 5 条占位 missing 才够，
             #    免得抢在这批探针要验证的事情前面报错。
+            # 🔴 批 O：在线卡必须带 input_verdict_refs（评审 §7.2 第四条）——
+            #    桩也得真落一条 fact 行、再引用它，不能凭空拼一个 ref
+            #    （verify_verdict_refs 会去库里核 agent/sha/task_id/run_id）。
+            "fb = FactBundle(task_id=TID, agent='market', status='completed',\n"
+            "                verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
+            "                evidence=[Evidence(field='x', source='s', value=1,\n"
+            "                                   as_of=t, retrieved_at=t)], missing=[])\n"
+            f"vid = save_fact_bundle(fb, run_id=RID, path={str(db)!r})\n"
+            f"meta = load_verdict_meta(vid, path={str(db)!r})\n"
+            "ref = VerdictRef(agent='market', verdict_id=vid,\n"
+            "                 content_sha256=meta['content_sha256'],\n"
+            "                 contract_version=CONTRACT_VERSION, run_id=RID)\n"
             "card = DecisionCard(decision_id=TID, status='WAIT', headline='h',\n"
             "                    verdicts=[v], synthesis='', model_ref='m',\n"
             "                    missing=['占位1 —— 本文件不测 roster',\n"
             "                             '占位2', '占位3', '占位4', '占位5'],\n"
-            "                    run_id=RID, evidence_set_id='es-stub')\n"
+            "                    run_id=RID, evidence_set_id='es-stub',\n"
+            "                    input_verdict_refs=[ref])\n"
             f"save_card(card, path={str(db)!r})\n"
             "print('run stub-run   （查进度：bin/biga-card --status stub-run）',"
             " file=sys.stderr)\n"

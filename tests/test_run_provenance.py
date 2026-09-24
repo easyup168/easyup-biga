@@ -54,10 +54,14 @@ from _store import (  # noqa: E402
     save_fact_bundle,
     verify_verdict_refs,
 )
-from _provenance import TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run  # noqa: E402
+from _provenance import (  # noqa: E402
+    TEST_EVIDENCE_SET_ID, TEST_RUN_ID, open_test_run, provenance_for)
 
 DID = "BIGA-20260924-001"
 CONTRACT_VERSION = "contract/1"
+
+#: 批 O：卡构造器拿不到 fixture，而在线卡的 refs 必须指向真落库的行。
+_DB: list = []
 
 
 @pytest.fixture()
@@ -66,6 +70,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
     open_test_run(p, decision_id=DID)
+    _DB[:] = [p]
     return p
 
 
@@ -88,7 +93,30 @@ def _card(**kw) -> DecisionCard:
         verdicts=[_verdict()], expected_roster=("market",),
         run_id=TEST_RUN_ID, evidence_set_id=TEST_EVIDENCE_SET_ID)
     base.update(kw)
+    # 批 O：`input_verdict_refs` 进了在线卡必填。多数用例不关心它具体是什么，
+    # 只要「有且对得齐」—— 默认给一份指向真落库行的（显式传了就不覆盖）。
+    if _DB and "input_verdict_refs" not in kw:
+        base["input_verdict_refs"] = _refs_matching(base)
     return DecisionCard(**base)
+
+
+def _refs_matching(base) -> list[VerdictRef]:
+    """给 `base["verdicts"]` 里每个 agent 造一条对得上的 ref（真落库）。
+
+    ⚠️ run_id 用卡自己声明的那个（`base["run_id"]`），不是 `provenance_for` 派生的 ——
+    否则血缘检查会当场判「ref 属于别的执行尝试」，而那是这些用例要测的**别的**东西。
+    """
+    t = now_cn()
+    out = []
+    for v in base["verdicts"]:
+        fb = FactBundle(task_id=base["decision_id"], agent=v.agent, status="completed",
+                        verdict="PASS", result={f"{v.agent}_x": 1.0},
+                        data_completeness=1.0, evidence=[_ev(f"{v.agent}_x")], missing=[])
+        vid = save_fact_bundle(fb, run_id=base["run_id"], path=_DB[0])
+        out.append(VerdictRef(agent=v.agent, verdict_id=vid,
+                              content_sha256=load_verdict_meta(vid, path=_DB[0])["content_sha256"],
+                              contract_version=CONTRACT_VERSION, run_id=base["run_id"]))
+    return out
 
 
 def _ref(agent="market", vid=1, sha=None, run=TEST_RUN_ID) -> VerdictRef:
@@ -141,9 +169,15 @@ class TestSchemaV16:
 # ══════════════════════════════════════════════ P3 / P4 / P5 · 写边界与可查询
 class TestOnlineCardRequiresProvenance:
 
-    @pytest.mark.parametrize("missing_field", ["run_id", "evidence_set_id"])
+    @pytest.mark.parametrize("missing_field", [
+        "run_id", "evidence_set_id",
+        # 🔴 批 O（评审 §7.2 第四条）：refs 也进必填 —— 一张答不出「用了哪些原件」
+        #    的在线卡不该落库。批 N 当时留了它，理由（会废掉 verdict_refs=None 那条
+        #    旧路径）在 B-2 之后不再成立：这次运行用了哪些原件现在是确定可答的。
+        "input_verdict_refs",
+    ])
     def test_在线卡缺血缘字段则落库拒绝(self, db, missing_field):
-        card = _card(**{missing_field: None})
+        card = _card(**{missing_field: None if missing_field != "input_verdict_refs" else []})
         with pytest.raises(ValueError, match="拒绝落库"):
             save_card(card, path=db)
 
@@ -153,7 +187,8 @@ class TestOnlineCardRequiresProvenance:
         要求它带 run_id 等于逼回放捏造一个（L-8：历史永不改写）。
         """
         rid = save_card(_card(), path=db)
-        replayed = _card(run_id=None, evidence_set_id=None, from_store=True)
+        replayed = _card(run_id=None, evidence_set_id=None,
+                         input_verdict_refs=[], from_store=True)
         assert save_card(replayed, replay_of=rid, path=db) > 0
 
     def test_落库之后血缘在列里而不是只在card_json里(self, db):

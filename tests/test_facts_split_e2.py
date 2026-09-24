@@ -50,7 +50,7 @@ from _sources import BreadthResult, parse_index_daily  # noqa: E402
 from _sources.sina_news import NewsFeed, NewsItem  # noqa: E402
 from _store import (  # noqa: E402
     init_schema,
-    latest_verdict_ids,
+    load_verdict_ids_for_run,
     load_outcome,
     load_verdict,
     load_verdict_meta,
@@ -58,8 +58,13 @@ from _store import (  # noqa: E402
     save_fact_bundle,
     save_verdict,
 )
+from _provenance import open_test_run  # noqa: E402
 
 TID = "BIGA-20260302-001"
+
+#: 批 O：fact 行要归属到一次真实的执行尝试（`load_verdict_ids_for_run`
+#: 按 run 取；`TestRunIdNamespace` 要求 run_id 追得到 decision_runs）。
+_RID = "e" * 32
 
 
 def _load(name: str, rel: str):
@@ -108,6 +113,7 @@ def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
+    open_test_run(p, run_id=_RID)     # 批 O：fact 要归属到一次真实的执行尝试
     return p
 
 
@@ -413,7 +419,7 @@ class TestP6MarketTemplateFixed:
         fb = FactBundle(task_id=TID, agent="market", status="completed", verdict="PASS",
                         result={"sh_close": 3000.0}, data_completeness=1.0,
                         evidence=[_ev("sh_close", 3000.0)])
-        fid = save_fact_bundle(fb)
+        fid = save_fact_bundle(fb, run_id=_RID)
         # 从模板里抠出那条 amend 命令用的 stance（照抄「缩量上涨」）
         text = self.AGENTS_MD.read_text(encoding="utf-8")
         m = re.search(r"--stance\s+(\S+)", text)
@@ -423,7 +429,7 @@ class TestP6MarketTemplateFixed:
         rc = amend.main(["--ref", str(fid), "--stance", stance])
         assert rc == 0
         # 判断落在**新的一行**（assessment），事实行没被重打
-        aid = latest_verdict_ids(TID)["market"]
+        aid = load_verdict_ids_for_run(_RID)["market"]
         assert aid != fid
         oc = load_outcome(aid)
         assert oc.stance == stance

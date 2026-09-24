@@ -1183,18 +1183,22 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         合成一张 `generated_at` 是现在的卡，spawn 核验照样通过。
         ⇒ 评审 §6.3 提前写出了这个 bug，B 因此**不是**「面向未来 Retry 的前置修复」，
         是一个已发货改动的前置条件
-  - [ ] **B-2 / B-3 / B-4 / B-5 留到下一批，必须与「拆 C-1 那道守卫」同批做**：
-        `ux_fact_per_run_agent`（`(run_id, agent)`，`WHERE run_id IS NOT NULL`）+
-        `ux_legacy_fact_per_task_agent`（`WHERE run_id IS NULL`）+ 废弃
-        `latest_verdict_ids(decision_id)` + 新增 `load_verdict_ids_for_run(run_id)`。
-        🔴 与同期那条 C-1 收窄修复（`latest_verdict_ids` 非空就拒绝自动重放）正面
-        冲突：B-2 落地后重放本来就安全，那道守卫会变成「拒绝一次本来安全的重放」，
-        把永久中毒原样退回来；而 B-4 要删的正是它刚成为第 4 个调用方的那个函数。
-        **加约束 + 拆守卫分开做的失败是静默的**（守卫有自己的测试，测试照样绿，
-        只有产品行为退回去）
-  - [ ] 评审 §7.2 第四条「在线卡 `input_verdict_refs` 不许为空」—— 它会同时废掉
-        `card_ops.synthesize(verdict_refs=None)` 这条**文档里明确允许**的旧路径，
-        属于产品决策不是纯加固；要防的危险情形已由契约层覆盖检查挡住，一并留到下一批
+  - [x] **B-2 / B-3 / B-4 / B-5 + 评审 §7.2 第四条 —— 批 O 一次做完（2026-09-24）**。
+        schema **v17**：`ux_fact_per_task_agent` 拆成 `ux_fact_per_run_agent`
+        （`(run_id, agent) WHERE kind='fact' AND run_id IS NOT NULL`）+
+        `ux_legacy_fact_per_task_agent`（`WHERE run_id IS NULL`）；
+        `latest_verdict_ids(decision_id)` 退役 → `load_verdict_ids_for_run(run_id)`
+        （退役由全仓 AST 扫描钉住）；`save_verdict` 支持 `run_id`；
+        在线卡 `input_verdict_refs` 进必填。
+        新增 `tests/test_run_scoped_facts.py`（18 条），9 处 sabotage 验证。
+        详见 `docs/tutorial/44-run-scoped-facts.md`、`CHANGELOG.md`
+    - [x] 🔴 **同批拆掉 C-1 那道守卫**（这是本批存在的理由的一半）：判据从
+          「`latest_verdict_ids(decision_id)` 非空就拒」收窄成「**已经出过在线卡
+          就拒**」（剩下的硬约束是 `ux_decision_online`，不是 fact 唯一约束）。
+          守卫**不是被删掉**，是判据跟着前提变了。对应测试的结论被翻过来，
+          理由写在 docstring 里 —— 分开做的失败是静默的：旧守卫的测试照样绿
+          （它测的是旧判据），只有产品行为悄悄退回「trigger 永久中毒」
+  - [x] 评审 B 节 13 项 **全部完成**（批 N 9 项 + 批 O 4 项）
 
 - [x] 批 O · 外部评审 A 节：消除动态同名模块 monkeypatch 错位 —— **2026-09-24**。
       批 J-II（教程第 32 章）只修了 `test_run_id_capture.py` 一处的"无条件覆写
