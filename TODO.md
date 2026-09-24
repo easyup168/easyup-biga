@@ -1177,6 +1177,13 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         自己标注"后续阶段"（非当前必需）；G 需要飞书真实触发一次 + 新会话
         验证，无法靠改代码单方面完成；H 的验收条件（tag/schema 说明/
         migration 回滚说明等）依赖 G 先过，目前排它之后
+  - [ ] F 节"当前必需"部分（跨包引用清理 / pyproject 正式化 / console
+        scripts / ruff / mypy，不含三项 Registry）的开工提示词已写好，
+        拆成 U-I（跨包清理，可立即开工，方案已定死）/ U-II（pyproject
+        正式化，建议排 U-I 之后）/ U-III（移除 sys.path，必须排 U-II
+        之后，82 个文件高风险）/ U-IV（ruff/mypy，只拿基线不清零，可并行）
+        四个子批，见 `docs/guide/f-node-packaging-kickoff-prompt.md`。
+        批次字母用 **U**（TODO.md 已用到 T），开工前先确认没被并行会话占用
 
 - [x] 批 P · 外部评审 E 节（一）：E-16 值一致 + E-18 缺席对号 —— **2026-09-24**。
       `check_fact_invariants` 新增「result 的值必须与同名 Evidence 一致」
