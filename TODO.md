@@ -1226,25 +1226,29 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         **F 的三项 Registry / H（Baseline 冻结）—— 仍未开始**。三项 Registry
         评审自己标注"后续阶段"（非当前必需）；H 的验收条件（tag/schema 说明/
         migration 回滚说明等）依赖 G 先过，目前排它之后
-  - [ ] **G（Live Acceptance）核实中**（2026-09-24）：13 项逐条核对，7 项已确认
-        满足（`ux_evidence_set_per_run`/`ux_fact_per_task_agent` 唯一索引、
-        `card.py::_check_run_provenance()`、`OrchestratorTimeout`、
-        `stale-run-reaper-biga.timer` 实测在跑；CLI 真实触发 `BIGA-20260924-007`
-        后直接查库确认：只生成一个 Decision、只生成一个 Run、只绑定一个
-        EvidenceSet、飞书投递 `status=delivered`）；1 项已知历史缺口不阻塞
+  - [ ] **G（Live Acceptance）13 项证据已集齐**（2026-09-24）：逐条核对，
+        11 项直接确认满足（`ux_evidence_set_per_run`/`ux_fact_per_task_agent`
+        唯一索引、`card.py::_check_run_provenance()`、`OrchestratorTimeout`、
+        `stale-run-reaper-biga.timer` 实测在跑；CLI 触发 `BIGA-20260924-007`
+        与飞书触发 `BIGA-20260924-009` 各自直接查库确认：只生成一个 Decision、
+        只生成一个 Run、只绑定一个 EvidenceSet、飞书投递 `status=delivered`；
+        replay 不碰 Provider 有静态+动态测试）；1 项已知历史缺口不阻塞
         （`runtime_run_id` 老数据只 36/166 行有值，新数据 capture 齐）；
         2 项核实后发现**真缺陷、均已修复**——① 编排器三处 wait 调用在总预算
         耗尽或单个 handle 到期时都不会取消已启动的 spawn（教程第 58 章）；
         ② 飞书触发时 `accept_trigger()` 的 ACK 抢在预算闸门判断之前就许诺
         "正在出卡"，闸门几秒后否决却没有任何后续告知用户（教程第 59 章，
         真机实测撞见：CLI 与飞书两次真实触发隔了 390s，差 10s 撞上
-        `MIN_GAP_SEC=400s`，暴露了这个信息差）；1 项补了静态+动态测试
-        （replay 不碰 Provider）；**剩 1 项未完成**——「飞书触发一次真实 Run
-        并成功走到出卡」：飞书触发本身已证明可达（`BIGA-20260924-008` 的
-        `trigger_id` 确认走通了 main→inbound.py→systemd-run 这条链），但那次
-        被预算闸门正确拦下，没有一次飞书触发**成功产出卡**；且核实结果不该
-        由本会话自己判（深度参与了建造，不适合当裁判）——需要另开新会话，
-        等 400s 窗口过后重新触发一次，看它能不能跑完
+        `MIN_GAP_SEC=400s`，暴露了这个信息差）。
+        **飞书触发一次真实 Run 并成功走到出卡**（第①项，此前唯一未完成的）
+        也已补齐——`BIGA-20260924-009`：21:06:32 飞书触发 → 21:08:34 出卡
+        `WAIT` → 21:11:29 飞书投递成功（`status=delivered`，一次即中，无重试）；
+        单 Decision/单 Run（`f4c899bc...`）/单 EvidenceSet（`es-38fbd3b2...`）
+        均直接查库确认。
+        ⚠️ **13 项证据均已拿到，但形式上的最终 sign-off 留给下一个新会话**——
+        本会话深度参与了上面两处真缺陷（编排器取消、ACK 抢跑）的发现与修复，
+        不适合自己当裁判；新会话只需按本条列出的证据逐项复核即可，不必重新
+        触发真实运行
   - [ ] F 节"当前必需"部分（不含三项 Registry）—— **4 个子批全部完成**，
         见 `docs/guide/f-node-packaging-kickoff-prompt.md`：
         - [x] **U-I** 跨包引用清理（`b06e6bf`，教程第 51 章）
