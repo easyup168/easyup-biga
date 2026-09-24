@@ -9,7 +9,13 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 2
 
-N=$(python3 -m pytest -q --tb=line 2>&1 | grep -oP '实测 \K[0-9]+' | head -1)
+# 🔴 必须与 CI hermetic job 的 marker 过滤完全一致（P1-3）：
+#   tests/test_docs_convention.py::test_文档里の条数 靠 request.session.items 数
+#   「这次跑里有多少条 test」—— 不带 marker 时比带 -m 多 3 条（installed/live/git），
+#   两侧计数不一样，守卫在 CI 里必然报红。
+MARKER_FILTER="not installed and not live and not git"
+
+N=$(python3 -m pytest -q --tb=line -m "$MARKER_FILTER" 2>&1 | grep -oP '实测 \K[0-9]+' | head -1)
 [ -n "$N" ] || { echo "✅ 条数已经是最新的（守卫没报红）"; exit 0; }
 
 for f in README.md CLAUDE.md docs/guide/review-prompt.md; do
@@ -20,6 +26,6 @@ for f in README.md CLAUDE.md docs/guide/review-prompt.md; do
              s#[0-9]+ 条测试，SQLite schema#${N} 条测试，SQLite schema#" "$f"
 done
 echo "▸ 已同步为 $N 条"
-python3 -m pytest -q --tb=line 2>&1 | grep -oP '实测 \K[0-9]+' >/dev/null \
+python3 -m pytest -q --tb=line -m "$MARKER_FILTER" 2>&1 | grep -oP '实测 \K[0-9]+' >/dev/null \
   && { echo "❌ 同步后仍然对不上 —— 有一处没被这几条 sed 覆盖到" >&2; exit 1; }
 echo "✅ 守卫通过"

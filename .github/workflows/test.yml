@@ -25,6 +25,9 @@ jobs:
       - name: Compile check
         run: python -m compileall -q src skills tools
 
+      - name: Bash syntax check
+        run: bash -n bin/biga bin/biga-card bin/biga-notify
+
       - name: Hermetic tests
         # -m "not installed and not live and not git" 跳过所有环境依赖测试。
         run: pytest -q -m "not installed and not live and not git"

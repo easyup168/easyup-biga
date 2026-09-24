@@ -822,6 +822,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_sets_run
 """
 
 
+# v19: agent_runs 加 provenance_mode，区分在线执行行与历史/回放行（P1-2）。
+# NULL = 历史行（迁移前写入）；'online' = 真实编排执行；将来可扩展 'replay'。
+# ALTER TABLE 在 SQLite 里安全：只加列，不改存量行。
+_V19 = """
+ALTER TABLE agent_runs ADD COLUMN provenance_mode TEXT;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -842,6 +850,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (16, _V16),
     (17, _V17),
     (18, _V18),
+    (19, _V19),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

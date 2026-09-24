@@ -17,6 +17,35 @@
 
 ---
 
+## [0.3.3] - 2026-09-25
+
+### 新增 · I 节补完 —— 剩余守卫全部到位
+
+专家评审 checklist 最后一批：P1-2 · P2-3 · P1-3 · CI 三项实施完成。
+
+**P1-2 补完：`record_agent_run()` 在线路径加 Run 归属校验 + `provenance_mode`（schema v19）**
+`save_verdict` / `save_fact_bundle` / `save_evidence_set` 三条在线写入口已有
+`_assert_run_owns_decision`，`record_agent_run` 一直没有：传了 `orchestration_run_id`
+也不核验它是否存在于 `decision_runs`。补上后：`orchestration_run_id` 非空时强制校验；
+同时把 `provenance_mode='online'` 写进新增的 `agent_runs.provenance_mode` 列（schema v19）。
+附跨 Run 隔离测试：`TestRunIsolation` 三条——`spawn_proof_for_run(run_a)` 不能借用 run_b
+的 spawn 证明；在线路径传假 run_id 报 ValueError；`provenance_mode` 自动置 `'online'`。
+
+**P2-3 补完：`card_ops.py` 明确的 API 边界**
+新增 `ALLOWED_REPLAY_CHANGES` 常量（`frozenset({"generated_at", "elapsed_ms", "run_id"})`），
+把「哪些字段允许回放与原卡不同」从 `comparable()` 的注释提升为可被多处引用的常量——
+`comparable()` 改为遍历它，而不是分散的三次 `d.pop()`。新增 `save_online_card()` /
+`save_replay_card()` 具名包装函数，`persist()` 调这两个而不是直接调底层，使在线路径
+和回放路径的分野在调用图上一眼可见（不再依赖调用方记得填 `replay_of=None`）。
+
+**P1-3 补完：CI 加 bash -n 语法检查**
+`.github/workflows/test.yml` hermetic job 新增 `bash -n bin/biga bin/biga-card bin/biga-notify`——
+三个入口脚本如有 shell 语法错误会在 CI 里直接拦下，不需等到真实调用才发现。
+
+同步测试条数：1816 条（1813 → 1816，守卫通过）；schema v19。
+
+---
+
 ## [0.3.2] - 2026-09-25
 
 ### 修复 · I 节补完 —— 三项遗漏守卫 + 故障注入测试
@@ -7388,7 +7417,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.2...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/easyup168/easyup-biga/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/easyup168/easyup-biga/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/easyup168/easyup-biga/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/easyup168/easyup-biga/compare/v0.2.0...v0.3.0

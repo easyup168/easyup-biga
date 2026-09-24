@@ -1320,6 +1320,7 @@ def record_agent_run(
     error: str | None = None,
     runtime_run_id: str | None = None,
     orchestration_run_id: str | None = None,
+    provenance_mode: str | None = None,
     path: pathlib.Path | str | None = None,
 ) -> int:
     """记一次 Agent 执行，返回 `ledger_id`（账本行号，批 J-II 从 `run_id` 改名）。
@@ -1361,15 +1362,21 @@ def record_agent_run(
     做延迟分析要用后者。
     """
     with connect(path) as conn:
+        # P1-2：在线路径校验 run 真实存在且归属于 decision，防止伪造账本行。
+        if orchestration_run_id is not None and decision_id is not None:
+            _assert_run_owns_decision(conn, run_id=orchestration_run_id,
+                                     decision_id=decision_id)
+        if provenance_mode is None and orchestration_run_id is not None:
+            provenance_mode = "online"
         cur = conn.execute(
             """INSERT INTO agent_runs
                (decision_id, task_id, agent, model, status, verdict,
                 missing_count, elapsed_ms, error, started_at, finished_at,
-                runtime_run_id, orchestration_run_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                runtime_run_id, orchestration_run_id, provenance_mode)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (decision_id, task_id, agent, model, status, verdict, missing_count,
              elapsed_ms, error, started_at, finished_at, runtime_run_id,
-             orchestration_run_id),
+             orchestration_run_id, provenance_mode),
         )
         return int(cur.lastrowid)
 

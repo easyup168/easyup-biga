@@ -1067,3 +1067,105 @@ class TestOrphanSpawnsSameSource:
         assert "临时号" in got[0][2], (
             f"证据在去重时被丢了 —— 分类成了 {got[0][2]!r}。"
             "「无决策号」与「只带临时号」指向不同根因，后者是 L-11")
+
+
+class TestRunIsolation:
+    """P1-2：spawn_proof_for_run 不能跨 Run 借用别的 run 的 spawn 证明。
+
+    sabotage 验证：把 spawn_proof_for_run 里的 orchestration_run_id 过滤去掉
+    （改成 decision_id 聚合），test_run_b的spawn证明不能被run_a借用 就会变红。
+    """
+
+    def test_run_b的spawn证明不能被run_a借用(self, tmp_path, monkeypatch):
+        """Run B 的 market 有真实 spawn 记录；以 run_a 查，market 不能沾光。"""
+        from _store import init_schema
+        from _store.db import connect as biga_connect
+        from tests._provenance import open_test_run
+
+        run_a = "a" * 32
+        run_b = "b" * 32
+
+        # 建一个有 decision_runs 行（只有 run_a）的 BigA DB
+        biga_db = tmp_path / "biga.db"
+        init_schema(biga_db)
+        open_test_run(biga_db, decision_id=MINE, run_id=run_a)
+        monkeypatch.setenv("BIGA_DB_PATH", str(biga_db))
+
+        # 运行时库：run_b 的 market 有真实 spawn 记录（run_id="rr-run-b"）
+        rt_db = tmp_path / "rt.db"
+        conn_rt = sqlite3.connect(rt_db)  # store-exempt: 外部运行时库的仿件
+        conn_rt.execute("CREATE TABLE subagent_runs (run_id TEXT, child_session_key TEXT,"
+                        " controller_session_key TEXT, requester_session_key TEXT,"
+                        " created_at INTEGER, payload_json TEXT)")
+        conn_rt.execute("INSERT INTO subagent_runs VALUES (?,?,?,?,?,?)",
+                        ("rr-run-b", "agent:market:subagent:x",
+                         "agent:main:card-1", "agent:main:card-1", 1000,
+                         '{"prompt":"本次决策编号 %s"}' % MINE))
+        conn_rt.commit()
+        conn_rt.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(rt_db))
+
+        # agent_runs 按 orchestration_run_id 分路由：
+        # run_a → market 在账本但无 runtime_run_id；run_b → market 有 "rr-run-b"
+        def fake_list(*, orchestration_run_id=None, **kw):
+            if orchestration_run_id == run_a:
+                return [{"agent": "market", "runtime_run_id": None}]
+            if orchestration_run_id == run_b:
+                return [{"agent": "market", "runtime_run_id": "rr-run-b"}]
+            return []
+
+        monkeypatch.setattr(pa, "list_agent_runs", fake_list, raising=False)
+        import _store
+        monkeypatch.setattr(_store, "list_agent_runs", fake_list)
+
+        result = pa.spawn_proof_for_run(run_a)
+        assert result.readable, "decision_runs 有行，应该是 readable=True"
+        in_ledger, spawned = result.per_agent["market"]
+        assert in_ledger, "market 在 run_a 的账本里（ours=True）"
+        assert not spawned, (
+            "market 没有 runtime_run_id，run_b 的 spawn 记录 rr-run-b 不能被 run_a 借用 "
+            f"—— 实际得到 per_agent={result.per_agent!r}")
+
+    def test_record_agent_run_在线路径校验run归属(self, tmp_path):
+        """P1-2：record_agent_run 带 orchestration_run_id 时必须核验 run 属于 decision。"""
+        from _store import init_schema
+        from _store.db import record_agent_run
+        from tests._provenance import open_test_run, TEST_RUN_ID
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE)
+
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="decision_runs"):
+            record_agent_run(
+                task_id=MINE, agent="market", status="ok",
+                started_at="2026-09-25T09:00:00", finished_at="2026-09-25T09:00:01",
+                elapsed_ms=1000, decision_id=MINE,
+                orchestration_run_id="no-such-run-" + "x" * 20,
+                path=db)
+
+    def test_record_agent_run_在线路径写入provenance_mode(self, tmp_path):
+        """P1-2：orchestration_run_id 非空时，provenance_mode 自动置为 'online'。"""
+        from _store import init_schema
+        from _store.db import record_agent_run, connect
+        from tests._provenance import open_test_run, TEST_RUN_ID
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE)
+
+        record_agent_run(
+            task_id=MINE, agent="market", status="ok",
+            started_at="2026-09-25T09:00:00", finished_at="2026-09-25T09:00:01",
+            elapsed_ms=1000, decision_id=MINE,
+            orchestration_run_id=TEST_RUN_ID,
+            path=db)
+
+        with connect(db, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT provenance_mode FROM agent_runs WHERE agent=? AND decision_id=?",
+                ("market", MINE)).fetchone()
+        assert row is not None
+        assert row["provenance_mode"] == "online", (
+            f"在线路径 provenance_mode 应为 'online'，实际为 {row['provenance_mode']!r}")

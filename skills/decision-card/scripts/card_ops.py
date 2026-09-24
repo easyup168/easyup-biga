@@ -234,14 +234,38 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
                 "run_id": card.run_id,
             },
         }
-        return save_card_with_notifications(card, [notification], replay_of=replay_of)
-    return save_card(card, replay_of=replay_of)
+        return save_online_card(card, [notification])
+    return save_replay_card(card, replay_of)
+
+
+#: 在线 Card 与其回放副本之间允许不同的字段集合。
+#:
+#: 这些字段描述的是**这次执行**，不是**这个结论**：
+#: - `generated_at`：回放时的时钟，与原卡不同
+#: - `elapsed_ms`：回放速度与原始执行无关
+#: - `run_id`：回放没有自己的 run_id（诚实置 None，见 replay.py）
+#:
+#: `comparable()` 只剥这些字段；`replay.py` 的 `--check` 读它来决定
+#: 「什么变化算正常、什么算回放失真」。两处共用同一份集合（L-3 的正解）。
+ALLOWED_REPLAY_CHANGES: frozenset[str] = frozenset({"generated_at", "elapsed_ms", "run_id"})
+
+
+def save_online_card(card: DecisionCard,
+                     notifications: list[dict]) -> int:
+    """在线路径：落库 Card + 入队通知，返回 record_id。"""
+    return save_card_with_notifications(card, notifications, replay_of=None)
+
+
+def save_replay_card(card: DecisionCard,
+                     parent_record_id: int | None) -> int:
+    """回放路径：落库 Card（不入队通知），返回 record_id。"""
+    return save_card(card, replay_of=parent_record_id)
 
 
 def comparable(card: DecisionCard) -> dict:
     """剥掉「每次必然不同」的字段，用于比较两张 Card 是否等价。
 
-    去掉 `generated_at` / `elapsed_ms` / `run_id` —— 它们描述的是**这次执行**，
+    去掉 `ALLOWED_REPLAY_CHANGES` 里的字段 —— 它们描述的是**这次执行**，
     不是**这个结论**。拿它们比较会让任何两次回放都「不一致」，
     于是一致性检查就退化成永远报警，很快没人看（又一个被忽略的守卫）。
 
@@ -254,9 +278,8 @@ def comparable(card: DecisionCard) -> dict:
        是要被核对的证据的一部分。
     """
     d = card.to_dict()
-    d.pop("generated_at", None)
-    d.pop("elapsed_ms", None)
-    d.pop("run_id", None)
+    for field in ALLOWED_REPLAY_CHANGES:
+        d.pop(field, None)
     return d
 
 

@@ -8,7 +8,7 @@
 [![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)](docs/design/phase-2-specialists.md)
 [![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)](#pipeline-中有哪些-agent)
 [![Tests](https://img.shields.io/badge/1813%20TESTS-PASSING-2ea043)](#当前实现状态)
-[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20v17-555)](docs/tutorial/04-store-layer.md)
+[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20v19-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
 
@@ -296,7 +296,7 @@ Replay
 | 全量 Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1813 条测试，SQLite schema v17**，全部通过。
+当前仓库有 **1813 条测试，SQLite schema v19**，全部通过。
 
 🔴 **"确定性编排升级"（把工作流从提示词搬进程序）已完成 Baseline 冻结**，
 不代表 **Phase 2 本身**已经收口——两者是并行、互不代表对方的判据。Phase 2
