@@ -815,11 +815,21 @@ class TestModuleIdentityAcrossTestFiles:
     orchestrator 却调旧对象，patch 悄悄不生效（真机复现过：`pytest
     tests/test_orchestrator.py tests/test_facts_split_e3.py` 会红，反序不会）。
 
-    这条测试不依赖收集顺序、不需要拉起子进程——它直接断言"这次会话里，
-    orchestrator.py 绑定的模块对象"与"这次会话里任何人现在 `import` 同名模块
-    拿到的对象"必须是**同一个**。只要有任何一处 `_load` helper 退化回无条件
-    覆写，这条断言就会因为收集顺序而变得不稳定/失败——比等一次真实的跨文件
-    monkeypatch 落空更早、更直接地暴露问题。
+    ⚠️ 2026-09-24（同一天，另一轮复核纠正了这里）：上一版文档字符串写着"这条
+    测试不依赖收集顺序"——**不成立**，已经被指出并实测证伪。这条断言能不能
+    抓到新引入的违规，取决于那个违规文件在字母序里排在 `test_orchestrator.py`
+    前面还是后面：排在前面的话，`orchestrator.py` 自己的 `import` 反而会
+    "捡漏"到违规文件已经登记的对象，两者天然一致，断言通过——默认全量
+    `pytest -q`（字母序）对"文件名排在 orchestrator 前面"的违规**完全失明**
+    （实测确认：12 处里有 6 处属于这一类，`test_decision_card`/
+    `test_emotion_calc`/`test_facts_split{,_e2,_e3}`/`test_market_calc`）。
+
+    真正不依赖顺序的判据是 `tests/test_module_load_idempotent.py` 的源码级
+    扫描（同 `test_no_raw_sqlite.py` 的风格，不靠运行时表现）——那一条才是
+    这一类问题的主守卫。这里留着的两条运行时断言仍有价值：它们精确验证
+    `card_ops`/`risk_check` 这两个**已知被 orchestrator.py 直接使用**的名字
+    当下这一刻确实是同一个对象，是源码扫描之外的第二层信号，但不能单独
+    依赖它们判断"有没有新的复制体忘了加幂等检查"。
     """
 
     def test_orchestrator绑定的card_ops与现在import拿到的是同一个对象(self):

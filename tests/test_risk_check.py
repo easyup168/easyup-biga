@@ -214,6 +214,14 @@ class TestStageTopology:
 
     @staticmethod
     def _lr():
+        # 🔴 幂等：已经有别的测试文件加载过 latency_report 就**复用那个实例**，
+        #    绝不用新实例覆写 sys.modules——`test_verify_exit_codes.py` 自己
+        #    `import latency_report as lr` 并对它做四处 monkeypatch，两份对象
+        #    分裂的话 patch 会打偏（同一个坑见 test_run_id_capture.py / 教程
+        #    第 32 章，三轮对抗性复核指出这份文件自己另一处加载点补了这道检查，
+        #    这一处漏网）。
+        if "latency_report" in sys.modules:
+            return sys.modules["latency_report"]
         p = REPO / "tools" / "verify" / "latency_report.py"
         spec = importlib.util.spec_from_file_location("latency_report", p)
         m = importlib.util.module_from_spec(spec)

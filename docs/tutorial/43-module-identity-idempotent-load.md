@@ -174,3 +174,11 @@ tools/verify/audit_public.sh --worktree
 本身（新增的 `docs/tutorial/*.md`）会带来 4 条新的参数化 case（同批 40 章
 末尾记录过的同一个成因）——`sync_test_count.sh` 在这个文件还没 `git add`
 时跑了一次。真实数字是 1445，已在同一批提交里改正三处徽章。
+
+**（同一天，第四轮复核）** 本章"新回归测试绕开顺序本身"那条要点站不住：
+`TestModuleIdentityAcrossTestFiles` 实测**依赖**收集顺序——12 处里有 6 处
+排在 `test_orchestrator.py` 之前，删掉那 6 处里任意一处的幂等检查，默认
+全量 `pytest -q` 一条不红。真正不依赖顺序的是后补的源码级 AST 扫描
+（`tests/test_module_load_idempotent.py`）。另外，本章改过的
+`tests/test_risk_check.py` 里还漏了一处（`latency_report` 的加载点）——
+同一个文件、同一次提交，仍然漏网。两条都已修复，详见 CHANGELOG。
