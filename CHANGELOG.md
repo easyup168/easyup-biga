@@ -15,6 +15,10 @@
 
 ## [未发布]
 
+---
+
+## [0.3.1] - 2026-09-25
+
 ### 新增 · I 节 Architecture Baseline Hardening — 七项防御加固
 
 外部专家对 `v1-architecture-baseline` tag 进行了二次评审，发现了七处在正常运行时
@@ -7359,7 +7363,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.0...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/easyup168/easyup-biga/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/easyup168/easyup-biga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/easyup168/easyup-biga/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/easyup168/easyup-biga/compare/v0.0.1...v0.1.0
