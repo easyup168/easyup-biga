@@ -1162,7 +1162,7 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
         缺失项合并掉。测试 1402 → 1408
   - [ ] 评审 E（Contract 与数据质量）/F（Package 与 Registry）/
         G（Live Acceptance）/H（Baseline 冻结）部分——已核实真实性，暂缓处理。
-        A 节的 monkeypatch 顺序依赖已修复，见批 P
+        A 节的 monkeypatch 顺序依赖已修复，见批 Q
 
 - [x] 批 N · 外部评审 B 部分（Run Provenance）前 9 项 —— **2026-09-24**。
       schema **v16**：`decision_records.run_id`/`.evidence_set_id`、
@@ -1200,7 +1200,7 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
           （它测的是旧判据），只有产品行为悄悄退回「trigger 永久中毒」
   - [x] 评审 B 节 13 项 **全部完成**（批 N 9 项 + 批 O 4 项）
 
-- [x] 批 P · 外部评审 A 节：消除动态同名模块 monkeypatch 错位 —— **2026-09-24**。
+- [x] 批 Q · 外部评审 A 节：消除动态同名模块 monkeypatch 错位 —— **2026-09-24**。
       批 J-II（教程第 32 章）只修了 `test_run_id_capture.py` 一处的"无条件覆写
       sys.modules"坑，全仓另有 11 处一模一样的复制体（`test_facts_split{,_e2,
       _e3}.py`/`test_decision_card.py`/`test_emotion_calc.py`/
@@ -1214,13 +1214,13 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
       fact_bundle` 与当前 import 拿到的是同一个对象，不依赖收集顺序。
       测试 1439 → 1441。详见 `docs/tutorial/43-module-identity-idempotent-
       load.md`、`CHANGELOG.md`
-  - [x] 🔴 **四轮复核纠正了批 P 自己**（2026-09-24）：`TestModuleIdentityAcross
+  - [x] 🔴 **四轮复核纠正了批 Q 自己**（2026-09-24）：`TestModuleIdentityAcross
         TestFiles`"不依赖收集顺序"是假的——实测把某处幂等检查删掉，默认字母序
         全量 `pytest -q` 一条不红（12 处里有 6 处排在 `test_orchestrator.py`
         之前，这类顺序下 orchestrator 自己的 import 反而"捡漏"到违规对象）。
         补 `tests/test_module_load_idempotent.py` 做源码级 AST 扫描（同
         `test_no_raw_sqlite.py` 风格，判据是源码结构不是运行时表现，真正不
-        依赖顺序）。且批 P 自己改过的 `test_risk_check.py` 又漏了一处
+        依赖顺序）。且批 Q 自己改过的 `test_risk_check.py` 又漏了一处
         （`TestStageTopology._lr()` 加载 `latency_report`）——同一个文件、
         同一次提交，仍然漏网，已补上。测试 1441 → 1445。
 
