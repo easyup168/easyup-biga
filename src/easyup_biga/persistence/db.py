@@ -166,6 +166,22 @@ def connect(path: pathlib.Path | str | None = None, *, readonly: bool = False) -
         conn.close()
 
 
+def _apply_migration(conn: sqlite3.Connection, *, version: int, sql: str) -> None:
+    """原子地执行一条 migration：DDL 与 user_version 更新在同一事务里。
+
+    `executescript()` 在执行前会自动 COMMIT 任何挂起的隐式事务（CPython 文档），
+    因此脚本里显式写 BEGIN IMMEDIATE，把 DDL 和 PRAGMA user_version 绑在一起。
+    若 DDL 失败：COMMIT 未到达 ⇒ user_version 不变 ⇒ 下次启动可直接重试。
+    """
+    script = f"BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version = {int(version)};\nCOMMIT;\n"
+    try:
+        conn.executescript(script)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def init_schema(path: pathlib.Path | str | None = None) -> int:
     """建表 / 升级到最新版本，返回当前 schema 版本。幂等。"""
     with connect(path) as conn:
@@ -173,10 +189,89 @@ def init_schema(path: pathlib.Path | str | None = None) -> int:
         current = int(cur.fetchone()[0])
         for version, sql in MIGRATIONS:
             if version > current:
-                conn.executescript(sql)
-                conn.execute(f"PRAGMA user_version={version}")
+                _apply_migration(conn, version=version, sql=sql)
                 current = version
     return current
+
+
+# ────────────────────────────────────────────────── provenance helpers (P1-1)
+
+
+def _assert_run_owns_decision(
+    conn: sqlite3.Connection, *, run_id: str, decision_id: str
+) -> None:
+    """run_id 必须在 decision_runs 里存在，且属于 decision_id。
+
+    在线写路径（save_card_with_notifications / save_fact_bundle / save_evidence_set）
+    在同一写事务里调此函数，保证「根节点存在且 decision 匹配」与后续 INSERT 原子。
+    """
+    row = conn.execute(
+        "SELECT decision_id FROM decision_runs WHERE run_id=?", (run_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(
+            f"run {run_id!r} 在 decision_runs 里不存在 —— "
+            "在线写入必须属于一次真实的编排执行尝试（P1-1）。"
+        )
+    if row["decision_id"] != decision_id:
+        raise ValueError(
+            f"run {run_id!r} 属于 decision {row['decision_id']!r}，"
+            f"不属于 {decision_id!r} —— run 与 decision 必须一一对应（P1-1）。"
+        )
+
+
+def _validate_online_provenance(
+    conn: sqlite3.Connection, card: DecisionCard
+) -> None:
+    """在线落库前，在同一写事务里校验 Run / EvidenceSet 根节点真实存在且相互一致。
+
+    须在 INSERT card 之前、同一 connect() 上下文内调用，以保证校验与写入原子性。
+    verify_verdict_refs() 已在写事务之前独立核对 agent/hash，本函数只补校
+    根节点存在性和 run_id 归属。
+    """
+    # 1. run_id 真实存在且属于这个 decision
+    _assert_run_owns_decision(conn, run_id=card.run_id, decision_id=card.decision_id)
+
+    # 2. evidence_set_id 真实存在，且属于相同 run / decision
+    row = conn.execute(
+        "SELECT run_id, decision_id FROM evidence_sets WHERE evidence_set_id=?",
+        (card.evidence_set_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(
+            f"evidence_set_id {card.evidence_set_id!r} 在 evidence_sets 里不存在（P1-1）。"
+        )
+    if row["run_id"] != card.run_id:
+        raise ValueError(
+            f"evidence_set {card.evidence_set_id!r} 属于 run {row['run_id']!r}，"
+            f"不属于当前 run {card.run_id!r}（P1-1）。"
+        )
+    if row["decision_id"] != card.decision_id:
+        raise ValueError(
+            f"evidence_set {card.evidence_set_id!r} 属于 decision {row['decision_id']!r}，"
+            f"不属于当前 decision {card.decision_id!r}（P1-1）。"
+        )
+
+    # 3. 在线 VerdictRef 不得引用 NULL-run 的历史行，且必须属于同一 run
+    for ref in card.input_verdict_refs:
+        vrow = conn.execute(
+            "SELECT run_id FROM agent_verdicts WHERE verdict_id=?",
+            (ref.verdict_id,),
+        ).fetchone()
+        if vrow is None:
+            raise ValueError(
+                f"verdict_id={ref.verdict_id}（{ref.agent}）不存在（P1-1）。"
+            )
+        if vrow["run_id"] is None:
+            raise ValueError(
+                f"在线卡不得引用历史（NULL-run）Verdict："
+                f"verdict_id={ref.verdict_id}，agent={ref.agent}（P1-1）。"
+            )
+        if vrow["run_id"] != card.run_id:
+            raise ValueError(
+                f"verdict_id={ref.verdict_id}（{ref.agent}）属于 run {vrow['run_id']!r}，"
+                f"不属于当前 run {card.run_id!r}（P1-1）。"
+            )
 
 
 # ────────────────────────────────────────────────────────── decision_records
@@ -306,6 +401,28 @@ def save_card_with_notifications(
         # 🔴 一个 connect() = 一个事务：卡的 INSERT 与通知的 INSERT 全在里面。
         #    `connect()` 正常退出才 commit；中途任一 INSERT 抛错 → 它 rollback 整段。
         with connect(path) as conn:
+            # 🔴 P1-1：在线路径在同一写事务里校验根节点真实存在。
+            if replay_of is None:
+                _validate_online_provenance(conn, card)
+            # 🔴 P2-3：Replay 路径在同一写事务里确认父记录存在且属于同一 decision。
+            #    旧版只靠 `replay_of` 参数非空来判定档位，没有查父记录的 decision_id，
+            #    攻击者可以传 Decision A 的 record_id 给 Decision B 的卡。
+            else:
+                parent_row = conn.execute(
+                    "SELECT decision_id FROM decision_records WHERE record_id=?",
+                    (replay_of,),
+                ).fetchone()
+                if parent_row is None:
+                    raise ValueError(
+                        f"replay_of={replay_of} 在 decision_records 里不存在（P2-3）。"
+                    )
+                if parent_row["decision_id"] != card.decision_id:
+                    raise ValueError(
+                        f"Replay 父记录 {replay_of} 属于 decision "
+                        f"{parent_row['decision_id']!r}，"
+                        f"不属于当前 {card.decision_id!r} —— "
+                        "Replay 不得跨 Decision（P2-3）。"
+                    )
             record_id = _insert_card_row(conn, card, payload, replay_of)
             for n in notifications:
                 _insert_notification(conn, event_type=n["event_type"],
@@ -1013,6 +1130,9 @@ def save_fact_bundle(
     FactBundle.from_dict(json.loads(blob))
     try:
         with connect(path) as conn:
+            # P1-1：run_id 非空时，在同一写事务里确认 Run 存在且属于这个 decision。
+            if run_id is not None:
+                _assert_run_owns_decision(conn, run_id=run_id, decision_id=fb.task_id)
             cur = conn.execute(
                 "INSERT INTO agent_verdicts "
                 "(task_id, agent, amends, amend_reason, verdict_json, content_sha256, "
@@ -1279,15 +1399,24 @@ def record_verdict_run(
 def list_agent_runs(
     *,
     decision_id: str | None = None,
+    orchestration_run_id: str | None = None,
     agent: str | None = None,
     limit: int = 100,
     path: pathlib.Path | str | None = None,
 ) -> list[dict[str, Any]]:
+    """取 agent_runs 行列表。
+
+    `orchestration_run_id`（P1-2）：按 run 级精确过滤，不按 decision 聚合。
+    spawn_proof_for_run() 使用它，保证同一 decision 的不同 run 互不借用账本。
+    """
     sql = "SELECT * FROM agent_runs"
     where, args = [], []
     if decision_id is not None:
         where.append("decision_id=?")
         args.append(decision_id)
+    if orchestration_run_id is not None:
+        where.append("orchestration_run_id=?")
+        args.append(orchestration_run_id)
     if agent is not None:
         where.append("agent=?")
         args.append(agent)
@@ -1528,6 +1657,9 @@ def save_evidence_set(
     now = now_cn().isoformat()
     try:
         with connect(path) as conn:
+            # P1-1：run_id 非空时，确认 Run 存在且属于 decision_id。
+            if run_id is not None and decision_id is not None:
+                _assert_run_owns_decision(conn, run_id=run_id, decision_id=decision_id)
             conn.execute(
                 "INSERT INTO evidence_sets "
                 "(evidence_set_id, decision_id, frozen_at, manifest_json, created_at, run_id) "

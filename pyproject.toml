@@ -20,7 +20,7 @@ name = "easyup-biga"
 #    开发版记号，明确表示「在 0.2.0 之后、尚未发布」。
 #    ⚠️ 这个数字现在有两个出处（这里 + CHANGELOG.md），正是 L-3 的形状 ——
 #    由 tests/test_packaging.py 钉住两者不矛盾。发版时两处一起改。
-version = "0.3.0.dev0"
+version = "0.3.1.dev0"
 description = "Multi-Agent A 股短线决策辅助系统：不自动下单，产出证据可追溯、可回放的 Decision Card"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -106,4 +106,10 @@ addopts = "-q --strict-markers"
 # `--strict-markers` 在上面 ⇒ 标记必须先在这里注册，否则用了就报错。
 markers = [
     "network: 这条测试真的需要出网（默认禁网，见 tests/conftest.py）",
+    # P1-3：测试分层 —— 默认 pytest 必须在 clean clone / source ZIP 里 0 failed。
+    # 带这些 marker 的测试须显式运行：pytest -m installed / -m live / -m git。
+    "installed: 需要本机已安装 OpenClaw profile 或 bin/biga 二进制（换机器/ZIP 会跳）",
+    "live: 需要在线运行时（OpenClaw gateway、真实 agent 执行环境）",
+    "git: 需要当前目录是 git 仓库（source ZIP 里没有 .git）",
+    "slow: 耗时较长的集成测试（可按需跳过）",
 ]

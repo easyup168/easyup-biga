@@ -41,17 +41,28 @@ from _store import (  # noqa: E402
     connect,
     load_verdict_meta,
     open_run,
+    save_evidence_set,
     save_fact_bundle,
 )
 
 __all__ = ["TEST_RUN_ID", "TEST_EVIDENCE_SET_ID", "open_test_run",
-           "run_id_for", "provenance_for"]
+           "run_id_for", "es_id_for", "provenance_for"]
 
 #: 默认的执行尝试 id。固定值（不是随机）—— 断言里要能直接写出它。
 TEST_RUN_ID = "t" * 32
-#: 默认的冻结切片 id。契约只要求非空字符串，不校验它在 evidence_sets 里存在
-#: （那是 `ux_evidence_set_per_run` 的事，与卡无关）。
-TEST_EVIDENCE_SET_ID = "es-test-0000"
+
+
+def es_id_for(run_id: str) -> str:
+    """从 run_id 派生确定的 evidence_set_id（测试专用，带 es- 前缀保持格式一致）。
+
+    P1-1 起 save_card 的在线路径会检查 evidence_set_id 确实存在于 evidence_sets 表。
+    provenance_for 在创建 evidence_sets 行时使用这个 id，确保拿到的 esid 与落库的行对应。
+    """
+    return "es-" + hashlib.sha256(("es:" + run_id).encode("utf-8")).hexdigest()[:28]
+
+
+#: 默认的冻结切片 id，由 TEST_RUN_ID 派生（P1-1 要求 evidence_sets 里真的有这行）。
+TEST_EVIDENCE_SET_ID = es_id_for(TEST_RUN_ID)
 
 
 def open_test_run(path, *, decision_id: str | None = None,
@@ -88,6 +99,16 @@ def provenance_for(path, decision_id: str, agents) -> tuple[str, str, list[Verdi
     """
     rid = run_id_for(decision_id)
     open_test_run(path, decision_id=decision_id, run_id=rid)
+    esid = es_id_for(rid)
+    # P1-1：save_card 的在线路径现在要求 evidence_set_id 真的存在于 evidence_sets 表。
+    # 先查再插（比 try/except 更安全）—— save_evidence_set 对 run_id 冲突抛
+    # sqlite3.IntegrityError（不转成 ValueError），捕错路径覆盖不全。
+    with connect(path, readonly=True) as _c:
+        _exists = _c.execute("SELECT 1 FROM evidence_sets WHERE evidence_set_id=?",
+                             (esid,)).fetchone()
+    if not _exists:
+        save_evidence_set(evidence_set_id=esid, decision_id=decision_id,
+                          manifest={"_test": True}, run_id=rid, path=path)
     t = now_cn()
     refs: list[VerdictRef] = []
     for agent in agents:
@@ -109,4 +130,4 @@ def provenance_for(path, decision_id: str, agents) -> tuple[str, str, list[Verdi
         refs.append(VerdictRef(agent=agent, verdict_id=vid,
                                content_sha256=meta["content_sha256"],
                                contract_version=CONTRACT_VERSION, run_id=rid))
-    return rid, TEST_EVIDENCE_SET_ID, refs
+    return rid, esid, refs

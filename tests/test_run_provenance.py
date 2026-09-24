@@ -70,6 +70,9 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
     open_test_run(p, decision_id=DID)
+    # P1-1：_card() 硬编码 TEST_EVIDENCE_SET_ID，save_card 在线路径现在会核验它存在。
+    save_evidence_set(evidence_set_id=TEST_EVIDENCE_SET_ID, decision_id=DID,
+                      manifest={"_test": True}, run_id=TEST_RUN_ID, path=p)
     _DB[:] = [p]
     return p
 
@@ -139,15 +142,24 @@ class TestSchemaV16:
         assert cols[column] == "TEXT"
 
     def test_一个run至多一套evidence_set(self, db):
-        """评审 §9「Every Run has exactly one EvidenceSet」的「至多」那一半。"""
+        """评审 §9「Every Run has exactly one EvidenceSet」的「至多」那一半。
+
+        🔴 不用 TEST_RUN_ID —— fixture 已为它创建了 TEST_EVIDENCE_SET_ID 那一行
+        （P1-1：save_card 在线路径要求 evidence_sets 有对应行），再往同一个 run_id
+        塞第一条就会撞约束，测不出「第一条成功、第二条失败」这个语义。
+        改用一个专属于本测试的 fresh_rid：open_test_run 只建 decision_runs，
+        不预建 evidence_sets，所以 fresh_rid 对 evidence_sets 来说是干净的。
+        """
+        fresh_rid = "1" * 32
+        open_test_run(db, run_id=fresh_rid, decision_id=DID)
         save_evidence_set(evidence_set_id="es-1", decision_id=DID,
-                          manifest={"a": 1}, run_id=TEST_RUN_ID, path=db)
+                          manifest={"a": 1}, run_id=fresh_rid, path=db)
         # 🔴 不 import sqlite3（`tests/test_no_raw_sqlite.py` 的判据：一切 DB 访问
         #    走 `_store`）。判据落在报错文本上 —— 要的是「唯一约束拦下了」这件事，
         #    不是异常类本身。
         with pytest.raises(Exception) as e:
             save_evidence_set(evidence_set_id="es-2", decision_id=DID,
-                              manifest={"b": 2}, run_id=TEST_RUN_ID, path=db)
+                              manifest={"b": 2}, run_id=fresh_rid, path=db)
         assert "UNIQUE" in str(e.value).upper(), e.value
 
     def test_没有run_id的切片不受唯一约束(self, db):
@@ -259,11 +271,21 @@ class TestVerifyRefsAgainstStore:
 
     def _saved(self, db, agent="market", did=DID, run=TEST_RUN_ID):
         """落一条**带 run_id 的** fact 原件（`save_verdict` 没有这个参数，
-        run_id 只有 fact 路径带得下来 —— 批 J-I 的设计）。"""
+        run_id 只有 fact 路径带得下来 —— 批 J-I 的设计）。
+
+        P1-1：save_fact_bundle 现在要求 run_id 在 decision_runs 里且归属于 did。
+        · did != DID 时 TEST_RUN_ID 已经属于 DID，需要为新 decision 派生专属 run_id。
+        · run != TEST_RUN_ID 时（如 "earlier-run"）需要先在 decision_runs 里注册它。
+        """
+        from _provenance import run_id_for  # noqa: PLC0415
+        actual_run = run
+        if did != DID and run == TEST_RUN_ID:
+            actual_run = run_id_for(did)
+        open_test_run(db, run_id=actual_run, decision_id=did)
         fb = FactBundle(task_id=did, agent=agent, status="completed", verdict="PASS",
                         result={"x": 1.0}, data_completeness=1.0, evidence=[_ev()],
                         missing=[])
-        vid = save_fact_bundle(fb, run_id=run, path=db)
+        vid = save_fact_bundle(fb, run_id=actual_run, path=db)
         return vid, load_verdict_meta(vid, path=db)["content_sha256"]
 
     def test_一致时无问题(self, db):

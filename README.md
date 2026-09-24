@@ -501,11 +501,15 @@ external/  外部材料，只读保存
 
 ## 路线图
 
-### Architecture Baseline v1 —— ✅ 已冻结
+### Architecture Baseline Hardening —— 🔶 I 节进行中
 
-`v1-architecture-baseline` tag 标记的这次冻结覆盖：Run Provenance 闭环、
+`v1-architecture-baseline` tag（已冻结）覆盖 Run Provenance 闭环、
 Run → EvidenceSet 一对一、Strict VerdictRef、TIMEOUT / Kill / Stale Run
 收敛、飞书失败语义、正式 Package 边界、Full Test Baseline。
+
+**I 节**在此基础上补充七项防御加固（P1-1/P1-2/P1-3/P2-1/P2-2/P2-3/P2-4），
+消灭已核实的静默失败模式（在线溯源根节点校验缺失、双写账本、环境依赖测试无法
+在干净 clone 里运行等）。
 
 ### Phase 2 收尾 —— 进行中
 

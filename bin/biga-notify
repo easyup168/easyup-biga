@@ -24,6 +24,14 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT" || exit 2
 PY=python3
 
+# 单实例锁：systemd timer 与手动调用并发时，第二个进程直接退出，不重复投递。
+LOCK_FILE="$ROOT/.biga-notify.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "BigA notification worker is already running; skip duplicate start." >&2
+    exit 0
+fi
+
 # 除非调用方自己传了 --deliverer，否则默认真投递（feishu）——
 # 这正是这条命令存在的唯一理由：把默认值从「安全但什么都不发」
 # 换成「这条命令的调用者显然是想真的发」。

@@ -813,6 +813,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_legacy_fact_per_task_agent
 """
 
 
+# v18: 一个 run 至多一个 EvidenceSet（P1-1）。
+# WHERE run_id IS NOT NULL —— 历史行 run_id 为 NULL，不受约束，保持向后兼容。
+_V18 = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_sets_run
+    ON evidence_sets(run_id)
+    WHERE run_id IS NOT NULL;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -832,6 +841,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (15, _V15),
     (16, _V16),
     (17, _V17),
+    (18, _V18),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

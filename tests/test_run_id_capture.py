@@ -39,6 +39,7 @@ from _store import (  # noqa: E402
     verify_verdict_refs,
 )
 from _roster import absent_registrations  # noqa: E402
+from _provenance import open_test_run  # noqa: E402
 
 TID = "BIGA-20260918-001"
 #: 一个真实形状的 run_id（32 位 hex，与 decision_runs.run_id 同形）。
@@ -101,6 +102,8 @@ def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))   # card_ops.* 走默认库路径靠它
     init_schema(p)
+    # P1-1：save_fact_bundle 与 save_evidence_set 现在要求 run_id 在 decision_runs 里存在。
+    open_test_run(p, run_id=RID, decision_id=TID)
     return p
 
 

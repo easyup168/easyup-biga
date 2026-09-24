@@ -5,6 +5,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools" / "verify"))
 
@@ -63,6 +65,7 @@ class TestCanonicalHash:
 
 
 class TestOpenclawVersion:
+    @pytest.mark.installed
     def test_解析真实biga_cli输出(self):
         version = cb.openclaw_version(cb.BIGA_CLI)
         assert version.startswith("OpenClaw ")
@@ -73,6 +76,7 @@ class TestMain:
         monkeypatch.setattr(cb, "CONFIG_PATH", tmp_path / "不存在.json")
         assert cb.main() == 1
 
+    @pytest.mark.installed
     def test_真实环境跑通_返回0(self, capsys):
         rc = cb.main()
         assert rc == 0

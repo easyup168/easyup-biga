@@ -516,13 +516,86 @@ def spawn_proof(decision_id: str) -> SpawnProof:
                       by_source=by_source)
 
 
-def check_1_spawned(decision_id: str | None) -> Check:
-    """Supervisor 真的 spawn 了**每一个** specialist —— 两份独立记录都要有。"""
+def spawn_proof_for_run(run_id: str) -> SpawnProof:
+    """与 spawn_proof() 相同的逻辑，但按 orchestration_run_id 精确过滤（P1-2）。
+
+    spawn_proof(decision_id) 按 decision 聚合 agent_runs——同一 decision 的
+    Run A 真正 spawn 了 Market，Run B 没有，但 Run B 会借用 Run A 的账本行而
+    通过检查。本函数只看「这次 run 的 agent_runs」，不跨 run 共享。
+
+    对历史行（orchestration_run_id IS NULL）本函数无法核验，此时退回空集
+    而非 FAIL，行为与「没有记录」一致（不借用别的 run）。
+    """
+    from _contract import STAGE1_AGENTS, STAGE2_AGENTS
+    from _store import list_agent_runs
+
+    # 按 orchestration_run_id 精确取这次 run 的账本行
+    runs = list_agent_runs(orchestration_run_id=run_id)
+    ours = {r["agent"] for r in runs}
+    rr_by_agent: dict[str, set[str]] = {}
+    for r in runs:
+        rid = r.get("runtime_run_id")
+        if rid:
+            rr_by_agent.setdefault(r["agent"], set()).add(rid)
+
+    # 运行时侧的 spawn 记录仍按 decision 取（因为没有 per-run 过滤接口）。
+    # 但我们用结构化 join（runtime_run_id ↔ subagent_runs.run_id）判断，
+    # 不是按决策号的字符串匹配——所以同 decision 不同 run 的 spawn id 不会混入。
+    row_dr = None
+    try:
+        from _store import connect
+        with connect(readonly=True) as conn:
+            row_dr = conn.execute(
+                "SELECT decision_id FROM decision_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+    except Exception:
+        pass
+
+    if row_dr is None:
+        return SpawnProof(readable=False, rows=0, per_agent={})
+
+    decision_id = row_dr["decision_id"]
+    spawns = _runtime_spawn_records(decision_id)
+    if spawns is None:
+        return SpawnProof(readable=False, rows=0, per_agent={})
+
+    runtime_ids = {r.get("run_id") for r in spawns if r.get("run_id")}
+
+    out = {}
+    for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
+        if agent == "discipline":
+            continue
+        rr = rr_by_agent.get(agent)
+        if rr:
+            # 强绑定：这次 run 的 runtime_run_id 必须出现在运行时侧
+            spawned = any(rid in runtime_ids for rid in rr)
+        else:
+            # 这次 run 的 agent_runs 里没有这个 agent——直接 absent，不从其他 run 借用
+            out[agent] = (agent in ours, False)
+            continue
+        out[agent] = (agent in ours, spawned)
+
+    by_source: dict[str, int] = {}
+    for r in spawns:
+        by_source[r.get("source", "?")] = by_source.get(r.get("source", "?"), 0) + 1
+    return SpawnProof(readable=True, rows=len(spawns), per_agent=out,
+                      by_source=by_source)
+
+
+def check_1_spawned(decision_id: str | None, run_id: str | None = None) -> Check:
+    """Supervisor 真的 spawn 了**每一个** specialist —— 两份独立记录都要有。
+
+    `run_id` 提供时（P1-2），按 orchestration_run_id 精确核验这次 run，
+    不允许从同 decision 的其他 run 借用账本行。
+    """
     c = Check("1", "Supervisor 确实 spawn 了各 Specialist（两份独立记录都要有）")
     if not decision_id:
         return c.pending("未提供 --decision-id") or c
 
-    proof = spawn_proof(decision_id)
+    if run_id:
+        proof = spawn_proof_for_run(run_id)
+    else:
+        proof = spawn_proof(decision_id)
     if not proof.readable:
         return c.pending(
             "读不到运行时的 spawn 记录（subagent_runs / task_runs 两张都不在，"

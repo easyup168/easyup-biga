@@ -212,7 +212,7 @@ class TestCoexistence:
         顺带钉住 assessment 的 run_id **从 fact 行继承**这条不变量——不继承的话
         按 run 取就会漏掉 tip，只拿到 fact 行。
         """
-        rid = open_test_run(db)
+        rid = open_test_run(db, decision_id=TID)
         fb = FactBundle(task_id=TID, agent="emotion", status="completed", verdict="PASS",
                         result={"limit_up_count": 78}, data_completeness=1.0,
                         evidence=[_ev("limit_up_count", 78)])
@@ -333,7 +333,7 @@ class TestLegacyAmendRetired:
         fb = FactBundle(task_id=TID, agent="emotion", status="completed", verdict="PASS",
                         result={"limit_up_count": 78}, data_completeness=1.0,
                         evidence=[_ev("limit_up_count", 78)])
-        rid = open_test_run(db)
+        rid = open_test_run(db, decision_id=TID)
         fid = save_fact_bundle(fb, run_id=rid, path=db)
         rc = amend.main(["--ref", str(fid), "--stance", "亢奋"])
         assert rc == 0

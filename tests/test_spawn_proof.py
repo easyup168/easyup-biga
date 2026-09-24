@@ -278,15 +278,18 @@ class TestWiredIntoRealPath:
             "                       Evidence, FactBundle, VerdictRef, new_run_context,\n"
             "                       now_cn)\n"
             "from _store import (init_schema, load_verdict_meta, open_run,\n"
-            "                    save_card, save_fact_bundle)\n"
+            "                    save_card, save_evidence_set, save_fact_bundle)\n"
             "t = now_cn()\n"
             f"TID = {did!r}\n"
             f"init_schema({str(db)!r})\n"
             # 🔴 批 N：在线卡必须带 run_id / evidence_set_id，且 run_id 要追得到
             #    decision_runs —— 桩也得开一次真 run，不能编一个字符串。
+            # 🔴 P1-1：save_card 在线路径现在还要求 evidence_set_id 在 evidence_sets 里存在。
             "RID = 's' * 32\n"
             "open_run(new_run_context(origin='cli', non_interactive=True,\n"
             f"                         decision_id=TID, run_id=RID), path={str(db)!r})\n"
+            f"save_evidence_set(evidence_set_id='es-stub', decision_id=TID,\n"
+            f"                  manifest={{}}, run_id=RID, path={str(db)!r})\n"
             "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
             "                 verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
             "                 stance='分化', elapsed_ms=1,\n"

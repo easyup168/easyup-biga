@@ -35,7 +35,6 @@ from _store import (  # noqa: E402
     load_verdict,
     load_verdict_meta,
     next_decision_id,
-    record_verdict_run,
 )
 from card_ops import Judgment, persist, synthesize  # noqa: E402
 
@@ -210,15 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if not args.no_store:
-        # 先记每个 Specialist 的执行账本。
-        # ⚠️ 只是账本，**不是**调用证明 —— 写它的就是这一行代码本身，
-        #    所以它不能证明任何关于自己的事（原注释写的是「唯一凭证」，不成立）。
-        #    spawn 证明的判据在 tools/verify/spawn_check.py。
-        for v in verdicts:
-            record_verdict_run(v, decision_id=decision_id,
-                               started_at=card.generated_at,
-                               finished_at=card.generated_at,
-                               model=args.model_ref)
+        # card_ops.persist() 是唯一账本写入 Owner（批 C-II + P2-2）。
+        # 旧版在这里手动记一遍 record_verdict_run，persist() 内部还会再记一遍——
+        # 造成每条 Verdict 双写。直接让 persist() 负责即可。
         rid = persist(card)
         print(f"已落库 record_id={rid}  decision_id={decision_id}", file=sys.stderr)
 

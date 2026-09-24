@@ -38,7 +38,7 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent.parent / "skills"))
 
-from phase1_acceptance import spawn_proof  # noqa: E402
+from phase1_acceptance import spawn_proof, spawn_proof_for_run  # noqa: E402
 
 # 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -47,12 +47,36 @@ import _verdict as _v  # noqa: E402
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if not argv:
-        print("用法: spawn_check.py <决策号>", file=sys.stderr)
-        return _v.UNKNOWN
-    decision_id = argv[0]
 
-    proof = spawn_proof(decision_id)
+    # P1-2：支持 --run-id <run_id> 按 orchestration_run_id 精确核验。
+    # 旧用法 spawn_check.py <决策号> 保持向后兼容（退回 decision 级核验）。
+    run_id: str | None = None
+    decision_id: str | None = None
+    args = list(argv)
+    if "--run-id" in args:
+        idx = args.index("--run-id")
+        if idx + 1 >= len(args):
+            print("--run-id 后面必须跟 run_id 值", file=sys.stderr)
+            return _v.UNKNOWN
+        run_id = args[idx + 1]
+        del args[idx:idx + 2]
+
+    if not args and not run_id:
+        print("用法: spawn_check.py <决策号>", file=sys.stderr)
+        print("      spawn_check.py --run-id <run_id>  （P1-2：Run 级精确核验）",
+              file=sys.stderr)
+        return _v.UNKNOWN
+
+    if args:
+        decision_id = args[0]
+
+    if run_id:
+        proof = spawn_proof_for_run(run_id)
+    elif decision_id:
+        proof = spawn_proof(decision_id)
+    else:
+        print("--run-id 或 <决策号> 二选一", file=sys.stderr)
+        return _v.UNKNOWN
     if not proof.readable:
         print("🔶 spawn 核验判不了 —— 读不到运行时的 spawn 记录"
               "（subagent_runs / task_runs 两张都不在，或在却读不了）。",

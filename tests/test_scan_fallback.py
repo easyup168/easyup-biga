@@ -46,6 +46,7 @@ import _scan  # noqa: E402
 _VICTIMS = ["tests/test_no_raw_sqlite.py", "tests/test_contract_single_impl.py"]
 
 
+@pytest.mark.git
 def test_有git时走git():
     assert _scan.scan_mode() == "git"
 

@@ -1,0 +1,53 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hermetic:
+    # 默认测试套件：只跑不依赖本机环境的测试（无 OpenClaw profile / bin/biga / .git）。
+    # 目标：clean clone 里 pytest 0 failed 0 error。
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e . --no-build-isolation
+
+      - name: Compile check
+        run: python -m compileall -q src skills tools
+
+      - name: Hermetic tests
+        # -m "not installed and not live and not git" 跳过所有环境依赖测试。
+        run: pytest -q -m "not installed and not live and not git"
+
+  source-archive:
+    # 模拟 source ZIP 场景（无 .git）。
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Simulate source archive without .git
+        run: |
+          cp -a . /tmp/biga-source
+          rm -rf /tmp/biga-source/.git
+
+      - name: Install and test in archive
+        working-directory: /tmp/biga-source
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e . --no-build-isolation
+          pytest -q -m "not installed and not live and not git"

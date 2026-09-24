@@ -79,7 +79,7 @@ def db(tmp_path, monkeypatch):
     p = tmp_path / "biga.db"
     monkeypatch.setenv("BIGA_DB_PATH", str(p))
     init_schema(p)
-    open_test_run(p, run_id=_RID)     # 批 O：fact 要归属到一次真实的执行尝试
+    open_test_run(p, run_id=_RID, decision_id=TID)     # 批 O + P1-1：fact/esid 须归属到真实执行尝试
     return p
 
 

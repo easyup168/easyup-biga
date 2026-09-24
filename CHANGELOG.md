@@ -15,6 +15,69 @@
 
 ## [未发布]
 
+### 新增 · I 节 Architecture Baseline Hardening — 七项防御加固
+
+外部专家对 `v1-architecture-baseline` tag 进行了二次评审，发现了七处在正常运行时
+不会触发、但在极端场景（并发重放、脏崩溃、clean-clone CI 等）下会静默失败的漏洞。
+七项修复均在本机逐条核实（reviewer 在隔离环境工作，无法直接运行代码），
+参考 reviewer 提供的修复方案后独立实现。
+
+**P1-1：在线 Provenance 根节点校验**（`db.py`、`schema.py` v18）
+
+`save_card_with_notifications` 原先只检查 `run_id`/`evidence_set_id` 非空，
+没有核实它们在库里真的存在且一致（`decision_runs` / `evidence_sets`）——
+攻击者或测试夹具可以填一个字符串绕过。现在：在同一写事务里加 `_validate_online_provenance`，
+对 `decision_runs`、`evidence_sets`、每条 `input_verdict_refs` 的 `run_id` 三者一起核；
+v18 migration 给 `evidence_sets(run_id)` 加唯一索引（`ux_evidence_sets_run`），确保一个
+执行尝试对应且仅对应一套数据切片。
+
+**P1-2：Spawn Proof 改为 Run 级**（`db.py`、`phase1_acceptance.py`、`spawn_check.py`）
+
+原先 `spawn_proof(decision_id)` 按决策聚合 agent_runs，Run B 可以借用 Run A 的
+spawn 记录通过核验。现在加 `--run-id` 参数路径，通过 `orchestration_run_id` 过滤，
+每次执行只核自己的那一批。
+
+**P1-3：Hermetic 测试分层**（`pyproject.toml`、`tests/`、`.github/workflows/test.yml`）
+
+依赖本机环境（`bin/biga`、git、运行时）的测试散在默认集里，clean-clone CI 必然报错——
+不是代码问题，而是让 CI 失去判断能力。加四个 pytest marker（`installed`/`live`/`git`/`slow`），
+环境依赖测试打上 marker、CI 跳过它们；同时新增 `source-archive` job，模拟无 `.git` 的
+ZIP 场景，验证与 git 无关的守卫在那里仍然全绿。
+
+**P2-1：Migration 原子化**（`db.py`）
+
+旧代码 `executescript()` 自动提交 DDL，`PRAGMA user_version=N` 在单独的 `execute()` 里——
+崩溃窗口里 DDL 已落但版本号没更新，下次 init 重跑同一个 migration。
+改为 `BEGIN IMMEDIATE; DDL; PRAGMA user_version=N; COMMIT;` 同一事务，消灭这个窗口。
+
+**P2-2：删除 synthesize.py 双写账本**（`synthesize.py`）
+
+`synthesize.py` 在调 `persist()` 之前还手动循环调 `record_verdict_run`——
+`persist()` 内部本来就会调，等于写两遍。两次写的值相同所以通常不报错，
+但幂等不等于正确：调度顺序变了就会乱。删掉手动调用，`persist()` 是唯一账本写入口。
+
+**P2-3：Replay 加父记录 decision_id 校验**（`db.py`）
+
+Replay 路径原先只检查 `replay_of` 非空，没有查父记录是否真的属于同一 `decision_id`——
+跨决策回放（Decision A 的 record_id 被 Decision B 的卡拿来用）会静默成功。
+现在在写事务里查 `decision_records WHERE record_id=replay_of` 的 `decision_id`，不匹配拒绝。
+
+**P2-4：Notification Worker 单实例锁**（`bin/biga-notify`）
+
+`bin/biga-notify` 没有单实例保护，并发调用会产生重复投递但两者都拿到空队列，
+互相不报错。加 `flock -n 9` 锁文件，第二个实例直接退出（不是等待），
+与 `bin/biga-card` 已有的 `flock` 保持风格一致。
+
+**测试夹具同步更新**（`tests/_provenance.py` 等 8 个测试文件）
+
+P1-1 新增的 `_validate_online_provenance` 正确地拦下了所有不满足三项血缘约束
+（`decision_runs`、`evidence_sets`、`input_verdict_refs.run_id`）的测试夹具——
+旧夹具直接编字符串绕过了本应存在的行。同步更新：`_provenance.py` 加 `es_id_for`
+（从 run_id 派生确定的 evidence_set_id）；`provenance_for` 在创建 fact 行之前先
+创建 `evidence_sets` 行；各测试文件的 `open_test_run` 调用补上 `decision_id`；
+`test_run_provenance.py` fixture 显式创建 `TEST_EVIDENCE_SET_ID` 对应的行；
+`test_spawn_proof.py` 的内嵌脚本补上 `save_evidence_set` 调用。
+
 ---
 
 ## [0.3.0] - 2026-09-25
