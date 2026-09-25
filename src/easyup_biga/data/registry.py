@@ -66,6 +66,7 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         #    区分它们的正是取回时刻。
         partition_keys=("as_of",),
         storage_policy="sqlite_fact",
+        quality_policy="cn-trading-calendar-v1",
         raw_table="raw_market_snapshot",
         fact_table="fact_trading_calendar",
         consumers=(
@@ -83,12 +84,16 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         #    互相印证，但那是 skill 内部的事，不走 Registry 的 validator 流程。
         #    写上等于点名一个今天没人执行的角色 —— 等 P3-2 真的接上再填。
         validation_providers=(),
-        # 🔴 `(symbol, as_of)` 而不是 `(trade_date,)`：这个数据集走的是
-        #    **决策快照道**，`SnapshotCoordinator` 冻结的就是「这次决策、这个
-        #    指数、这一刻」的那一份，同一交易日可以被冻结多次（多次决策）。
-        #    按 trade_date 切会把它们当成同一个分区。
-        partition_keys=("symbol", "as_of"),
-        storage_policy="sqlite_raw_snapshot",
+        # 🔴 切片键是 `evidence_set_id`，一次冻结**一个分区**。
+        #    这个数据集走的是**决策快照道**：`SnapshotCoordinator` 一次把
+        #    sh/sz 一起冻成一个 bundle，下游读的也是整份。
+        #    ⚠️ 我一度写成 `(symbol, as_of)`（抄自外部 P3-1），那是错的 ——
+        #    bundle 里有多个 symbol，按 symbol 切等于声称有多个分区而实际只发布
+        #    一个。外部 P3-2 自己把这个值改了，方向与本仓库的 `_check_partition_keys()`
+        #    抓到的是同一件事。
+        partition_keys=("evidence_set_id",),
+        storage_policy="sqlite_evidence_bundle",
+        quality_policy="cn-index-daily-bridge-v1",
         raw_table="raw_market_snapshot",
         consumers=("easyup_biga.application.coordinator:SnapshotCoordinator",),
     ),

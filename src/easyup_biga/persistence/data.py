@@ -47,7 +47,7 @@ from easyup_biga.data import (
 )
 from easyup_biga.domain import now_cn
 
-from .db import connect
+from .db import assert_snapshot_linkable, connect
 
 
 class DataRunTransitionError(RuntimeError):
@@ -351,13 +351,9 @@ def link_evidence_set_dataset(
             "SELECT 1 FROM evidence_sets WHERE evidence_set_id=?", (link.evidence_set_id,)
         ).fetchone() is None:
             raise ValueError("evidence set does not exist")
-        snapshot = conn.execute(
-            "SELECT dataset_id,status FROM dataset_snapshots WHERE snapshot_id=?", (link.snapshot_id,)
-        ).fetchone()
-        if snapshot is None or snapshot["dataset_id"] != link.dataset_id:
-            raise ValueError("snapshot does not exist or belongs to another dataset")
-        if snapshot["status"] != DatasetStatus.COMPLETE.value:
-            raise ValueError("new EvidenceSet links only COMPLETE snapshots by default")
+        # 🔴 与 `save_evidence_set` 共用同一份判据（`db.assert_snapshot_linkable`）。
+        #    这三条原本在两处各写一遍 —— 同一条判据两处实现就是 L-3。
+        assert_snapshot_linkable(conn, link.dataset_id, link.snapshot_id)
         try:
             cur = conn.execute(
                 "INSERT INTO evidence_set_datasets "

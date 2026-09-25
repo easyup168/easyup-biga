@@ -172,6 +172,11 @@ class DatasetDefinition:
             在 `persistence.data.save_dataset_partition` / `save_dataset_snapshot`
             里被用来拒绝「分区声称的版本与注册表不符」。P3-0 时它没有消费方，
             按裁定 9 没装；现在有了才装，这正是那条纪律想要的节奏。
+        quality_policy: 这个数据集用哪条质量策略。**P3-2 才加进来** ——
+            `data.snapshots.DatasetSnapshotService` 把它写进 `QualityReport.policy_id`。
+            🔴 它必须在 `data/quality.py::QUALITY_POLICIES` 里注册（由测试钉住）：
+            外部实现包里这个字段指向一组**不存在**的策略 id，而
+            「点名一个不存在的东西」正是本仓库立过守卫的失败模式。
         consumers: 🔴 **今天谁在读它。** 写成 ``"模块路径:符号名"``，
             由测试 import 那个模块并断言符号真的在（行为判据，不是字符串扫描）。
 
@@ -188,6 +193,7 @@ class DatasetDefinition:
     validation_providers: tuple[str, ...]
     partition_keys: tuple[str, ...]
     storage_policy: str
+    quality_policy: str
     raw_table: str
     consumers: tuple[str, ...]
     fact_table: str | None = None
@@ -200,6 +206,7 @@ class DatasetDefinition:
             raise ValueError(
                 f"{self.dataset_id}: partition_keys 必须非空且不重复 —— "
                 f"它被 persistence.data 用来核对每一次写入的实际分区键。")
+        _text("quality_policy", self.quality_policy)
         if not self.consumers:
             raise ValueError(
                 f"{self.dataset_id}: consumers 不能为空 —— "

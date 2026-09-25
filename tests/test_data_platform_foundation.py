@@ -57,7 +57,8 @@ def _run() -> DataJobRun:
         data_run_id=new_data_run_id(),
         job_id="index-daily-foundation-smoke",
         dataset_id="cn.index.daily_bars",
-        partition_key={"symbol": "sh000001", "as_of": "20260925"},
+        # 🔴 切片键随注册表：index_daily 按 evidence_set_id 切（一次冻结一个分区）。
+        partition_key={"evidence_set_id": "ES-P31-SMOKE"},
         requested_data_version=1,
         trigger_id="test-trigger",
         created_at=now_cn().isoformat(),
@@ -135,7 +136,7 @@ def test_整条血缘走通_raw到证据集(tmp_path):
     quality = QualityReport(
         quality_report_id=new_quality_report_id(), data_run_id=run.data_run_id,
         dataset_id=run.dataset_id, partition_id=partition.partition_id,
-        status=DatasetStatus.COMPLETE, policy_id="cn-index-daily-v1",
+        status=DatasetStatus.COMPLETE, policy_id="cn-index-daily-bridge-v1",
         metrics={"rows": 120}, checked_at=now,
     )
     save_quality_report(quality, path=db)

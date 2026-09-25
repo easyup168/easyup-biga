@@ -6,7 +6,7 @@
 
 [![Status](https://img.shields.io/badge/status-architecture%20baseline%20hardening-d29922)](TODO.md)
 [![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
-[![Tests](https://img.shields.io/badge/tests-1924%20selected-555)](#当前实现状态)
+[![Tests](https://img.shields.io/badge/tests-1938%20selected-555)](#当前实现状态)
 [![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v26-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
@@ -701,7 +701,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── bin/             biga / biga-card / biga-notify / biga-reap
 ├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
 ├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
-├── tests/           1924 条测试
+├── tests/           1938 条测试
 ├── docs/
 │   ├── design/      当前架构与阶段设计
 │   ├── guide/       安装、使用、回滚与运维

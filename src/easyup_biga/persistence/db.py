@@ -19,7 +19,7 @@ import json
 import os
 import pathlib
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from typing import Any
 
@@ -1860,15 +1860,54 @@ def is_trading_day(
 # ──────────────────────────────────────────────────────────────── evidence_sets
 
 
+def assert_snapshot_linkable(conn: sqlite3.Connection, dataset_id: str, snapshot_id: str) -> None:
+    """一份 DatasetSnapshot 能不能被 EvidenceSet 引用 —— **这条判断的唯一实现**。
+
+    三条：存在 / 属于这个 dataset / 状态是 `COMPLETE`。
+
+    🔴 为什么放在 `db.py` 而不是 `persistence/data.py`：两个写入口都要用它，
+    而它必须跑在**调用方已经打开的事务里**（`save_evidence_set` 要求血缘与
+    EvidenceSet 主行同事务写入），所以不能自己开连接。
+    `data.py` 已经 `from .db import connect`，方向是单向的，反过来会成环。
+
+    ⚠️ 外部 P3-2 实现把这三条在 `save_evidence_set` 里**又写了一遍**
+    （`data.py::link_evidence_set_dataset` 里本来就有一份）—— L-3 的形状：
+    同一条判据两处实现，改了一处忘另一处时，剩下那处仍然看起来权威。
+    """
+    row = conn.execute(
+        "SELECT dataset_id,status FROM dataset_snapshots WHERE snapshot_id=?",
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"快照 {snapshot_id!r} 不存在 —— 无法被 EvidenceSet 引用")
+    if row["dataset_id"] != dataset_id:
+        raise ValueError(
+            f"快照 {snapshot_id!r} 属于 {row['dataset_id']!r}，不是 {dataset_id!r}")
+    if row["status"] != "COMPLETE":
+        raise ValueError(
+            f"EvidenceSet 只链 COMPLETE 的快照；{snapshot_id!r} 现在是 "
+            f"{row['status']!r} —— PARTIAL/QUARANTINED 要先上浮到 missing[]，"
+            f"不能被静默消费")
+
+
 def save_evidence_set(
     *,
     evidence_set_id: str,
     decision_id: str | None,
     manifest: dict[str, Any],
     run_id: str | None = None,
+    dataset_snapshots: Mapping[str, str] | None = None,
     path: pathlib.Path | str | None = None,
 ) -> str:
     """登记一次数据冻结（`SnapshotCoordinator` 冻结完调它），返回 `evidence_set_id`。
+
+    🔴 P3-2 新增的 `dataset_snapshots`（`dataset_id -> snapshot_id`）与 EvidenceSet
+    主行**在同一个事务里**写入。manifest v2 里写着快照号、而结构化链接行却没落库，
+    是一种**半发布**状态 —— 读的人会以为 `evidence_set_datasets` 查得到而它查不到。
+    要么两个都有，要么两个都没有。
+
+    存储层仍不解释 manifest 的业务形状，只核对被引用的快照**可链**
+    （见 `assert_snapshot_linkable`）。
 
     🔴 存储层对 `manifest` 的结构**不做假设** —— 它只负责严格 JSON 落库。
     manifest 长什么样、怎么反查回 `raw_market_snapshot`，是冻结方
@@ -1907,6 +1946,14 @@ def save_evidence_set(
                 "VALUES (?,?,?,?,?,?)",
                 (evidence_set_id, decision_id, now, blob, now, run_id),
             )
+            # 🔴 同事务写血缘 —— 见 docstring：半发布状态比没有血缘更难查。
+            for dataset_id, snapshot_id in sorted((dataset_snapshots or {}).items()):
+                assert_snapshot_linkable(conn, dataset_id, snapshot_id)
+                conn.execute(
+                    "INSERT INTO evidence_set_datasets "
+                    "(evidence_set_id,dataset_id,snapshot_id,created_at) VALUES (?,?,?,?)",
+                    (evidence_set_id, dataset_id, snapshot_id, now),
+                )
     except sqlite3.IntegrityError as e:
         if "evidence_sets.evidence_set_id" not in str(e) and "evidence_set_id" not in str(e):
             raise

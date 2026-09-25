@@ -38,8 +38,21 @@ from __future__ import annotations
 from .contracts import DatasetDefinition, ProviderDefinition
 from .registry import DATASET_REGISTRY
 
-__all__ = ["PROVIDERS", "PROVIDER_REGISTRY", "PROVIDER_IDS",
-           "get_provider", "datasets_of", "uses_provider"]
+__all__ = ["PROVIDERS", "PROVIDER_REGISTRY", "PROVIDER_IDS", "ProviderNotRegistered",
+           "get_provider", "datasets_of", "uses_provider", "provider_for_source"]
+
+
+class ProviderNotRegistered(KeyError):
+    """这个 provider 不在册 —— **一个专有异常，不是裸 KeyError**。
+
+    🔴 为什么值得单独一个类型：调用方需要**精确**捕获它。
+    外部 P3-2 实现在 `SnapshotCoordinator` 里写的是 `except KeyError:`，
+    而那段 `publish()` 有上百行、其中 `entry["snapshot_id"]`、manifest 字段缺失
+    等等**都会抛 KeyError**。用裸 KeyError 兜底，等于把「这个源没登记」
+    和「我的数据结构坏了」当成同一件事处理 —— 而后者会被静默咽掉。
+
+    这正是本项目最优先防范的形状：**静默 fail-open**（R-3）。
+    """
 
 
 #: 数据源名册的**唯一手写处**。关系（谁支持哪些 dataset）不在这里写 —— 见 `datasets_of`。
@@ -111,10 +124,38 @@ def get_provider(provider_id: str) -> ProviderDefinition:
     try:
         return PROVIDER_REGISTRY[provider_id]
     except KeyError:
-        raise KeyError(
+        raise ProviderNotRegistered(
             f"未注册的数据源 {provider_id!r}。\n"
             f"  已注册：{list(PROVIDER_REGISTRY)}\n"
             f"  ⚠️ id 与 providers/ 下的模块同名（适配器级，不是「这家公司」）。\n"
             f"  未激活的适配器不在册：它们在各自的 P3-6 迁移 PR 里进来，"
             f"现在进册就是零消费方。"
         ) from None
+
+
+def provider_for_source(dataset_id: str, source: str) -> str:
+    """从 raw 层的 `source`（如 `sina:kline/sh000001`）反查**适配器级** provider_id。
+
+    🔴 不能直接取前缀当 provider_id。本仓库的 `provider_id` 是适配器级的
+    （`sina` / `sina_calendar` / `szse`），而 `source` 的前缀是**站点级**的
+    —— `sina` 与 `sina_calendar` 都写 `sina:`。外部实现直接
+    `source.split(":")[0]` 当 provider_id，对指数日线恰好相等，对交易日历就错。
+
+    ⇒ 判据取交集：**这个 dataset 登记的 provider** ∩ **前缀对得上的 provider**。
+    交集不唯一就 fail closed —— 猜一个出来正是「悄悄选边」。
+    """
+    prefix = source.split(":", 1)[0]
+    registered = set(DATASET_REGISTRY[dataset_id].fallback_providers) | {
+        DATASET_REGISTRY[dataset_id].primary_provider,
+        *DATASET_REGISTRY[dataset_id].validation_providers,
+    }
+    hits = sorted(pid for pid in registered
+                  if PROVIDER_REGISTRY[pid].source_prefix == prefix)
+    if len(hits) != 1:
+        raise ProviderNotRegistered(
+            f"{dataset_id} 的 source 前缀 {prefix!r} 对应到 {hits or '（无）'} —— "
+            f"必须恰好一个。\n"
+            f"  该 dataset 登记的 provider：{sorted(registered)}\n"
+            f"  前缀不是 provider_id：sina 与 sina_calendar 都写 'sina:'，"
+            f"所以要按「本 dataset 登记了谁」求交集，不能直接取前缀。")
+    return hits[0]

@@ -18,6 +18,8 @@
   P9  `datasets_of()` 的派生与 DATASET_REGISTRY 双向对得上（+ 三角色覆盖用合成定义测）
   P10 `bin/biga-data` 真的跑得起来 —— 名册有**行为上**的消费方，不是零消费方
   P11 🔴 没有零消费方的已激活 dataset（外部设计 §16 的 `no zero-consumer active dataset`）
+  P12 每个 dataset 的 `quality_policy` 都在 `data/quality.py` 里注册过
+  P13 `provider_for_source()` 按「本 dataset 登记了谁」求交集，不是取前缀
 
 🔴 P5 的判据为什么是「注册表 → 源码」单向
 -----------------------------------------
@@ -61,6 +63,11 @@ from easyup_biga.data import (  # noqa: E402
     get_provider,
     uses_provider,
 )
+from easyup_biga.data.provider_registry import (  # noqa: E402
+    ProviderNotRegistered,
+    provider_for_source,
+)
+from easyup_biga.data.quality import QUALITY_POLICIES  # noqa: E402
 from easyup_biga.persistence.db import connect, init_schema  # noqa: E402
 
 
@@ -269,6 +276,7 @@ def test_三种角色都算用到_用合成定义测():
         base = dict(dataset_id="x", title="t", schema_version=1, primary_provider="P",
                     fallback_providers=(), validation_providers=(),
                     partition_keys=("as_of",), storage_policy="s",
+                    quality_policy="cn-trading-calendar-v1",
                     raw_table="raw_market_snapshot", consumers=("m:s",))
         return DatasetDefinition(**{**base, **kw})
 
@@ -300,3 +308,46 @@ def test_biga_data_用法错误退非零():
                        capture_output=True, text=True, cwd=REPO, timeout=60)
     assert r.returncode != 0
     assert "未知子命令" in r.stderr
+
+
+# ── P12：quality_policy 不许指向空气 ────────────────────────────────────────
+def test_每个dataset的quality_policy都已注册():
+    """P12：外部实现里这个字段指向一组**不存在**的策略 id。
+
+    🔴 「点名一个不存在的东西，读者会认为它已经有人管了」—— 仓库为文档立过
+    这条守卫（`test_设计文档点名的文件必须真实存在`），代码里同样成立：
+    一个写着 `quality_policy="cn-index-daily-v1"` 的注册表，读起来像是
+    「这个数据集有质量策略」，而实际上没有任何地方能回答它检查了什么。
+    """
+    ghosts = [(d.dataset_id, d.quality_policy) for d in DATASETS
+              if d.quality_policy not in QUALITY_POLICIES]
+    assert not ghosts, (
+        f"这些 quality_policy 没在 data/quality.py 注册：{ghosts}\n"
+        f"  已注册：{list(QUALITY_POLICIES)}\n"
+        f"  注册一条策略 = 写清「检查什么 / 不检查什么」。")
+
+
+def test_质量策略必须说清不检查什么():
+    """P12b：`not_checked` 不许为空。
+
+    🔴 只写「检查什么」，读者会默认剩下的都查了 —— 而「以为查过」比
+    「知道没查」危险得多（R-3 的同一条道理）。
+    """
+    silent = [p.policy_id for p in QUALITY_POLICIES.values() if not p.not_checked]
+    assert not silent, f"这些策略没写「不检查什么」：{silent}"
+
+
+# ── P13：provider 解析不靠取前缀 ───────────────────────────────────────────
+def test_provider_for_source按登记求交集而不是取前缀():
+    """P13：`sina` 与 `sina_calendar` 的 `source_prefix` 都是 `sina`。
+
+    🔴 外部实现直接 `source.split(":")[0]` 当 provider_id —— 对指数日线
+    恰好相等，对交易日历就错（会解析成 `sina` 而真实适配器是 `sina_calendar`）。
+    判据必须带上「**这个 dataset 登记了谁**」这一半。
+    """
+    assert provider_for_source("cn.index.daily_bars", "sina:kline/sh000001") == "sina"
+    # 同一个前缀，不同 dataset ⇒ 不同适配器。取前缀的实现在这里会给出 "sina"。
+    assert provider_for_source("cn.trading_calendar", "sina:calendar/klc_td_sh") == "sina_calendar"
+
+    with pytest.raises(ProviderNotRegistered, match="必须恰好一个"):
+        provider_for_source("cn.index.daily_bars", "em:push2ex/limit_up")

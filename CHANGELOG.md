@@ -15,6 +15,80 @@
 
 ## [未发布]
 
+### 新增 · Phase 3 · P3-2：把已在生产的 index_daily 冻结接进通用血缘
+
+红线是**什么都不变**：Agent 输出、Run、Card、raw hash 语义、手工单跑的 fallback
+全部照旧，只在**同一批不可变字节**上再发布一份标准血缘。
+
+```text
+data/snapshots.py               通用 DatasetSnapshotService（走完整状态机、按逻辑分区幂等）
+data/datasets/index_daily.py    桥接器 —— 不抓任何数据
+data/quality.py                 质量策略真名册
+EvidenceSet manifest v2         旧键逐字保留 + knowledge_cutoff / datasets 两个新键
+```
+
+不新增 migration（仍 v26），不引入 Parquet / DuckDB。
+
+#### 验收外部 P3-2 实现：核心设计对，两处值得学
+
+**一 · `raw_artifact_id` 只在恰好一个 artifact 时才填。** 一个 bundle 有 sh + sz
+两份 raw 时留空，由 `provider_attempts` 承担一对多的血缘边。它的注释原话是
+「do not lie with one arbitrary FK」—— **与仓库「不硬凑：凑出来的溯源比没有溯源
+更糟」是同一条，独立到达。**
+
+**二 · 发布前真的核对哈希。** 逐个 symbol 比对冻结 raw 的 `content_sha256` 与
+manifest 里记的，对不上就抛。一份「登记了但对不上原始字节」的血缘，比没有血缘更糟。
+
+#### 改掉五处
+
+| # | 外部实现 | 问题 | 本仓库 |
+|---|---|---|---|
+| 1 | `except KeyError:` 兜 seam | `publish()` 里字段缺失**也抛 KeyError** ⇒ 结构性 bug 被静默咽掉（R-3） | 专有异常 `ProviderNotRegistered`，只咽它 |
+| 2 | `source.split(":")[0]` 当 provider_id | 站点前缀 ≠ 适配器 id；对日历会解析成 `sina` 而真实是 `sina_calendar` | 按「本 dataset 登记了谁」求交集 |
+| 3 | manifest 自报 provider 不与 raw 核对 | 血缘可以描述一个与 raw 层不符的出处 | 不一致就抛 |
+| 4 | `quality_policy` 指向不存在的策略 id | 「点名一个不存在的东西」 | 真名册 + 守卫，每条必须写**不检查什么** |
+| 5 | 同事务血缘校验又写一遍 | 与 `link_evidence_set_dataset` 里那份重复（L-3） | 收成 `db.assert_snapshot_linkable()` |
+
+#### 🔴 我自己判错一次
+
+我一度把外部那条「注入 fetcher + provider 未注册 ⇒ 跳过血缘」的 seam **整个删掉**，
+理由是「生产路径与测试路径应当是同一条」，还在注释里写了理由。快照/编排三个文件全绿。
+
+跑全量才红：批 E-20.2 的 `test_换个provider落库的source跟着变` —— 它验**出处不会
+说谎**，而它**必须**注入一个未注册的 provider 才测得到。删掉 seam 等于逼那条测试
+改用注册过的源，那样它就测不到它要测的东西了。
+
+⇒ seam 的**条件**是对的，错的只是**捕获范围**。已恢复，只改捕获。
+
+⇒ 两条教训：
+- **「测试路径 ≠ 生产路径」不等于那条分叉是错的** —— 先问它在为哪条测试服务
+- **局部绿不能代替全量** —— 我跑了三个相关文件全绿，红的那条在第四个文件里
+
+#### 探针也落错过一次
+
+P15 想守「seam 只咽未注册，不咽结构性 KeyError」。第一版把
+`except ProviderNotRegistered` 放宽成 `except KeyError` 再跑「严格路径会不会抛」
+—— **没红**：放宽捕获是**超集**，严格路径走 re-raise 分支，两种写法行为相同。
+⇒ 判据挪到「**在调试缝上**抛结构性 KeyError 必须传出来」。
+
+#### `partition_keys` 第一次承重
+
+`cn.index.daily_bars` 的切片键我抄自外部 P3-1 的 `(symbol, as_of)`，
+而桥按 `{"evidence_set_id": ...}` 发布 —— P3-1 加的 `_check_partition_keys()`
+**当场抓到**。正确答案是 `("evidence_set_id",)`：一次冻结发布一个分区，
+bundle 里有多个 symbol，按 symbol 切等于声称有多个。外部 P3-2 自己也改了这个值。
+
+#### 实测
+
+```text
+schema  仍 v26（本批不新增 migration）
+守卫    +6 条，全部经探针见红
+测试    1924 → 1938 条，2338 passed / 0 failed
+```
+
+---
+
+
 ### 新增 · Phase 3 · P3-1：schema v23–v26 数据平台地基（与外部实现包**合并**）
 
 控制面第一次装下**采集**这条生命周期。七张追加式表分四步进来：

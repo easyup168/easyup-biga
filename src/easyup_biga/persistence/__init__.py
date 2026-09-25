@@ -4,6 +4,7 @@
 """
 
 from .db import (
+    assert_snapshot_linkable,
     DEFAULT_DB_PATH,
     AppendOnlyViolation,
     StoreNotInitialised,
@@ -83,6 +84,7 @@ from .data import (
 )
 
 __all__ = [
+    "assert_snapshot_linkable",
     "DataRunTransitionError",
     "DataStoreConflict",
     "UnknownDataRun",

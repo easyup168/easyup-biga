@@ -1,6 +1,6 @@
 # Phase 3 设计 —— 数据平台地基 + 第一条调度
 
-> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ✅ / P3-2 ⬜）
+> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ✅ / P3-2 ✅ / P3-3 ⬜）
 > **覆盖**：Phase 3 的设计基线、范围、里程碑、出口条件，以及本仓库对外部设计的适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
 
 > Phase 3 的**设计 SSOT**。结构性问题（存储平面选型、失败模式清单、表结构）
@@ -228,7 +228,7 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 |---|---|---|---|
 | P3-0 | 契约 + Dataset/Provider Registry + `bin/biga-data` | — | ✅ |
 | P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ✅ |
-| P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ⬜ |
+| P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ✅ |
 | P3-3 | Security Master（point-in-time universe） | **v27** | ⬜ |
 | P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ⬜ |
 | P3-5 | Tradability + Adjustment Factors | — | ⬜ |
@@ -290,6 +290,41 @@ v27  fact_security_master                          append-only，按 available_a
 
 `evidence_set_datasets`（v26）是 v1 相对旧草案的一处新增：**关键血缘要能用 SQL 查，
 不能只藏在 manifest JSON 里** —— 这正是 schema v16 加 Run Provenance 三列时学到的东西。
+
+#### ⏩ P3-2 落地（2026-09-25）：外部实现验收，取其主体、改五处
+
+外部交付 P3-2 实现包（**又是只跑 574 条 focused，不跑全量**）。核心设计对：
+`DatasetSnapshotService` 走完整状态机、按逻辑分区幂等、`raw_artifact_id` 只在
+恰好一个 artifact 时才填（**拒绝拿随便一个外键撒谎**，与仓库「不硬凑」同源）；
+桥接器发布前**逐个 symbol 核对冻结 raw 的 `content_sha256` 与 manifest 逐字相同**，
+不二次抓取；血缘与 EvidenceSet 主行**同事务**写入，避免半发布状态。
+
+改掉的五处：
+
+| # | 外部实现 | 问题 | 本仓库 |
+|---|---|---|---|
+| 1 | `except KeyError:` 兜 seam | `entry["snapshot_id"]` 缺失等结构性 bug **也抛 KeyError** ⇒ 被静默咽掉（R-3） | 专有异常 `ProviderNotRegistered`，只咽它 |
+| 2 | `source.split(":")[0]` 当 provider_id | 站点前缀 ≠ 适配器 id。对日历会解析成 `sina` 而真实是 `sina_calendar` | `provider_for_source()` 按「本 dataset 登记了谁」求交集 |
+| 3 | manifest 自报 provider 不与 raw 核对 | 血缘可以描述一个与 raw 层不符的出处 | 不一致就抛 |
+| 4 | `quality_policy` 指向不存在的策略 id | 「点名一个不存在的东西」 | `src/easyup_biga/data/quality.py` 真名册 + 守卫，且每条必须写**不检查什么** |
+| 5 | 同事务血缘校验又写一遍 | 与 `link_evidence_set_dataset` 里那份重复（L-3） | 收成 `db.assert_snapshot_linkable()` |
+
+#### 🔴 我自己判错一次，记下来
+
+我一度把外部那条「注入 fetcher + provider 未注册 ⇒ 跳过血缘」的 seam **整个删掉**，
+理由是「生产路径与测试路径应当是同一条」。跑全量才发现它破了批 E-20.2 的
+`test_换个provider落库的source跟着变` —— 那条测试**必须**注入一个未注册的
+provider 才能验「出处不会说谎」。
+
+⇒ seam 的**条件**是对的，错的只是它的**捕获范围**。已恢复，只改捕获。
+
+> 教训：**「测试路径 ≠ 生产路径」不等于「那条分叉是错的」。**
+> 先问那条分叉在为哪条测试服务，再决定删不删。
+
+⚠️ 顺带修正 `cn.index.daily_bars` 的切片键：`(symbol, as_of)` → `("evidence_set_id",)`。
+一次冻结发布**一个**分区（bundle 里有多个 symbol），按 symbol 切等于声称有多个。
+外部 P3-2 自己也改了这个值 —— 而本仓库的 `_check_partition_keys()`
+（P3-1 加的）会在写入时当场抓到它，这正是把那个字段变成承重件的收益。
 
 ### 3.2 P3-2 的红线
 
