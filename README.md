@@ -4,11 +4,10 @@
 
 ### 基于 OpenClaw 的可追溯 Multi-Agent A 股决策内核
 
-[![Status](https://img.shields.io/badge/status-architecture%20baseline%20v1-2ea043)](TODO.md)
-[![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)](docs/design/phase-2-specialists.md)
-[![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)](#pipeline-中有哪些-agent)
-[![Tests](https://img.shields.io/badge/1817%20TESTS-PASSING-2ea043)](#当前实现状态)
-[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20v19-555)](docs/tutorial/04-store-layer.md)
+[![Status](https://img.shields.io/badge/status-architecture%20baseline%20hardening-d29922)](TODO.md)
+[![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
+[![Tests](https://img.shields.io/badge/tests-1817%20collected-555)](#当前实现状态)
+[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v19-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
 
@@ -22,10 +21,11 @@
 
 BigA 是一个建立在 [OpenClaw](https://docs.openclaw.ai) 之上的个人 A 股 Multi-Agent 系统。
 
-**当前仓库首先建设的是 Decision Kernel：**
+当前仓库首先建设的是一套可靠的 **Decision Kernel**：
 
 ```text
 Trigger
+  → Decision
   → Run
   → Frozen Evidence
   → Specialist Agents
@@ -39,13 +39,14 @@ Trigger
 - 有来源；
 - 有时间；
 - 有缺失项；
+- 有运行身份；
 - 可追溯；
 - 可回放；
-- 可以证明 Agent 真实运行过；
+- 可以核验 Agent 是否真实运行；
 
 的 `DecisionCard`。
 
-**长期目标**是在这个内核周围继续建设完整的个人交易系统：
+BigA 的长期目标，是在这个内核周围继续建设完整的个人交易系统：
 
 ```text
 Data
@@ -66,22 +67,96 @@ Data
 
 ---
 
+## BigA 的架构主张
+
+BigA 不是把多个 Agent 名称写进 Prompt，然后让一个 Supervisor 自由决定工作流的股票分析 Demo。
+
+它探索的是一种目前仍较少见的 AI 交易系统架构：
+
+> **OpenClaw 负责智能运行，BigA 的确定性业务层负责流程、冻结证据、风险、身份血缘、回放，以及未来完整的交易生命周期。**
+
+```text
+OpenClaw Runtime
+        ↓
+Deterministic Orchestrator
+        ↓
+Decision + Run
+        ↓
+Frozen EvidenceSet
+        ↓
+Specialist Agents
+        ↓
+Fact / Assessment
+        ↓
+Risk Veto
+        ↓
+DecisionCard
+        ↓
+Replay / Verification / Review
+```
+
+BigA 不声称每一项技术都是原创，也不声称自己是世界上唯一的相关项目。
+
+它的辨识度来自于把下面这些原则同时应用到一个个人 A 股系统中：
+
+- 程序拥有工作流，Agent 只拥有判断；
+- 确定性数字由代码计算，LLM 负责解释；
+- 一个 Run 只能使用自己的冻结数据世界；
+- Runtime Proof 不能由 Agent 自报；
+- `UNKNOWN`、`MISSING`、`TIMEOUT` 是正式业务状态；
+- Replay 不重新访问外部数据源；
+- 历史判断不能被后来结果覆盖；
+- Risk 拥有独立否决权；
+- DecisionCard 不等于订单；
+- Agent 不能直接下单、修改业务状态或重新启动 Pipeline。
+
+因此，BigA 的目标不是成为另一个"AI 股票分析器"，而是逐步演进成：
+
+> **一个以 OpenClaw 为智能底座、以可信数据和确定性控制面为核心的个人 A 股交易操作系统。**
+
+---
+
+## 当前不是在做什么
+
+当前 BigA 不是：
+
+- 自动下单机器人；
+- 已经完成的全功能量化交易平台；
+- 让 LLM 自己计算技术指标的数值引擎；
+- 每个 Agent 自己联网、自己选数据源的松散脚本集合；
+- 由 Prompt 控制全部状态、流程和失败恢复的工作流；
+- 用一条 `BUY / SELL / HOLD` 文本代替证据、风险和运行记录的分析器；
+- 对收益做任何保证的投资建议服务。
+
+当前阶段首先把 Multi-Agent Decision Kernel 做成一套：
+
+```text
+可靠
+可证明
+可回放
+可扩展
+失败时能够明确说"不知道"
+```
+
+的基础架构。
+
+---
+
 ## 为什么这个项目值得重新做
 
-BigA 不是把一批 Agent 名字放进 Prompt 里。
-
-它重点验证并固化的是更难的部分：
+BigA 重点验证和固化的，不是"能不能让几个 Agent 说话"，而是更难的部分：
 
 1. **程序控制流程，Agent 负责判断。**
 2. **不知道就是 `UNKNOWN`，不能静默变成 `PASS`。**
-3. **同一次运行的事实、判断、风险和 Card 必须能追溯到同一条身份链。**
+3. **同一次运行的事实、判断、风险和 Card 必须属于同一条身份链。**
 4. **OpenClaw Runtime 的真实记录，而不是 Agent 自报，才算 spawn 证据。**
 5. **在线与回放共用同一套组装逻辑。**
 6. **同机另一套 OpenClaw 实例必须保持隔离。**
-7. **成本、超时、递归和通知失败都必须有机器级守卫。**
+7. **成本、超时、递归、外部 kill 和通知失败必须有机器级守卫。**
+8. **历史产物只能追加或修订，不能把后来知道的结果改写成"当时就知道"。**
 
-开发过程中真实发生过的事故、错误假设和修复过程，全部保留在
-[`docs/tutorial/`](docs/tutorial/README.md) 中（目前 60 章）。
+开发过程中真实发生过的事故、错误假设、对抗测试和修复过程，保留在
+[`docs/tutorial/`](docs/tutorial/README.md) 中，目前共 60 章。
 
 ---
 
@@ -125,9 +200,11 @@ BigA 不是把一批 Agent 名字放进 Prompt 里。
                                   Replay       Feishu
 ```
 
-### OpenClaw 与 BigA 的边界
+---
 
-**OpenClaw 负责：**
+## OpenClaw 与 BigA 的边界
+
+### OpenClaw 负责
 
 ```text
 Agent Session
@@ -136,9 +213,10 @@ Tool Policy
 Subagent
 Runtime Run ID
 Agent Timeout
+Agent Lifecycle
 ```
 
-**BigA 负责：**
+### BigA 负责
 
 ```text
 Trigger
@@ -147,7 +225,7 @@ Decision / Run Identity
 数据冻结
 EvidenceSet
 Risk
-Card
+DecisionCard
 Replay
 预算
 通知意图
@@ -157,6 +235,15 @@ Replay
 
 > **OpenClaw 是智能运行时；BigA 是业务系统。**
 
+这也意味着：
+
+```text
+Agent 不拥有顶层流程
+Agent 不保存飞书凭证
+Agent 不直接写核心业务状态
+Agent 不直接调用券商
+```
+
 ---
 
 ## Pipeline 中有哪些 Agent
@@ -165,12 +252,12 @@ Replay
 
 | Agent | 职责 |
 |---|---|
-| `main` | 与人交互、解释结果、查询状态；**不负责出卡编排**（编排是一段程序，`main` 够不到它，见「确定性编排升级」） |
+| `main` | 与人交互、解释结果、查询状态；**不负责出卡编排** |
 
 ### 自动出卡 Pipeline
 
 | Stage | Agent | 职责 |
-|---|---|
+|---|---|---|
 | Stage 1 | `market` | 指数、成交额、量能、市场宽度 |
 | Stage 1 | `sector` | 板块强度、资金方向、主线结构 |
 | Stage 1 | `news` | 新闻窗口与消息面判断 |
@@ -179,11 +266,11 @@ Replay
 | Stage 2 | `risk` | 读取冻结的 Stage 1 事实并行使否决权 |
 | Stage 3 | `synthesizer` | 只做最终综合判断，不采集数据、不 spawn Agent |
 
-`discipline` 已进入长期设计，但目前没有真实的交易行为输入源，因此注册但不启动。
+`discipline` 已进入长期设计，但目前没有真实交易行为输入源，因此注册但不启动。
 
 ---
 
-## 六条设计地基
+## 设计地基
 
 ### 1. `UNKNOWN` 不等于 `PASS`
 
@@ -247,26 +334,68 @@ Trigger
 → DecisionCard
 ```
 
-这条链的 Run Provenance 已经完整落地（schema v16/v17）：一张卡属于哪次执行、
+这条链的 Run Provenance 已完整落地（schema v19）：一张卡属于哪次执行、
 基于哪份切片，现在是一句 SQL，不必解 `card_json`。
 
 ### 5. Runtime Proof 不能由业务代码自证
 
-`agent_runs` 是 BigA 的执行账本，不是 spawn 证明。
+`agent_runs` 是 BigA 的执行账本，不等于 OpenClaw spawn 证明。
 
-真正证明 Specialist 被 OpenClaw spawn 的，是 OpenClaw Runtime 自己记录的运行数据。
+真正证明 Specialist 被执行的，是 OpenClaw Runtime 自己记录的运行数据。
+`bin/biga-card` 在每次出卡后按 Run ID 精确核验，不允许跨 Run 借用 spawn 记录。
+
+```text
+DecisionCard
+→ BigA Run
+→ AgentRun (orchestration_run_id)
+→ runtime_run_id
+→ OpenClaw Runtime Record
+```
 
 ### 6. 历史不可覆盖
 
 ```text
-原始事实
+Raw Artifact
 Snapshot
 Verdict
 DecisionCard
 Replay
 ```
 
-都采用追加或版本化思路。修订产生新版本，不把历史改成"当时就知道"。
+都采用追加或版本化思路。
+
+修订产生新版本，不把历史改成"当时就知道"。
+
+Replay 不重新采集数据，组装结果由守卫强制与原卡一致（业务结论不可变）。
+
+### 7. Risk 拥有独立否决权
+
+Agent 可以提出判断，但：
+
+```text
+身份不成立
+数据过期
+覆盖率不足
+硬性风险规则触发
+```
+
+必须由确定性 Risk Policy fail closed。
+
+### 8. 通知不等于业务成功
+
+```text
+DecisionCard 保存成功
+Feishu 发送失败
+```
+
+应被记录为：
+
+```text
+Decision = COMPLETED
+Notification = FAILED / RETRYING
+```
+
+通知失败不能篡改决策事实。
 
 ---
 
@@ -280,30 +409,69 @@ Replay
 | Risk 制衡层 | ✅ |
 | Synthesizer 综合判官 | ✅ |
 | Run 状态机与事件历史 | ✅ |
+| Global Deadline | ✅ |
+| TIMEOUT 与 FAILED 分离 | ✅ |
+| 部分 Agent 启动失败清理 | ✅ |
+| stale-run reaper | ✅ |
 | Facts / Assessment 拆分 | ✅ |
+| Fact / Evidence canonical value 一致 | ✅ |
 | `index_daily` 冻结快照共享 Vertical Slice | ✅ |
 | Strict JSON、写边界重校验、Amendment 约束 | ✅ |
 | Replay 与组装一致性检查 | ✅ |
-| OpenClaw Runtime spawn 核验 | ✅ |
-| 飞书入站、出站闭环 | ✅ 真机端到端已确认（触发 → 出卡 → 推送成功） |
+| Replay 业务结论不可变守卫 | ✅ |
+| 飞书入站、出站、有限重试与 Outbox | ✅ |
 | Apache-2.0 开源合规基础 | ✅ |
 | Run → EvidenceSet → Verdict → Card 强身份闭环 | ✅ |
-| 外部 kill 后 stale Run 自动收尾 | ✅ |
-| **确定性编排升级 Baseline 冻结**（`v1-architecture-baseline`） | ✅ 经独立 sign-off |
-| 飞书启动失败重试策略 | 🔶 固定次数重试，无指数退避 |
-| 飞书里用裸自然语言要卡（不发 `/card`） | 🔶 仍会走错编排，别这么用 |
-| **Phase 2 自身两条出口条件**（真实否决端到端落库 / 缺失项跨天累积） | 🔶 仍未达成，见下 |
-| 全量 Dataset / Provider / Pipeline Registry | ⬜ 后续 |
+| 真实 Run / EvidenceSet 根节点写边界校验 | ✅ |
+| Run-scoped OpenClaw Spawn Proof | ✅ |
+| Schema Migration 原子性 | ✅ |
+| 通知 Worker 单实例防重复发送 | ✅ |
+| Source ZIP / Clean Clone 默认测试全绿 | ✅ |
+| 确定性编排升级 Baseline 冻结（`v1-architecture-baseline`） | ✅ 经独立 sign-off |
+| 飞书启动失败重试策略 | 🔶 固定次数，无指数退避 |
+| Phase 2 自身两条出口条件（真实否决落库 / 缺失跨天累积） | 🔶 仍未达成，见下 |
+| Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
 当前仓库有 **1817 条测试，SQLite schema v19**，全部通过。
 
-🔴 **"确定性编排升级"（把工作流从提示词搬进程序）已完成 Baseline 冻结**，
-不代表 **Phase 2 本身**已经收口——两者是并行、互不代表对方的判据。Phase 2
-自己的出口条件仍差两条：`emotion`/`news` 报"今天"、日线类报"上一交易日"，
-`risk` 因此正确地拒绝合并审 ⇒ 攒不到一次真实否决；跨天累积同理。
-详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11、
-[`deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
+🔴 **Phase 2 自身出口条件**仍差两条：`emotion`/`news` 报"今天"、日线类报"上一交易日"
+⇒ `risk` 因此正确地拒绝合并审 ⇒ 攒不到一次真实否决；跨天缺失累积同理。
+详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11。
+
+---
+
+## 当前边界
+
+### 当前适合
+
+```text
+离线开发
+受控 Live Run
+人工触发 DecisionCard
+手工飞书验证
+架构与 Contract 演进
+```
+
+### 当前暂不建议
+
+```text
+自动 Retry
+大量 Cron / systemd 无人值守任务
+高频飞书触发
+长期连续生产运行
+自动下单
+将当前测试徽章视为发布质量证明
+```
+
+当以下条件全部满足后，再冻结：
+
+```text
+v1-architecture-baseline（重新冻结）
+```
+
+- Live Acceptance 重新独立通过；
+- Phase 2 两条出口条件达成。
 
 ---
 
@@ -311,7 +479,7 @@ Replay
 
 BigA 的安装场景是：**在一台已经运行另一套 OpenClaw 的机器上，并排安装第二套隔离实例。**
 
-请先按安装指南执行：
+请先阅读：
 
 - [安装与隔离](docs/guide/install.md)
 - [完整使用手册](docs/guide/usage.md)
@@ -333,10 +501,10 @@ bin/biga-card
 ### 查看与验证
 
 ```bash
-bin/biga-card --list       # 最近出过哪些
-bin/biga-card --show <号>   # 看某一张
-bin/biga-card --status <run_id>  # 说出某次运行死在哪一步
-bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相同
+bin/biga-card --list
+bin/biga-card --show <decision_id>
+bin/biga-card --status <run_id>
+bin/biga-card --check <decision_id>
 ```
 
 `--check` 验证的是：
@@ -348,14 +516,27 @@ bin/biga-card --check <号>  # 用冻结证据重跑，断言结论逐字段相�
 → 重新组装
 ```
 
-是否无损；它不是"重新独立推导一次投资结论"。
+是否无损；它不是重新独立推导一次投资结论。
 
 ### 手工投递待发通知
 
 ```bash
-bin/biga-notify                    # 真投递（默认）
-bin/biga-notify --deliverer stdout # 只打印，不真发（排查用）
+bin/biga-notify
 ```
+
+只打印、不实际发送：
+
+```bash
+bin/biga-notify --deliverer stdout
+```
+
+### 回收超时或失联 Run
+
+```bash
+bin/biga-reap
+```
+
+默认行为和可写模式请以使用手册为准。
 
 ### 紧急停止生成新卡
 
@@ -363,7 +544,11 @@ bin/biga-notify --deliverer stdout # 只打印，不真发（排查用）
 printf 'maintenance\n' > .biga-card-stop
 ```
 
-恢复前确认触发源已经停止，然后 `rm .biga-card-stop`。
+恢复前确认触发源已停止，然后：
+
+```bash
+rm .biga-card-stop
+```
 
 `--list`、`--show`、`--check` 等只读命令不受总闸影响。
 
@@ -376,12 +561,12 @@ BigA 不把"程序没报错"当作可信证明。
 | 要验证什么 | 命令 | 证明范围 |
 |---|---|---|
 | Card 组装可回放 | `bin/biga-card --check <decision_id>` | 冻结输入到 Card 的管线无损 |
-| Agent 真的运行 | `python3 tools/verify/spawn_check.py <decision_id>` | BigA 账本与 OpenClaw Runtime 双重对账 |
-| Stage 1 真的并行 | `python3 tools/verify/latency_report.py --parallel-check` | Agent 运行时间区间存在结构性重叠 |
+| Agent 真的运行 | `python3 tools/verify/spawn_check.py --run-id <run_id>` | BigA 账本与 OpenClaw Runtime 双重对账（Run 级精确核验） |
+| Stage 1 真的并行 | `python3 tools/verify/latency_report.py --parallel-check` | Agent 运行区间存在结构性重叠 |
 | 同机实例未受影响 | `python3 tools/verify/isolation.py` | Profile、文件、端口与 systemd 命名空间隔离 |
-| 存量数据可读 | `python3 tools/verify/readback_check.py` | 数据库中不存在"写进去了但读不回来"的毒行 |
-| 今日预算与闸门 | `python3 tools/verify/budget_report.py` | 当前是否允许发起一次新的付费 Run |
-| 配置基线未漂移 | `python3 tools/verify/config_baseline.py` | OpenClaw Version / Tool Policy Hash / Agent Config Hash |
+| 存量数据可读 | `python3 tools/verify/readback_check.py` | 数据库中不存在"写入但无法读取"的毒行 |
+| 今日预算与闸门 | `python3 tools/verify/budget_report.py` | 当前是否允许发起新的付费 Run |
+| 配置基线未漂移 | `python3 tools/verify/config_baseline.py` | OpenClaw Version / Tool Policy / Agent Config |
 
 验证工具使用三态语义：
 
@@ -411,10 +596,12 @@ Agent 和 BigA 业务数据库都不保存 `appSecret`。
 
 当前支持：
 
-- 飞书发送 `/card` 命令触发 BigA（裸自然语言描述意图不会被识别，见上表）；
+- 飞书发送 `/card` 命令触发 BigA；
 - DecisionCard / Run Failure 进入通知路径；
 - `bin/biga-notify` 主动发送待发消息；
-- systemd timer 定期投递。
+- systemd timer 定期投递；
+- Retryable / Permanent Error 分类；
+- 有限次数重试与 abandoned 状态。
 
 飞书属于当前架构的最小集成，不是多用户、多租户通知平台。
 
@@ -434,39 +621,40 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 🔴 每一批都经过**独立复核**——不是提出方自己宣布通过：读全部 diff、亲自
 重跑每一道探针（含 sabotage-revert，故意弄坏一遍确认它真的会报红）、
 跑真实数据验证，再决定合并。这条纪律在 Baseline 冻结本身上也没有例外——
-真机触发飞书 `/card` 走完整闭环、13 项 Live Acceptance 逐条查库核实、
-两处真缺陷（编排器超时不取消残留 spawn、飞书 ACK 抢在预算闸门前面许诺
-结果）当场发现并修复，最终由另一个会话复核后签字确认。
+真机触发飞书 `/card` 走完整闭环、Live Acceptance 逐条查库核实、
+当场发现的真缺陷修复后由另一个会话复核签字确认。
 
 完整推导、每一批做了什么、每次评审怎么复核，见
 [`docs/design/deterministic-orchestration.md`](docs/design/deterministic-orchestration.md)。
 
 ---
 
-## 目录结构
+## 项目结构
 
 ```text
 .
-├── agents/          各 Agent 的 workspace（AGENTS.md = 角色契约唯一载体）
-├── src/easyup_biga/ 五个共享基础设施包的真实实现
-│   ├── domain/      Evidence / AgentVerdict / DecisionCard（唯一实现）；
-│   │               facts.py：事实（FactBundle）与判断（AgentAssessment）已全部拆开
-│   ├── providers/   采集层：五个数据源 + 重试 + 量级围栏
-│   ├── persistence/ 数据访问层（唯一 DB 入口，将来切 PostgreSQL 只改这里）
-│   ├── runtime/     OpenClaw 运行时适配层（Specialist 生命周期唯一入口）
-│   └── application/ SnapshotCoordinator（冻结一次、多处读，跨层协调）
+├── agents/          OpenClaw Agent 的角色契约
+├── src/easyup_biga/
+│   ├── domain/      Evidence / Verdict / Card / Facts / Registry
+│   ├── providers/   数据源适配与采集边界
+│   ├── persistence/ SQLite、Run、Verdict、Outbox
+│   ├── runtime/     OpenClaw Runtime Adapter
+│   └── application/ SnapshotCoordinator 等应用服务
+│
 ├── skills/
 │   ├── _contract/ _sources/ _store/ _runtime/ _snapshot/
-│   │               旧包路径，原地留兼容薄壳（一个字符不改地转发到 src/ 之下）
-│   └── *-calc/      六个业务技能（market / sector / technical / emotion / news / risk）
-├── data/            SQLite 事实层（不入库）
-├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 配置基线 / 公开审查
-│                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
+│   │               旧路径兼容薄壳
+│   └── *-calc/      确定性业务技能
+├── bin/             biga / biga-card / biga-notify / biga-reap
+├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
+├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
 ├── tests/           1817 条测试
 ├── docs/
-│   ├── design/      架构文档（SSOT）+ 各阶段设计
-│   ├── guide/       操作手册（安装 / 使用 / Schema 回滚）
-│   └── tutorial/    开发教程（60 章，与代码同步）
+│   ├── design/      当前架构与阶段设计
+│   ├── guide/       安装、使用、回滚与运维
+│   ├── tutorial/    真实施工过程与事故复盘
+│   └── external/    外部评审材料
+├── data/            本地运行数据（不提交）
 └── images/          品牌素材
 ```
 
@@ -482,8 +670,8 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 | [Phase 2](docs/design/phase-2-specialists.md) | Specialist、Risk 与并行 |
 | [安装指南](docs/guide/install.md) | 与既有 OpenClaw 实例隔离共存 |
 | [使用手册](docs/guide/usage.md) | 出卡、读卡、验证与排错 |
-| [Schema 版本与回滚](docs/guide/schema-rollback.md) | 17 个版本一句话摘要 + 没有 DOWN migration 时怎么办 |
-| [开发教程](docs/tutorial/README.md) | 真实施工过程与事故复盘 |
+| [Schema 回滚](docs/guide/schema-rollback.md) | Schema 版本和恢复方式 |
+| [开发教程](docs/tutorial/README.md) | 60 章真实施工与事故复盘 |
 | [TODO](TODO.md) | 当前未完成项与机器验收条件 |
 | [CHANGELOG](CHANGELOG.md) | 每次变更及其原因 |
 | [CONTRIBUTING](CONTRIBUTING.md) | 贡献规则 |
@@ -501,21 +689,23 @@ external/  外部材料，只读保存
 
 ## 路线图
 
-### Architecture Baseline Hardening —— 🔶 I 节进行中
+### Architecture Baseline Hardening — 当前阶段
 
-`v1-architecture-baseline` tag（已冻结）覆盖 Run Provenance 闭环、
-Run → EvidenceSet 一对一、Strict VerdictRef、TIMEOUT / Kill / Stale Run
-收敛、飞书失败语义、正式 Package 边界、Full Test Baseline。
+在线溯源根节点校验、Run-scoped Spawn Proof、Hermetic Test Baseline、
+Replay 专用写入口、Migration 原子性、Notification Worker 单实例——
+这六项已在 v0.3.1–v0.3.4 全部完成。
 
-**I 节**在此基础上补充七项防御加固（P1-1/P1-2/P1-3/P2-1/P2-2/P2-3/P2-4），
-消灭已核实的静默失败模式（在线溯源根节点校验缺失、双写账本、环境依赖测试无法
-在干净 clone 里运行等）。
-
-### Phase 2 收尾 —— 进行中
+当前剩余的出口条件：
 
 ```text
-真实否决端到端落库（等一次够极端的行情）
-缺失项跨天累积 ≥5 次（等下一个交易日）
+Phase 2 两条功能出口（真实否决 / 缺失跨天累积）
+Live Acceptance 重新独立通过
+```
+
+完成后重新冻结：
+
+```text
+v1-architecture-baseline
 ```
 
 ### Data Platform
@@ -558,10 +748,35 @@ BigA 的演进原则是：
 
 ---
 
+## BigA 与其他项目的关系
+
+BigA 借鉴多 Agent、量化研究、交易执行和数据平台项目中的成熟思想，但核心业务对象与控制面由 BigA 自己拥有。
+
+BigA 不试图证明自己"世界唯一"。
+
+它希望做到的是：
+
+```text
+OpenClaw Runtime
++
+Deterministic Domain Control
++
+Frozen Evidence
++
+Run-scoped Provenance
++
+Failure-first Contracts
++
+Future Trading Lifecycle
+```
+
+在一个面向个人 A 股系统的统一架构里成立。
+
+---
+
 ## 品牌素材
 
-[`images/`](images/) 目录含五张 Logo（`LOGO_BigA01`–`04` + 一张透明底变体）。
-五张图由 AI 生成，保留了 C2PA 内容凭证（`caBX` 块）未作剥离。
+[`images/`](images/) 目录包含 BigA Logo 及透明背景版本。
 
 ---
 
