@@ -4,9 +4,9 @@
 
 ### 基于 OpenClaw 的可追溯 Multi-Agent A 股决策内核
 
-[![Status](https://img.shields.io/badge/status-architecture%20baseline%20hardening-d29922)](TODO.md)
+[![Status](https://img.shields.io/badge/status-phase%202%20code%20closed%20%C2%B7%20baseline%20v1--2-2ea043)](#当前边界)
 [![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
-[![Tests](https://img.shields.io/badge/tests-1891%20selected-555)](#当前实现状态)
+[![Tests](https://img.shields.io/badge/tests-1903%20selected-555)](#当前实现状态)
 [![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v22-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
@@ -427,17 +427,17 @@ Notification = FAILED / RETRYING
 | Schema Migration 原子性 | ✅ |
 | 通知 Worker 单实例防重复发送 | ✅ |
 | Source ZIP / Clean Clone 默认测试全绿 | ✅ |
-| 确定性编排升级 Baseline 冻结（`v1-architecture-baseline`） | 🔶 **已解冻**——tag 打过，此后的独立评审发现了阻塞项，待重新冻结 |
+| 确定性编排升级 Baseline 冻结 | ✅ 2026-09-25 重新冻结于 `v1-architecture-baseline-2`，口径 = **代码与架构收口**（旧 `v1-architecture-baseline` 保留不动，它的解冻经过见下文）|
 | 飞书启动失败重试策略 | 🔶 固定次数，无指数退避 |
-| Phase 2 出口条件 4（缺失跨天累积） | ✅ 跨 4 天 44 张卡（`tools/verify/exit_conditions.py`）|
+| Phase 2 出口条件 4（缺失跨天累积） | ✅ **严格判据**实测跨 5 天 31 张卡（2026-09-25 生产库，`tools/verify/exit_conditions.py`；演练注入与编排层弱证据不计入）|
 | Phase 2 出口条件 3（真实否决落库） | ⬜ 等一个命中 risk 阈值的交易日——不是开发问题 |
-| Phase 2 出口条件 5（延迟预算） | ✅ `elapsed_ms` 已修，实测 66.8s / $0.88（预算 90s）|
+| Phase 2 出口条件 5（延迟预算） | ✅ 盘中 Decision SLO **180s**，唯一定义在 `latency_report.py::DEFAULT_BUDGET_MS`；盘后负载另立 Profile（裁定 17）|
 | AgentRun 写边界闭合（三个显式入口） | ✅ 裸接口已私有 |
 | 交易日历（`market_is_open` 认节假日） | ✅ 2026-09-25 起真的认了（`bin/biga-calendar`）|
 | Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1890 条 Hermetic 测试选中，SQLite schema v22**，0 failed。
+当前仓库有 **1903 条 Hermetic 测试选中，SQLite schema v22**，0 failed。
 
 | 口径 | 数字 | 怎么复现 |
 |---|---|---|
@@ -488,9 +488,12 @@ Spawn Proof 仍是 decision 级、测试基线不可复现）；随后那批修�
 
 解冻本身也说明打 tag 的时机偏早：`v1` 该在 Live Acceptance 重新通过之后再打。
 
-🔴 **Phase 2 自身出口条件**仍差两条：`emotion`/`news` 报"今天"、日线类报"上一交易日"
-⇒ `risk` 因此正确地拒绝合并审 ⇒ 攒不到一次真实否决；跨天缺失累积同理。
-详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §3.11。
+🔒 **Phase 2 代码收口已完成，出口条件 7/8。** 剩下的只有条件 3（一次真实 Risk Veto），
+它**等的是行情、不是开发** —— 要盘面真的命中 risk 的阈值之一。
+条件 4 与 5 在 2026-09-25 用收紧后的判据重新实测后达成，不是把线放宽换来的：
+条件 4 的工具改严了（演练与弱证据不再计入）数字反而还在线上，条件 5 是把
+早已重推完的 180s 从两个字面量收敛成一处定义。
+详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §4。
 
 ---
 
@@ -517,14 +520,21 @@ Spawn Proof 仍是 decision 级、测试基线不可复现）；随后那批修�
 将当前测试徽章视为发布质量证明
 ```
 
-当以下条件全部满足后，再冻结：
+🔒 **2026-09-25：基础架构已按「代码收口」口径重新冻结于 `v1-architecture-baseline-2`。**
+
+这个 tag 声称的是**代码与架构收口**，不是「全部验收通过」。它明确**不**覆盖两件事：
 
 ```text
-v1-architecture-baseline（重新冻结）
+⬜ Phase 2 条件 3   一次真实 Risk Veto —— 等行情命中 risk 阈值，不是等开发
+🔶 Live Acceptance  2026-09-25 跑过一次：PASS 6 / FAIL 0 / PENDING 3
 ```
 
-- Live Acceptance 重新独立通过（2026-09-25 已跑一次：PASS 6 / FAIL 0 / PENDING 3）；
-- Phase 2 条件 3 与 5 达成。
+🔴 **把这两条写在 tag 旁边，是裁定 14 本身的要求。** 上一个
+`v1-architecture-baseline` 出事不是因为打早了一天，是因为它**没说自己不包含什么** ——
+读的人于是把它读成「全绿」。这次换一种做法：冻结的范围写死在 tag message 里，
+剩下的两条留在这儿显眼地开着。
+
+旧 tag 不删、不移动（L-8：当时看到的必须可重建）。
 
 ---
 
@@ -701,7 +711,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── bin/             biga / biga-card / biga-notify / biga-reap
 ├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
 ├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
-├── tests/           1891 条测试
+├── tests/           1903 条测试
 ├── docs/
 │   ├── design/      当前架构与阶段设计
 │   ├── guide/       安装、使用、回滚与运维
@@ -753,15 +763,16 @@ Replay 专用写入口、Migration 原子性、Notification Worker 单实例—�
 
 ```text
 Phase 2 条件 3（真实否决）—— 等行情，不是等开发
-Phase 2 条件 5（延迟预算）—— elapsed_ms 已修，等下次盘中取数
 Live Acceptance 重新独立通过
 ```
 
-完成后**另打一个新 tag**（不移动、不覆盖旧的那个 —— 见上文「tag 现状」）：
+🔒 **已另打新 tag**（不移动、不覆盖旧的那个 —— 见上文「tag 现状」）：
 
 ```text
-v1-architecture-baseline-2
+v1-architecture-baseline-2    2026-09-25 · 口径 = 代码与架构收口
 ```
+
+上面那两条**不在这个 tag 的声称范围内**，见「当前边界」一节。
 
 ### Data Platform
 

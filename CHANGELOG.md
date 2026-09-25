@@ -17,6 +17,147 @@
 
 ---
 
+## [0.5.1] - 2026-09-25
+
+### 修复 · Phase 2 收口评审 v2：**验收工具自己在放水**
+
+外部评审包 `biga-phase2-final-closure-package-v2`。它没动任何产品代码 ——
+Agent / Orchestrator / Adapter / Schema / Provider 一行未改 —— 全部三处修改都落在
+`tools/verify/` 里。
+
+🔴 **这件事本身就是结论**：前几轮评审查的是「系统会不会做错」，这一轮查的是
+**「判系统对不对的那个东西，本身对不对」**。而它查出来的两条，都会让出口条件
+**提前变绿**。
+
+> 验收工具报绿的成本是零，报红的成本是一天工作。
+> 没有东西在验收验收工具 —— 这是本仓库到目前为止唯一一层没有守卫的地方。
+
+#### ① 条件 4 会把「自己制造的故障」算成「发现了真实缺失」
+
+`exit_conditions.py` 自己写了一套 `_is_real_missing()`：带点号、不以
+`supervisor.` / `roster.` 开头就算数。而 `missing_ledger.py` 早就有一套更细的分类，
+它**额外**排除了 `--break-source` 演练注入的那些。
+
+两套判据同时存在 ⇒ **L-3**。而这次的分叉方向特别糟：宽的那套用来签收出口条件，
+严的那套只用来打印台账。等于用自己制造的故障证明自己能发现故障。
+
+⇒ 分类唯一复用 `missing_ledger.py`，`_is_real_missing()` 删掉。
+
+#### ② 条件 3 只看「有没有人说了否决」
+
+原判据是「任一 verdict 的 `stance == 否决`」。三个洞：不管是不是 `risk` 说的、
+不管 Card 状态有没有真的被拦住、不管这张卡还能不能 `replay --check` 复现。
+
+制衡层的否决权是一个**权限**，不是一句措辞（见 `verdict.py::VETO_STANCE` 的注释）。
+签收它却只认措辞，等于把 Phase 2 唯一的结构性新机制验成了一次字符串比对。
+
+⇒ 收紧成三项**同时**成立：`risk.stance == VETO_STANCE` ∧ `Card.status ∈ {AVOID, BLOCK}`
+∧ `replay --check` 通过。
+
+#### ③ 台账把回放行当成独立的卡
+
+`missing_ledger.collect()` 取号时没有 `WHERE replay_of IS NULL` —— 同一个
+`decision_id` 有回放时，`load_online_card()` 会把**同一张在线卡**返回两遍。
+实测生产库 49 行 / 48 个决策号，正好多数一张。
+
+⇒ `SELECT DISTINCT … WHERE replay_of IS NULL`。
+
+#### 改严之后重新实测：条件 4 达成（数字没变）
+
+```text
+✅ 条件 4 · 源级真实 missing ≥5 张且跨天
+      2026-09-21  19 张    2026-09-24   8 张
+      2026-09-22   1 张    2026-09-25   2 张
+      2026-09-23   1 张
+      ⇒ 31 张卡，跨 5 天
+```
+
+🔴 **数字没变不代表白改。** 恰恰相反 —— 现在这个数是**可解释**的：
+当前库里 `--break-source` 演练卡共 **0** 张，所以①那个洞是**潜在的**、今天还没咬人。
+而评审方看不到生产库，只能判「🔶 待重跑确认」；我们跑了，所以写 ✅ 并附实测输出。
+
+⚠️ 文档里原来那句「跨 4 天 44 张卡」是**一次手写统计**，口径与任何一版工具都不同，
+谁也复现不出来。⇒ 以工具输出为准，手写数字不再留作判据（裁定 14 的直接应用）。
+
+### 修复 · 顺着同一条线扫下去，自己又找到三处
+
+评审只报了上面三条。但「没有东西在验收验收工具」是个**模式**，不是三个 bug ——
+照 R-2 那条红线的教训（「再发现第四处，补进表里，别新开一条红线」）顺着扫了一遍：
+
+#### ④ 盘中延迟预算有**两个出处**，而且此刻不相等
+
+```text
+latency_report.py::DEFAULT_BUDGET_MS  = 180_000   ← 连推导过程一起写在这儿
+phase1_acceptance.check_8_latency()   =  90_000   ← 另一个字面量，没人同步
+```
+
+同一次运行，一个工具说达标、另一个说超两倍，**两边都不报错**。
+
+评审给的修法是把 `90_000` 改成 `180_000`。**那只是让两个字面量此刻相等** ——
+下次重推预算还会再分叉一次。⇒ 改成 `from latency_report import DEFAULT_BUDGET_MS`，
+并由 `test_条件5_盘中延迟预算只有一处定义` 钉住「只有一处」（不是「两处相等」）。
+
+#### ⑤ 退出码三态的守卫，名单里漏了两个工具
+
+`tests/test_verify_exit_codes.py` 的两条守卫按一张**手写名单** `_WIRED` 参数化。
+`exit_conditions.py` 与 `budget_report.py` 从建起就用着这套码，却从来不在名单里 ——
+两条守卫**一次都没查过它们**。
+
+🔴 根因不是「忘了加」，是**名单不会因为目录里多一个文件而自己变长**，
+而它失效的表现是「少两条 test case」，不是一条红。测试总数每天都在变，没人会发现。
+
+⇒ 加 `test_名单没有漏掉任何用了这套码的工具`：**目录里凡是 import 了 `_verdict` 的，
+都得在名单里**。这条不需要人记得。
+
+补进名单当场抓到 ⑥。
+
+#### ⑥ `budget_report.py` 的 `return 3` —— 一个不在词汇表里的退出码
+
+`_verdict.describe(3)` 打出来是「未定义的退出码 3」。
+⇒ 「闸门此刻拒绝」是**查了、确实观察到**的状态（不是没查成）⇒ `_v.FAIL`。
+
+#### ⑦ README 里第四个测试条数，三条正则一个都匹配不上
+
+```text
+badge/tests-1891%20selected        ← 守卫查
+├── tests/  1891 条测试            ← 守卫查
+**1890 条 Hermetic 测试选中**      ← 中间夹了个 Hermetic，三条正则全落空
+```
+
+同一份 README 自己跟自己对不上（1891 vs 1890），而守卫全绿。
+与徽章那次（`(\d+)%20TESTS` 从没匹配上过）是**逐字相同**的形状：
+**L-13 —— 判据按字符串形状写，作者多打两个字它就静默失效。**
+
+⇒ 补第四条正则 + `sync_test_count.sh` 补对应 sed。四处现在同步为 **1903**。
+
+### 新增
+
+- `tests/test_exit_conditions.py` —— 出口条件工具的红灯测试（7 条）。
+  三类假阳性各有一条探针：演练顶满条件 4 / 非 risk 的否决算数 / 预算有两个出处
+- `tests/test_verify_exit_codes.py::test_名单没有漏掉任何用了这套码的工具`
+
+⚠️ 两条新守卫都做了**反向探针**：把 `_WIRED` 缩回原样 → 红；
+把预算改回字面量（**即使值相同**）→ 红。没验证会红的守卫不算守卫。
+
+### 变更 · 裁定 17：Phase 2 的延迟门槛固定为盘中 180s
+
+盘中 Decision SLO = 180s 是 Phase 2 **唯一**的正式延迟门槛。
+**盘后运行不纳入** —— 收盘后一小时快讯量翻倍（184 vs ~70 条）是另一种负载形态，
+归后续 Data Platform / Post-close Job Profile 单独定义。
+
+🔴 这条裁定要防的是把出口条件写成一个**动的**数：盘后一超就重推一次预算，
+等于让被考核的负载自己决定考核线。
+
+⇒ 出口条件 5 达成。Phase 2 **7/8**，只差条件 3（一次真实 Risk Veto）——
+它等的是行情命中 risk 的阈值，不是开发。
+
+### 已知问题
+
+- Phase 2 出口条件 3 未达成：库里还没有一次满足严格三项判据的真实否决
+- `v1-architecture-baseline` 仍处于解冻状态，待 Live Acceptance 重新独立通过后另打新 tag
+
+---
+
 ## [0.5.0] - 2026-09-25
 
 ### 修复 · v1 最终架构收口评审（`biga-final-architecture-closure-review-2026092503`）
@@ -8093,7 +8234,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.5.0...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/easyup168/easyup-biga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/easyup168/easyup-biga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/easyup168/easyup-biga/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/easyup168/easyup-biga/compare/v0.3.6...v0.3.7
