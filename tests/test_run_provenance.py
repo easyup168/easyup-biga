@@ -141,6 +141,27 @@ class TestSchemaV16:
         assert column in cols, f"{table}.{column} 不存在 —— 血缘还是只能解 card_json"
         assert cols[column] == "TEXT"
 
+    def test_一个run至多一个切片的约束只应有一条(self, db):
+        """v20：一条不变量只许有一个名字。
+
+        🔴 v18 照抄评审 §6.4 的建议索引加了 `ux_evidence_sets_run`，**没有先查
+        这条不变量是不是已经有人在守** —— v16 的 `ux_evidence_set_per_run` 与它
+        逐字相同（同表、同列、同 WHERE）。两个名字守同一条规则就是 L-3：
+        将来改规则时改掉一个，剩下那个仍在默默拦着，而且不报错。
+
+        评审给的是**形状**，不是「你缺这个」。v20 把 v18 那个名字撤了。
+
+        sabotage 验证：把 `_V20` 从 MIGRATIONS 里去掉，本条变红（会数到 2 条）。
+        """
+        with connect(db, readonly=True) as c:
+            idx = [r["name"] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='evidence_sets' AND sql LIKE '%UNIQUE%' "
+                "AND sql LIKE '%run_id%'")]
+        assert idx == ["ux_evidence_set_per_run"], (
+            f"evidence_sets(run_id) 上的唯一索引应当只有一条，实际 {idx}。\n"
+            "  多出来的那条守的是同一件事 —— 改规则时会有一条被漏掉（L-3）。")
+
     def test_一个run至多一套evidence_set(self, db):
         """评审 §9「Every Run has exactly one EvidenceSet」的「至多」那一半。
 
@@ -357,6 +378,39 @@ class TestLegacySynthesizeCLI:
 
     def test_只渲染不落库时放行(self, db):
         assert self._run(db, "--no-store").returncode == 0
+
+    def test_落库时每条verdict恰好一条agent_runs(self, db):
+        """P2-2：standalone synthesize 不许重复记账。
+
+        🔴 这条守的是 v0.3.1 删掉的那段**手工账本循环** —— 它在 `persist()`
+        内部也记一遍的前提下又记了一遍，于是每条 Verdict 双写。
+
+        ⚠️ 已有的 `test_在线路径记账_每个verdict一行` 覆盖不到它：那条测的是
+        `card_ops.persist()`，而双写发生在 `synthesize.py` 这一层 ——
+        **修复之前那条也是绿的**。把手工循环加回去，只有本条会红。
+        """
+        import os
+        # 🔴 原件必须带 run_id：P1-1 起在线卡不许引用 NULL-run 的历史 Verdict。
+        #    `_run()` 落的是不带 run_id 的那种（它服务的两条测试测的是更早的闸门）。
+        vid = save_verdict(_verdict(), run_id=TEST_RUN_ID, path=db)
+        em = []
+        for m in absent_registrations(["market"]):
+            em += ["--extra-missing", m.code, str(m)]
+        r = subprocess.run(
+            [sys.executable, str(REPO / "skills/decision-card/scripts/synthesize.py"),
+             "--verdict-ids", str(vid), "--status", "WAIT", "--headline", "h",
+             "--model-ref", "m", *em, "--json",
+             "--run-id", TEST_RUN_ID, "--evidence-set-id", TEST_EVIDENCE_SET_ID],
+            capture_output=True, text=True,
+            env={**os.environ, "BIGA_DB_PATH": str(db)})
+        assert r.returncode == 0, r.stderr
+        with connect(db, readonly=True) as c:
+            rows = c.execute("SELECT agent, COUNT(*) n FROM agent_runs "
+                             "GROUP BY agent").fetchall()
+        assert [(r0["agent"], r0["n"]) for r0 in rows] == [("market", 1)], (
+            "每条 Verdict 应当恰好一条 agent_runs —— "
+            f"实际 {[(r0['agent'], r0['n']) for r0 in rows]}。"
+            "两条 = synthesize.py 和 persist() 各记了一遍（P2-2）。")
 
 
 class TestSaveVerdictRunValidation:

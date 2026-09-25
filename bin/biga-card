@@ -310,10 +310,22 @@ fi
 #    留着它是纵深防御，退出码语义与老路径一致（4 = spawn 未过，6 = 历史毒行）。
 #
 # P1-2：按 orchestration_run_id（Run 级）精确核验，防止同 decision 的别的 Run
-#    借用本次 spawn 记录通过检查。run_id 从 decision_runs 取，与 NOW 严格绑定。
-RUN_ID=$(_sql "SELECT run_id FROM decision_runs WHERE decision_id='$NOW' ORDER BY created_at DESC LIMIT 1")
+#    借用本次 spawn 记录通过检查。
+#
+# 🔴 run_id 取自**刚落的那张卡**（`decision_records.run_id`，v16 加的列），
+#    不是 `decision_runs` 里这个 decision 最新的那次 run。
+#    最终验收条件写的是「Spawn Proof 精确绑定 **Card.run_id**」——
+#    `ORDER BY created_at DESC LIMIT 1` 给的是「最近开的那次 run」，
+#    而一个 decision 可以有多个 run（重投 / reaper / 将来的 Retry，
+#    那正是 P1-2 的威胁模型）。出卡之后若又开了一次 run，核验就会去查
+#    一个没出过这张卡的执行尝试 —— 查的不是这张卡的来路。
+RUN_ID=$(_sql "SELECT run_id FROM decision_records WHERE decision_id='$NOW' AND replay_of IS NULL AND run_id IS NOT NULL ORDER BY record_id DESC LIMIT 1")
 if [ -z "$RUN_ID" ]; then
-  echo "🔴 找不到本次执行的 run_id（决策号 $NOW）——spawn 核验无法按 Run 级精确核验。" >&2
+  echo "🔴 刚落的卡（决策号 $NOW）没有 run_id —— spawn 核验无法按 Run 级精确核验。" >&2
+  echo "   在线卡必须带 run_id（save_card 的在线分支会拒绝不带的）；"           >&2
+  echo "   查这张卡怎么落进去的：sqlite3 data/biga.db \\"                        >&2
+  echo "     \"SELECT record_id,run_id,replay_of FROM decision_records"          >&2
+  echo "       WHERE decision_id='$NOW'\""                                       >&2
   exit 4
 fi
 $PY tools/verify/spawn_check.py --run-id "$RUN_ID"

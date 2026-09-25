@@ -334,7 +334,7 @@ Trigger
 → DecisionCard
 ```
 
-这条链的 Run Provenance 已完整落地（schema v19）：一张卡属于哪次执行、
+这条链的 Run Provenance 已完整落地（schema v20）：一张卡属于哪次执行、
 基于哪份切片，现在是一句 SQL，不必解 `card_json`。
 
 ### 5. Runtime Proof 不能由业务代码自证
@@ -427,13 +427,37 @@ Notification = FAILED / RETRYING
 | Schema Migration 原子性 | ✅ |
 | 通知 Worker 单实例防重复发送 | ✅ |
 | Source ZIP / Clean Clone 默认测试全绿 | ✅ |
-| 确定性编排升级 Baseline 冻结（`v1-architecture-baseline`） | ✅ 经独立 sign-off |
+| 确定性编排升级 Baseline 冻结（`v1-architecture-baseline`） | 🔶 **已解冻**——tag 打过，此后的独立评审发现了阻塞项，待重新冻结 |
 | 飞书启动失败重试策略 | 🔶 固定次数，无指数退避 |
 | Phase 2 自身两条出口条件（真实否决落库 / 缺失跨天累积） | 🔶 仍未达成，见下 |
 | Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1817 条测试，SQLite schema v19**，全部通过。
+当前仓库有 **1833 条测试，SQLite schema v20**，全部通过。
+
+### tag 现状
+
+| tag | 指向 | 现在该怎么读它 |
+|---|---|---|
+| **`v0.3.6`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
+| `v1-architecture-baseline` | 一个更早的提交 | ⚠️ **已解冻，不再代表「可发布」。**保留是因为它是历史事实（当时确实 sign-off 过），不是因为它仍然成立 |
+| `v0.3.1` … `v0.3.4` | 各自的发布点 | 过程快照 |
+
+🔴 **`v1-architecture-baseline` 为什么解冻**：它打过，也确实经过独立 sign-off。
+但 sign-off 之后的**又一轮**独立评审在正常路径上找到了阻塞项（在线溯源根节点未校验、
+Spawn Proof 仍是 decision 级、测试基线不可复现）；随后那批修复**本身**再被复核时，
+又发现十二处 —— 其中三处是「守卫写了、但没有任何生产代码调用它」，也就是说
+**打勾的那几项当时并没有真的在守**（见 CHANGELOG `[0.3.6]`）。⇒ 徽章从 ✅ 退回 🔶。
+
+这一步是裁定 14 的直接应用：**徽章必须描述一个真被测过的状态，未达成就写 🔶，
+不写 ✅。** 一个描述过期状态的 ✅ 比 🔶 更糟 —— 🔶 诚实，它不诚实。
+
+⚠️ 这个 tag **没有被删除**，也不建议删：删掉等于抹掉「我们曾经以为它成立」这件事，
+而那恰恰是这份记录里最有价值的部分。要重新冻结时**另打一个新 tag**，
+不覆盖、不移动旧的 —— 与 `decision_records` 用 `replay_of` 追加而不是原地改，
+是同一条纪律（L-8：当时看到的必须可重建）。
+
+解冻本身也说明打 tag 的时机偏早：`v1` 该在 Live Acceptance 重新通过之后再打。
 
 🔴 **Phase 2 自身出口条件**仍差两条：`emotion`/`news` 报"今天"、日线类报"上一交易日"
 ⇒ `risk` 因此正确地拒绝合并审 ⇒ 攒不到一次真实否决；跨天缺失累积同理。
@@ -607,7 +631,7 @@ Agent 和 BigA 业务数据库都不保存 `appSecret`。
 
 ---
 
-## 确定性编排升级（Baseline 已冻结）
+## 确定性编排升级（Baseline 冻结后已解冻）
 
 Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错误的决策号上、
 出卡递归成 187 个会话烧掉 \$8.99、飞书路径 4 spawn 缺一个 agent 却没有任何报错。
@@ -648,7 +672,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── bin/             biga / biga-card / biga-notify / biga-reap
 ├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
 ├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
-├── tests/           1817 条测试
+├── tests/           1833 条测试
 ├── docs/
 │   ├── design/      当前架构与阶段设计
 │   ├── guide/       安装、使用、回滚与运维
@@ -693,7 +717,8 @@ external/  外部材料，只读保存
 
 在线溯源根节点校验、Run-scoped Spawn Proof、Hermetic Test Baseline、
 Replay 专用写入口、Migration 原子性、Notification Worker 单实例——
-这六项已在 v0.3.1–v0.3.4 全部完成。
+这六项在 v0.3.1–v0.3.4 落地，**v0.3.6 复核后才真正到位**：那次复核发现其中
+三项的守卫没有任何生产调用方（写了函数 ≠ 那条路被守住），详见 CHANGELOG。
 
 当前剩余的出口条件：
 
@@ -702,10 +727,10 @@ Phase 2 两条功能出口（真实否决 / 缺失跨天累积）
 Live Acceptance 重新独立通过
 ```
 
-完成后重新冻结：
+完成后**另打一个新 tag**（不移动、不覆盖旧的那个 —— 见上文「tag 现状」）：
 
 ```text
-v1-architecture-baseline
+v1-architecture-baseline-2
 ```
 
 ### Data Platform

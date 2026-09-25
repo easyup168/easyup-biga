@@ -1363,9 +1363,19 @@ def record_agent_run(
     """
     with connect(path) as conn:
         # P1-2：在线路径校验 run 真实存在且归属于 decision，防止伪造账本行。
-        if orchestration_run_id is not None and decision_id is not None:
+        # 🔴 判据只看 `orchestration_run_id` 一个 —— 旧写法是
+        #    `if orchestration_run_id is not None and decision_id is not None`，
+        #    那样 `decision_id=None` 就整段跳过校验，而下面照样把这行盖上
+        #    `provenance_mode='online'` 的章：账本里于是躺着一行**自称在线、
+        #    却指向一个不存在的 run** 的记录。这与 `save_evidence_set` 里
+        #    A2 修掉的是同一个洞，当时漏了这一处。
+        if orchestration_run_id is not None:
+            if not decision_id:
+                raise ValueError(
+                    "run-bound agent run requires decision_id —— "
+                    "orchestration_run_id 非空时 decision_id 不能为 None（P1-2）")
             _assert_run_owns_decision(conn, run_id=orchestration_run_id,
-                                     decision_id=decision_id)
+                                      decision_id=decision_id)
         if provenance_mode is None and orchestration_run_id is not None:
             provenance_mode = "online"
         cur = conn.execute(
@@ -1401,8 +1411,15 @@ def record_online_agent_run(
     """在线路径专用的严格 API：三个 provenance 字段全部必须非空。
 
     与 record_agent_run() 的区别：这里 decision_id / orchestration_run_id /
-    runtime_run_id 全部是位置必填语义，任何一个为空立刻抛 ValueError，
-    不允许传 None 绕过校验。用于 card_ops.persist() 的在线路径（批 P1-2）。
+    runtime_run_id 全部是必填语义，任何一个为空立刻抛 ValueError，
+    不允许传 None 绕过校验。
+
+    🔴 **唯一生产调用方是 `record_verdict_run()` 的在线分支**（它再被
+    `card_ops.persist()` 调）。这句话曾经写的是「用于 card_ops.persist() 的
+    在线路径」—— 那时 `persist()` 走的是 `record_verdict_run()` →
+    `record_agent_run()`，**根本不经过这里**：一个自称守着在线路径、
+    却没有任何生产调用方的守卫（L-1）。修法不是删掉它，是把路由接上：
+    字段映射仍然只有 `record_verdict_run()` 一份，不在调用点手抄。
     """
     for name, value in {
         "decision_id": decision_id,
@@ -1445,7 +1462,22 @@ def record_verdict_run(
     """从一个 `AgentVerdict` 直接记账，省得调用方手抄字段（抄错就是口径分裂）。
 
     `runtime_run_id` / `orchestration_run_id` 透传给 `record_agent_run` —— 见那里的说明。
+
+    🔴 P1-2：三个 provenance 字段都齐时走严格 API `record_online_agent_run()`。
+    路由放在这里而不是 `card_ops.persist()`，是为了让字段映射仍然只有这一份 ——
+    在调用点按条件分支各抄一遍，就是这个函数当初存在的理由的反面。
+    ⚠️ 「齐不齐」是**判据**不是**要求**：被 spawn 了却没拿到 runtime_run_id 的
+    agent 仍然记账（批 F 的立场，不记就是漏账），只是走宽松分支、
+    在 `spawn_proof_for_run()` 那里被判成 UNKNOWN 而不是 PASS —— R-3。
     """
+    if decision_id and orchestration_run_id and runtime_run_id:
+        return record_online_agent_run(
+            decision_id=decision_id, orchestration_run_id=orchestration_run_id,
+            runtime_run_id=runtime_run_id, agent=v.agent, task_id=v.task_id,
+            status=v.status, verdict=v.verdict, missing_count=len(v.missing),
+            elapsed_ms=v.elapsed_ms, model=model,
+            started_at=started_at, finished_at=finished_at, path=path,
+        )
     return record_agent_run(
         task_id=v.task_id, agent=v.agent, status=v.status, verdict=v.verdict,
         missing_count=len(v.missing), elapsed_ms=v.elapsed_ms,

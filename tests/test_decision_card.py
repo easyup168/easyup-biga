@@ -252,26 +252,67 @@ class TestReplay:
         assert "不一致" in capsys.readouterr().err
 
     def test_回放不覆盖原始记录(self, db):
-        """回放追加新行、不改原始行；换模型（model_ref 在 ALLOWED_REPLAY_CHANGES 里）是合法的。"""
+        """回放追加新行、不改原始行 —— 且**换模型给出新结论**是合法的。
+
+        🔴 这正是本模块 docstring 里的用法 2（「换个模型重跑，看结论会不会变」）。
+        v0.3.4 的第一版 P2-3 守卫拿 `comparable()` 做全量比对，把结论也冻住了，
+        于是这条命令永远落不了库，而 CLI 还在收 `--status/--headline`。
+        评审 §13.2 要冻的是**来源**，不是**结论**。
+        """
         self._seed(db)
-        # 换模型但不改业务结论 —— 应该成功
-        assert replay.main([DID, "--model-ref", "anthropic/claude-opus-5", "--store"]) == 0
+        assert replay.main([DID, "--status", "AVOID", "--headline", "更保守",
+                            "--model-ref", "anthropic/claude-opus-5", "--store"]) == 0
         assert load_online_card(DID).status == "WAIT"    # 在线那条没变
         with connect(db, readonly=True) as c:
             rows = c.execute("SELECT record_id, replay_of, status "
                              "FROM decision_records ORDER BY record_id").fetchall()
-        assert [r["status"] for r in rows] == ["WAIT", "WAIT"]
+        assert [r["status"] for r in rows] == ["WAIT", "AVOID"]
         assert rows[1]["replay_of"] == rows[0]["record_id"]
 
-    def test_回放不能改业务结论(self, db):
-        """P1-2 不可变守卫：回放卡的 status/headline 等业务结论不许与原卡不同。"""
+    def test_回放不能改血缘(self, db):
+        """P2-3：回放可以给新结论，但不许换掉「这个结论基于什么」。
+
+        评审 §18 的 `test_replay_preserves_frozen_input_lineage`。
+        判据逐字段来自 `card_ops.REPLAY_FROZEN_LINEAGE`。
+
+        sabotage 验证：把 `save_replay_card()` 里的 `_lineage_drift` 判断删掉，
+        本条变红 —— 一张换掉了证据的「回放」会被当成无损回放落进库。
+        """
         self._seed(db)
-        # 强行改 status：save_replay_card 应该拒绝
-        rc = replay.main([DID, "--status", "AVOID", "--headline", "更保守",
-                          "--model-ref", "anthropic/claude-opus-5", "--store"])
-        assert rc != 0, (
-            "回放卡改了 status（WAIT→AVOID），save_replay_card 应该拒绝、"
-            f"replay.main 应该返回非零，实际返回 {rc}")
+        original = card_ops.load_original(DID)
+        with connect(db, readonly=True) as c:
+            parent = c.execute("SELECT record_id FROM decision_records "
+                               "WHERE decision_id=? AND replay_of IS NULL",
+                               (DID,)).fetchone()["record_id"]
+
+        # 换掉冻结切片 id —— 结论可以变，但「基于哪份数据」不许变
+        tampered = card_ops.synthesize(
+            historical=True, decision_id=original.decision_id,
+            verdicts=original.verdicts,
+            judgment=card_ops.Judgment(status=original.status,
+                                       headline=original.headline,
+                                       synthesis=original.synthesis),
+            model_ref="m", elapsed_ms=0,
+            verdict_refs=list(original.input_verdict_refs),
+            expected_roster=original.expected_roster,
+            evidence_set_id="es-别人的切片")
+
+        with pytest.raises(ValueError, match="evidence_set_id"):
+            card_ops.save_replay_card(tampered, parent)
+
+    def test_回放血缘守卫不误伤换模型(self, db):
+        """守卫的守卫：只换 model_ref 不动血缘，必须放行。
+
+        `model_ref` 已经从 `ALLOWED_REPLAY_CHANGES` 里摘掉了（那是给 `--check`
+        用的集合），落库侧靠 `REPLAY_FROZEN_LINEAGE` 不包含它来放行 ——
+        两个集合分别回答两个问题，这条钉住它们没有再纠缠到一起。
+        """
+        self._seed(db)
+        assert "model_ref" not in card_ops.ALLOWED_REPLAY_CHANGES, (
+            "model_ref 不该在 ALLOWED_REPLAY_CHANGES 里 —— 它会让 replay --check "
+            "看不见 SYNTHESIS_VERSION 漂移")
+        assert replay.main([DID, "--model-ref", "anthropic/claude-opus-5",
+                            "--store"]) == 0
 
     def test_model_ref不层层累积版本后缀(self, db):
         """回放取回的 model_ref 已带 (synth/N)，不剥掉会越叠越长。"""
@@ -352,6 +393,56 @@ class TestPersistWritesAgentRunsLedger:
         assert sorted(r["agent"] for r in rows) == sorted(STANCE_VOCAB), (
             "在线 persist() 必须给每个 verdict 记一行 agent_runs，"
             "否则 spawn_check.py 永远判不了")
+
+    def test_在线路径走严格API_record_online_agent_run(self, db, monkeypatch):
+        """P1-2：provenance 三字段齐全时，账本必须经过 `record_online_agent_run()`。
+
+        🔴 这条测的是**它有没有生产调用方**，不是它的内部校验对不对。
+        v0.3.4 加这个严格 API 时写着「用于 card_ops.persist() 的在线路径」，
+        而 `persist()` 走的是 `record_verdict_run()` → `record_agent_run()`，
+        根本不经过它 —— 一个只有测试在调的守卫（L-1）。
+
+        sabotage 验证：把 `record_verdict_run()` 里那段路由删掉，本条立刻变红。
+        """
+        import _store.db as _db
+        seen: list[tuple[str, str, str]] = []
+        real = _db.record_online_agent_run
+
+        def spy(**kw):
+            seen.append((kw["agent"], kw["orchestration_run_id"],
+                         kw["runtime_run_id"]))
+            return real(**kw)
+
+        monkeypatch.setattr(_db, "record_online_agent_run", spy)
+        c = _synth(decision_id=DID, verdicts=full_roster(),
+                   judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        rr = {v.agent: f"openclaw-{v.agent}" for v in c.verdicts}
+        card_ops.persist(c, runtime_run_ids=rr)
+
+        assert sorted(a for a, _, _ in seen) == sorted(rr), (
+            "在线路径没有走严格 API —— `record_online_agent_run()` 没有生产调用方，"
+            f"实际经过它的只有 {sorted(a for a, _, _ in seen)}")
+        assert all(orch == c.run_id for _, orch, _ in seen), \
+            "账本行指回的编排执行尝试必须是卡自己那次"
+
+    def test_没拿到runtime_run_id时仍然记账_但不走严格API(self, db, monkeypatch):
+        """批 F 的立场不许被 P1-2 推翻：被 spawn 却没捞回 id 的 agent 仍要记账。
+
+        不记就是漏账（账本行数与真实 spawn 次数脱节）。它只是走宽松分支，
+        由 `spawn_proof_for_run()` 判成 UNKNOWN —— R-3，不是 PASS 也不是伪造。
+        """
+        import _store.db as _db
+        called: list[str] = []
+        monkeypatch.setattr(_db, "record_online_agent_run",
+                            lambda **kw: called.append(kw["agent"]))
+        c = _synth(decision_id=DID, verdicts=full_roster(),
+                   judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        card_ops.persist(c, runtime_run_ids={v.agent: None for v in c.verdicts})
+
+        assert called == [], "值为 None 时不该走要求 runtime_run_id 非空的严格 API"
+        rows = list_agent_runs(decision_id=DID, path=db)
+        assert sorted(r["agent"] for r in rows) == sorted(STANCE_VOCAB), \
+            "宽松分支必须照样记账 —— 漏账比记一条判不了的账更糟"
 
     def test_回放路径不记账(self, db):
         c = _synth(decision_id=DID, verdicts=full_roster(),

@@ -38,7 +38,8 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent.parent / "skills"))
 
-from phase1_acceptance import spawn_proof, spawn_proof_for_run  # noqa: E402
+from phase1_acceptance import (  # noqa: E402
+    _UNPROVEN_HINT, spawn_proof, spawn_proof_for_run)
 
 # 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -78,15 +79,22 @@ def main(argv: list[str] | None = None) -> int:
         print("--run-id 或 <决策号> 二选一", file=sys.stderr)
         return _v.UNKNOWN
     if not proof.readable:
-        print("🔶 spawn 核验判不了 —— 读不到运行时的 spawn 记录"
-              "（subagent_runs / task_runs 两张都不在，或在却读不了）。",
+        print("🔶 spawn 核验判不了 —— "
+              + (proof.unreadable_reason
+                 or "读不到运行时的 spawn 记录"
+                    "（subagent_runs / task_runs 两张都不在，或在却读不了）"),
               file=sys.stderr)
         print("   这**不算通过**：无法区分「真 spawn」与「手工跑脚本」。",
               file=sys.stderr)
         return _v.UNKNOWN
 
     ours = sorted(a for a, (o, _) in proof.per_agent.items() if o)
-    forged = sorted(a for a, (o, sp) in proof.per_agent.items() if o and not sp)
+    # 🔴 P1-2：`unproven` 是第三态，先摘出去再算 forged。
+    #    「真 spawn 了但没捞回 runtime_run_id」被报成「伪造」会把排查引到
+    #    错误方向 —— 前者要去查编排器的 runtime_run_ids 映射，后者要去查
+    #    谁在直接写库。同一条红字指向两个完全不同的地方就等于没指。
+    forged = sorted(a for a, (o, sp) in proof.per_agent.items()
+                    if o and not sp and a not in proof.unproven)
     absent = sorted(a for a, (o, _) in proof.per_agent.items() if not o)
     ok = sorted(a for a, (o, sp) in proof.per_agent.items() if o and sp)
 
@@ -111,6 +119,13 @@ def main(argv: list[str] | None = None) -> int:
         print("   那些行是被**直接写入**的，不是 Supervisor spawn 出来的。",
               file=sys.stderr)
         return _v.FAIL
+
+    if proof.unproven:
+        print("🔶 spawn 核验判不了 —— 这些 agent 的账本行**证不了也不算伪造**：",
+              file=sys.stderr)
+        for a, reason in sorted(proof.unproven.items()):
+            print(f"   {a}：{_UNPROVEN_HINT.get(reason, reason)}", file=sys.stderr)
+        return _v.UNKNOWN
 
     if not ok:
         print(f"🔶 spawn 核验判不了 —— {decision_id} 一个 agent 都没核到"

@@ -17,6 +17,175 @@
 
 ---
 
+## [0.3.6] - 2026-09-25
+
+### 修复 · 评审修复包的复核发现（Review-of-the-remediation）
+
+对 v0.3.1–v0.3.4 那批「评审修复」本身做了一次独立复核，逐项核对
+`docs/external/biga-deep-review-remediation-pack` 的 Finding 与参考实现。
+四项确认到位（P2-1 Migration 原子性 / P1-1 在线根节点校验 / P2-3 跨 Decision /
+P2-4 flock），以下六处是复核发现的问题。
+
+🔴 **共同形状：清单勾了 `[x]`，但勾的是「写了一个函数」，不是「那条路真的被守住了」。**
+三处（下面的 1/2/3）都是「守卫存在、没有消费方」——正是 `architecture.md` §9 L-1
+说的头号失败模式，而这批修复本身就是为了消灭这类问题。
+
+**1. `record_agent_run()` 留着 `save_evidence_set()` 刚补掉的那个洞**
+
+判据写的是 `if orchestration_run_id is not None and decision_id is not None`——
+`decision_id=None` 就整段跳过 `_assert_run_owns_decision`，**却照样把这行盖上
+`provenance_mode='online'` 的章**。实测：
+
+```
+record_agent_run(decision_id=None, orchestration_run_id="totally-fake-run-id", …)
+→ 落库成功，provenance_mode='online'，指向一个不存在的 run
+```
+
+与 v0.3.4 的 A2 在 `save_evidence_set()` 里修掉的是同一个洞，当时漏了这一处。
+改为只看 `orchestration_run_id`，`decision_id` 为空直接 ValueError。
+
+**2. `record_online_agent_run()` 没有生产调用方**
+
+它的 docstring 写着「用于 `card_ops.persist()` 的在线路径」——而 `persist()` 走的是
+`record_verdict_run()` → `record_agent_run()`，**根本不经过它**。一个自称守着在线
+路径、却只有测试在调的守卫。
+修法不是删掉它，是在 `record_verdict_run()` 里接上路由（三个 provenance 字段齐全
+时走严格 API）。路由放在那里而不是调用点，是为了让字段映射仍然只有一份——
+在调用点按条件分支各抄一遍，正是那个函数当初存在的理由的反面。
+
+⚠️ 「被 spawn 了但没捞回 runtime_run_id」的 agent **仍然记账**（批 F 的立场不变，
+漏账比记一条判不了的账更糟），只是走宽松分支，在核验侧被判成 UNKNOWN。
+
+**3. v19 加的 `provenance_mode` 是「写了没人读」的列**
+
+唯一的「读取方」是一条读回自己刚写的值的测试。评审参考实现
+`reference/spawn_proof_run_scope.py` 指定的两个读取方一个都没写。补上：
+
+- `spawn_proof_for_run()` 改成**三态**（新增 `SpawnProof.unproven`），分类照参考
+  实现：账本无行 = absent / `provenance_mode != 'online'` = UNKNOWN /
+  在线但缺 `runtime_run_id` = UNKNOWN / join 不上 = FAIL / join 上 = PASS。
+- §8.4：`spawn_proof()`（decision 级 legacy 入口）的**段名回退只对非 online 行
+  开放**。对一条声明自己是在线执行的行放行弱名称匹配，等于把强绑定检查的开关
+  交给被检查方自己按。
+
+🔴 顺带修掉一处**把排查引向错误方向**的报错：原来「真 spawn 了但没记下
+runtime_run_id」会被报成「那些行是被直接写入的，不是 Supervisor spawn 出来的」。
+两者要查的地方完全不同（前者查编排器的 `runtime_run_ids` 映射，后者查谁在直接
+写库），同一条红字指向两个地方就等于没指。原因码 → 人话的映射只有一份
+（`_UNPROVEN_HINT`），`spawn_check.py` 与 `check_1_spawned()` 共用。
+
+**4. `.biga-notify.lock` 没进 `.gitignore`**
+
+`bin/biga-notify` 的 flock 落在 `$ROOT/.biga-notify.lock`，而同批加的并发测试用
+`cwd=REPO` 启动真脚本 —— 跑一次测试就在仓库根留一个未跟踪文件。公开仓库里这是
+随时可能被 `git add .` 带进去的东西。
+
+**5. `bin/biga-card` 绑的是「最近那次 run」，不是 `Card.run_id`**
+
+`SELECT run_id FROM decision_runs … ORDER BY created_at DESC LIMIT 1` 取的是这个
+decision 最近开的那次 run。而最终验收条件写的是「Spawn Proof **精确绑定
+Card.run_id**」——一个 decision 可以有多个 run（重投 / reaper / 将来的 Retry，
+那正是 P1-2 的威胁模型），出卡之后又开一次 run，核验就去查了一次没出过这张卡的
+执行尝试。改从 `decision_records.run_id`（v16 加的列，就是卡自己那一行）取。
+
+**6. 回放不可变守卫做过头，废掉了 replay 的头号用途**
+
+v0.3.4 的 `save_replay_card()` 拿 `comparable()` 做全量比对，`status` / `headline` /
+`synthesis` 全在比对范围内 ⇒ `replay.py --status AVOID --store`（模块 docstring
+里的**用法 2**「换个模型重跑，看结论会不会变」）**永远落不了库**，而 CLI 还在收
+那几个参数。当时连 `test_回放不覆盖原始记录` 都被改成了「不改结论」来适配。
+
+评审 §13.2 要的是「保留或验证来源 Verdict / Evidence refs」——**冻血缘，不是冻
+结论**。改为 `REPLAY_FROZEN_LINEAGE`（`decision_id` / `verdicts` /
+`input_verdict_refs` / `evidence_set_id` / `expected_roster`）逐字段比对，
+结论字段放开。这同时补上了清单里一直空着的
+「验证 Frozen Input Lineage」（评审 §18 的 `test_replay_preserves_frozen_input_lineage`）。
+
+**7.（随 6 一并）`model_ref` 从 `ALLOWED_REPLAY_CHANGES` 摘掉**
+
+v0.3.4 把它加进去的理由是「换模型是合法的回放场景」——那个理由对**落库**成立，
+对 `--check` 不成立，而这个集合**同时服务两者**。`model_ref` 里嵌着
+`SYNTHESIS_VERSION`，剥掉它之后 `replay.py --check` 就再也看不见「合成版本已经
+变了」，而那正是它守的东西之一。现在两个问题两个集合，不再互相牵连。
+
+### 新增 · 上述六项的守卫（全部做过 sabotage-revert 探针）
+
+```text
+test_在线路径走严格API_record_online_agent_run     删掉路由 → 红
+test_没拿到runtime_run_id时仍然记账_但不走严格API   钉住批 F 的立场不被推翻
+TestProvenanceModeIsRead（6 条）                   删掉 provenance_mode 分支 → 红
+TestOnlineLedgerRequiresDecision（2 条）           判据改回旧写法 → 红
+test_核验绑的是卡自己的run不是最近那次run          SQL 改回 decision_runs → 红
+test_回放不能改血缘                                删掉血缘比对 → 红
+test_回放血缘守卫不误伤换模型                      model_ref 塞回集合 → 红
+```
+
+🔴 `TestOnlineLedgerRequiresDecision` 的第二条判据落在**库里有没有那行**上，
+不只落在「抛没抛异常」上——抛了异常但仍然写进去等于没修。
+
+测试 1831 → 1860 条（`-m "not installed and not live and not git"` 口径 1831）。
+
+### 修复 · 复核的第二批（清单外，同一次复核发现）
+
+**8. v20：撤掉 v18 那条重复索引**
+
+```sql
+v16  CREATE UNIQUE INDEX ux_evidence_set_per_run ON evidence_sets(run_id) WHERE run_id IS NOT NULL;
+v18  CREATE UNIQUE INDEX ux_evidence_sets_run    ON evidence_sets(run_id) WHERE run_id IS NOT NULL;
+```
+
+同表、同列、同 `WHERE` —— **逐字相同的同一条索引**。v18 是照抄评审 §6.4 给的建议
+索引加的，**没有先查这条不变量是不是已经有人在守**。
+
+🔴 值得再升一版去删它的理由不是写放大（`evidence_sets` 一次决策才一行），
+是**一条不变量有了两个名字**：将来改「一个 run 能不能有两套切片」这条规则时，
+改掉其中一个、剩下那个仍在默默拦着 —— 「改了但没生效」，而且不报错。
+⇒ 评审给的是**形状**，不是「你缺这个」；照抄之前先 grep 一遍。
+
+**9. P2-2 补上真正的回归守卫**
+
+清单里「每个 Verdict 恰好一条 AgentRun `[x]`」当时是靠一条**覆盖不到它**的测试
+撑着的：`test_在线路径记账_每个verdict一行` 测的是 `card_ops.persist()`，而双写
+发生在 `synthesize.py` 那一层 —— **修复之前那条也是绿的**。把手工账本循环加回去，
+没有任何测试会红。新增 `test_落库时每条verdict恰好一条agent_runs` 跑真实的
+`synthesize.py --store` 再数行数；探针确认：加回循环 → 它红、旧那条仍绿。
+
+**10. `spawn_proof_for_run()` 不再把三种「判不了」吞成一句**
+
+原来 `except Exception: pass` 让「BigA 库读不了」「run_id 不存在」塌成同一个
+UNKNOWN，而这三种要查的地方完全不同。新增 `SpawnProof.unreadable_reason`，
+两个消费方都打出来。顺带补上第四种：`decision_runs.decision_id` 为空（legacy
+路径占号前）时**不能**当成「运行时零记录」往下走 —— 那会对一次真实执行报出
+「从未被 spawn 过」这个假结论。
+
+### 变更 · 文档与实际状态对齐（评审 §15 / §20）
+
+**11. README 撤回尚未成立的 Baseline 冻结声明**
+
+状态表里 `确定性编排升级 Baseline 冻结` 一行从 `✅ 经独立 sign-off` 退回
+`🔶 已解冻`，章节标题同步。理由写在表下方，不只改一个符号：
+
+> tag 打过也确实 sign-off 过，但此后的独立评审在正常路径上找到阻塞项，
+> 而那批修复**本身**再复核时又发现六处。
+
+这是裁定 14 的直接应用 —— **一个描述过期状态的 ✅ 比 🔶 更糟：🔶 诚实，它不诚实。**
+⚠️ 原来 README 是自相矛盾的：状态表说「已冻结」，路线图小节说「完成后重新冻结」。
+
+**12. 三处 schema 版本漂移**
+
+`architecture.md`（架构 SSOT）停在「v16 与 v17」、`schema-rollback.md` 版本表停在
+v17、`review-prompt.md` 写着 v17。`sync_test_count.sh` 只同步条数，不管版本号 ——
+**这三处只能靠人记得**，而三次都没记得。现已补到 v20，并在 `architecture.md` 里
+把 v18/v20 那一来一回作为 L-3 的新鲜样本记下来。
+
+🔴 顺带纠正 `schema-rollback.md` 一句**写下来时就已经是假的**断言：
+「17 条里没有一条 `DROP`」—— 实际 v2 删过列、v17 删过索引，现在 v20 又删了一条。
+它是一句 `grep -c DROP schema.py` 就能当场证伪的话，而在它留着的那段时间里，
+任何照它做判断的人都会判错。
+
+
+---
+
 ## [0.3.5] - 2026-09-25
 
 ### 变更
@@ -7486,7 +7655,9 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.3...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/easyup168/easyup-biga/compare/v0.3.4...v0.3.6
+[0.3.4]: https://github.com/easyup168/easyup-biga/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/easyup168/easyup-biga/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/easyup168/easyup-biga/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/easyup168/easyup-biga/compare/v0.3.0...v0.3.1

@@ -612,10 +612,24 @@ snapshot` 这类单标的小体积数据集会继续留在这里——`raw_*` �
 | `d_sector_strength` | 板块强度 |
 | `raw_news` | 带 `published_at` / `source` / `retrieved_at` |
 
-v16（Run Provenance）与 v17（Fact 唯一约束按 run 分区）**不新增表**——
-只给已有表加列（`run_id`/`evidence_set_id` 等）与改约束（`ux_evidence_set_
-per_run`/`ux_fact_per_task_agent` 唯一索引），所以上表没有对应新行。
-完整 17 个版本各一句话摘要见 [`schema-rollback.md`](../guide/schema-rollback.md)，
+v16 到 v20 **都不新增表** —— 只给已有表加列与改约束，所以上表没有对应新行：
+
+| | 加了什么 | 为什么 |
+|---|---|---|
+| v16 | Run Provenance 三列 + `ux_evidence_set_per_run` | 「这张卡属于哪次执行」变成一句 SQL |
+| v17 | Fact 唯一约束按 **run** 分区 | 同一决策的第二个 run 能写自己那份事实 |
+| v18 | `ux_evidence_sets_run` | ⚠️ **多余的**，见下 |
+| v19 | `agent_runs.provenance_mode` | 区分在线执行行与历史行，是 Run 级 spawn 核验的三态判据 |
+| v20 | 撤掉 v18 | 一条不变量不许有两个名字 |
+
+🔴 v18 / v20 这一来一回值得留在这里，因为它是 **L-3 的一个新鲜样本**：
+v18 照抄外部评审给的建议索引，**没有先查这条不变量是不是已经有人在守** ——
+它与 v16 的 `ux_evidence_set_per_run` 同表、同列、同 `WHERE`，逐字相同。
+两个名字守同一条规则的后果不是浪费，是**改规则时会漏掉一个，而且不报错**。
+⇒ 评审给的是**形状**，不是「你缺这个」；照抄之前先 grep 一遍。
+由 `tests/test_run_provenance.py::test_一个run至多一个切片的约束只应有一条` 钉住。
+
+完整 20 个版本各一句话摘要见 [`schema-rollback.md`](../guide/schema-rollback.md)，
 权威说明仍是 `schema.py` 逐条迁移体正上方的注释。
 
 ⚠️ **只读打开一个还不存在的库**会抛 `StoreNotInitialised`（v5 加），

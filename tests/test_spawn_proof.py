@@ -264,6 +264,27 @@ class TestWiredIntoRealPath:
             "bin/biga-card 调 spawn_check.py 时没有 --run-id —— "
             "那样查的是决策级，同一个 decision 的其他 Run 的 spawn 记录会被借用。")
 
+    def test_核验绑的是卡自己的run不是最近那次run(self):
+        """P1-2 最终验收条件：Spawn Proof **精确绑定 Card.run_id**。
+
+        🔴 `--run-id` 拿到了还不够，要看那个 id 是从哪儿取的：
+        从 `decision_runs … ORDER BY created_at DESC` 取的是「这个 decision 最近
+        开的那次 run」，而一个 decision 可以有多个 run（重投 / reaper / Retry ——
+        正是 P1-2 的威胁模型）。出卡之后又开一次 run，核验就去查了一次没出过
+        这张卡的执行尝试。唯一正确的来源是刚落的那张卡自己的 `run_id`。
+
+        sabotage 验证：把那句 SQL 改回 `FROM decision_runs …`，本条变红。
+        """
+        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
+        run = text.split("# ── 出新卡")[1]
+        sql = [ln for ln in run.splitlines() if ln.startswith("RUN_ID=")]
+        assert len(sql) == 1, f"RUN_ID 的取法应当只有一处，实际 {len(sql)} 处"
+        assert "FROM decision_records" in sql[0], (
+            "RUN_ID 不是从 decision_records（卡自己那一行）取的 —— "
+            f"实际是：{sql[0]}")
+        assert "decision_runs" not in sql[0], (
+            "从 decision_runs 取的是「最近开的那次 run」，不是「出这张卡的那次 run」")
+
     @staticmethod
     def _orch_path(work) -> pathlib.Path:
         return work / "skills" / "decision-card" / "scripts" / "orchestrator.py"
@@ -1216,3 +1237,166 @@ class TestRunIsolation:
                 manifest={},
                 run_id="missing-run",
                 path=db)
+
+
+class TestProvenanceModeIsRead:
+    """P1-2 补完：`agent_runs.provenance_mode`（schema v19）必须真的被核验读到。
+
+    🔴 这一列在本类出现之前是**写了没人读**的 —— 唯一的「读取方」是一条读回
+    自己刚写的值的测试。为一个没有消费方的字段升一版 schema，正是 L-1 的形状。
+    评审参考实现 `reference/spawn_proof_run_scope.py` 指定的两个读取方
+    （run 级三态 / §8.4 收窄段名回退）当时一个都没写。
+
+    sabotage 验证：
+      · 删掉 `spawn_proof_for_run()` 里 `if "online" not in modes_by_agent…` 那段
+        → `test_legacy行判不了不算伪造` 变红（legacy 行被算成 forged）
+      · 把 `a not in proof.unproven` 从 `spawn_check.py` 的 forged 过滤里去掉
+        → 两条 `spawn_check_对判不了报UNKNOWN` 变红（rc 从 2 变成 1）
+      · 删掉 `spawn_proof()` 里 `elif agent in online_agents` 那段
+        → `test_在线行不许退回段名匹配` 变红（段名蹭上别人的记录 ⇒ 判成已证明）
+    """
+
+    RID = "c" * 32
+
+    def _wire(self, tmp_path, monkeypatch, rows, runtime):
+        """`rows = [(agent, runtime_run_id|None, provenance_mode|None)]` 落真库。
+
+        ⚠️ `provenance_mode=None` 会被 `record_agent_run()` 自动置成 `'online'`
+        （带 orchestration_run_id 的新行本来就是在线行）。要造「非在线」的行，
+        显式传 `'legacy'` —— 这也正是 §8.4 给弱名称匹配划定的那个档位。
+        真正的 NULL 行只可能是 v19 之前落的历史行，API 造不出来，
+        但它与 `'legacy'` 走的是同一个分支（都不等于 `'online'`）。
+        """
+        from _store import init_schema
+        from _store.db import record_agent_run
+        from tests._provenance import open_test_run
+
+        db = tmp_path / "biga.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE, run_id=self.RID)
+        monkeypatch.setenv("BIGA_DB_PATH", str(db))
+        for agent, rr, mode in rows:
+            record_agent_run(task_id=MINE, agent=agent, status="ok",
+                             started_at="t", finished_at="t", elapsed_ms=1,
+                             decision_id=MINE, runtime_run_id=rr,
+                             orchestration_run_id=self.RID,
+                             provenance_mode=mode, path=db)
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(fake_runtime_db(tmp_path / "rt.db", runtime)))
+        return db
+
+    # ── 三态 ────────────────────────────────────────────────────────────────
+
+    def test_join得上算通过(self, tmp_path, monkeypatch):
+        # fake_runtime_db 生成的 run_id 是 run-0、run-1…
+        self._wire(tmp_path, monkeypatch,
+                   [("market", "run-0", None)], [("market", MINE)])
+        proof = pa.spawn_proof_for_run(self.RID)
+        assert proof.per_agent["market"] == (True, True)
+        assert proof.unproven == {}
+        assert spawn_check.main(["--run-id", self.RID]) == 0
+
+    def test_在线行没有runtime_run_id判不了不算伪造(self, tmp_path, monkeypatch):
+        """批 F 明确允许「被 spawn 了但值为 None」——那是取数缺口，不是伪造。"""
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, None)], [("market", MINE)])
+        proof = pa.spawn_proof_for_run(self.RID)
+        assert proof.unproven == {"market": "missing_runtime_run_id"}, (
+            "在线行缺 runtime_run_id 必须进第三态，"
+            f"实际 unproven={proof.unproven!r}")
+
+    def test_legacy行判不了不算伪造(self, tmp_path, monkeypatch):
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, "legacy")], [("market", MINE)])
+        proof = pa.spawn_proof_for_run(self.RID)
+        assert proof.unproven == {"market": "not_online_provenance"}, (
+            "provenance_mode 非 online 的行必须判不了，"
+            f"实际 unproven={proof.unproven!r}")
+
+    @pytest.mark.parametrize("mode", [None, "legacy"])
+    def test_spawn_check对判不了报UNKNOWN不报伪造(self, tmp_path, monkeypatch,
+                                                  capsys, mode):
+        """🔴 判据落在**退出码**上：2 = 判不了，1 = 伪造。两者指向不同的排查方向。"""
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, mode)], [("market", MINE)])
+        rc = spawn_check.main(["--run-id", self.RID])
+        err = capsys.readouterr().err
+        assert rc == 2, (
+            f"provenance_mode={mode!r} + 无 runtime_run_id 应报 UNKNOWN(2)，"
+            f"实际 rc={rc}（1 = 伪造，会把排查引向「谁在直接写库」）")
+        # 判据取 FAIL 分支的措辞（「核验失败」），不取「伪造」两个字 ——
+        # UNKNOWN 分支自己就在说「不算伪造」，拿它当禁词会自己打自己。
+        assert "核验失败" not in err and "判不了" in err, err
+
+    def test_报错要指路(self, tmp_path, monkeypatch, capsys):
+        """UNKNOWN 不能只说「判不了」，要说清接下来查哪儿。"""
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, None)], [("market", MINE)])
+        spawn_check.main(["--run-id", self.RID])
+        err = capsys.readouterr().err
+        assert "runtime_run_ids" in err, \
+            f"没告诉人该去查编排器的 runtime_run_ids 映射：{err}"
+
+    # ── §8.4：段名回退只对非 online 行开放 ──────────────────────────────────
+
+    def test_在线行不许退回段名匹配(self, tmp_path, monkeypatch):
+        """decision 级的 legacy 入口也不许给「自称在线」的行放行段名匹配。
+
+        运行时侧有一条 market 的真记录（别的 run 留下的），账本行自称 online
+        却没有 runtime_run_id —— 段名一比就「命中」，而那正是 §8.4 要堵的：
+        强绑定检查的开关不能交给被检查方自己按。
+        """
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, None)], [("market", MINE)])
+        assert pa.spawn_proof(MINE).per_agent["market"] == (True, False), \
+            "自称在线的账本行不许靠 agent 段名蹭上运行时记录（§8.4）"
+
+    def test_历史行仍然可以段名匹配(self, tmp_path, monkeypatch):
+        """收窄不能误伤历史行 —— 它们本来就只有段名这一个判据。"""
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, "legacy")], [("market", MINE)])
+        assert pa.spawn_proof(MINE).per_agent["market"] == (True, True), \
+            "provenance_mode 非 online 的历史行仍应走段名匹配，否则是误伤"
+
+
+class TestOnlineLedgerRequiresDecision:
+    """P1-2：`record_agent_run()` 带 orchestration_run_id 时不许省掉 decision_id。
+
+    旧写法 `if orchestration_run_id is not None and decision_id is not None`
+    让 `decision_id=None` 整段跳过校验，**却照样盖上 `provenance_mode='online'`
+    的章** —— 账本里于是躺着一行自称在线、指向不存在 run 的记录。
+    与 `save_evidence_set` 里 A2 修掉的是同一个洞，当时漏了这一处。
+
+    sabotage 验证：把那句判据改回 `and decision_id is not None`，两条都变红。
+    """
+
+    def test_缺decision_id被拒(self, tmp_path):
+        from _store import init_schema
+        from _store.db import record_agent_run
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        with pytest.raises(ValueError, match="decision_id"):
+            record_agent_run(task_id=MINE, agent="market", status="ok",
+                             started_at="t", finished_at="t", elapsed_ms=1,
+                             decision_id=None,
+                             orchestration_run_id="totally-fake-run-id",
+                             path=db)
+
+    def test_伪造run不会留下自称online的行(self, tmp_path):
+        """判据落在**库里有没有那行**上 —— 抛异常但仍然写进去等于没修。"""
+        from _store import init_schema
+        from _store.db import connect, record_agent_run
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        with pytest.raises(ValueError):
+            record_agent_run(task_id=MINE, agent="market", status="ok",
+                             started_at="t", finished_at="t", elapsed_ms=1,
+                             decision_id=None,
+                             orchestration_run_id="totally-fake-run-id",
+                             path=db)
+        with connect(db, readonly=True) as c:
+            n = c.execute("SELECT COUNT(*) FROM agent_runs "
+                          "WHERE provenance_mode='online'").fetchone()[0]
+        assert n == 0, "校验没拦住：库里留下了一行自称 online 却指向假 run 的账本"

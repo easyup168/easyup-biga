@@ -815,6 +815,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_legacy_fact_per_task_agent
 
 # v18: 一个 run 至多一个 EvidenceSet（P1-1）。
 # WHERE run_id IS NOT NULL —— 历史行 run_id 为 NULL，不受约束，保持向后兼容。
+#
+# ⚠️ **这一条是多余的，v20 把它撤了。** 见 `_V20` 的说明。
+# 已发布的迁移条目不许改动，所以它留在这里原样执行一次，再由 v20 删掉。
 _V18 = """
 CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_sets_run
     ON evidence_sets(run_id)
@@ -827,6 +830,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_sets_run
 # ALTER TABLE 在 SQLite 里安全：只加列，不改存量行。
 _V19 = """
 ALTER TABLE agent_runs ADD COLUMN provenance_mode TEXT;
+"""
+
+
+# v20: 撤掉 v18 —— 它与 v16 的 `ux_evidence_set_per_run` 是**逐字相同的同一条索引**。
+#
+# ```sql
+# v16  CREATE UNIQUE INDEX ux_evidence_set_per_run ON evidence_sets(run_id) WHERE run_id IS NOT NULL;
+# v18  CREATE UNIQUE INDEX ux_evidence_sets_run    ON evidence_sets(run_id) WHERE run_id IS NOT NULL;
+# ```
+#
+# 🔴 为什么值得再升一版去删它，而不是留着不管
+# ------------------------------------------------
+# 不是为了那点写放大（`evidence_sets` 一次决策才一行）。是因为
+# **一条不变量有了两个名字**，而这正是 L-3 的形状：
+# 将来有人要改「一个 run 能不能有两套切片」这条规则时，改掉其中一个，
+# 剩下那个仍然在默默拦着 —— 于是「改了但没生效」，而且不报错。
+#
+# 成因值得记下来：v18 是照抄评审 §6.4 的建议索引加的，**没有先查这条不变量
+# 是不是已经有人在守**。评审给的是形状，不是「你缺这个」。
+# ⇒ 由 `tests/test_run_provenance.py::test_一个run至多一个切片的约束只应有一条` 钉住。
+#
+# ⚠️ 撤的是 v18 那个名字，不是这条不变量本身 —— v16 的索引仍在，约束不变。
+_V20 = """
+DROP INDEX IF EXISTS ux_evidence_sets_run;
 """
 
 
@@ -851,6 +878,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (17, _V17),
     (18, _V18),
     (19, _V19),
+    (20, _V20),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

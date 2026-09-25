@@ -86,6 +86,12 @@ memory/
 #    以及沙盒测试把它复制进去、把三条出卡路径测试全判成「被拦」。
 .biga-card-stop
 .biga-card.lock
+# 通知 worker 的单实例锁（P2-4）。⚠️ 加这一条晚了一步：`bin/biga-notify` 的
+# flock 落在 `$ROOT/.biga-notify.lock`，而同批加的并发测试用 `cwd=REPO` 启动
+# 真脚本 —— 于是**跑一次测试就在仓库根留一个未跟踪文件**。公开仓库里这是
+# 随时可能被顺手 `git add .` 带进去的东西，也会让「同步条数前先看
+# git status」那条纪律天天看到噪声。
+.biga-notify.lock
 
 # 🔴 例外：测试 fixture 要进仓库，即使它是 `.log`
 # 上面的 `*.log` 会把 `tests/fixtures/stalled-session.log` 一起忽略掉 ——

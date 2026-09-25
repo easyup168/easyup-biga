@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import sys
 from collections.abc import Mapping
@@ -249,12 +248,46 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
 #:
 #: `comparable()` 只剥这些字段；`replay.py` 的 `--check` 读它来决定
 #: 「什么变化算正常、什么算回放失真」。两处共用同一份集合（L-3 的正解）。
+#:
+#: ⚠️ **不要往这里加 `model_ref`。** v0.3.4 加过一次，理由是「换模型是合法的回放
+#: 场景」—— 那个理由对**落库**成立，对 `--check` 不成立，而这个集合同时服务两者。
+#: `model_ref` 里嵌着 `SYNTHESIS_VERSION`（见 `synthesize()`），剥掉它之后
+#: `--check` 就再也看不见「合成版本已经变了」——而那正是它守的东西之一。
+#: 落库侧的「换模型合法」现在由下面的 `REPLAY_FROZEN_LINEAGE` 单独表达：
+#: 两个问题，两个集合，不再互相牵连。
 ALLOWED_REPLAY_CHANGES: frozenset[str] = frozenset({
     "generated_at",
     "elapsed_ms",
     "run_id",
-    "model_ref",  # 回放换模型是合法场景，model_ref 是执行元数据，不是业务结论
 })
+
+#: 回放卡**必须与原卡逐字相同**的字段 —— 「这个结论基于什么」。
+#:
+#: 🔴 回放的用途是「换个模型重跑，看结论会不会变」（见 `replay.py` 的用法 2）。
+#: 所以该冻的是**输入**，不是**结论**：
+#:
+#: ===================== ==============================================
+#: `decision_id`         回放不得跨决策（DB 层还会再查一次父记录，纵深防御）
+#: `verdicts`            冻结的证据本身
+#: `input_verdict_refs`  判定原件的血缘（哪几条原件、什么哈希、属于哪次 run）
+#: `evidence_set_id`     基于哪份冻结切片
+#: `expected_roster`     当时期望哪些 agent 在场
+#: ===================== ==============================================
+#:
+#: `status` / `headline` / `synthesis` / `missing` / `model_ref` **允许变** ——
+#: 那是新模型给出的新判断，正是回放要观察的东西。
+#:
+#: ⚠️ v0.3.4 的第一版守卫拿 `comparable()` 做全量比对，等于把结论也冻住了，
+#: 于是 `replay.py --status AVOID --store`（模块 docstring 里的用法 2）
+#: **永远落不了库**，而它自己的 CLI 还在收这几个参数。评审 §13.2 要的是
+#: 「保留或验证来源 Verdict / Evidence refs」——冻血缘，不是冻结论。
+REPLAY_FROZEN_LINEAGE: tuple[str, ...] = (
+    "decision_id",
+    "verdicts",
+    "input_verdict_refs",
+    "evidence_set_id",
+    "expected_roster",
+)
 
 
 def save_online_card(card: DecisionCard,
@@ -267,23 +300,40 @@ def save_replay_card(card: DecisionCard,
                      parent_record_id: int | None) -> int:
     """回放路径：落库 Card（不入队通知），返回 record_id。
 
-    🔴 P1-2 不可变守卫：回放卡的业务结论不许与原卡不同。
-    允许变化的字段见 ALLOWED_REPLAY_CHANGES（时戳 / 耗时 / run_id）。
-    其他任何字段不同 ⇒ 抛 ValueError，不落库。
+    🔴 P2-3 血缘不可变守卫：回放卡**基于什么**不许与原卡不同
+    （`REPLAY_FROZEN_LINEAGE`）。结论本身允许不同 —— 那是回放的用途。
+
+    ⚠️ 父记录不存在时这里不报错：`save_card()` 的 replay 分支会在**写事务内**
+    查父记录并拒绝（P2-3）。在这里再判一次只会多一套口径，而且它是事务外的读。
     """
     if parent_record_id is not None:
         parent = load_card_by_record_id(parent_record_id)
         if parent is not None:
-            expected = json.dumps(comparable(parent), ensure_ascii=False,
-                                  sort_keys=True, separators=(",", ":"))
-            actual = json.dumps(comparable(card), ensure_ascii=False,
-                                sort_keys=True, separators=(",", ":"))
-            if expected != actual:
+            drift = _lineage_drift(parent, card)
+            if drift:
                 raise ValueError(
-                    "replay changed immutable business content —— "
-                    "回放卡与原卡的业务结论不同（状态/标题/判定等），"
-                    "只有 ALLOWED_REPLAY_CHANGES 里的字段允许变化。")
+                    "replay changed frozen input lineage —— "
+                    "回放卡与原卡的**来源**不同：" + "；".join(drift) + "。\n"
+                    "  回放可以给出新的结论（status / headline / synthesis），"
+                    "但必须基于同一份冻结证据；\n"
+                    "  这几个字段变了，两次结果就不再可比，回放实验作废。")
     return save_card(card, replay_of=parent_record_id)
+
+
+def _lineage_drift(parent: DecisionCard, card: DecisionCard) -> list[str]:
+    """`REPLAY_FROZEN_LINEAGE` 里对不上的字段，每条一句人话。空列表 = 一致。"""
+    a, b = parent.to_dict(), card.to_dict()
+    out = []
+    for f in REPLAY_FROZEN_LINEAGE:
+        if a.get(f) != b.get(f):
+            # 🔴 `verdicts` / `input_verdict_refs` 整份打印会刷屏 —— 大字段只说
+            #    「不同」与条数，小字段直接把两个值摆出来。报错要能一眼看懂。
+            if isinstance(a.get(f), list) or isinstance(b.get(f), list):
+                out.append(f"{f}（原卡 {len(a.get(f) or [])} 条，"
+                           f"回放 {len(b.get(f) or [])} 条或内容不同）")
+            else:
+                out.append(f"{f}（原卡 {a.get(f)!r}，回放 {b.get(f)!r}）")
+    return out
 
 
 def comparable(card: DecisionCard) -> dict:
