@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# biga-calendar —— 刷新交易日历（fact_trading_calendar）。
+#
+# 为什么要有这条命令
+# ------------------
+# `market_is_open()` 分三层：日历表 → 硬编码兜底 → weekday。第一层长期是**空的**
+# （原生产方走深交所官方端点，本机连不通），于是它恒走 weekday 回退。
+# 2026-09-25（中秋）实测撞到后果：系统在休市日出了一张卡，`news` 按「今天」报
+# 交易日 20260925，日线类报 20260924，`risk` 因交易日不一致弃权。
+#
+# 这条命令把第一层填上，数据含**交易所已公布的未来排期**（实测到次年年末）。
+#
+# 🔴 什么时候跑
+#   · 装好之后跑一次
+#   · 每年 11-12 月交易所发次年日历后再跑一次
+#     （`tests/test_sina_calendar.py` 会在兜底表到期前 45 天提醒你）
+#
+# 用法
+#   bin/biga-calendar                 刷新（默认往回覆盖 730 天）
+#   bin/biga-calendar --back-days 90  只覆盖最近 90 天 + 未来
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+
+BACK=730
+[ "${1:-}" = "--back-days" ] && BACK="${2:?--back-days 后面要跟天数}"
+
+exec python3 - "$BACK" <<'PY'
+import sys, pathlib
+_ROOT = pathlib.Path.cwd()
+sys.path.insert(0, str(_ROOT / "src"))
+sys.path.insert(0, str(_ROOT / "skills"))
+from easyup_biga.providers.http import SourceError
+from easyup_biga.providers.sina_calendar import refresh_trading_calendar
+
+try:
+    n, start, end = refresh_trading_calendar(back_days=int(sys.argv[1]))
+except SourceError as e:
+    print(f"🔴 交易日历刷新失败：{e}", file=sys.stderr)
+    print("   日历表保持原样，market_is_open 退回兜底表 / weekday —— "
+          "方向是安全的（宁可多报 missing），但节假日可能判不出来。", file=sys.stderr)
+    raise SystemExit(2)
+print(f"✅ 交易日历已刷新：{n} 行，覆盖 {start} … {end}")
+print(f"   核对一天：python3 -c \"import sys;sys.path.insert(0,'skills');"
+      f"from _store import is_trading_day;print(is_trading_day('20260925'))\"")
+PY

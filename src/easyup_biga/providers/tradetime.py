@@ -92,7 +92,10 @@ def market_is_open(now: datetime, *, path: pathlib.Path | str | None = None) -> 
 
     known = is_trading_day(n.strftime("%Y%m%d"), path=path)   # True / False / None
     if known is None:
-        # 没有日历数据 —— 回退到「非周末即可能开市」（与批 L 之前逐一相同）。
+        # 日历没覆盖到 —— 先问兜底表，再退到 weekday。
+        known = holiday_fallback(n.date())
+    if known is None:
+        # 兜底表也不认 —— 回退到「非周末即可能开市」（与批 L 之前逐一相同）。
         if n.weekday() >= 5:            # 周六 / 周日
             return False
     elif not known:
@@ -171,3 +174,59 @@ def session_in_progress(trade_date: str, *, retrieved_at: datetime) -> bool:
     d = datetime.strptime(trade_date, "%Y%m%d").date()
     now = retrieved_at.astimezone(CN_TZ)
     return d == now.date() and now.time() < MARKET_CLOSE
+
+
+# ─────────────────────────────────────────────── 第 3 层：硬编码兜底（带过期守卫）
+#
+# 🔴 它只在**日历表没覆盖到**那一天时才被问到（见 `market_is_open`）。
+#    正常路径是 `fact_trading_calendar`（由 `providers/sina_calendar.py` 刷新，
+#    含交易所已公布的未来排期）。这一层管的是「刷新还没跑过 / 跑失败了」。
+#
+# ⚠️ **硬编码表会烂，而且是静默地烂。** 实测证据：一个同类系统的硬编码表把
+#    2026 年的中秋写成「与国庆合并」（只列了 10 月那几天），于是 2026-09-25
+#    这个真实的休市日不在表里 —— 它的权威源一旦不可达，那天就会被判成交易日。
+#    表本身写得很认真，注释也写了维护规则，照样烂了。
+#
+# ⇒ 所以这一层带**过期守卫**：`_COVER_THROUGH` 之后一律返回 None（交给 weekday
+#   回退），**绝不乐观地答 True**。并且 `tests/test_tradetime.py` 有一条会在
+#   到期前若干天就变红的测试 —— 把「静默地烂」换成「按期响亮地提醒」。
+#
+#: 兜底表的覆盖**区间**（两端含）。区间外 ⇒ 这一层弃权，返回 None。
+#:
+#: 🔴 **下界和上界一样重要。** 第一版只有上界，于是这一层对 `_COVER_THROUGH`
+#: 之前的任何一天都敢答 —— 而 `_HOLIDAYS` 只列了导出那天之后的假期，
+#: 结果 2026-01-01（元旦）被自信地判成交易日。
+#: 「不在假期表里 ⇒ 是交易日」这句话，只有在**表确实覆盖那一天**时才成立。
+#: 更早的日期由 `fact_trading_calendar` 负责（刷新默认往回覆盖 730 天）。
+_COVER_FROM = datetime(2026, 9, 25, tzinfo=CN_TZ).date()
+_COVER_THROUGH = datetime(2026, 12, 31, tzinfo=CN_TZ).date()
+
+#: 覆盖区间内的**法定休市工作日**（周末不列，第 1 层已经短路）。
+#:
+#: 🔴 **这份表是从权威源导出的，不是手抄的**，导出方式见
+#: `tools/verify/dump_holiday_fallback.py`（同一个解码器，同一份数据）。
+#:
+#: ⚠️ 第一版真的是手抄的——照着另一份同类系统的假期表抄了 2026 年，把
+#: **20261008 抄成了休市日**，而它是国庆后的复市日、是交易日。抄的时候那张表
+#: 看起来很可信（有分组注释、有维护规则）。这件事发生在我写完上面那段
+#: 「硬编码表会烂」的注释**之后的十分钟内** —— 所以判据只能是「从数据导出」，
+#: 不能是「仔细一点」。
+_HOLIDAYS: frozenset[str] = frozenset({
+    "20260925",                                     # 中秋
+    "20261001", "20261002", "20261005",             # 国庆（10-08 复市，是交易日）
+    "20261006", "20261007",
+})
+
+
+def holiday_fallback(day: "date") -> bool | None:
+    """兜底层：`True` 交易日 / `False` 法定休市 / `None` **本层不敢答**。
+
+    🔴 `None` 是这层存在的关键，不是缺省值：超出 `_COVER_THROUGH` 就弃权，
+    而不是「不在假期表里 ⇒ 是交易日」。后者正是硬编码表烂掉时的失败形状 ——
+    表停止更新之后，每一个新的节假日都会被悄悄判成交易日。
+    """
+    if not (_COVER_FROM <= day <= _COVER_THROUGH):
+        return None
+    if day.weekday() >= 5:
+        return False
+    return day.strftime("%Y%m%d") not in _HOLIDAYS

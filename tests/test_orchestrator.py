@@ -228,6 +228,41 @@ class TestHappyPath:
             (RunState.NOTIFICATION_PENDING, RunState.COMPLETED),
         ]
 
+    def test_卡上记了这次编排的真实耗时(self, db):
+        """`elapsed_ms` 不许是 0 —— 那会让端到端验收**永远判不了**。
+
+        🔴 2026-09-25 真机实测撞到：编排器调 `synthesize()` 时不传
+        `elapsed_ms`，卡上一直记 0，于是 `phase1_acceptance` 第 8 项报
+        「Card 的 elapsed_ms 为 0，无法精确定界这次决策的时间窗」，
+        出口条件 5（按实测重推延迟预算）因此没有可引用的数字。
+
+        ⚠️ 判据只能是「> 0 且落在一个宽松的合理区间」——不能钉具体值
+        （那会变成一条随机器快慢而红的测试）。上界取 10 分钟：
+        它挡的是「误把某个时刻当成时长」这类错（那会得到一个巨大的数）。
+
+        sabotage 验证：把 `elapsed_ms=int(...)` 那行从 orchestrator 删掉，本条变红。
+        """
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        assert card.elapsed_ms > 0, (
+            "卡上的 elapsed_ms 是 0 —— 编排器没把这次的耗时传给 synthesize()，"
+            "端到端验收与延迟预算都会失去判据")
+        assert card.elapsed_ms < 600_000, (
+            f"elapsed_ms={card.elapsed_ms} 大得不像时长 —— "
+            "多半把某个时刻当成了时长")
+
+    def test_落库之后elapsed_ms在列里(self, db):
+        """卡上有还不够：`decision_records.elapsed_ms` 是延迟报告读的那一列。"""
+        orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
+        ctx = new_run_context(origin="cli", non_interactive=True)
+        card = orch.run(ctx)
+        with connect(db, readonly=True) as c:
+            got = c.execute("SELECT elapsed_ms FROM decision_records "
+                            "WHERE decision_id=? AND replay_of IS NULL",
+                            (card.decision_id,)).fetchone()["elapsed_ms"]
+        assert got == card.elapsed_ms > 0, f"库里是 {got}，卡上是 {card.elapsed_ms}"
+
     def test_不走legacy粗边(self, db):
         orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
         ctx = new_run_context(origin="cli", non_interactive=True)

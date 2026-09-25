@@ -150,6 +150,19 @@ class DecisionOrchestrator:
 
     # ── 主流程 ───────────────────────────────────────────────────────────
     def run(self, ctx: RunContext) -> "card_ops.DecisionCard":
+        # 🔴 这次编排的墙钟起点。卡上的 `elapsed_ms` 取它到合成完成的差值。
+        #
+        #    在此之前编排器**不传** `elapsed_ms`，于是卡上一直记 0 ——
+        #    后果不是少个字段：`phase1_acceptance` 第 8 项（端到端 < 预算）
+        #    因此**永远判不了**，出口条件 5（按实测重推延迟预算）也就没有
+        #    可引用的数字，只能每次去 trajectory 里反推。
+        #    2026-09-25 的真实运行实测撞到：`elapsed_ms=0`，验收报
+        #    「无法精确定界这次决策的时间窗」。
+        #
+        #    ⚠️ 用 `time.monotonic()` 不用 `now_cn()` 之差：墙钟测的是**时长**，
+        #      而系统时钟可能在跑的过程中被 NTP 拨动（差值会出现负数或跳变）。
+        #      这与「写库的时间戳一律北京时间」不冲突 —— 那条管的是**时刻**。
+        t0 = time.monotonic()
         # Stage 0：占号（在 open_run 之前 —— decision_id 从一开始就非空，
         # 不留 legacy 那个「开 run 时还没号」的口子）。
         did = ctx.decision_id or reserve_decision_id(by="orchestrator")
@@ -283,6 +296,9 @@ class DecisionOrchestrator:
                     #    那一列实测 7 行全是 NULL（它在 open_run 时写入，而冻结发生在之后，
                     #    只追加的表补不回去），所以卡自己带着它才是唯一可查的记录。
                     evidence_set_id=esid,
+                    # 🔴 这次编排的端到端耗时（Stage 0 占号起，到合成完）。
+                    #    卡自己带着它，验收与延迟预算就不必去 trajectory 反推。
+                    elapsed_ms=int((time.monotonic() - t0) * 1000),
                     # 🔴 批 K：把**当下** AGENT_REGISTRY 算出的期望 roster 冻进卡，
                     #    让 absent_agents 读「生成时期望谁」而非「今天期望谁」。
                     expected_roster=EXPECTED_ROSTER)

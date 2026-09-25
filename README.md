@@ -6,7 +6,7 @@
 
 [![Status](https://img.shields.io/badge/status-architecture%20baseline%20hardening-d29922)](TODO.md)
 [![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
-[![Tests](https://img.shields.io/badge/tests-1844%20hermetic-555)](#当前实现状态)
+[![Tests](https://img.shields.io/badge/tests-1875%20hermetic-555)](#当前实现状态)
 [![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v21-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
@@ -429,11 +429,13 @@ Notification = FAILED / RETRYING
 | Source ZIP / Clean Clone 默认测试全绿 | ✅ |
 | 确定性编排升级 Baseline 冻结（`v1-architecture-baseline`） | 🔶 **已解冻**——tag 打过，此后的独立评审发现了阻塞项，待重新冻结 |
 | 飞书启动失败重试策略 | 🔶 固定次数，无指数退避 |
-| Phase 2 自身两条出口条件（真实否决落库 / 缺失跨天累积） | 🔶 仍未达成，见下 |
+| Phase 2 出口条件 4（缺失跨天累积） | ✅ 跨 4 天 44 张卡（`tools/verify/exit_conditions.py`）|
+| Phase 2 出口条件 3（真实否决落库） | ⬜ 等一个命中 risk 阈值的交易日——不是开发问题 |
+| 交易日历（`market_is_open` 认节假日） | ✅ 2026-09-25 起真的认了（`bin/biga-calendar`）|
 | Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1844 条测试，SQLite schema v21**，全部通过。
+当前仓库有 **1875 条测试，SQLite schema v21**，全部通过。
 
 | 口径 | 数字 | 怎么复现 |
 |---|---|---|
@@ -452,8 +454,8 @@ Notification = FAILED / RETRYING
 
 | tag | 指向 | 现在该怎么读它 |
 |---|---|---|
-| **`v0.3.7`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
-| `v0.3.6` | 上一次复核 | 过程快照 |
+| **`v0.4.0`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
+| `v0.3.6` · `v0.3.7` | 前两次复核 | 过程快照 |
 | `v1-architecture-baseline` | 一个更早的提交 | ⚠️ **已解冻，不再代表「可发布」。**保留是因为它是历史事实（当时确实 sign-off 过），不是因为它仍然成立 |
 | `v0.3.1` … `v0.3.4` | 各自的发布点 | 过程快照 |
 
@@ -513,8 +515,8 @@ Spawn Proof 仍是 decision 级、测试基线不可复现）；随后那批修�
 v1-architecture-baseline（重新冻结）
 ```
 
-- Live Acceptance 重新独立通过；
-- Phase 2 两条出口条件达成。
+- Live Acceptance 重新独立通过（2026-09-25 已跑一次：PASS 6 / FAIL 0 / PENDING 3）；
+- Phase 2 条件 3 与 5 达成。
 
 ---
 
@@ -691,7 +693,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── bin/             biga / biga-card / biga-notify / biga-reap
 ├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
 ├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
-├── tests/           1844 条测试
+├── tests/           1875 条测试
 ├── docs/
 │   ├── design/      当前架构与阶段设计
 │   ├── guide/       安装、使用、回滚与运维
@@ -742,7 +744,8 @@ Replay 专用写入口、Migration 原子性、Notification Worker 单实例—�
 当前剩余的出口条件：
 
 ```text
-Phase 2 两条功能出口（真实否决 / 缺失跨天累积）
+Phase 2 条件 3（真实否决）—— 等行情，不是等开发
+Phase 2 条件 5（延迟预算）—— elapsed_ms 已修，等下次盘中取数
 Live Acceptance 重新独立通过
 ```
 
