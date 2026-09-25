@@ -92,9 +92,13 @@ def main(argv: list[str] | None = None) -> int:
     reasons = check_budget(day=day)
     if reasons:
         print(explain(reasons))
-        return 3
+        # 🔴 这里原来是裸 `return 3` —— 而 `3` 根本不在这套词汇表里，
+        #    `_verdict.describe(3)` 打出来就是「未定义的退出码 3」。
+        #    「闸门此刻拒绝」是**查了、确实观察到**的状态（不是没查成）
+        #    ⇒ FAIL。这样 `budget_report.py && biga-card` 才读得对。
+        return _v.FAIL
     print("✅ 此刻可以出卡")
-    return 0
+    return _v.PASS
 
 
 if __name__ == "__main__":

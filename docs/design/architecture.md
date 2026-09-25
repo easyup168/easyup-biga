@@ -1517,7 +1517,7 @@ Phase 2 及以后的设计见 [`phase-2-specialists.md`](phase-2-specialists.md)
 
 | 风险 | 概率 | 影响 | 缓解 |
 |---|---|---|---|
-| 八 Agent 延迟超预算（>105s），盘中不可用 | 中 | 高 | §10 三条压制手段；Phase 2 出口条件卡死 105s；真超了就把最慢的 specialist 降级为 Python 适配器（**只此一处偏离形态**，且需小飞确认） |
+| 八 Agent 延迟超 Phase 2 盘中 SLO（>180s），盘中不可用 | 中 | 高 | §10 三条压制手段；Phase 2 盘中 Decision SLO 固定为 180s；真超了就把最慢的 specialist 降级为 Python 适配器（**只此一处偏离形态**，且需小飞确认） |
 | token 成本失控 | 中 | 中 | `agent_runs` 逐次记账；Phase 2 出成本分解再决定降档 |
 | 两套系统抢 CPU/内存（宿主 15G，生产已占） | 中 | 中 | BigA 的 `maxConcurrent` 封顶 6；Phase 1 不建 cron，无后台负载 |
 | 误用不带 `--profile` 的命令改到生产 state | **高** | 中 | 做 `biga` wrapper 脚本强制注入 `--profile biga`；**本次会话已实证这个风险真实发生过** |

@@ -49,7 +49,14 @@ from _store.runtime import AgentTurn, RuntimeProbe  # noqa: E402
 #: 用了这套口径的工具。判据是「它自己 import 了 `_verdict`」。
 _WIRED = ["isolation.py", "latency_report.py", "agent_trace.py",
           "missing_ledger.py", "phase1_acceptance.py", "spawn_check.py",
-          "readback_check.py"]
+          "readback_check.py", "exit_conditions.py", "budget_report.py"]
+#: ⚠️ 最后两个是 **2026-09-25 补进来的**，它们从第一天起就 `import _verdict`、
+#:    也真的返回三态，却一直不在这张表里 —— 于是下面那两条守卫**从没查过它们**。
+#:
+#:    🔴 根因不是「忘了加」，是**判据写在一张手写名单上**：名单不会因为
+#:    `tools/verify/` 下多出一个文件而自己变长，而它的失效是静默的
+#:    （少查一个 ≠ 报错）。⇒ 由 `test_名单没有漏掉任何用了这套码的工具`
+#:    反过来钉住：**用了这套码，就必须在名单里**。
 
 
 class TestSingleDefinition:
@@ -99,6 +106,31 @@ class TestSingleDefinition:
             + "  改成 `_v.PASS` / `_v.FAIL` / `_v.UNKNOWN`。\n"
               "  裸数字读不出意图 —— `return 1` 到底是「不通过」还是「没查成」，\n"
               "  评审就是在这个歧义上找到四处缺陷的。")
+
+    def test_名单没有漏掉任何用了这套码的工具(self):
+        """🔴 反向钉住 `_WIRED` —— 名单是手写的，**它不会自己变长**。
+
+        上面两条守卫都按 `_WIRED` 参数化。于是「新工具忘了加进名单」的后果是
+        **少两条 test case**，而不是一条红 —— 测试总数每天都在变，没人会发现。
+
+        实测：`exit_conditions.py` 与 `budget_report.py` 从建起就用着这套码，
+        却一直不在名单里，两条守卫**从没查过它们**。查出来靠的不是复查名单，
+        是有人顺手 `grep` 了一遍目录。
+
+        ⇒ 判据反过来：**目录里凡是 import 了 `_verdict` 的，都得在名单里**。
+           这条不需要人记得，新增文件时它自己会红。
+        """
+        used = {p.name for p in (REPO / "tools" / "verify").glob("*.py")
+                if "import _verdict" in p.read_text(encoding="utf-8")}
+        missing = sorted(used - set(_WIRED))
+        assert missing == [], (
+            "这些工具用了 `_verdict` 的退出码，却不在 `_WIRED` 里 ——\n"
+            "  于是本文件的两条守卫从没查过它们：\n"
+            + "".join(f"  · {m}\n" for m in missing)
+            + "  加进 `_WIRED` 即可（加完两条守卫会立刻替它们体检）。")
+        assert set(_WIRED) <= used, (
+            f"`_WIRED` 里有目录下不存在或没接上唯一定义的名字："
+            f"{sorted(set(_WIRED) - used)}")
 
     def test_describe覆盖三个码(self):
         """报错要指路 —— 只给数字的退出码会被当成「反正非零」。"""

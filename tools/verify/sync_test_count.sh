@@ -23,7 +23,8 @@ for f in README.md CLAUDE.md docs/guide/review-prompt.md; do
              s#\| [0-9]+ 条测试 \| ✅ \|#| ${N} 条测试 | ✅ |#
              s#(├── tests/ +)[0-9]+ 条测试#\1${N} 条测试#
              s#\| 测试 \| [0-9]+ 条 \|#| 测试 | ${N} 条 |#
-             s#[0-9]+ 条测试，SQLite schema#${N} 条测试，SQLite schema#" "$f"
+             s#[0-9]+ 条测试，SQLite schema#${N} 条测试，SQLite schema#
+             s#[0-9]+ 条 Hermetic 测试#${N} 条 Hermetic 测试#" "$f"
 done
 echo "▸ 已同步为 $N 条"
 python3 -m pytest -q --tb=line -m "$MARKER_FILTER" 2>&1 | grep -oP '实测 \K[0-9]+' >/dev/null \

@@ -38,6 +38,13 @@ from _contract import (CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS,  # noqa: E402
 
 import isolation  # noqa: E402  —— I-1 的唯一判据，见下方 F19 的注释
 
+# 🔴 盘中延迟预算只有**一份**定义，在 `latency_report.py`（连同 180s 的推导过程）。
+#    这里原本自己写了一个 `90_000` 字面量 —— 而 `latency_report.py` 早已是 180_000。
+#    两处同名不同值、各自报绿，是 §9 L-3 的教科书形状：同一条判据两个出处，
+#    改了一处忘了另一处时，**剩下那处仍然报绿**。照抄评审给的 180_000 只是让
+#    两个字面量此刻相等，下次重推还会再分叉一次 ⇒ 直接引用唯一那份。
+from latency_report import DEFAULT_BUDGET_MS  # noqa: E402
+
 # 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _verdict as _v  # noqa: E402
@@ -987,7 +994,8 @@ def check_5_fail_closed(run_live: bool) -> Check:
     return c
 
 
-def check_8_latency(decision_id: str | None, budget_ms: int = 90_000) -> Check:
+def check_8_latency(decision_id: str | None,
+                    budget_ms: int = DEFAULT_BUDGET_MS) -> Check:
     """🔴 读**真实墙钟**，不读 Supervisor 自报的数。
 
     早先这条查的是 `card.elapsed_ms` —— 那是 Supervisor 自己填进来的数字，

@@ -87,7 +87,8 @@ def collect(path: pathlib.Path | str | None = None) -> list[dict]:
     """
     with db.connect(path, readonly=True) as conn:
         ids = [r["decision_id"] for r in conn.execute(
-            "SELECT decision_id FROM decision_records ORDER BY decision_id")]
+            "SELECT DISTINCT decision_id FROM decision_records "
+            "WHERE replay_of IS NULL ORDER BY decision_id")]
     out = []
     for did in ids:
         obj = db.load_online_card(did, path=path)
