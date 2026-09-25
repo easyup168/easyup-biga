@@ -13,7 +13,11 @@
 
 ---
 
-## [未发布]
+## [0.6.0] - 2026-09-26
+
+> 发布在 `phase3` 分支上。本版之前先把 `main` 并了进来（带回 `[0.5.1]`
+> 那次 Phase 2 收口发版），所以下面这段的基线是 v0.5.1 而不是 v0.5.0。
+> Phase 3 做完再统一合回 `main`。
 
 ### 新增 · Phase 3 · P3-11…P3-17 落地 —— 外部「P3-0…P3-17 完整包」深度评审后选择性合并
 
@@ -76,6 +80,43 @@ P3-7 的 `required_datasets` 引用的三个 dataset 要等 P3-6 迁完才存在
 > 🔴 最彻底的那种篡改 —— 把文件整个删掉 —— 反而绕过了为篡改准备的那条分支。
 
 ⇒ 归一成 `FileStoreError`，并补了一条专门钉它的测试。
+
+### 修复 · 版本号守卫写反了，而它只在出事那天才会显形
+
+`tests/test_packaging.py` 的 `_version_tuple()` 把 `X.Y.Z` 排在了 `X.Y.Z.devN`
+**前面** —— 与它自己上一行注释「dev 版排在同号正式版之前（PEP 440）」字面相反。
+
+三段版本号不全等时这个方向无所谓（`0.5.1.dev0` vs `0.5.0` 靠第三段就分出来了），
+所以它平时恒绿。它唯一会显形的场合恰恰是这条守卫存在的**全部理由**：
+
+> CHANGELOG 已经发了 `0.5.1`，而 pyproject 还写着 `0.5.1.dev0`（= 「0.5.1 之前」）
+> ⇒ 这棵树在宣称自己**早于**那个已发布的 tag。
+
+实测历史：`v0.4.0 → 0.4.1.dev0`、`v0.5.0 → 0.5.1.dev0` 都对，
+**唯独 `v0.5.1 → 0.5.1.dev0` 漏了 bump** —— 守卫当场报绿放行。
+
+> 🔴 一条在正常情况下恒真、只在出事那天才该红的判据，**写反了不会有人发现**。
+> 这和仓库里那五次「假守卫」是同一个形状，区别只是它藏在比较函数的符号里。
+
+### 修复 · 退出码名册的反向守卫，自己的探测范围比它声称的窄
+
+把 `main` 并进 `phase3` 时，v0.5.1 新加的那条反向守卫
+（「`tools/verify/` 下凡是用了 `_verdict` 的，都必须在 `_WIRED` 里」）
+当场抓到 `security_master_probe.py` —— 它是 P3-3 加的，一直不在名册里。
+**跨分支合并把两边各自看不见的那一半对上了**，这正是这条守卫想要的效果。
+
+但顺着查下去发现它自己有个口子：探测写的是 `"import _verdict" in text`，
+于是 `from _verdict import PASS, FAIL` 这种写法**整个漏过去** ——
+而那恰恰是新工具最可能的写法（编辑器自动补全给的就是它）。
+实测：本版新增的 `tools/verify/phase3_acceptance.py` 第一版正是这么写的，
+**没被抓到**。
+
+> 🔴 一条反向守卫自己犯了它要防的毛病：**判据比它声称的范围窄**。
+> 它报绿的含义是「名册没漏」，实际含义是「名册没漏掉用某一种写法的那些」。
+
+⇒ 探测改成正则认两种 import 形式；`security_master_probe.py` 与
+`phase3_acceptance.py` 一并进名册（进去之后另外两条守卫立刻替它们体检，
+`phase3_acceptance.py` 的取码方式因此也统一成了 `import _verdict as _v`）。
 
 ### 变更 · `bin/biga-data` 从 heredoc 退成薄壳，实现搬进 `src/easyup_biga/data/cli.py`
 
@@ -8950,7 +8991,7 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.5.1...HEAD
+[0.6.0]: https://github.com/easyup168/easyup-biga/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/easyup168/easyup-biga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/easyup168/easyup-biga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/easyup168/easyup-biga/compare/v0.3.7...v0.4.0

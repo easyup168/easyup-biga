@@ -88,7 +88,15 @@ def _version_tuple(v: str) -> tuple[int, int, int, int]:
     assert m, f"版本号 {v!r} 不是 X.Y.Z 或 X.Y.Z.devN 的形状"
     major, minor, patch, dev = m.groups()
     # dev 版排在同号正式版**之前**（PEP 440）：0.3.0.dev0 < 0.3.0
-    return (int(major), int(minor), int(patch), -1 if dev is None else int(dev))
+    #
+    # 🔴 2026-09-26 修：这一行原本是 `-1 if dev is None else int(dev)`，
+    #    把正式版排到了 dev 版**前面** —— 和上面那句注释字面相反。
+    #    它只在 X.Y.Z 三段全等时才显形，而那**正是这条守卫唯一要抓的场合**：
+    #    「CHANGELOG 已经发了 0.5.1，pyproject 却还写着 0.5.1.dev0（= 0.5.1 之前）」。
+    #    实测 v0.5.1 那次发版就漏了 bump（v0.4.0→0.4.1.dev0、v0.5.0→0.5.1.dev0
+    #    都对，唯独 v0.5.1→0.5.1.dev0），而守卫报绿。
+    #    ⇒ 一条在「正常情况」下恒真、只在出事那天才该红的判据，写反了不会有人发现。
+    return (int(major), int(minor), int(patch), int(dev) if dev is not None else 1 << 31)
 
 
 def _last_released() -> str:

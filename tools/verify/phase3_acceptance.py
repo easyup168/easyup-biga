@@ -29,7 +29,7 @@ if str(SRC) not in sys.path:
 if str(pathlib.Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from _verdict import FAIL, PASS, UNKNOWN  # noqa: E402
+import _verdict as _v  # noqa: E402
 
 #: P3-11..P3-17 的收口模块。缺任何一个都说明这份 checkout 不完整。
 CLOSEOUT_MODULES = (
@@ -79,7 +79,7 @@ def main(argv=None) -> int:
         _emit("✅ Phase 3 代码面闸门" if not errors else "❌ Phase 3 代码面闸门",
               checks, errors)
         print("  🔶 上线验收：本次未判（--code-only）")
-        return PASS if not errors else FAIL
+        return _v.PASS if not errors else _v.FAIL
 
     from easyup_biga.data.finalizer import evaluate_phase3_release
 
@@ -95,8 +95,8 @@ def main(argv=None) -> int:
           else ("❌ 代码面未过" if code_errors else "🔶 代码面已过，证据不足"),
           list(status.checks), code_errors + list(status.live_errors))
     if code_errors:
-        return FAIL
-    return PASS if status.live_ready else UNKNOWN
+        return _v.FAIL
+    return _v.PASS if status.live_ready else _v.UNKNOWN
 
 
 if __name__ == "__main__":

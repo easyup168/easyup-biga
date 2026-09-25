@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import sys
 from datetime import datetime, timedelta
 
@@ -49,7 +50,8 @@ from _store.runtime import AgentTurn, RuntimeProbe  # noqa: E402
 #: 用了这套口径的工具。判据是「它自己 import 了 `_verdict`」。
 _WIRED = ["isolation.py", "latency_report.py", "agent_trace.py",
           "missing_ledger.py", "phase1_acceptance.py", "spawn_check.py",
-          "readback_check.py", "exit_conditions.py", "budget_report.py"]
+          "readback_check.py", "exit_conditions.py", "budget_report.py",
+          "security_master_probe.py", "phase3_acceptance.py"]
 #: ⚠️ 最后两个是 **2026-09-25 补进来的**，它们从第一天起就 `import _verdict`、
 #:    也真的返回三态，却一直不在这张表里 —— 于是下面那两条守卫**从没查过它们**。
 #:
@@ -120,8 +122,14 @@ class TestSingleDefinition:
         ⇒ 判据反过来：**目录里凡是 import 了 `_verdict` 的，都得在名单里**。
            这条不需要人记得，新增文件时它自己会红。
         """
+        # 🔴 两种 import 形式都要认。原本只查字面量 `"import _verdict"`，
+        #    于是 `from _verdict import PASS, FAIL` 这种写法**整个漏过去** ——
+        #    而它恰恰是新工具最可能的写法（IDE 自动补全给的就是它）。
+        #    ⇒ 这条反向守卫自己也犯了它要防的毛病：判据比它声称的范围窄。
+        #    实测 2026-09-26：`phase3_acceptance.py` 第一版正是这么写的。
         used = {p.name for p in (REPO / "tools" / "verify").glob("*.py")
-                if "import _verdict" in p.read_text(encoding="utf-8")}
+                if re.search(r"^\s*(?:import _verdict|from _verdict import)",
+                             p.read_text(encoding="utf-8"), re.M)}
         missing = sorted(used - set(_WIRED))
         assert missing == [], (
             "这些工具用了 `_verdict` 的退出码，却不在 `_WIRED` 里 ——\n"
