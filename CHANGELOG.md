@@ -17,6 +17,148 @@
 
 ---
 
+## [0.3.7] - 2026-09-25
+
+### 修复 · 第三轮外部深度评审（`biga-deep-review-2026092502`）
+
+上一轮（v0.3.6）修完之后，评审又对源码做了一次独立复核，确认了六项修复到位，
+同时找到 **3 个核心写边界/核验漏口 + 2 个确定性测试失败**。本版逐项收口，
+实现按评审包 `reference/` 下的骨架适配，不是自己另想一套。
+
+**A · `bin/biga-card` 没有精确绑定本次生成的 Card（P1-1）**
+
+wrapper 一直用 `MAX(decision_id)` 的前后差判断「有没有出新卡」。但**决策号是按
+字典序比大小的，而它不随落库先后单调递增** —— 飞书路径会预占号，于是：
+
+```text
+001 预占 → 首次启动失败
+999 后来先成功落库
+001 稍后重试，成功落库
+```
+
+出卡前后 `MAX(decision_id)` 都是 999 ⇒ wrapper 把一张**真落库了的卡**判成
+「没有新卡落库」，rc=4。评审给了 PoC，本地照它复现成功。
+
+⇒ 判据换成 `record_id`（AUTOINCREMENT，它才真的描述先后）：取出卡前的水位，
+出卡后查 `record_id > 水位 AND replay_of IS NULL` 的在线卡。**恰好一张**才往下走，
+多于一张 fail closed（说不清哪张是这次的，核验就是在核别人的卡）。
+`BIGA_CARD_DECISION_ID` 存在时按那个号取，但仍要求 `record_id > 水位` ——
+这个号可能在更早一次尝试里就落过卡，不加水位会把上次的成果当成这次的。
+
+新增行为守卫 `test_低编号重试的卡也能被识别并核对它自己的run`：库里先有 999、
+本次落 001，断言 wrapper 认出 001 **并且**传给 `spawn_check` 的 `--run-id`
+是 001 那张卡的 run。sabotage 回退判据 ⇒ 精确复现评审那句 `rc=4`。
+
+**B · Spawn Proof 把多条账本行压成集合，混合/重复行被隐藏（P1-2）**
+
+上一版先按 agent 把所有 `runtime_run_id` 收进一个集合再 `any(...)`。于是
+**成功 join 的那个 id 根本不必来自被核验的那一行**。评审两个 PoC 都实测 PASS：
+
+```text
+§5.2  online 行 runtime_run_id 为空 + 旁边一条 legacy 行有且 join 得上  → PASS
+§5.3  两条 online 行，一条真一条伪造，运行时只有真的那个              → PASS
+```
+
+⇒ 逐字移植 `reference/strict_spawn_proof.py::verify_agent_rows`：不压集合，
+按 agent 保留原始行，六个分支各自给 `(status, reason)`。
+`SpawnProof` 因此带上 `status` / `failed`，`per_agent` 与 `unproven` 从它派生
+（一份判据、多种旧视图，不各算一遍）。
+
+⚠️ **与 reference 的唯一偏离**：无账本行时 reference 返回 `FAIL/no_agent_run`，
+这里返回 `ABSENT`。本项目里「某个 agent 这次没跑」是合法状态（裁定 13 的
+`discipline` 根本不建；`risk` 在两种确定性早退里不被 spawn），判 FAIL 会让每张
+roster 不满的卡都红。评审**正文 §5.4 写的也是「没有行 → ABSENT」**，是 reference
+代码与正文不一致，这里跟正文。
+
+配套两处：
+- schema **v21** `ux_online_agent_run_once`（评审 §5.5）——让「一次 run 一个 agent
+  两条在线行」在库层就写不进来。核验侧的逐行严格仍然保留：索引挡新写入，
+  核验挡索引之前就存在的老行（实测生产库 184 行 `provenance_mode` 全为 NULL）。
+- `provenance_mode` 收紧（§5.6）：只认 `online`/`legacy`/`None`，且 `legacy` 不得
+  带 `orchestration_run_id`。**安全档位不是自由文本** —— 否则「传个字符串换一档
+  更弱的核验」是调用方自己就能打开的开关。
+
+**C · Replay 血缘守卫可以从低层 Store 绕过（P1-3）**
+
+守卫长在 `card_ops.save_replay_card()`，而低层 `_store.save_card(card, replay_of=…)`
+只查父记录存在与同 Decision。评审用它换掉 `evidence_set_id` 直接落库成功
+（PoC 输出 `LOW_LEVEL_REPLAY_ACCEPTED`）。
+
+> 一条「只有走某个入口才生效」的安全规则，等于没有这条规则。
+
+⇒ 判据搬到契约层（`_contract.REPLAY_FROZEN_LINEAGE` + `replay_lineage_drift`），
+由写边界在**同一个写事务**里执行，形状照 `reference/replay_store_guard.py`。
+`card_ops` 那份删掉，不留第二套。新增三条 parametrize 的低层对抗测试
+（篡改 `evidence_set_id` / `input_verdict_refs` / `expected_roster`）
+＋ 一条反面守卫（血缘不变时换结论必须放行 —— 那是回放的用途）。
+
+⚠️ 顺带修正三条老测试：它们造的「回放卡」用 `make_verdict()` 重新生成证据
+（每次取 `now_cn()`），也就是**换掉了冻结证据再挂到 `replay_of` 上**。
+守卫抓它们是对的 —— 那不是回放。
+
+**D · Source ZIP 测试基线仍有 2 个确定性失败（P1-4）**
+
+- `test_条数只数被跟踪的文档` 里 `assert tracked` 在没有 `.git` 时必然失败，
+  而它测的是一段**与 git 无关**的纯函数。拆成两条：逻辑那条喂合成集合、
+  默认跑；真实 git 那条标 `@pytest.mark.git`。
+  「换台机器就红」的守卫会先被人关掉，然后再也没人开回来。
+- `latency_report` 的输出流契约冲突：`StoreNotInitialised` 打 stderr，
+  而同一批工具其他 UNKNOWN 分支打 stdout —— 两条测试各钉一边、**都绿**，
+  因为走的是不同代码路径。统一为「业务结论 PASS/FAIL/UNKNOWN → stdout，
+  参数错误/异常 → stderr」，五个工具一起改。
+  `budget_report` 顺带接上 `_verdict`（它原来退的是裸 `2`）。
+
+⇒ **source ZIP（无 `.git`）现在 1842 passed / 6 skipped / 0 failed。**
+
+CI 两个 job 加 `timeout-minutes: 15` —— 套件里有几条起真子进程的测试，
+卡住时会耗满 job 的 6 小时上限，而且看起来像「还在跑」。
+
+**E · 核验工具的两处（P2）**
+
+- `phase1_acceptance` 不再**静默降级**：只给 `--decision-id` 时不再自动改用
+  decision 级弱核验，而是报「判不了」并指出怎么取这张卡自己的 run_id；
+  确实要查历史加 `--legacy`（那时会在报告里注明用的是弱判据）。
+- `spawn_check --run-id` 模式下报错不再打出 `None …`：`SpawnProof` 带上从
+  `decision_runs` 反查到的 `decision_id`。
+
+**F · 文档数字（评审 §7.4「至少三套数字」）**
+
+README 徽章停在 `tests-1817` / `schema v19`，而正文是另一个数。根因是
+`sync_test_count.sh` 与条数守卫的正则都按**老徽章格式** `(\d+)%20TESTS` 写，
+徽章改版成 `badge/tests-N%20collected` 之后**从来没有匹配上过** ——
+🔴 **而失效的表现是「一直通过」**，没有任何地方会报红（L-13：按字符串形状写判据）。
+正则与 sed 一起改到真实形状；新增 `test_README徽章的schema版本与代码一致`
+把 schema 版本也钉住（它此前既没有守卫也没有同步脚本）。
+README 补一张表，把 Hermetic / 环境相关 / Live 三个口径分开列，
+并写明「全部通过」指的是哪一行。
+
+`schema-rollback.md` 修掉评审 §10 指出的自相矛盾：一边表里写 v2 用了
+`DROP COLUMN`，一边正文说「SQLite 的 `ALTER TABLE` 没有删列能力」。
+事实是 3.35 起有这个能力、但限制很多 —— 两句打架的话摆在同一份操作文档里，
+比其中任何一句错更糟：照着做的人不知道该信哪句。
+
+### 修复 · 顺带（这次复核自己撞到的）
+
+**`test_契约对象只从_store取_不自己解JSON列` 漏了 `docs/external/` 排除**
+
+同文件另外两条 AST 守卫都调 `is_external_reference()`，只有它没有。
+后果**只在无 git 时出现**：正常路径 `git ls-files` 尊重 `.gitignore`，那个目录
+天然不可见；剥掉 `.git` 退化成文件系统遍历，评审包里的示范代码就被当成产品代码。
+这正是 `_scan` 自己那段注释说的「两条路径要用同一个排除规则」。
+
+### 已知未完成
+
+```text
+Live OpenClaw E2E     未跑（需要盘中真实数据 + 真实 spawn）
+Live Feishu E2E       未跑
+v1-architecture-baseline   仍未重新冻结，README 标 🔶
+subprocess 测试的 process group 清理   未做（评审 D 组末项）
+```
+
+测试 1844 条（Hermetic 口径）/ 1877 passed（含环境相关）/ 0 failed。
+
+---
+
 ## [0.3.6] - 2026-09-25
 
 ### 修复 · 评审修复包的复核发现（Review-of-the-remediation）
@@ -7655,7 +7797,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.6...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/easyup168/easyup-biga/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/easyup168/easyup-biga/compare/v0.3.4...v0.3.6
 [0.3.4]: https://github.com/easyup168/easyup-biga/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/easyup168/easyup-biga/compare/v0.3.2...v0.3.3

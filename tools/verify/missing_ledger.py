@@ -171,5 +171,11 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except StoreNotInitialised as e:
-        print(f"\n🔶 判不了 —— {e}", file=sys.stderr)
+        # 🔴 业务结论（PASS/FAIL/UNKNOWN）一律走 **stdout**，只有参数错误与
+        #    程序异常走 stderr。「事实库还不存在」是一个**业务结论**——
+        #    R-3 的「算不出来」，不是程序出错。
+        #    ⚠️ 这里原来打 stderr，与同一批工具的其他 UNKNOWN 分支（走 stdout）
+        #      构成两套口径：两条测试各钉一边，**都绿**，因为它们走的是不同
+        #      代码路径。外部评审把它并排放在一起才看出来。
+        print(f"\n🔶 判不了 —— {e}")
         raise SystemExit(_v.UNKNOWN) from None

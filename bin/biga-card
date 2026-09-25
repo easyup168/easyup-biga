@@ -227,7 +227,13 @@ EOF
   fi
 fi
 
-BEFORE=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
+# 🔴 判据是 **record_id**，不是 MAX(decision_id)。
+#    决策号是**按字典序**比大小的，而它并不随落库先后单调递增：飞书路径会
+#    预占号，于是「先占 001 → 启动失败 → 后来 999 先成功落库 → 001 稍后重试
+#    成功」完全可能发生。那时 MAX(decision_id) 出卡前后都是 999，wrapper 会
+#    把一张**真落库了的卡**判成「没有新卡」（评审 §4.2 的 PoC 实测 rc=4）。
+#    record_id 是 AUTOINCREMENT，它才真的描述「谁后落的」。
+BEFORE_RECORD_ID=$(_sql "SELECT COALESCE(MAX(record_id),0) FROM decision_records")
 echo "▸ 程序驱动出卡  起 $(date +%T)"
 # 🔴 `\$1.2` 必须转义：脚本以无参数方式跑（出新卡），`set -u` 下裸 `$1` 是
 #    未绑定的位置参数会**当场终止脚本**。总闸开着时撞不到这行，一旦解除就会咬人。
@@ -284,8 +290,30 @@ ORCH_RC=$?
 # 正常跑完，编排子进程已退出 —— 撤掉 trap，后面的 spawn_check / readback 不受它影响。
 trap - EXIT TERM INT HUP
 
-NOW=$(_sql "SELECT COALESCE(MAX(decision_id),'') FROM decision_records")
-if [ "$ORCH_RC" -ne 0 ] || [ "$NOW" = "$BEFORE" ]; then
+# 本次新落的在线卡（record_id 严格大于出卡前的水位）。一行 = 决策号 \t run_id。
+# 🔴 `replay_of IS NULL` —— 回放不是「出了一张新卡」，别把它算进来。
+NEW_CARDS=$(_sql "SELECT decision_id || char(9) || COALESCE(run_id,'') FROM decision_records WHERE record_id > $BEFORE_RECORD_ID AND replay_of IS NULL ORDER BY record_id")
+# 飞书预占号时再收一道：只认**这次请求那个号**的卡，别的写入方同时落卡也不会混进来。
+# 🔴 仍然要求 `record_id > 水位`：这个号可能在**更早一次尝试**里就已经落过卡了
+#    （一个 decision 只允许一张在线卡），不加水位就会把上次的成果当成这次的。
+if [ -n "${BIGA_CARD_DECISION_ID:-}" ]; then
+  NEW_CARDS=$(_sql "SELECT decision_id || char(9) || COALESCE(run_id,'') FROM decision_records WHERE decision_id='$BIGA_CARD_DECISION_ID' AND replay_of IS NULL AND record_id > $BEFORE_RECORD_ID ORDER BY record_id DESC LIMIT 1")
+fi
+NEW_COUNT=$(printf '%s' "$NEW_CARDS" | grep -c . || true)
+NOW=$(printf '%s' "$NEW_CARDS" | tail -1 | cut -f1)
+
+# 🔴 多于一张 ⇒ **fail closed**。一次出卡只该产生一张在线卡；出现两张说明
+#    有并发写入方，此时「这次的卡是哪张」没有答案，往下核验就是在核别人的卡。
+if [ "$ORCH_RC" -eq 0 ] && [ "$NEW_COUNT" -gt 1 ]; then
+  echo >&2
+  echo "🔴 本次出卡期间落了 $NEW_COUNT 张在线卡 —— 说不清哪张是这次的，拒绝往下核验。" >&2
+  echo "   落的是：" >&2
+  printf '%s\n' "$NEW_CARDS" | sed 's/^/     /' >&2
+  echo "   单实例锁（.biga-card.lock）应当挡住并发出卡，出现这行说明它没生效。" >&2
+  exit 4
+fi
+
+if [ "$ORCH_RC" -ne 0 ] || [ "$NEW_COUNT" -eq 0 ]; then
   echo >&2
   if [ "$ORCH_RC" -eq 124 ]; then
     echo "🔴 出卡超时（外层 $(( CARD_DEADLINE_SEC + 60 ))s 硬超时兜底触发）。" >&2
@@ -319,7 +347,7 @@ fi
 #    而一个 decision 可以有多个 run（重投 / reaper / 将来的 Retry，
 #    那正是 P1-2 的威胁模型）。出卡之后若又开了一次 run，核验就会去查
 #    一个没出过这张卡的执行尝试 —— 查的不是这张卡的来路。
-RUN_ID=$(_sql "SELECT run_id FROM decision_records WHERE decision_id='$NOW' AND replay_of IS NULL AND run_id IS NOT NULL ORDER BY record_id DESC LIMIT 1")
+RUN_ID=$(printf '%s' "$NEW_CARDS" | tail -1 | cut -f2)
 if [ -z "$RUN_ID" ]; then
   echo "🔴 刚落的卡（决策号 $NOW）没有 run_id —— spawn 核验无法按 Run 级精确核验。" >&2
   echo "   在线卡必须带 run_id（save_card 的在线分支会拒绝不带的）；"           >&2

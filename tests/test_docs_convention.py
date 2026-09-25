@@ -262,7 +262,13 @@ def test_教程不写与既存系统相关的内容(path: pathlib.Path):
 _LIVE_TEST_COUNT_DOCS = ("README.md", "CLAUDE.md", "docs/guide/review-prompt.md")
 
 _TEST_COUNT_PATTERNS = (
-    r"(\d+)%20TESTS",            # README 的徽章
+    # 🔴 README 徽章。原来写的是 `(\d+)%20TESTS` —— 而真实徽章是
+    #    `badge/tests-1817%20collected`（小写、后缀不是 TESTS）。也就是说这条
+    #    正则**从来没有匹配上过**：徽章既不被同步脚本改、也不被本守卫查，
+    #    于是它停在 1817 而正文已经是 1843，外部评审因此数出「至少三套数字」。
+    #    ⚠️ 这是 L-13 的形状：按**字符串形状**写判据，形状一变就静默失效 ——
+    #      而失效的表现是「一直通过」，没有任何地方会报红。
+    r"badge/tests-(\d+)%20",     # README 的徽章
     r"(\d+)\s*条测试",            # 正文散文
     r"测试\s*\|\s*(\d+)\s*条",     # CLAUDE.md 的状态表
 )
@@ -373,17 +379,39 @@ class _FakeItem:
     def __init__(self, params): self.callspec = _FakeSpec(params)
 
 
+def test_README徽章的schema版本与代码一致():
+    """schema 徽章漂了两版都没人发现（v19 vs 实际 v21）。
+
+    条数有守卫、有同步脚本，schema 版本两样都没有 —— 而它同样是
+    「文档里的一个实测数字」。裁定 14：徽章必须描述真被测过的状态。
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "src"))
+    from easyup_biga.persistence.schema import SCHEMA_VERSION
+
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    found = re.findall(r"schema%20v(\d+)", text) + re.findall(r"schema v(\d+)", text)
+    assert found, "README 里找不到 schema 版本 —— 是被删了，还是换了写法？"
+    bad = [v for v in found if int(v) != SCHEMA_VERSION]
+    assert not bad, (
+        f"代码里 SCHEMA_VERSION={SCHEMA_VERSION}，README 写着 v{sorted(set(bad))}。\n"
+        "  徽章与正文都算。")
+
+
 def test_条数只数被跟踪的文档():
-    """`_tracked_docs()` / `_is_untracked_doc_case()` 的自证。
+    """`_is_untracked_doc_case()` 的自证 —— **不依赖真的有 git**。
 
     没有这条，上面那个 `collected` 的口径就是「看起来对」——而 2026-09-23
     那次正是「看起来对」：同步出来的数在本机跑得通，clone 下来跑不出。
+
+    🔴 判据喂的是一份**合成的** tracked 集合，不是 `_tracked_docs()` 的真实
+    返回值。原来这里 `assert tracked`，于是在 source ZIP（没有 `.git`）里
+    **必然失败** —— 而它测的是一段纯函数逻辑，和有没有 git 毫无关系。
+    「换一台机器就红」的守卫会先被人关掉，然后就再也没人开回来。
+    真实 git 那一侧由下面那条 `@pytest.mark.git` 负责。
     """
-    tracked = _tracked_docs()
-    assert tracked, "拿不到 git 跟踪清单 —— 条数检查会整条退化成 skip"
-    # 🔴 非平凡：必须真的扫到已知的被跟踪文档，否则「全都算未跟踪」也会绿
     known = DOCS / "README.md"
-    assert known in tracked, f"没扫到 {known}，覆盖坏了"
+    tracked = {known}
 
     # 被跟踪 ⇒ 计入条数
     assert not _is_untracked_doc_case(_FakeItem({"path": known}), tracked)
@@ -396,6 +424,18 @@ def test_条数只数被跟踪的文档():
     # docs/ 之外的参数不受影响（别把别的参数化检查也误伤）
     assert not _is_untracked_doc_case(_FakeItem({"rel": "CLAUDE.md"}), tracked)
     assert not _is_untracked_doc_case(_FakeItem({"path": REPO / "skills"}), tracked)
+
+
+@pytest.mark.git
+def test_真实git清单扫得到docs下的文档():
+    """上一条用的是合成集合；这一条验 `_tracked_docs()` 真的能扫到东西。
+
+    🔴 非平凡：必须真的扫到已知的被跟踪文档，否则「全都算未跟踪」也会绿 ——
+    那样条数会静默地一路缩水到 0，而每一步都「通过」。
+    """
+    tracked = _tracked_docs()
+    assert tracked, "拿不到 git 跟踪清单"
+    assert DOCS / "README.md" in tracked, "扫到了，但没扫到已知的那份，覆盖坏了"
 
 
 def test_文档里的测试条数与实测一致(request):

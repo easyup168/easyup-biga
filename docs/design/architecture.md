@@ -621,6 +621,7 @@ v16 到 v20 **都不新增表** —— 只给已有表加列与改约束，所�
 | v18 | `ux_evidence_sets_run` | ⚠️ **多余的**，见下 |
 | v19 | `agent_runs.provenance_mode` | 区分在线执行行与历史行，是 Run 级 spawn 核验的三态判据 |
 | v20 | 撤掉 v18 | 一条不变量不许有两个名字 |
+| v21 | `ux_online_agent_run_once` | 一次 run 一个 agent 至多一条在线账本行——多条时一条真 `runtime_run_id` 会把另一条伪造的**盖住** |
 
 🔴 v18 / v20 这一来一回值得留在这里，因为它是 **L-3 的一个新鲜样本**：
 v18 照抄外部评审给的建议索引，**没有先查这条不变量是不是已经有人在守** ——
@@ -629,7 +630,7 @@ v18 照抄外部评审给的建议索引，**没有先查这条不变量是不�
 ⇒ 评审给的是**形状**，不是「你缺这个」；照抄之前先 grep 一遍。
 由 `tests/test_run_provenance.py::test_一个run至多一个切片的约束只应有一条` 钉住。
 
-完整 20 个版本各一句话摘要见 [`schema-rollback.md`](../guide/schema-rollback.md)，
+完整 21 个版本各一句话摘要见 [`schema-rollback.md`](../guide/schema-rollback.md)，
 权威说明仍是 `schema.py` 逐条迁移体正上方的注释。
 
 ⚠️ **只读打开一个还不存在的库**会抛 `StoreNotInitialised`（v5 加），

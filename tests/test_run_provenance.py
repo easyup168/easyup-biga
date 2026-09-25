@@ -214,15 +214,63 @@ class TestOnlineCardRequiresProvenance:
         with pytest.raises(ValueError, match="拒绝落库"):
             save_card(card, path=db)
 
-    def test_回放不受这条约束(self, db):
+    def test_回放不受run_id必填这条约束(self, db):
         """回放本来就不是一次执行尝试 —— `comparable()` 比较时连 run_id 都剥掉。
 
         要求它带 run_id 等于逼回放捏造一个（L-8：历史永不改写）。
+
+        ⚠️ 放开的**只有 run_id**。`evidence_set_id` / `input_verdict_refs` 是
+        血缘，回放必须落在同一份上（`REPLAY_FROZEN_LINEAGE`）——
+        这条测试原来把它们一起置空，那不是「回放不必带 run_id」，
+        是「回放可以换掉它基于的证据」，与 P1-3 要堵的是同一件事。
         """
-        rid = save_card(_card(), path=db)
-        replayed = _card(run_id=None, evidence_set_id=None,
-                         input_verdict_refs=[], from_store=True)
+        original = _card()
+        rid = save_card(original, path=db)
+        replayed = _card(run_id=None, from_store=True,
+                         verdicts=list(original.verdicts),
+                         evidence_set_id=original.evidence_set_id,
+                         input_verdict_refs=list(original.input_verdict_refs))
         assert save_card(replayed, replay_of=rid, path=db) > 0
+
+    @pytest.mark.parametrize("tamper,expect", [
+        ({"evidence_set_id": "tampered-es"}, "evidence_set_id"),
+        ({"input_verdict_refs": []}, "input_verdict_refs"),
+        ({"expected_roster": ("market", "sector")}, "expected_roster"),
+    ])
+    def test_低层save_card不能绕过回放血缘守卫(self, db, tamper, expect):
+        """🔴 P1-3：守卫必须长在**写边界**，不是长在 CLI 那条路上。
+
+        评审用的正是这条路径：`card_ops.save_replay_card()` 有守卫，
+        而低层 `_store.save_card(card, replay_of=…)` 换掉 `evidence_set_id`
+        照样落库成功（PoC 输出 `LOW_LEVEL_REPLAY_ACCEPTED`）。
+        一条「只有走某个入口才生效」的安全规则，等于没有这条规则。
+
+        sabotage 验证：把 `db.py` replay 分支里的 `replay_lineage_drift`
+        判断删掉，三条 parametrize 全红。
+        """
+        original = _card()
+        rid = save_card(original, path=db)
+        kw = dict(from_store=True, run_id=None, status="AVOID",
+                  verdicts=list(original.verdicts),
+                  evidence_set_id=original.evidence_set_id,
+                  input_verdict_refs=list(original.input_verdict_refs))
+        kw.update(tamper)          # 篡改覆盖掉那一项，其余血缘保持一致
+        bad = _card(**kw)
+        with pytest.raises(ValueError, match="frozen input lineage"):
+            save_card(bad, replay_of=rid, path=db)
+        with pytest.raises(ValueError, match=expect):
+            save_card(bad, replay_of=rid, path=db)
+
+    def test_回放可以给出新结论(self, db):
+        """守卫的反面：血缘不变时，换结论**必须**被放行 —— 那是回放的用途。"""
+        original = _card()
+        rid = save_card(original, path=db)
+        ok = _card(from_store=True, run_id=None, status="AVOID",
+                   headline="换个模型之后更保守", model_ref="opus",
+                   verdicts=list(original.verdicts),
+                   evidence_set_id=original.evidence_set_id,
+                   input_verdict_refs=list(original.input_verdict_refs))
+        assert save_card(ok, replay_of=rid, path=db) > 0
 
     def test_落库之后血缘在列里而不是只在card_json里(self, db):
         """🔴 评审 §7-8 的落点：要的是「一句 SQL 能答」，不是「解开 JSON 能看到」。"""

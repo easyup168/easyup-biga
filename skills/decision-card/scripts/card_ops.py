@@ -38,7 +38,6 @@ from _contract import (  # noqa: E402
     card_event_type,
 )
 from _store import (  # noqa: E402
-    load_card_by_record_id,
     load_online_card,
     load_verdict,
     load_verdict_meta,
@@ -253,42 +252,21 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
 #: 场景」—— 那个理由对**落库**成立，对 `--check` 不成立，而这个集合同时服务两者。
 #: `model_ref` 里嵌着 `SYNTHESIS_VERSION`（见 `synthesize()`），剥掉它之后
 #: `--check` 就再也看不见「合成版本已经变了」——而那正是它守的东西之一。
-#: 落库侧的「换模型合法」现在由下面的 `REPLAY_FROZEN_LINEAGE` 单独表达：
-#: 两个问题，两个集合，不再互相牵连。
+#: 落库侧的「换模型合法」由契约层的 `REPLAY_FROZEN_LINEAGE` 单独表达
+#: （它不含 `model_ref`）：两个问题，两个集合，不再互相牵连。
 ALLOWED_REPLAY_CHANGES: frozenset[str] = frozenset({
     "generated_at",
     "elapsed_ms",
     "run_id",
 })
 
-#: 回放卡**必须与原卡逐字相同**的字段 —— 「这个结论基于什么」。
+#: 回放血缘的判据**不在这里** —— 它在契约层 `_contract.REPLAY_FROZEN_LINEAGE`，
+#: 由写边界（`_store.save_card` 的 replay 分支）在同一个写事务里执行。
 #:
-#: 🔴 回放的用途是「换个模型重跑，看结论会不会变」（见 `replay.py` 的用法 2）。
-#: 所以该冻的是**输入**，不是**结论**：
-#:
-#: ===================== ==============================================
-#: `decision_id`         回放不得跨决策（DB 层还会再查一次父记录，纵深防御）
-#: `verdicts`            冻结的证据本身
-#: `input_verdict_refs`  判定原件的血缘（哪几条原件、什么哈希、属于哪次 run）
-#: `evidence_set_id`     基于哪份冻结切片
-#: `expected_roster`     当时期望哪些 agent 在场
-#: ===================== ==============================================
-#:
-#: `status` / `headline` / `synthesis` / `missing` / `model_ref` **允许变** ——
-#: 那是新模型给出的新判断，正是回放要观察的东西。
-#:
-#: ⚠️ v0.3.4 的第一版守卫拿 `comparable()` 做全量比对，等于把结论也冻住了，
-#: 于是 `replay.py --status AVOID --store`（模块 docstring 里的用法 2）
-#: **永远落不了库**，而它自己的 CLI 还在收这几个参数。评审 §13.2 要的是
-#: 「保留或验证来源 Verdict / Evidence refs」——冻血缘，不是冻结论。
-REPLAY_FROZEN_LINEAGE: tuple[str, ...] = (
-    "decision_id",
-    "verdicts",
-    "input_verdict_refs",
-    "evidence_set_id",
-    "expected_roster",
-)
-
+#: 🔴 第一版把它长在这个模块里，于是守卫只长在 **CLI 那条路**上：外部评审用低层
+#: `_store.save_card(card, replay_of=…)` 直接写、换掉 `evidence_set_id`，照样落库
+#: 成功。一条「只有走某个入口才生效」的安全规则，等于没有这条规则。
+#: 这里只做**转发**，不再有第二份判据（L-3）。
 
 def save_online_card(card: DecisionCard,
                      notifications: list[dict]) -> int:
@@ -300,40 +278,12 @@ def save_replay_card(card: DecisionCard,
                      parent_record_id: int | None) -> int:
     """回放路径：落库 Card（不入队通知），返回 record_id。
 
-    🔴 P2-3 血缘不可变守卫：回放卡**基于什么**不许与原卡不同
-    （`REPLAY_FROZEN_LINEAGE`）。结论本身允许不同 —— 那是回放的用途。
-
-    ⚠️ 父记录不存在时这里不报错：`save_card()` 的 replay 分支会在**写事务内**
-    查父记录并拒绝（P2-3）。在这里再判一次只会多一套口径，而且它是事务外的读。
+    血缘守卫在写边界（`_store.save_card` 的 replay 分支），见上面那段注释。
+    这里保留这个名字，是因为「在线」与「回放」是两个安全档位，调用点该看得出
+    自己走的是哪一个 —— 但**档位不由这个名字决定**，由 `replay_of` 参数决定，
+    而判据在库里。
     """
-    if parent_record_id is not None:
-        parent = load_card_by_record_id(parent_record_id)
-        if parent is not None:
-            drift = _lineage_drift(parent, card)
-            if drift:
-                raise ValueError(
-                    "replay changed frozen input lineage —— "
-                    "回放卡与原卡的**来源**不同：" + "；".join(drift) + "。\n"
-                    "  回放可以给出新的结论（status / headline / synthesis），"
-                    "但必须基于同一份冻结证据；\n"
-                    "  这几个字段变了，两次结果就不再可比，回放实验作废。")
     return save_card(card, replay_of=parent_record_id)
-
-
-def _lineage_drift(parent: DecisionCard, card: DecisionCard) -> list[str]:
-    """`REPLAY_FROZEN_LINEAGE` 里对不上的字段，每条一句人话。空列表 = 一致。"""
-    a, b = parent.to_dict(), card.to_dict()
-    out = []
-    for f in REPLAY_FROZEN_LINEAGE:
-        if a.get(f) != b.get(f):
-            # 🔴 `verdicts` / `input_verdict_refs` 整份打印会刷屏 —— 大字段只说
-            #    「不同」与条数，小字段直接把两个值摆出来。报错要能一眼看懂。
-            if isinstance(a.get(f), list) or isinstance(b.get(f), list):
-                out.append(f"{f}（原卡 {len(a.get(f) or [])} 条，"
-                           f"回放 {len(b.get(f) or [])} 条或内容不同）")
-            else:
-                out.append(f"{f}（原卡 {a.get(f)!r}，回放 {b.get(f)!r}）")
-    return out
 
 
 def comparable(card: DecisionCard) -> dict:

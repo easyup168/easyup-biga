@@ -30,6 +30,10 @@ jobs:
 
       - name: Hermetic tests
         # -m "not installed and not live and not git" 跳过所有环境依赖测试。
+        # 🔴 timeout-minutes：套件里有几条起真子进程的测试（出卡沙盒、通知并发）。
+        #    它们卡住时默认会耗满 job 的 6 小时上限 —— 一次挂死等于烧掉一整天的
+        #    CI 额度，而且看起来像「还在跑」，没人会去点停止。
+        timeout-minutes: 15
         run: pytest -q -m "not installed and not live and not git"
 
   source-archive:
@@ -49,6 +53,7 @@ jobs:
           rm -rf /tmp/biga-source/.git
 
       - name: Install and test in archive
+        timeout-minutes: 15
         working-directory: /tmp/biga-source
         run: |
           python -m pip install -U pip

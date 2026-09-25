@@ -20,7 +20,49 @@ from .registry import EXPECTED_ROSTER
 from .verdict import VETO_STANCE, AgentVerdict
 from .verdict_ref import VerdictRef
 
-__all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE"]
+__all__ = ["DecisionCard", "CardStatus", "DECISION_ID_RE",
+           "REPLAY_FROZEN_LINEAGE", "replay_lineage_drift"]
+
+#: 回放卡**必须与原卡逐字相同**的字段 —— 「这个结论基于什么」。
+#:
+#: 🔴 回放的用途是「换个模型重跑，看结论会不会变」。所以该冻的是**输入**，
+#: 不是**结论**：`status` / `headline` / `synthesis` / `missing` / `model_ref`
+#: 允许变，那正是回放要观察的东西。
+#:
+#: ⚠️ **这份定义放在契约层、不放在 `card_ops`，是有原因的。**
+#: 它第一版长在 `skills/decision-card/scripts/card_ops.py` 里，于是守卫只长在
+#: **CLI 那条路**上：外部评审用低层 `_store.save_card(card, replay_of=…)` 直接
+#: 写，换掉 `evidence_set_id` 照样落库成功（PoC 输出 `LOW_LEVEL_REPLAY_ACCEPTED`）。
+#: 一条「只有走某个入口才生效」的安全规则，等于没有这条规则。
+#: ⇒ 判据搬到契约层，写边界（`persistence/db.py`）在**同一个写事务里**执行它。
+REPLAY_FROZEN_LINEAGE: tuple[str, ...] = (
+    "decision_id",
+    "verdicts",
+    "input_verdict_refs",
+    "evidence_set_id",
+    "expected_roster",
+)
+
+
+def replay_lineage_drift(parent: dict[str, Any], replay: dict[str, Any]) -> list[str]:
+    """`REPLAY_FROZEN_LINEAGE` 里对不上的字段，每条一句人话。空列表 = 一致。
+
+    两边都收**卡的 dict**（`to_dict()` 或库里那份 `card_json` 解出来的），
+    不重建 `DecisionCard` —— 重建要过一遍构造期校验，而历史卡未必还过得去，
+    那会把「血缘变没变」这个问题变成「旧卡今天还合不合法」。
+    形状照 `reference/replay_store_guard.py::canonical_subset`。
+    """
+    out: list[str] = []
+    for f in REPLAY_FROZEN_LINEAGE:
+        a, b = parent.get(f), replay.get(f)
+        if a == b:
+            continue
+        # 🔴 大字段整份打印会刷屏。报错要能一眼看懂，不是把两个 JSON 甩给人。
+        if isinstance(a, list) or isinstance(b, list):
+            out.append(f"{f}（原卡 {len(a or [])} 条，回放 {len(b or [])} 条或内容不同）")
+        else:
+            out.append(f"{f}（原卡 {a!r}，回放 {b!r}）")
+    return out
 
 CardStatus = Literal["BUY", "WAIT", "AVOID", "BLOCK"]
 _CARD_STATUSES: frozenset[str] = frozenset(get_args(CardStatus))

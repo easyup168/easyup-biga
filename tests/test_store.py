@@ -380,7 +380,12 @@ class TestDecisionRecords:
         original = make_card(status="WAIT")
         rid = save_card(original, path=db)
 
-        replay = make_card(status="AVOID", model_ref="anthropic/claude-opus-5")
+        # 🔴 回放必须**沿用原卡那份冻结证据**（REPLAY_FROZEN_LINEAGE）。
+        #    `make_verdict()` 每次取 now_cn()，不带 verdicts 就等于换了一份证据 ——
+        #    那不是回放，是另造一张卡挂在 replay_of 上。
+        replay = make_card(status="AVOID", model_ref="anthropic/claude-opus-5",
+                           verdicts=list(original.verdicts),
+                           missing=list(original.missing))
         save_card(replay, replay_of=rid, path=db)
 
         # 在线那条仍然是原始结论
@@ -423,8 +428,11 @@ class TestDecisionIdAllocation:
         save_card(make_card(decision_id=b), path=db)   # 不该抛错
 
     def test_回放不占用新序号(self, db):
-        rid = save_card(make_card(decision_id="BIGA-20260919-001"), path=db)
-        save_card(make_card(decision_id="BIGA-20260919-001", status="AVOID"),
+        original = make_card(decision_id="BIGA-20260919-001")
+        rid = save_card(original, path=db)
+        save_card(make_card(decision_id="BIGA-20260919-001", status="AVOID",
+                            verdicts=list(original.verdicts),
+                            missing=list(original.missing)),
                   replay_of=rid, path=db)
         # 回放记录用的是同一个 decision_id，不该把 002 也算成已占用
         assert next_decision_id(day="20260919") == "BIGA-20260919-002"
@@ -600,5 +608,10 @@ class TestF23MissingDatabase:
             [sys.executable, str(REPO / "tools" / "verify" / f"{tool}.py")],
             capture_output=True, text=True, env=env, cwd=REPO)
         assert "Traceback" not in r.stderr, r.stderr[-500:]
-        assert "判不了" in r.stderr
+        # 🔴 业务结论走 stdout（评审 2026092502 §7.3）。原来这里断言 stderr，
+        #    而同一批工具的其他 UNKNOWN 分支打的是 stdout ——
+        #    两条测试各钉一边、**都绿**，因为它们走的是不同代码路径。
+        #    一个工具的「判不了」出现在两个流里，下游没法用一条管道接住它。
+        assert "判不了" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+        assert "判不了" not in r.stderr, "业务结论不该同时出现在 stderr"
         assert r.returncode == 2, f"判不了统一用退出码 2（与 isolation.py 一致）"

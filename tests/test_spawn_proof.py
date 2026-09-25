@@ -264,33 +264,77 @@ class TestWiredIntoRealPath:
             "bin/biga-card 调 spawn_check.py 时没有 --run-id —— "
             "那样查的是决策级，同一个 decision 的其他 Run 的 spawn 记录会被借用。")
 
-    def test_核验绑的是卡自己的run不是最近那次run(self):
-        """P1-2 最终验收条件：Spawn Proof **精确绑定 Card.run_id**。
+    def test_不用MAX_decision_id定位本次的卡(self):
+        """决策号**按字典序**比大小，而它不随落库先后单调递增。
 
-        🔴 `--run-id` 拿到了还不够，要看那个 id 是从哪儿取的：
-        从 `decision_runs … ORDER BY created_at DESC` 取的是「这个 decision 最近
-        开的那次 run」，而一个 decision 可以有多个 run（重投 / reaper / Retry ——
-        正是 P1-2 的威胁模型）。出卡之后又开一次 run，核验就去查了一次没出过
-        这张卡的执行尝试。唯一正确的来源是刚落的那张卡自己的 `run_id`。
+        飞书路径会预占号 ⇒ 「001 预占 → 首次启动失败 → 999 后来先落库 →
+        001 稍后重试成功」是真实可能的顺序。那时出卡前后 `MAX(decision_id)`
+        都是 999，wrapper 会把一张**真落库了的卡**判成「没有新卡」。
+        判据只能是 `record_id`（AUTOINCREMENT，真的描述先后）。
 
-        sabotage 验证：把那句 SQL 改回 `FROM decision_runs …`，本条变红。
+        ⚠️ 这条只查形状；真正的判据是下面那条行为测试。
         """
         text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
         run = text.split("# ── 出新卡")[1]
-        sql = [ln for ln in run.splitlines() if ln.startswith("RUN_ID=")]
-        assert len(sql) == 1, f"RUN_ID 的取法应当只有一处，实际 {len(sql)} 处"
-        assert "FROM decision_records" in sql[0], (
-            "RUN_ID 不是从 decision_records（卡自己那一行）取的 —— "
-            f"实际是：{sql[0]}")
-        assert "decision_runs" not in sql[0], (
-            "从 decision_runs 取的是「最近开的那次 run」，不是「出这张卡的那次 run」")
+        # 🔴 只看**代码行**，注释里出现这个字符串是正常的 —— 那段注释正是在
+        #    解释「为什么不能用它」。第一版忘了剥注释，于是这条测试被脚本里
+        #    自己的解释文字绊倒（CLAUDE.md 那条「描述规则时别把 X 抄进去」的
+        #    另一面：抄是必要的，判据得跟着变精确）。
+        code = "\n".join(ln for ln in run.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert "MAX(decision_id)" not in code, (
+            "还在用决策号的字典序最大值定位本次的卡 —— 低编号重试会被漏掉")
+        assert "MAX(record_id)" in code, "没有取 record_id 水位"
+
+    def test_低编号重试的卡也能被识别并核对它自己的run(self, tmp_path):
+        """🔴 评审 §4.5 的场景，行为判据。
+
+        库里先有一张**更大**决策号的卡（999，run=h…），本次 orchestrator 落的是
+        **更小**的 001（run=n…）。要求：
+
+          · wrapper 不报「没有新卡落库」（rc 不是 4）
+          · 传给 spawn_check 的 `--run-id` 是 **001 那张卡的 run**，不是 999 的
+
+        sabotage 验证：把 `bin/biga-card` 的判据改回 `MAX(decision_id)`，
+        本条立刻变红（rc=4，"没有新卡落库"）—— 而上面那条形状测试也会红。
+        """
+        import subprocess
+        did_old, did_new = "BIGA-20260925-999", "BIGA-20260925-001"
+        rid_old, rid_new = "h" * 32, "n" * 32
+
+        seen = tmp_path / "spawn-argv.txt"
+        spawn_stub = ("import sys, pathlib\n"
+                      f"pathlib.Path({str(seen)!r}).write_text(' '.join(sys.argv[1:]))\n"
+                      "raise SystemExit(0)\n")
+        work, db, stub = self._seeded_repo(tmp_path, did_new, spawn_stub,
+                                           readback_stub="raise SystemExit(0)\n",
+                                           rid=rid_new)
+
+        # 先种下那张**更大号、更早落库**的卡（record_id 更小）
+        seed = tmp_path / "seed.py"
+        seed.write_text(self._orch_stub(work, db, did_old, rid=rid_old),
+                        encoding="utf-8")
+        r0 = subprocess.run([sys.executable, str(seed)], capture_output=True,
+                            text=True, cwd=work)
+        assert r0.returncode == 0, r0.stderr
+
+        r = self._run(work, db, stub)
+        assert r.returncode == 0, (
+            "低编号（001）重试成功落卡，wrapper 却没认出来 —— "
+            f"rc={r.returncode}\n{r.stderr[-800:]}")
+        argv = seen.read_text(encoding="utf-8").split()
+        assert "--run-id" in argv, f"没按 Run 级核验：{argv}"
+        got = argv[argv.index("--run-id") + 1]
+        assert got == rid_new, (
+            f"核的是 run={got}，而本次那张卡（{did_new}）的 run 是 {rid_new}。"
+            "拿到的多半是 999 那张的 run —— 说明还在按决策号大小找卡。")
 
     @staticmethod
     def _orch_path(work) -> pathlib.Path:
         return work / "skills" / "decision-card" / "scripts" / "orchestrator.py"
 
     @staticmethod
-    def _orch_stub(work, db, did: str) -> str:
+    def _orch_stub(work, db, did: str, rid: str = "s" * 32) -> str:
         """orchestrator.py 的桩内容：落一张真卡 + 渲染到 stdout + 退出 0。
 
         🔴 批 C-II 之后，出卡的**付费动作**是 `orchestrator.py`（经 Adapter → 真
@@ -314,10 +358,11 @@ class TestWiredIntoRealPath:
             # 🔴 批 N：在线卡必须带 run_id / evidence_set_id，且 run_id 要追得到
             #    decision_runs —— 桩也得开一次真 run，不能编一个字符串。
             # 🔴 P1-1：save_card 在线路径现在还要求 evidence_set_id 在 evidence_sets 里存在。
-            "RID = 's' * 32\n"
+            f"RID = {rid!r}\n"
             "open_run(new_run_context(origin='cli', non_interactive=True,\n"
             f"                         decision_id=TID, run_id=RID), path={str(db)!r})\n"
-            f"save_evidence_set(evidence_set_id='es-stub', decision_id=TID,\n"
+            "ESID = 'es-' + RID[:8]\n"
+            f"save_evidence_set(evidence_set_id=ESID, decision_id=TID,\n"
             f"                  manifest={{}}, run_id=RID, path={str(db)!r})\n"
             "v = AgentVerdict(task_id=TID, agent='market', status='completed',\n"
             "                 verdict='PASS', result={'x': 1}, data_completeness=1.0,\n"
@@ -344,7 +389,7 @@ class TestWiredIntoRealPath:
             # 🔴 批 P：每个缺席 agent 各一条解得出它名字的登记（评审 §18）。
             "                    missing=[absent_agent_missing(a)\n"
             "                             for a in EXPECTED_ROSTER if a != 'market'],\n"
-            "                    run_id=RID, evidence_set_id='es-stub',\n"
+            "                    run_id=RID, evidence_set_id=ESID,\n"
             "                    input_verdict_refs=[ref])\n"
             f"save_card(card, path={str(db)!r})\n"
             "print('run stub-run   （查进度：bin/biga-card --status stub-run）',"
@@ -353,7 +398,8 @@ class TestWiredIntoRealPath:
         )
 
     @staticmethod
-    def _seeded_repo(tmp_path, did: str, spawn_stub: str, readback_stub: str | None = None):
+    def _seeded_repo(tmp_path, did: str, spawn_stub: str, readback_stub: str | None = None,
+                     rid: str = "s" * 32):
         """造一个能走完出卡路径的沙盒。**不联网、不花钱。**
 
         桩（`readback_stub` 缺省时不桩 —— 让真的 `readback_check.py` 跑在刚种下的
@@ -381,7 +427,7 @@ class TestWiredIntoRealPath:
 
         # 🔴 桩掉 orchestrator.py —— 这才是收缩之后的付费调用。
         TestWiredIntoRealPath._orch_path(work).write_text(
-            TestWiredIntoRealPath._orch_stub(work, db, did), encoding="utf-8")
+            TestWiredIntoRealPath._orch_stub(work, db, did, rid=rid), encoding="utf-8")
 
         # BIGA 桩留成一个「响亮的空操作」：Adapter 走 DEFAULT_BIGA 不经这里，
         # 万一有别的路径去调 $BIGA，这里会在 stderr 留痕而不是真起会话。
@@ -1262,10 +1308,12 @@ class TestProvenanceModeIsRead:
         """`rows = [(agent, runtime_run_id|None, provenance_mode|None)]` 落真库。
 
         ⚠️ `provenance_mode=None` 会被 `record_agent_run()` 自动置成 `'online'`
-        （带 orchestration_run_id 的新行本来就是在线行）。要造「非在线」的行，
-        显式传 `'legacy'` —— 这也正是 §8.4 给弱名称匹配划定的那个档位。
-        真正的 NULL 行只可能是 v19 之前落的历史行，API 造不出来，
-        但它与 `'legacy'` 走的是同一个分支（都不等于 `'online'`）。
+        （带 orchestration_run_id 的新行本来就是在线行）。
+
+        🔴 `'legacy'` / 多条 online / 未知 mode 这三种形状，**API 现在造不出来**
+        （§5.6 收紧 + v21 唯一索引）——那正是修复的目的。但老库里存在这些行，
+        核验必须照样给出正确结论。所以这几种由 `_raw_row()` 直接写，
+        走 `_store.connect()`（事实层的唯一入口，不是裸 sqlite3）。
         """
         from _store import init_schema
         from _store.db import record_agent_run
@@ -1275,15 +1323,47 @@ class TestProvenanceModeIsRead:
         init_schema(db)
         open_test_run(db, decision_id=MINE, run_id=self.RID)
         monkeypatch.setenv("BIGA_DB_PATH", str(db))
+        seen_online: set[str] = set()
         for agent, rr, mode in rows:
-            record_agent_run(task_id=MINE, agent=agent, status="ok",
-                             started_at="t", finished_at="t", elapsed_ms=1,
-                             decision_id=MINE, runtime_run_id=rr,
-                             orchestration_run_id=self.RID,
-                             provenance_mode=mode, path=db)
+            api_ok = mode in (None, "online") and agent not in seen_online \
+                and mode != "__NULL__"
+            if api_ok:
+                seen_online.add(agent)
+                record_agent_run(task_id=MINE, agent=agent, status="ok",
+                                 started_at="t", finished_at="t", elapsed_ms=1,
+                                 decision_id=MINE, runtime_run_id=rr,
+                                 orchestration_run_id=self.RID,
+                                 provenance_mode=mode, path=db)
+            else:
+                self._raw_row(db, agent=agent, runtime_run_id=rr,
+                              provenance_mode=(None if mode == "__NULL__" else mode))
         monkeypatch.setenv("BIGA_RUNTIME_DB",
                            str(fake_runtime_db(tmp_path / "rt.db", runtime)))
         return db
+
+    def _raw_row(self, db, *, agent, runtime_run_id, provenance_mode):
+        """直接写一行 agent_runs —— 造 API 已经拒绝的历史形状。
+
+        🔴 用 `_store.connect()`，不是裸 `sqlite3.connect`：单一入口那条规则
+        （I-4）管的是**业务代码**，测试要造的正是「写边界拦不住的老数据」，
+        绕开写边界是这条测试的内容本身，绕开 `_store` 则只是偷懒。
+        """
+        from _store import connect
+        with connect(db) as c:
+            # 🔴 这一行造的是**老库里的形状**，而 v21 的唯一索引正是为了让它
+            #    今后写不进来。要模拟 v21 之前的库，就得先把那条索引拿掉 ——
+            #    留着它，这里插不进去，于是「核验能不能正确处理老数据」
+            #    就永远测不到。
+            #    ⚠️ 索引本身有自己的守卫（test_v21索引让重复在线行写不进来），
+            #      这里把它摘掉不会让那条检查失效。
+            c.execute("DROP INDEX IF EXISTS ux_online_agent_run_once")
+            c.execute(
+                "INSERT INTO agent_runs (decision_id, task_id, agent, status,"
+                " missing_count, elapsed_ms, started_at, finished_at,"
+                " runtime_run_id, orchestration_run_id, provenance_mode)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (MINE, MINE, agent, "ok", 0, 1, "t", "t",
+                 runtime_run_id, self.RID, provenance_mode))
 
     # ── 三态 ────────────────────────────────────────────────────────────────
 
@@ -1309,7 +1389,7 @@ class TestProvenanceModeIsRead:
         self._wire(tmp_path, monkeypatch,
                    [("market", None, "legacy")], [("market", MINE)])
         proof = pa.spawn_proof_for_run(self.RID)
-        assert proof.unproven == {"market": "not_online_provenance"}, (
+        assert proof.unproven == {"market": "legacy_only"}, (
             "provenance_mode 非 online 的行必须判不了，"
             f"实际 unproven={proof.unproven!r}")
 
@@ -1327,6 +1407,90 @@ class TestProvenanceModeIsRead:
         # 判据取 FAIL 分支的措辞（「核验失败」），不取「伪造」两个字 ——
         # UNKNOWN 分支自己就在说「不算伪造」，拿它当禁词会自己打自己。
         assert "核验失败" not in err and "判不了" in err, err
+
+    # ── 评审 2026092502 §5.2 / §5.3 的两个 PoC ─────────────────────────────
+
+    def test_legacy行不能替online行提供runtime_id(self, tmp_path, monkeypatch):
+        """§5.2：online 行没有 runtime ID，旁边一条 legacy 行有 —— 不许 PASS。
+
+        🔴 上一版先把同一个 agent 的所有 runtime_run_id 压成一个集合再
+        `any(...)`，于是**成功 join 的那个 id 根本不来自被核验的那一行**。
+        这是「聚合掉了行的身份」这一类错误里最典型的形状。
+
+        sabotage 验证：把 verify_agent_rows 换回「取全部 rr 再 any()」，本条变红。
+        """
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, "online"),
+                    ("market", "run-0", "legacy")],
+                   [("market", MINE)])              # 运行时真有 run-0
+        proof = pa.spawn_proof_for_run(self.RID)
+        st, reason = proof.status["market"]
+        assert st != "PASS", (
+            f"legacy 行的 runtime_run_id 替 online 行作了证 —— ({st}, {reason})")
+        assert reason == "mixed_provenance", reason
+        assert spawn_check.main(["--run-id", self.RID]) == 2
+
+    def test_一条真行不能掩盖一条伪造行(self, tmp_path, monkeypatch):
+        """§5.3：两条 online 行，一条 join 得上、一条伪造 —— 不许 PASS。
+
+        判据是 FAIL 而不是 UNKNOWN：同一次 run 同一个 agent 出现两条在线执行
+        记录，本身就是不该存在的状态（v21 的唯一索引拦新写入），不是「查不到」。
+        """
+        self._wire(tmp_path, monkeypatch,
+                   [("market", "run-0", "online"),
+                    ("market", "run-forged", "online")],
+                   [("market", MINE)])              # 运行时只有 run-0
+        proof = pa.spawn_proof_for_run(self.RID)
+        st, reason = proof.status["market"]
+        assert st == "FAIL" and reason == "duplicate_online_rows", (
+            f"一条真 runtime_run_id 把伪造那条盖住了 —— ({st}, {reason})")
+        assert spawn_check.main(["--run-id", self.RID]) == 1
+
+    def test_v21索引让重复在线行写不进来(self, tmp_path, monkeypatch):
+        """库层的另一半：上面那种状态**根本不该能写进来**。"""
+        from _store import init_schema
+        from _store.db import record_agent_run
+        from tests._provenance import open_test_run
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE, run_id=self.RID)
+        # contract-exempt: record_agent_run() 的入参，不是 AgentVerdict
+        kw = dict(task_id=MINE, agent="market", status="ok", started_at="t",
+                  finished_at="t", elapsed_ms=1, decision_id=MINE,
+                  orchestration_run_id=self.RID, path=db)
+        record_agent_run(runtime_run_id="run-0", **kw)
+        with pytest.raises(Exception) as e:
+            record_agent_run(runtime_run_id="run-forged", **kw)
+        assert "UNIQUE" in str(e.value).upper(), e.value
+
+    def test_provenance_mode不是自由文本(self, tmp_path):
+        """§5.6：调用方不能靠传字符串给自己换一个更弱的安全档位。"""
+        from _store import init_schema
+        from _store.db import record_agent_run
+        from tests._provenance import open_test_run
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE, run_id=self.RID)
+        # contract-exempt: record_agent_run() 的入参，不是 AgentVerdict
+        kw = dict(task_id=MINE, agent="market", status="ok", started_at="t",
+                  finished_at="t", elapsed_ms=1, decision_id=MINE, path=db)
+        with pytest.raises(ValueError, match="provenance_mode"):
+            record_agent_run(orchestration_run_id=self.RID,
+                             provenance_mode="whatever", **kw)
+        # legacy 档位不许和 orchestration_run_id 同时出现 —— 那是「在线执行想用弱判据」
+        with pytest.raises(ValueError, match="legacy"):
+            record_agent_run(orchestration_run_id=self.RID,
+                             provenance_mode="legacy", **kw)
+
+    def test_未知mode的历史行判不了(self, tmp_path, monkeypatch):
+        """v19 之前落的行 provenance_mode 是 NULL —— 证不了，也不冤枉。"""
+        self._wire(tmp_path, monkeypatch,
+                   [("market", "run-0", "__NULL__")], [("market", MINE)])
+        st, reason = pa.spawn_proof_for_run(self.RID).status["market"]
+        assert (st, reason) == ("UNKNOWN", "unsupported_provenance_mode"), \
+            f"({st}, {reason})"
 
     def test_报错要指路(self, tmp_path, monkeypatch, capsys):
         """UNKNOWN 不能只说「判不了」，要说清接下来查哪儿。"""

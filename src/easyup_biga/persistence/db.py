@@ -35,6 +35,7 @@ from easyup_biga.domain import (
     is_adhoc_task_id,
     new_task_id,
     now_cn,
+    replay_lineage_drift,
 )
 
 from .schema import MIGRATIONS, SCHEMA_VERSION
@@ -409,7 +410,8 @@ def save_card_with_notifications(
             #    攻击者可以传 Decision A 的 record_id 给 Decision B 的卡。
             else:
                 parent_row = conn.execute(
-                    "SELECT decision_id FROM decision_records WHERE record_id=?",
+                    "SELECT decision_id, card_json FROM decision_records "
+                    "WHERE record_id=?",
                     (replay_of,),
                 ).fetchone()
                 if parent_row is None:
@@ -423,6 +425,26 @@ def save_card_with_notifications(
                         f"不属于当前 {card.decision_id!r} —— "
                         "Replay 不得跨 Decision（P2-3）。"
                     )
+                # 🔴 血缘守卫在**这里**，不在 card_ops —— 它第一版只长在 CLI 那条路上，
+                #    外部评审用低层 `save_card(card, replay_of=…)` 直接写、换掉
+                #    `evidence_set_id`，照样落库成功。一条「只有走某个入口才生效」的
+                #    安全规则等于没有这条规则。判据是契约层那一份（唯一实现）。
+                #    ⚠️ 与父记录的比对必须在**这个写事务内**完成：先校验、放连接、
+                #      再开连接插入，中间那段时间父记录可以被换掉。
+                # contract-exempt: 这里**故意**不重建 DecisionCard —— 见
+                #   `replay_lineage_drift()` 的说明：重建要过一遍构造期校验，
+                #   而父卡可能是一张今天已经不合法的历史卡，那会把「血缘变没变」
+                #   这个问题偷换成「旧卡今天还合不合法」。比的是两份 dict 的
+                #   五个字段，不解释卡的语义，因此不构成第二套契约。
+                parent_dict = json.loads(parent_row["card_json"])  # contract-exempt: 见上
+                drift = replay_lineage_drift(parent_dict, card.to_dict())
+                if drift:
+                    raise ValueError(
+                        "replay changed frozen input lineage —— "
+                        "回放卡与原卡的**来源**不同：" + "；".join(drift) + "。\n"
+                        "  回放可以给出新的结论（status / headline / synthesis），"
+                        "但必须基于同一份冻结证据；\n"
+                        "  这几个字段变了，两次结果就不再可比，回放实验作废。")
             record_id = _insert_card_row(conn, card, payload, replay_of)
             for n in notifications:
                 _insert_notification(conn, event_type=n["event_type"],
@@ -1376,6 +1398,18 @@ def record_agent_run(
                     "orchestration_run_id 非空时 decision_id 不能为 None（P1-2）")
             _assert_run_owns_decision(conn, run_id=orchestration_run_id,
                                       decision_id=decision_id)
+        # 🔴 P1-2 §5.6：**安全档位不由调用方自由填字符串决定。**
+        #    只认两个值，且两者与 orchestration_run_id 的组合是固定的 ——
+        #    否则「传 provenance_mode='legacy' 换取 decision 级的弱名称匹配」
+        #    就是一条调用方自己就能打开的降级开关。
+        if provenance_mode not in (None, "online", "legacy"):
+            raise ValueError(
+                f"provenance_mode 只能是 'online' / 'legacy' / None，"
+                f"给的是 {provenance_mode!r} —— 安全档位不是自由文本（P1-2）")
+        if provenance_mode == "legacy" and orchestration_run_id is not None:
+            raise ValueError(
+                "legacy 账本行不得带 orchestration_run_id —— "
+                "带着它就是一次在线执行，只是想用弱判据核验它（P1-2 §5.6）")
         if provenance_mode is None and orchestration_run_id is not None:
             provenance_mode = "online"
         cur = conn.execute(

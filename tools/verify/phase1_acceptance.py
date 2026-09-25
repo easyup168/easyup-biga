@@ -429,23 +429,101 @@ class SpawnProof:
     #:
     #: 在 `unproven` 里的 agent **不计入 forged** —— 消费方必须先查它。
     unproven: dict[str, str] = field(default_factory=dict)
+    #: `agent -> (status, reason)`，status ∈ {ABSENT, PASS, FAIL, UNKNOWN}。
+    #: 只有 `spawn_proof_for_run()` 会填（P1-2 行级严格核验）。
+    #: `per_agent` / `unproven` 都从它派生 —— 一份判据，两种旧视图。
+    status: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: FAIL 的 `agent -> reason`。同样从 `status` 派生。
+    failed: dict[str, str] = field(default_factory=dict)
+    #: 这次核验落在哪个决策上。`--run-id` 模式下由 `decision_runs` 反查得到 ——
+    #: 🔴 没有它，Run 模式的报错会打出「None 在运行时记录里一条都没有」：
+    #:    一句指向空的话，而报错要指路（评审 2026092502 §9）。
+    decision_id: str | None = None
     #: `readable=False` 时的原因，给人看。`readable=True` 时为 None。
     #: 🔴 「判不了」有好几种成因，要查的地方完全不同：库不在 / 库读不了 /
     #:    这个 run_id 压根不存在。塌成同一句「判不了」＝ 让人从头猜一遍。
     unreadable_reason: str | None = None
 
 
-#: `SpawnProof.unproven` 的原因码 → 给人看的一句话。**只有这一份**（L-3）：
+#: 一个 agent 在**一次 run** 里的账本行 → `(status, reason)`。
+#: 🔴 逐字移植自评审 `reference/strict_spawn_proof.py::verify_agent_rows`。
+#:
+#: **不许先把多行压成集合再判**，这正是上一版的漏口：
+#:
+#: ==========================================  ====================================
+#: online 行没有 runtime_run_id，
+#: 旁边一条 legacy 行有，且 join 得上           上一版 `any(...)` ⇒ **PASS**
+#: 两条 online 行，一条真一条伪造              上一版 `any(...)` ⇒ **PASS**
+#: ==========================================  ====================================
+#:
+#: 两次都是「成功 join 的那个 id 根本不来自被核验的那一行」。
+#: ⇒ 判据必须落在**行**上：先确定「哪一行才是这次在线执行」，再看那一行的 id。
+#:
+#: ⚠️ **与 reference 的唯一偏离**：无行时 reference 返回 `FAIL/no_agent_run`，
+#: 这里返回 `ABSENT`。理由是本项目里「某个 agent 这次没跑」是**合法**状态
+#: （裁定 13 的 discipline 根本不建；risk 在两种确定性早退里不被 spawn），
+#: 判成 FAIL 会让每一张 roster 不满的卡都红。评审正文 §5.4 写的也是
+#: 「没有行 → ABSENT」，是 reference 代码与正文不一致，这里跟正文。
+def verify_agent_rows(rows: list[dict], *, runtime_ids: set[str]) -> tuple[str, str]:
+    """`(status, reason)`，status ∈ {ABSENT, PASS, FAIL, UNKNOWN}。"""
+    if not rows:
+        return "ABSENT", "no_agent_run"
+
+    online = [r for r in rows if r.get("provenance_mode") == "online"]
+    legacy = [r for r in rows if r.get("provenance_mode") == "legacy"]
+    other = [r for r in rows
+             if r.get("provenance_mode") not in {"online", "legacy"}]
+
+    if other:
+        # v19 之前落的行（provenance_mode 为 NULL）走这里：证不了，也不冤枉。
+        return "UNKNOWN", "unsupported_provenance_mode"
+    if online and legacy:
+        return "UNKNOWN", "mixed_provenance"
+    if not online:
+        return "UNKNOWN", "legacy_only"
+    if len(online) != 1:
+        # 🔴 FAIL 不是 UNKNOWN：同一次 run 同一个 agent 出现两条在线执行记录，
+        #    本身就是不该存在的状态（v21 的唯一索引拦它），不是「查不到」。
+        return "FAIL", "duplicate_online_rows"
+
+    runtime_run_id = online[0].get("runtime_run_id")
+    if not runtime_run_id:
+        return "UNKNOWN", "missing_runtime_run_id"
+    if runtime_run_id not in runtime_ids:
+        return "FAIL", "runtime_record_not_found"
+    return "PASS", "runtime_exact_match"
+
+
+#: 原因码 → 给人看的一句话。**只有这一份**（L-3）：
 #: `spawn_check.py` 与 `check_1_spawned()` 都从这里取，不各写一遍措辞。
 #: 🔴 每一条都要说清「所以该去查什么」——报错要指路，不能只说判不了。
 _UNPROVEN_HINT: dict[str, str] = {
-    "not_online_provenance":
-        "账本行不是在线编排写的（provenance_mode 非 online）——"
-        "历史行或手工跑 skill 落的行，无法证明也不算伪造",
+    "unsupported_provenance_mode":
+        "账本行的 provenance_mode 不是 online/legacy（多半是 v19 之前落的历史行）"
+        "—— 证不了也不算伪造",
+    "legacy_only":
+        "这次 run 里这个 agent 只有 legacy 行 —— 弱证据，不作数（§8.4："
+        "段名匹配只对 decision 级历史入口开放）",
+    "mixed_provenance":
+        "同一次 run 同一个 agent 既有 online 行又有 legacy 行 —— "
+        "分不清哪一行代表这次执行。**legacy 行的 runtime_run_id 不许替 online 行作证**；"
+        "查是谁写了第二行",
     "missing_runtime_run_id":
         "在线行但没记下 runtime_run_id —— spawn 多半真的发生过，"
         "是编排器没把 SpawnResult.handle.runtime_run_id 收回来；"
         "查 orchestrator 的 runtime_run_ids 映射",
+}
+
+#: FAIL 的原因码 → 给人看的一句话。与上面分开，因为**排查方向完全不同**：
+#: UNKNOWN 去查数据与时机，FAIL 去查「谁写了这行 / 为什么运行时没有它」。
+_FAIL_HINT: dict[str, str] = {
+    "duplicate_online_rows":
+        "同一次 run 同一个 agent 有**多条** online 账本行 —— "
+        "一条真的 runtime_run_id 会把另一条伪造的盖住，所以整体不作数。"
+        "schema v21 的 ux_online_agent_run_once 本该拦住它，出现说明是索引之前的老行",
+    "runtime_record_not_found":
+        "在线行的 runtime_run_id 在运行时侧查无此记录 —— 这一行是被直接写进库的，"
+        "不是 Supervisor spawn 出来的",
 }
 
 
@@ -553,7 +631,7 @@ def spawn_proof(decision_id: str) -> SpawnProof:
     for r in spawns:
         by_source[r.get("source", "?")] = by_source.get(r.get("source", "?"), 0) + 1
     return SpawnProof(readable=True, rows=len(spawns), per_agent=out,
-                      by_source=by_source)
+                      by_source=by_source, decision_id=decision_id)
 
 
 def spawn_proof_for_run(run_id: str) -> SpawnProof:
@@ -585,18 +663,12 @@ def spawn_proof_for_run(run_id: str) -> SpawnProof:
     from _contract import STAGE1_AGENTS, STAGE2_AGENTS
     from _store import list_agent_runs
 
-    # 按 orchestration_run_id 精确取这次 run 的账本行
+    # 按 orchestration_run_id 精确取这次 run 的账本行，**按 agent 分组保留原始行**
+    # —— 不压成集合，见 verify_agent_rows() 的说明。
     runs = list_agent_runs(orchestration_run_id=run_id)
-    ours = {r["agent"] for r in runs}
-    rr_by_agent: dict[str, set[str]] = {}
-    #: agent → 这次 run 的账本行里出现过的 provenance_mode 集合（去 NULL）。
-    #: ⚠️ 用 .get：测试的 mock 行只有 "agent"/"runtime_run_id" 两个键。
-    modes_by_agent: dict[str, set[str]] = {}
+    rows_by_agent: dict[str, list[dict]] = {}
     for r in runs:
-        rid = r.get("runtime_run_id")
-        if rid:
-            rr_by_agent.setdefault(r["agent"], set()).add(rid)
-        modes_by_agent.setdefault(r["agent"], set()).add(r.get("provenance_mode"))
+        rows_by_agent.setdefault(r["agent"], []).append(r)
 
     # 运行时侧的 spawn 记录仍按 decision 取（因为没有 per-run 过滤接口）。
     # 但我们用结构化 join（runtime_run_id ↔ subagent_runs.run_id）判断，
@@ -639,53 +711,64 @@ def spawn_proof_for_run(run_id: str) -> SpawnProof:
 
     runtime_ids = {r.get("run_id") for r in spawns if r.get("run_id")}
 
-    out = {}
+    status: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[bool, bool]] = {}
     unproven: dict[str, str] = {}
+    failed: dict[str, str] = {}
     for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
         if agent == "discipline":
             continue
-        in_ledger = agent in ours
-        if not in_ledger:
-            # 这次 run 的 agent_runs 里没有这个 agent——直接 absent，不从其他 run 借用
-            out[agent] = (False, False)
-            continue
-        if "online" not in modes_by_agent.get(agent, set()):
-            # 历史行 / 手工跑 skill 落的行：证不了，但也不该被冤成伪造。
-            # 🔴 §8.4：**不退回段名匹配**。名称匹配只对显式 legacy 路径开放，
-            #    而那条路是 spawn_proof(decision_id)，不是这里。
-            out[agent] = (True, False)
-            unproven[agent] = "not_online_provenance"
-            continue
-        rr = rr_by_agent.get(agent)
-        if not rr:
-            # 在线行但没捞回 runtime_run_id（批 F 明确允许的「key 在、值 None」）。
-            out[agent] = (True, False)
-            unproven[agent] = "missing_runtime_run_id"
-            continue
-        # 强绑定：这次 run 的 runtime_run_id 必须出现在运行时侧
-        out[agent] = (True, any(rid in runtime_ids for rid in rr))
+        st, reason = verify_agent_rows(rows_by_agent.get(agent, []),
+                                       runtime_ids=runtime_ids)
+        status[agent] = (st, reason)
+        # 三个旧视图从同一份判据派生 —— 不各算一遍（L-3）。
+        out[agent] = {"ABSENT": (False, False),
+                      "PASS": (True, True)}.get(st, (True, False))
+        if st == "UNKNOWN":
+            unproven[agent] = reason
+        elif st == "FAIL":
+            failed[agent] = reason
 
     by_source: dict[str, int] = {}
     for r in spawns:
         by_source[r.get("source", "?")] = by_source.get(r.get("source", "?"), 0) + 1
     return SpawnProof(readable=True, rows=len(spawns), per_agent=out,
-                      by_source=by_source, unproven=unproven)
+                      by_source=by_source, unproven=unproven,
+                      status=status, failed=failed, decision_id=decision_id)
 
 
-def check_1_spawned(decision_id: str | None, run_id: str | None = None) -> Check:
+def check_1_spawned(decision_id: str | None, run_id: str | None = None,
+                    *, allow_legacy: bool = False) -> Check:
     """Supervisor 真的 spawn 了**每一个** specialist —— 两份独立记录都要有。
 
     `run_id` 提供时（P1-2），按 orchestration_run_id 精确核验这次 run，
     不允许从同 decision 的其他 run 借用账本行。
+
+    🔴 **不给 `run_id` 不会静默降级**（评审 2026092502 §8）。
+    decision 级核验会把同一个 decision 其他 run 的 spawn 记录算进来，是**弱证据**；
+    调用方漏了一个参数就自动改用弱证据，等于把安全档位交给手滑决定。
+    要查历史决策，显式 `--legacy`：那时得到的是「查了，但用的是弱判据」，
+    而不是一句看起来一样的「通过」。
     """
     c = Check("1", "Supervisor 确实 spawn 了各 Specialist（两份独立记录都要有）")
-    if not decision_id:
-        return c.pending("未提供 --decision-id") or c
+    if not decision_id and not run_id:
+        return c.pending("未提供 --decision-id / --run-id") or c
 
     if run_id:
         proof = spawn_proof_for_run(run_id)
-    else:
+    elif allow_legacy:
         proof = spawn_proof(decision_id)
+        c.notes.append(
+            "⚠️ 走的是 decision 级（弱）核验：同 decision 其他 run 的 spawn 记录"
+            "会被算进来。在线验收请给 --run-id。")
+    else:
+        return c.pending(
+            f"只给了 --decision-id（{decision_id}），没给 --run-id —— "
+            "不自动降级到 decision 级弱核验。\n"
+            "    在线卡取它自己那次执行：\n"
+            "      sqlite3 data/biga.db \"SELECT run_id FROM decision_records "
+            f"WHERE decision_id='{decision_id}' AND replay_of IS NULL\"\n"
+            "    确实要查历史（弱判据）：加 --legacy") or c
     if not proof.readable:
         return c.pending(
             (proof.unreadable_reason
@@ -704,6 +787,11 @@ def check_1_spawned(decision_id: str | None, run_id: str | None = None) -> Check
             f"{decision_id} 在运行时的 spawn 记录里一条都没有"
             f"（读到的来源：{proof.by_source or '两张表都是空的'}），"
             f"而 agent_runs 里有 {sorted(ours)} —— 这个号从未被 spawn 过") or c
+    if proof.failed:
+        return c.fail(
+            f"（读到的来源：{proof.by_source}）"
+            + "；".join(f"{a}：{_FAIL_HINT.get(r, r)}"
+                        for a, r in sorted(proof.failed.items()))) or c
     if forged:
         return c.fail(
             f"这些 agent 在 agent_runs 里有行，但运行时的 spawn 记录里没有"
@@ -991,6 +1079,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Phase 1 验收自检")
     ap.add_argument("--decision-id", help="要核对的 decision_id")
     ap.add_argument("--run-id", help="按 orchestration_run_id 精确核验 spawn（P1-2）")
+    ap.add_argument("--legacy", action="store_true",
+                    help="显式允许 decision 级（弱）spawn 核验 —— 只用于查历史决策。"
+                         "在线验收不要用它：decision 级会把同 decision 其他 run 的"
+                         "spawn 记录算进来")
     ap.add_argument("--live", action="store_true", help="允许联网（第 5 项需要）")
     ap.add_argument("--baseline", type=pathlib.Path,
                     help="邻居基线 JSON（第 6 项需要）")
@@ -1013,7 +1105,8 @@ def main(argv: list[str] | None = None) -> int:
         baseline = json.loads(args.baseline.read_text())
 
     checks = [
-        check_1_spawned(args.decision_id, run_id=args.run_id),
+        check_1_spawned(args.decision_id, run_id=args.run_id,
+                        allow_legacy=args.legacy),
         check_2_verdict(args.decision_id),
         check_3_card_sections(args.decision_id),
         check_4_replay(args.decision_id),

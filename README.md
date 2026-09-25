@@ -6,8 +6,8 @@
 
 [![Status](https://img.shields.io/badge/status-architecture%20baseline%20hardening-d29922)](TODO.md)
 [![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
-[![Tests](https://img.shields.io/badge/tests-1817%20collected-555)](#当前实现状态)
-[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v19-555)](docs/tutorial/04-store-layer.md)
+[![Tests](https://img.shields.io/badge/tests-1844%20hermetic-555)](#当前实现状态)
+[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v21-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
 
@@ -334,7 +334,7 @@ Trigger
 → DecisionCard
 ```
 
-这条链的 Run Provenance 已完整落地（schema v20）：一张卡属于哪次执行、
+这条链的 Run Provenance 已完整落地（schema v21）：一张卡属于哪次执行、
 基于哪份切片，现在是一句 SQL，不必解 `card_json`。
 
 ### 5. Runtime Proof 不能由业务代码自证
@@ -433,13 +433,27 @@ Notification = FAILED / RETRYING
 | Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1833 条测试，SQLite schema v20**，全部通过。
+当前仓库有 **1844 条测试，SQLite schema v21**，全部通过。
+
+| 口径 | 数字 | 怎么复现 |
+|---|---|---|
+| Hermetic（徽章与上面这个数用的就是它） | 1844 passed · 0 failed | `pytest`（clean clone / source ZIP 都是这个数） |
+| 环境相关（需显式开关） | `installed` 2 · `git` 2 | `pytest --run-installed` / `--run-git` |
+| Live Acceptance（真实 OpenClaw + 飞书） | ⬜ **未跑** | 需要盘中真实数据，见下 |
+
+🔴 **「全部通过」指的是 Hermetic 那一行，不包含 Live。** 这三个数以前混在一句话里，
+外部评审因此数出「至少三套数字」—— 徽章停在一个早就不成立的旧值上（同步脚本的
+正则按老徽章格式写，徽章改版后**从来没有匹配上过**，于是既不被同步也不被校验，
+而失效的表现是「一直通过」）。现在徽章、正文、`CLAUDE.md` 由
+`tools/verify/sync_test_count.sh` 同源生成，schema 版本由
+`test_README徽章的schema版本与代码一致` 钉住。
 
 ### tag 现状
 
 | tag | 指向 | 现在该怎么读它 |
 |---|---|---|
-| **`v0.3.6`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
+| **`v0.3.7`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
+| `v0.3.6` | 上一次复核 | 过程快照 |
 | `v1-architecture-baseline` | 一个更早的提交 | ⚠️ **已解冻，不再代表「可发布」。**保留是因为它是历史事实（当时确实 sign-off 过），不是因为它仍然成立 |
 | `v0.3.1` … `v0.3.4` | 各自的发布点 | 过程快照 |
 
@@ -447,7 +461,12 @@ Notification = FAILED / RETRYING
 但 sign-off 之后的**又一轮**独立评审在正常路径上找到了阻塞项（在线溯源根节点未校验、
 Spawn Proof 仍是 decision 级、测试基线不可复现）；随后那批修复**本身**再被复核时，
 又发现十二处 —— 其中三处是「守卫写了、但没有任何生产代码调用它」，也就是说
-**打勾的那几项当时并没有真的在守**（见 CHANGELOG `[0.3.6]`）。⇒ 徽章从 ✅ 退回 🔶。
+**打勾的那几项当时并没有真的在守**（见 CHANGELOG `[0.3.6]`）。
+第三轮评审对那批修复再复核，又找到三个写边界漏口与两个确定性测试失败
+（见 CHANGELOG `[0.3.7]`）。⇒ 徽章从 ✅ 退回 🔶。
+
+> 连续三轮都在**已经宣布修好**的东西上找到东西 —— 这本身就是「暂不冻结」
+> 最好的理由。每一轮找到的都不是新写的代码，是上一轮那句「已到位」。
 
 这一步是裁定 14 的直接应用：**徽章必须描述一个真被测过的状态，未达成就写 🔶，
 不写 ✅。** 一个描述过期状态的 ✅ 比 🔶 更糟 —— 🔶 诚实，它不诚实。
@@ -672,7 +691,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── bin/             biga / biga-card / biga-notify / biga-reap
 ├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
 ├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
-├── tests/           1833 条测试
+├── tests/           1844 条测试
 ├── docs/
 │   ├── design/      当前架构与阶段设计
 │   ├── guide/       安装、使用、回滚与运维

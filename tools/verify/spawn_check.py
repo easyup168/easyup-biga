@@ -39,7 +39,7 @@ sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent.parent / "skills"))
 
 from phase1_acceptance import (  # noqa: E402
-    _UNPROVEN_HINT, spawn_proof, spawn_proof_for_run)
+    _FAIL_HINT, _UNPROVEN_HINT, spawn_proof, spawn_proof_for_run)
 
 # 退出码的唯一定义 —— 见 tools/verify/_verdict.py 的 docstring
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -88,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return _v.UNKNOWN
 
+    # 🔴 Run 模式下 CLI 参数里的 decision_id 是 None，报错不能打 "None …"。
+    #    优先用 proof 从 decision_runs 反查到的那个；两者都没有才退回 run_id。
+    subject = proof.decision_id or decision_id or f"run {run_id}"
+
     ours = sorted(a for a, (o, _) in proof.per_agent.items() if o)
     # 🔴 P1-2：`unproven` 是第三态，先摘出去再算 forged。
     #    「真 spawn 了但没捞回 runtime_run_id」被报成「伪造」会把排查引到
@@ -107,10 +111,17 @@ def main(argv: list[str] | None = None) -> int:
     #    而机器当天确实跑过别的真实决策，伪造的号**蹭上了别人的记录**。
     #    ⚠️ `bin/biga-card` 正常使用就会反复运行 ⇒ 这个条件几乎总成立。
     if proof.rows == 0 and ours:
-        print(f"🔴 spawn 核验失败：{decision_id} 在运行时的 spawn 记录里"
+        print(f"🔴 spawn 核验失败：{subject} 在运行时的 spawn 记录里"
               f"**一条都没有**（读到的来源：{proof.by_source or '两张表都是空的'}），"
               f"而 agent_runs 里有 {ours}。", file=sys.stderr)
         print("   那些行是凭空写进去的，这个决策号从未被 spawn 过。", file=sys.stderr)
+        return _v.FAIL
+
+    # 🔴 行级 FAIL（重复在线行 / runtime 查无此记录）先报，它们有各自的排查方向。
+    if proof.failed:
+        print("🔴 spawn 核验失败：", file=sys.stderr)
+        for a, reason in sorted(proof.failed.items()):
+            print(f"   {a}：{_FAIL_HINT.get(reason, reason)}", file=sys.stderr)
         return _v.FAIL
 
     if forged:
@@ -128,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         return _v.UNKNOWN
 
     if not ok:
-        print(f"🔶 spawn 核验判不了 —— {decision_id} 一个 agent 都没核到"
+        print(f"🔶 spawn 核验判不了 —— {subject} 一个 agent 都没核到"
               f"（运行时记录 {proof.rows} 条，agent_runs {len(ours)} 个）。",
               file=sys.stderr)
         return _v.UNKNOWN

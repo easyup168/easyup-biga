@@ -238,7 +238,15 @@ _JSON_COLUMNS = ("card_json", "verdict_json")
 def test_契约对象只从_store取_不自己解JSON列():
     bad = []
     for path in repo_files(".py"):
-        if STORE_DIR in path.parents or path.parent.name == "tests":
+        # 🔴 `is_external_reference` 漏在这一条上了 —— 同文件另外两条 AST 守卫
+        #    都排除了 `docs/external/`，只有它没有。后果是**只在无 git 时才出现**：
+        #    正常路径下 `git ls-files` 尊重 .gitignore，那个目录天然看不见；
+        #    剥掉 .git 退化成文件系统遍历，评审包里的示范代码
+        #    （`reference/replay_store_guard.py` 里就有一句 `json.loads(card_json)`）
+        #    就被当成了产品代码。
+        #    ⇒ 这正是 `_scan` 那段注释说的「两条路径要用同一个排除规则」。
+        if (STORE_DIR in path.parents or path.parent.name == "tests"
+                or is_external_reference(path)):
             continue
         src = path.read_text(encoding="utf-8")
         if not any(col in src for col in _JSON_COLUMNS):

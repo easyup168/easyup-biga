@@ -12,7 +12,8 @@
 上面那行绝对导入（批 U-I：本包内部已全部改成绝对导入，不再经薄壳）。
 """
 
-from .card import DECISION_ID_RE, CardStatus, DecisionCard
+from .card import (DECISION_ID_RE, REPLAY_FROZEN_LINEAGE, CardStatus,
+                   DecisionCard, replay_lineage_drift)
 from .evidence import CN_TZ, EVIDENCE_KINDS, SHA256_RE, Evidence, now_cn
 from .provenance import (DERIVED_PREFIX, ORIGIN_KINDS, OriginRef, evidence_origins,
                          fact_origin, raw_origins, resolve_provenance,
@@ -139,6 +140,8 @@ __all__ = [
     "AgentVerdict",
     "CardStatus",
     "DecisionCard",
+    "REPLAY_FROZEN_LINEAGE",
+    "replay_lineage_drift",
     "Evidence",
     "VerdictLevel",
     "VerdictStatus",

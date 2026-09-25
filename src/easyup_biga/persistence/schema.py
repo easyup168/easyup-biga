@@ -857,6 +857,31 @@ DROP INDEX IF EXISTS ux_evidence_sets_run;
 """
 
 
+# v21: 一次 run 里一个 agent 至多一条**在线**执行账本行（评审 2026092502 §5.5）。
+#
+# 🔴 它拦的是什么
+# ----------------
+# 同一个 (run, agent) 有两条 online 行时，一条真的 runtime_run_id 会把另一条
+# 伪造的**盖住** —— 上一版核验用 `any(rid in runtime_ids)`，两条里有一条 join
+# 得上就判 PASS。核验侧已经改成逐行严格（`verify_agent_rows`），这条索引是
+# 另一半：让那种状态**根本写不进来**。
+#
+# ⚠️ 两道一起上不是重复：索引挡新写入，核验挡**索引之前就存在的老行**
+#    （实测生产库 184 行 provenance_mode 全为 NULL，不受这条索引约束）。
+#
+# WHERE provenance_mode = 'online' —— 只管在线行。历史行（NULL）不受约束，
+# 否则这条迁移会在任何一个老库上直接失败。
+#
+# 🔴 将来若支持 Retry（同一 run 重跑同一个 agent），**不要放宽这条索引**，
+#    而是加 `attempt_no` 列、把唯一键扩成 (run, agent, attempt_no)。
+#    评审原话：不要让不可区分的多条在线行共存 —— 不可区分正是问题本身。
+_V21 = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_online_agent_run_once
+    ON agent_runs(orchestration_run_id, agent)
+    WHERE provenance_mode = 'online';
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -879,6 +904,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (18, _V18),
     (19, _V19),
     (20, _V20),
+    (21, _V21),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

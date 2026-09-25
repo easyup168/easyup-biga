@@ -19,7 +19,7 @@ N=$(python3 -m pytest -q --tb=line -m "$MARKER_FILTER" 2>&1 | grep -oP '实测 \
 [ -n "$N" ] || { echo "✅ 条数已经是最新的（守卫没报红）"; exit 0; }
 
 for f in README.md CLAUDE.md docs/guide/review-prompt.md; do
-  sed -i -E "s#badge/[0-9]+%20TESTS#badge/${N}%20TESTS#
+  sed -i -E "s#badge/tests-[0-9]+%20#badge/tests-${N}%20#
              s#\| [0-9]+ 条测试 \| ✅ \|#| ${N} 条测试 | ✅ |#
              s#(├── tests/ +)[0-9]+ 条测试#\1${N} 条测试#
              s#\| 测试 \| [0-9]+ 条 \|#| 测试 | ${N} 条 |#
