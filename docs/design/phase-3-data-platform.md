@@ -308,7 +308,7 @@ news dataset                 —— 见下
 
 | # | 内容 | 与外部包的差异 |
 |---|---|---|
-| P3-0 | 契约 + Dataset/Provider Registry | 去掉 `required_datasets` 验收（裁定 9） |
+| P3-0 ✅ | 契约 + Dataset/Provider Registry + `bin/biga-data list\|providers` | 去掉 `required_datasets` 验收（裁定 9）；CLI 从 P3-1 **拉前**（见下） |
 | P3-1 | Schema **v23** 七张表 + 四个 Store + `bin/biga-data` 骨架 | 版本号（1）、CLI 形态（2） |
 | P3-2 | 交易日历注册进 Registry | 保留现表现列名（10） |
 | P3-3 | Security Master（沪深北统一 `instrument_id`、point-in-time universe） | — |
@@ -316,6 +316,27 @@ news dataset                 —— 见下
 | P3-5 | Tradability + Adjustment Factors | — |
 | P3-6 | Emotion 迁移 + 拆出 `cn.market.breadth` | 涨跌家数归属（4） |
 | P3-7 | Snapshot Resolver + `required_datasets` + Manifest v2 | 字段时机（9）、v1 兼容（11） |
+
+#### ⏩ P3-0 落地（2026-09-25）：两处与本表不同
+
+**一 · `bin/biga-data list` 从 P3-1 拉到 P3-0。** 理由是裁定 9 的同一条道理：
+名册自己也得有消费方。P3-0 若只交付两张注册表，它在 P3-1 之前就是一条
+L-1 死配置 —— 而本文刚用这条理由拒绝了 `required_datasets` 提前进场。
+CLI 只读静态定义，很小，且让这个里程碑可以被**演示**而不是只能被阅读。
+
+**二 · 注册表收的是「今天真的在跑的全部 7 组」，不是 §2 的目标清单。**
+两份清单不是一回事：§2 列的是 Phase 3 要给它们建**全链**（Raw → Parquet →
+Snapshot）的数据集；注册表回答的是「这个系统里有哪些数据集」。
+后者只收一部分，这个问题立刻有两份答案 —— 而注册表是后来的那份，它会输。
+
+⇒ 实际注册：`cn.trading_calendar` / `cn.index.daily_bars` / `cn.index.quote` /
+`cn.market.breadth` / `cn.market.emotion_close` / `cn.sector.rankings` /
+`cn.news.flash`。还没探活过的（`cn.equity.daily_bars`、`cn.security_master`
+等）**不进** —— 占位符会让人以为这条链已经有人管了。
+
+⚠️ 顺带修正裁定 4 的一处表述：`cn.market.breadth` 不是「Phase 3 才拆出来的」，
+它本来就是一个独立的生产数据集（东财 `push2delay/ulist.np`，41 条 raw）。
+裁定 4 真正要防的是**把它绑给 emotion 消费**，那条仍然成立。
 
 🔴 **P3-4 是唯一的生产级 Vertical Slice** —— 它是第一个走完
 `Provider → Raw → Normalize → Quality → Parquet → Snapshot → EvidenceSet`
