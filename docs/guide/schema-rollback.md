@@ -6,7 +6,7 @@
 > 权威说明**只有一份**，在 `src/easyup_biga/persistence/schema.py` 每条
 > 迁移体正上方的注释里；下表只是从那里摘一句话方便查，不是第二套口径
 
-## 当前版本（`v1-architecture-baseline` 冻结时）
+## 当前版本（Phase 3 · P3-1 落地后）
 
 ```bash
 python3 -c "
@@ -17,7 +17,7 @@ print('SCHEMA_VERSION =', SCHEMA_VERSION, '| 迁移条数 =', len(MIGRATIONS))
 ```
 
 ```
-SCHEMA_VERSION = 22 | 迁移条数 = 22
+SCHEMA_VERSION = 26 | 迁移条数 = 26
 ```
 
 | 版本 | 一句话（摘自 `schema.py` 对应迁移体正上方的注释） |
@@ -44,6 +44,10 @@ SCHEMA_VERSION = 22 | 迁移条数 = 22
 | v20 | 撤掉 v18（**`DROP INDEX`**）—— 一条不变量不许有两个名字 |
 | v21 | 一次 run 里一个 agent 至多一条**在线**账本行 —— 多条时真 id 会掩盖伪造 id |
 | v22 | 冻结「这次该启动谁」（`expected_spawn_agents`）+ 一个运行时 id 不许给两行背书 |
+| v23 | Data Run 身份与事件：`data_job_runs` + `data_run_events`。**与 Decision Run 分开**——一次采集失败不该和一次决策失败长成同一件事 |
+| v24 | 取数出处：`provider_attempts` + `raw_artifacts`。`raw_artifacts` 只存 URI/哈希/元数据，正文在文件里；小体积的 `raw_market_snapshot` **不迁移** |
+| v25 | 通用发布元数据：`dataset_partitions` + `quality_reports` + `dataset_snapshots`。`UNIQUE(dataset_id, partition_key_json, data_version)` ——修订出新版本，旧版本永不覆盖 |
+| v26 | `evidence_set_datasets`：EvidenceSet → DatasetSnapshot 的冻结血缘。**关键血缘要能用 SQL 查**，不能只藏在 manifest JSON 里（与 v16 加 Run Provenance 三列同一个教训）|
 
 ## 为什么没有 DOWN migration
 

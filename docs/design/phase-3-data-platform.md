@@ -1,6 +1,6 @@
 # Phase 3 设计 —— 数据平台地基 + 第一条调度
 
-> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ⬜）
+> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ✅ / P3-2 ⬜）
 > **覆盖**：Phase 3 的设计基线、范围、里程碑、出口条件，以及本仓库对外部设计的适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
 
 > Phase 3 的**设计 SSOT**。结构性问题（存储平面选型、失败模式清单、表结构）
@@ -227,7 +227,7 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 | # | 内容 | schema | 状态 |
 |---|---|---|---|
 | P3-0 | 契约 + Dataset/Provider Registry + `bin/biga-data` | — | ✅ |
-| P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ⬜ |
+| P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ✅ |
 | P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ⬜ |
 | P3-3 | Security Master（point-in-time universe） | **v27** | ⬜ |
 | P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ⬜ |
@@ -237,6 +237,44 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 
 🔴 **每个里程碑的出口都是「旧行为回归全绿 + 新红灯测试全绿」**，
 Data Platform 不允许破坏 Decision Kernel。
+
+#### ⏩ P3-1 落地（2026-09-25）：与外部实现包合并，不是二选一
+
+外部交付了一份 P3-0+P3-1 的完整实现。在**同一个 worktree** 里做对照实测：
+
+```text
+原始 main                1891 passed / 0 failed
+加上他们的代码            1881 passed / 14 failed
+```
+
+其中 2 条是徽章未同步（无害），**12 条是真破坏**，根因两条：
+
+1. `EvidenceSetDatasetLink` 撞铁律 4 的守卫（类名含 `Evidence` 词根）
+2. `src/easyup_biga/persistence/__init__.py` 急切 import 新包 ⇒ 出卡路径依赖 `easyup_biga.data`，
+   而 `test_spawn_proof.py` 的沙盒**把这个包静默丢掉了**（见下）
+
+⇒ 判定是**合并**，不是覆盖。取他们的：schema v23–v26、`src/easyup_biga/persistence/data.py`、
+Data Run 状态机、快照/分区/质量记录类型、构造时校验、分区键归一、id 工厂。
+保留我的：适配器级 `provider_id` + `modules` + `source_prefix`、`consumers`
+与零消费方守卫、`bin/biga-data`、退出码映射、注释与报错指路。
+
+#### 🔴 顺带修掉一颗潜伏已久的地雷
+
+`test_spawn_proof.py` 与 `test_scan_fallback.py` 各写了一份
+`shutil.ignore_patterns(..., "data", ...)`。那个 glob 按名字匹配**任意层级** ——
+本意排掉仓库根的 `data/`（SQLite 库），实际连 `src/easyup_biga/data/` 一起
+**静默**丢掉。
+
+它此前没爆，只是因为没有任何生产路径 import 那个包；P3-1 把它接进
+`src/easyup_biga/persistence/__init__.py` 的那一刻就会炸，而报错指向沙盒里的临时目录，看不出是
+排除规则干的。
+
+⇒ 收成一处 `tests/_scan.py::sandbox_ignore()`，按**相对仓库根的路径**判而不是
+按名字判。正反探针都验过（退回旧写法当场红）。
+
+⚠️ 这是同一个坑的**第三个实例**——前两个（运行时总闸被复制进沙盒、构建产物
+没排除）就记在那份注释里。前两次的修法都是「往名单里再加一个名字」，
+而名单的**形状**一直是错的。
 
 ### 3.1 schema 分步（v1–v22 永不修改）
 

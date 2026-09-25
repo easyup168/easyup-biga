@@ -136,3 +136,42 @@ def repo_files(*suffixes: str) -> list[pathlib.Path]:
         if p.is_file():
             files.append(p)
     return sorted(files)
+
+
+def sandbox_ignore(repo_root: pathlib.Path):
+    """造沙盒副本时的排除规则 —— **两处沙盒共用的唯一实现**。
+
+    🔴 为什么不能直接用 `shutil.ignore_patterns("data", ...)`
+    -------------------------------------------------------
+    `ignore_patterns` 的 glob 对**每一层目录**生效。写 `"data"` 本意是排掉仓库
+    根下那个装 SQLite 库的 `data/`，实际连 `src/easyup_biga/data/`（Phase 3 的
+    数据平台包）一起丢掉了 —— 而且是**静默**丢：copytree 不报错，沙盒照常建起来，
+    只是少了一个包。
+
+    实测后果（2026-09-25，评审外部 P3-1 实现时发现）：只要有任何生产路径
+    `import easyup_biga.data`，`test_spawn_proof.py` 的 11 条出卡路径测试就会
+    集体 `ModuleNotFoundError`，而报错指向的是沙盒里的临时目录，看不出是
+    排除规则干的。
+
+    ⚠️ 这是同一个坑的**第三个实例**。`test_scan_fallback.py` 的注释里已经记着
+    前两个：`.biga-card-stop`（运行时总闸被复制进沙盒）与 `build/`（构建产物
+    没被排除）。那条注释的原话是「这份硬编码名单没跟上」—— 现在它连名单**形状**
+    都不对：按名字匹配任意层级，而它想表达的是「仓库根下的那一个」。
+
+    ⇒ 改成按**相对仓库根的路径**判断，并且两处沙盒共用这一份。
+    """
+    root = repo_root.resolve()
+    #: 只在仓库根下排除（按路径判，不按名字判）
+    ROOT_ONLY = {"data", "memory", ".claude", ".pytest_cache", "build", "dist"}
+    #: 任意层级都排除（它们在任何目录下都是同一类东西）
+    ANY_LEVEL = {".git", "__pycache__", ".biga-card-stop", ".biga-card.lock"}
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        here = pathlib.Path(directory).resolve()
+        drop = {n for n in names if n in ANY_LEVEL}
+        if here == root:
+            drop |= {n for n in names if n in ROOT_ONLY}
+        drop |= {n for n in names if n.endswith(".egg-info")}
+        return drop
+
+    return _ignore

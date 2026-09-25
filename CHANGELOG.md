@@ -15,6 +15,107 @@
 
 ## [未发布]
 
+### 新增 · Phase 3 · P3-1：schema v23–v26 数据平台地基（与外部实现包**合并**）
+
+控制面第一次装下**采集**这条生命周期。七张追加式表分四步进来：
+
+```text
+v23  data_job_runs / data_run_events                    采集的身份与状态流水
+v24  provider_attempts / raw_artifacts                  取数出处（含失败的每一跳）
+v25  dataset_partitions / quality_reports / dataset_snapshots
+v26  evidence_set_datasets                              EvidenceSet → 快照的冻结血缘
+```
+
+落库面 `src/easyup_biga/persistence/data.py`（走同一个 `connect()` 边界，I-4 对它同样成立）、
+Data Run 状态机 `src/easyup_biga/data/jobs.py`、整条血缘的冒烟测试。
+
+#### 🔴 判定是「合并」不是「覆盖」，依据是一次 A/B 对照
+
+外部交付了一份 P3-0+P3-1 完整实现包，要求「更好就覆盖」。它的
+`TEST_RESULTS.md` 第一行自陈 **没跑全量**，而它改了 `persistence/schema.py`
+与 `persistence/__init__.py` —— 全仓最多人依赖的两个文件。
+
+直接在它的源码树里跑得到 27 failed，但**那个数字没有意义**：那份树是 zip 解出来
+的、没有 `.git`，而相当一部分守卫按 git 清单扫。⇒ 在**同一个 worktree** 建 A/B：
+
+```text
+原始 main（对照）    1891 passed /  0 failed
+只加他们的代码       1881 passed / 14 failed
+合并后               2211 passed /  0 failed
+```
+
+⇒ 通用原则：**跨环境的测试数字不可比。** 先建一个只差「被测物」一项的对照组。
+
+取他们的：schema v23–v26（复用仓库的 `_append_only` 触发器 + CHECK + UNIQUE + FK）、
+`persistence/data.py`（CAS 状态机、写入前的引用完整性核对）、Data Run 状态机、
+快照/分区/质量记录类型、构造时校验、分区键归一、id 工厂。
+
+保留我的：适配器级 `provider_id` + `modules` + `source_prefix`（他们用站点级
+`sina` 同时当日历与日线主源，**与他们自己设计包的 inventory 矛盾**，且没有任何
+字段指向真实适配器模块 ⇒ job runner 无法分派）、`consumers` 与零消费方守卫
+（他们自己的设计 §16 列了 `no zero-consumer active dataset`，实现里没有）、
+`bin/biga-data`（他们的注册表**没有任何生产消费方**，而 ADR-002 要求有）、
+退出码映射、注释与报错指路。
+
+#### 🔴 顺带引爆并修掉一颗埋了很久的地雷
+
+11 条失败报 `ModuleNotFoundError: No module named 'easyup_biga.data'`，而包就在那里。
+
+`test_spawn_proof.py` 与 `test_scan_fallback.py` 各写了一份
+`shutil.ignore_patterns(..., "data", ...)`。那个 glob 按名字匹配**任意层级** ——
+本意排掉仓库根下装 SQLite 库的 `data/`，实际连 `src/easyup_biga/data/` 一起
+**静默**丢掉（copytree 不报错，沙盒照常建起来，只是少一个包）。
+
+它此前没爆，只因没有任何生产路径 import 那个包；P3-1 把它接进
+`persistence/__init__.py` 的那一刻就会炸，而报错指向沙盒里的临时目录。
+
+⚠️ **同一个坑的第三个实例。** 前两个就记在那份注释里（运行时总闸被复制进沙盒、
+构建产物没排除），**前两次的修法都是「往名单里再加一个名字」** ——
+而名单的**形状**一直是错的。
+
+⇒ 收成一处 `tests/_scan.py::sandbox_ignore()`，按**相对仓库根的路径**判。
+正反探针都验过（退回旧写法当场红）。
+⇒ 通用原则：**同一个坑第三次出现时别再补名单，去看判据的形状。**
+前两次「加个名字」都成功了，那恰恰是它能活到第三次的原因。
+
+#### `partition_keys` 两版都是装饰品
+
+他们强制非空、我允许空，争的是「填什么」，而**两边都错过了真正的问题**：
+没有任何东西核对「实际写入的分区键 == 注册表声明的」。于是
+`{"symbol",…,"as_of"}` 与 `{"trade_date"}` 能同时写进同一个 dataset，
+而 `UNIQUE(dataset_id, partition_key_json, data_version)` **不报错**——
+键不同 ⇒ JSON 不同 ⇒ 两行，而它们描述的是同一片数据。
+
+⇒ 三个写入口都接上 `_check_partition_keys()`，这个字段这才变成承重件。
+⇒ 顺带解掉编造值之争：日历的正确切片键是 **`as_of`**（交易所逐步公布未来排期，
+11 月取到的含次年、9 月取到的不含 —— 区分两次取回的正是取回时刻），
+既不是他们的 `calendar_month`（按早已换掉的官方端点形状写的），也不是我的空元组。
+
+#### 一条字段该什么时候进来
+
+`DatasetDefinition.schema_version` 在 P3-0 被按「无消费方就是 L-1 死配置」挡在外面；
+P3-1 的 `save_dataset_partition` 要拿它拒绝「分区声称的版本与注册表不符」——
+**有消费方了才装进来**。这是那条纪律想要的节奏，不是「永远别加字段」。
+
+#### 两处守卫误报，都按它们自己给的机制处理
+
+- `EvidenceSetDatasetLink` 撞铁律 4 的词根检查 ⇒ 重命名为 `DatasetLink` 并加
+  `# contract-exempt:` 注释说明它不是第二份 Evidence 契约。**没有靠改名绕开** ——
+  改名能让守卫闭嘴，但读者仍会问「这是不是第二份契约」，豁免注释才回答它
+- 教程里「潜伏已久」一词原写作另一个词，被「教程不写与同机已有实例相关内容」
+  的词表判为误报 ⇒ 改措辞，不改守卫
+
+#### 实测
+
+```text
+schema  v22 → v26
+测试    1915 → 1924 条，2216 passed / 0 failed
+审查    audit_public.sh --worktree 十一项全绿
+```
+
+---
+
+
 ### 变更 · Phase 3 设计基线换成 `BigA Data Architecture v1`，P3-0 按它改了 5 处
 
 收到新的外部设计包，它**取代**此前的 Phase 3 Data Platform Foundation 草案。

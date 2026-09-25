@@ -32,11 +32,30 @@ Phase 3 Data Platform Foundation 草案，并且是照 Phase 2 收口源码重�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any, Mapping
 
 __all__ = [
+    "DataJobRun",
     "DataRunStatus",
+    "DatasetLink",
+    "DatasetPartition",
+    "DatasetProviderBinding",
+    "DatasetSnapshot",
+    "DatasetStatus",
+    "ProviderAttempt",
+    "ProviderAttemptStatus",
+    "ProviderRole",
+    "QualityReport",
+    "RawArtifact",
+    "canonical_partition_key",
+    "new_data_run_id",
+    "new_dataset_snapshot_id",
+    "new_partition_id",
+    "new_quality_report_id",
+    "new_raw_artifact_id",
     "DataIssue",
     "DatasetDefinition",
     "ProviderDefinition",
@@ -137,12 +156,22 @@ class DatasetDefinition:
         fallback_providers: primary 失败后依次接管。
         validation_providers: 只用于交叉校验；冲突时判 `QUARANTINED`，
             **不静默选边**（裁定 15 的但书：允许多源，不允许悄悄给出两个数）。
-        partition_keys: 这个数据集按什么切片。**没有切片就是空元组** ——
-            不给「看起来该有」的键硬塞一个值。
+        partition_keys: 这个数据集按什么切片。**必须非空且不重复。**
+
+            🔴 第一版允许空元组，理由是「不给看起来该有的键硬塞一个值」。
+            那条原则没错，用错了地方：真正的问题不是「要不要填」，是
+            **没有任何东西核对填的对不对** —— 两版实现里它都只是装饰品。
+            现在 `persistence.data` 会拿它核对每一次写入的实际分区键
+            （`set(partition_key) == set(partition_keys)`），它因此变成承重的，
+            而承重的字段不能为空。
         storage_policy: 今天它落在哪一类存储。这是**事实不是计划**：
             P3-0 时全部还在 SQLite，EOD 那条链在 P3-4 才换 Parquet。
         raw_table: 今天 raw 落哪张表 —— 由测试断言这张表真的存在。
         fact_table: 今天有没有归一化后的 fact 表。只有日历有。
+        schema_version: 这个数据集的 schema 第几版。**P3-1 才加进来** ——
+            在 `persistence.data.save_dataset_partition` / `save_dataset_snapshot`
+            里被用来拒绝「分区声称的版本与注册表不符」。P3-0 时它没有消费方，
+            按裁定 9 没装；现在有了才装，这正是那条纪律想要的节奏。
         consumers: 🔴 **今天谁在读它。** 写成 ``"模块路径:符号名"``，
             由测试 import 那个模块并断言符号真的在（行为判据，不是字符串扫描）。
 
@@ -153,6 +182,7 @@ class DatasetDefinition:
 
     dataset_id: str
     title: str
+    schema_version: int
     primary_provider: str
     fallback_providers: tuple[str, ...]
     validation_providers: tuple[str, ...]
@@ -161,6 +191,19 @@ class DatasetDefinition:
     raw_table: str
     consumers: tuple[str, ...]
     fact_table: str | None = None
+
+    def __post_init__(self) -> None:
+        _text("dataset_id", self.dataset_id)
+        if self.schema_version < 1:
+            raise ValueError(f"{self.dataset_id}: schema_version 必须 >= 1")
+        if not self.partition_keys or len(set(self.partition_keys)) != len(self.partition_keys):
+            raise ValueError(
+                f"{self.dataset_id}: partition_keys 必须非空且不重复 —— "
+                f"它被 persistence.data 用来核对每一次写入的实际分区键。")
+        if not self.consumers:
+            raise ValueError(
+                f"{self.dataset_id}: consumers 不能为空 —— "
+                f"答不出谁读它，这条就还不该进册（零消费方 = L-1 死配置）。")
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,3 +243,266 @@ class ProviderDefinition:
     title: str
     source_prefix: str
     modules: tuple[str, ...]
+
+
+# ─────────────────────────────────────────────── P3-1：快照 / 执行记录（外部实现合入）
+#
+# 下面这一段取自外部 P3-0/P3-1 实现包，**逐个审过**而不是整份照搬。
+# 取它的理由：这些结构在 P3-1 立刻有消费方（`persistence/data.py`），
+# 且它的构造时校验、分区键归一、id 工厂三件事都做得比我原来的骨架完整。
+#
+# 改掉的地方各自在注释里写了为什么。
+
+
+class DatasetStatus(StrEnum):
+    """一份**快照/数据集**处在什么状态 —— 与 `DataRunStatus`（一次执行的终态）是两层。
+
+    `COMPLETE` 不带 D，正是与 `DataRunStatus.COMPLETED` 拉开距离的那个字母。
+    """
+
+    COLLECTING = "COLLECTING"
+    VALIDATING = "VALIDATING"
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    QUARANTINED = "QUARANTINED"
+    FAILED = "FAILED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class ProviderRole(StrEnum):
+    """一个 provider 在**某个 dataset 上**扮演的角色。
+
+    🔴 角色属于「dataset × provider」这条边，不属于 provider 本身 ——
+    「不要把某个 Provider 永久等同于 Primary」。今天这条边内联在
+    `DatasetDefinition` 的三个字段里（只有两个 dataset，独立结构是空开销）；
+    等出现需要挂**边上元数据**的场景（重试策略、限流配额），再抽 `DatasetProviderBinding`。
+    """
+
+    PRIMARY = "PRIMARY"
+    FALLBACK = "FALLBACK"
+    VALIDATOR = "VALIDATOR"
+
+
+class ProviderAttemptStatus(StrEnum):
+    """一次 provider 取数尝试的结果。
+
+    ⚠️ 可重试与不可重试**分成两个值**，不是一个 `failed` 加一个布尔 ——
+    落库之后只剩字符串，布尔那一位最容易在序列化边界被丢掉。
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE"
+    FAILED_PERMANENT = "FAILED_PERMANENT"
+    SKIPPED = "SKIPPED"
+
+
+def _text(name: str, value: str) -> None:
+    """非空、且两端无空白 —— 这类 id 会进 UNIQUE 约束与 JSON 键。
+
+    🔴 卡 `value != value.strip()` 而不只是 `strip()` 非空：`"sina "` 与 `"sina"`
+    在 SQLite 里是两行，而人眼看不出区别。
+    """
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ValueError(f"{name} 必须是非空且两端无空白的字符串，收到 {value!r}")
+
+
+def canonical_partition_key(value: Mapping[str, str]) -> dict[str, str]:
+    """把分区键归一成**确定性**形式（按键排序）。
+
+    🔴 它是 `UNIQUE(dataset_id, partition_key_json, data_version)` 能成立的前提：
+    同一个分区写两次，若 JSON 键序不同就会变成两行，而唯一约束**不会报错** ——
+    它是「同一份数据悄悄存了两份」的经典入口。
+    """
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("partition_key 必须是非空映射")
+    out: dict[str, str] = {}
+    for key, item in sorted(value.items()):
+        _text("分区键", key)
+        _text(f"分区键 {key} 的值", item)
+        out[key] = item
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetProviderBinding:
+    """dataset × provider × role 这条边。**今天没有消费方** —— 见 `ProviderRole`。
+
+    留着类型定义是因为 `ProviderAttempt.role` 要用 `ProviderRole`；
+    这个 dataclass 本身在抽边上元数据之前不会被实例化。
+    """
+
+    dataset_id: str
+    provider_id: str
+    role: ProviderRole
+
+
+@dataclass(frozen=True, slots=True)
+class DataJobRun:
+    """一次数据任务执行的身份。"""
+
+    data_run_id: str
+    job_id: str
+    dataset_id: str
+    partition_key: Mapping[str, str]
+    requested_data_version: int
+    trigger_id: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        _text("data_run_id", self.data_run_id)
+        _text("job_id", self.job_id)
+        if self.requested_data_version < 1:
+            raise ValueError("requested_data_version 必须 >= 1")
+        object.__setattr__(self, "partition_key", canonical_partition_key(self.partition_key))
+
+
+@dataclass(frozen=True, slots=True)
+class RawArtifact:
+    """一份 provider 原始响应的**元数据**（正文在文件里，不在库里）。"""
+
+    artifact_id: str
+    dataset_id: str
+    provider_id: str
+    request_fingerprint: str
+    body_uri: str
+    body_sha256: str
+    size_bytes: int
+    retrieved_at: str
+    content_type: str | None = None
+    compression: str | None = None
+    as_of: str | None = None
+    available_at: str | None = None
+
+    def __post_init__(self) -> None:
+        _text("artifact_id", self.artifact_id)
+        _text("body_sha256", self.body_sha256)
+        if self.size_bytes < 0:
+            raise ValueError("size_bytes 不能为负")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAttempt:
+    """一次取数尝试 —— fallback 链上的每一跳都要留痕，包括失败的那些。"""
+
+    data_run_id: str
+    provider_id: str
+    role: ProviderRole
+    attempt_no: int
+    status: ProviderAttemptStatus
+    started_at: str
+    finished_at: str | None = None
+    elapsed_ms: int | None = None
+    artifact_id: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetPartition:
+    """一个已发布的分区。`data_version` 递增，**旧版本永不覆盖**。"""
+
+    partition_id: str
+    dataset_id: str
+    partition_key: Mapping[str, str]
+    schema_version: int
+    data_version: int
+    storage_format: str
+    storage_uri: str
+    content_sha256: str
+    row_count: int
+    provider_id: str
+    raw_artifact_id: str | None = None
+    supersedes_partition_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.data_version < 1:
+            raise ValueError("data_version 必须 >= 1")
+        if self.row_count < 0:
+            raise ValueError("row_count 不能为负")
+        object.__setattr__(self, "partition_key", canonical_partition_key(self.partition_key))
+
+
+@dataclass(frozen=True, slots=True)
+class QualityReport:
+    """一次质量裁定的结果与依据。"""
+
+    quality_report_id: str
+    data_run_id: str
+    dataset_id: str
+    partition_id: str | None
+    status: DatasetStatus
+    policy_id: str
+    metrics: Mapping[str, Any] = field(default_factory=dict)
+    issues: tuple[DataIssue, ...] = ()
+    checked_at: str = ""
+
+    def to_issue_dicts(self) -> list[dict[str, Any]]:
+        return [
+            {"code": i.code, "severity": i.severity, "detail": i.detail,
+             "retryable": i.retryable}
+            for i in self.issues
+        ]
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetSnapshot:
+    """下游**唯一可引用**的发布单位。"""
+
+    snapshot_id: str
+    dataset_id: str
+    partition_key: Mapping[str, str]
+    as_of: str
+    knowledge_cutoff: str
+    status: DatasetStatus
+    schema_version: int
+    data_version: int
+    partition_ids: tuple[str, ...]
+    quality_report_id: str
+    content_sha256: str
+    supersedes_snapshot_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "partition_key", canonical_partition_key(self.partition_key))
+        if not self.partition_ids:
+            raise ValueError("partition_ids 不能为空 —— 一个不指向任何分区的快照没有意义")
+        if self.status in {DatasetStatus.COLLECTING, DatasetStatus.VALIDATING}:
+            raise ValueError(
+                f"已发布的快照不能是中途状态 {self.status} —— "
+                f"发布意味着质量已裁定（COMPLETE / PARTIAL / QUARANTINED / FAILED）"
+            )
+
+
+# contract-exempt: 这不是第二份 Evidence 契约。它是 `evidence_set_datasets` 的一行
+#   （EvidenceSet ↔ DatasetSnapshot 的链接），名字里的 EvidenceSet 指的是**被引用方**
+#   而不是它自己是什么。改名绕开词根只会让读者更难看出它在连什么。
+@dataclass(frozen=True, slots=True)
+class DatasetLink:
+    """把一次决策的冻结证据集，与它用到的某个 DatasetSnapshot 连起来。"""
+
+    evidence_set_id: str
+    dataset_id: str
+    snapshot_id: str
+
+
+def _new(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
+def new_data_run_id() -> str:
+    return _new("dr")
+
+
+def new_raw_artifact_id() -> str:
+    return _new("raw")
+
+
+def new_partition_id() -> str:
+    return _new("part")
+
+
+def new_quality_report_id() -> str:
+    return _new("qr")
+
+
+def new_dataset_snapshot_id() -> str:
+    return _new("dss")

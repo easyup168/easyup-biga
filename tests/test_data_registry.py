@@ -266,9 +266,9 @@ def test_三种角色都算用到_用合成定义测():
     走到那条分支。「当前数据恰好测不到」和「守卫漏了」在结果上一模一样。
     """
     def ds(**kw):
-        base = dict(dataset_id="x", title="t", primary_provider="P",
+        base = dict(dataset_id="x", title="t", schema_version=1, primary_provider="P",
                     fallback_providers=(), validation_providers=(),
-                    partition_keys=(), storage_policy="s",
+                    partition_keys=("as_of",), storage_policy="s",
                     raw_table="raw_market_snapshot", consumers=("m:s",))
         return DatasetDefinition(**{**base, **kw})
 

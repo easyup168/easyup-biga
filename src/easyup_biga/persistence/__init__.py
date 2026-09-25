@@ -60,7 +60,45 @@ from .runs import (
 )
 from .schema import SCHEMA_VERSION
 
+
+# Phase 3 数据平台的元数据落库（P3-1）。走同一个 `connect()` 边界，
+# 不另起第二个库、不另开写路径 —— I-4「DB 唯一入口」对它同样成立。
+from .data import (
+    DataRunTransitionError,
+    DataStoreConflict,
+    UnknownDataRun,
+    data_run_events,
+    data_run_state,
+    find_dataset_snapshot,
+    link_evidence_set_dataset,
+    list_evidence_set_datasets,
+    load_dataset_snapshot,
+    open_data_run,
+    record_provider_attempt,
+    save_dataset_partition,
+    save_dataset_snapshot,
+    save_quality_report,
+    save_raw_artifact,
+    transition_data_run,
+)
+
 __all__ = [
+    "DataRunTransitionError",
+    "DataStoreConflict",
+    "UnknownDataRun",
+    "data_run_events",
+    "data_run_state",
+    "find_dataset_snapshot",
+    "link_evidence_set_dataset",
+    "list_evidence_set_datasets",
+    "load_dataset_snapshot",
+    "open_data_run",
+    "record_provider_attempt",
+    "save_dataset_partition",
+    "save_dataset_snapshot",
+    "save_quality_report",
+    "save_raw_artifact",
+    "transition_data_run",
     "DEFAULT_DB_PATH",
     "SCHEMA_VERSION",
     "AppendOnlyViolation",

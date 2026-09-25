@@ -52,14 +52,19 @@ DATASETS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
         dataset_id="cn.trading_calendar",
         title="A 股交易日历（含交易所已公布的未来排期）",
+        schema_version=1,
         # 实测主源是新浪不是深交所 —— 见模块头。szse 作 fallback 保留：
         # 它是**官方**源，在连得通的环境里它才是更权威的那个。
         primary_provider="sina_calendar",
         fallback_providers=("szse",),
         validation_providers=(),
-        # 新浪那个端点一次返回全量（往回 730 天 + 未来），没有自然切片。
-        # 外部草案写 ("month",) 是按深交所 monthList 的形状写的，换主源后不成立。
-        partition_keys=(),
+        # 🔴 切片键是 `as_of`（这份日历是**什么时候取的**），不是月份。
+        #    外部草案写 ("month",) 是按深交所 monthList 端点的形状写的，换主源
+        #    之后不成立 —— 新浪那个端点一次返回全量（往回 730 天 + 未来）。
+        #    但「没有切片」也是错的：交易所**逐步公布**未来排期，11 月取到的
+        #    日历含次年、9 月取到的不含 ⇒ 两次取回是同一数据集的两个版本，
+        #    区分它们的正是取回时刻。
+        partition_keys=("as_of",),
         storage_policy="sqlite_fact",
         raw_table="raw_market_snapshot",
         fact_table="fact_trading_calendar",
@@ -71,13 +76,18 @@ DATASETS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
         dataset_id="cn.index.daily_bars",
         title="指数日线（market/sector/technical 共用的脊梁）",
+        schema_version=1,
         primary_provider="sina",
         fallback_providers=(),
         # 🔴 **故意留空。** tencent 今天确实被 market-calc 用来取成交额并与日线
         #    互相印证，但那是 skill 内部的事，不走 Registry 的 validator 流程。
         #    写上等于点名一个今天没人执行的角色 —— 等 P3-2 真的接上再填。
         validation_providers=(),
-        partition_keys=("trade_date",),
+        # 🔴 `(symbol, as_of)` 而不是 `(trade_date,)`：这个数据集走的是
+        #    **决策快照道**，`SnapshotCoordinator` 冻结的就是「这次决策、这个
+        #    指数、这一刻」的那一份，同一交易日可以被冻结多次（多次决策）。
+        #    按 trade_date 切会把它们当成同一个分区。
+        partition_keys=("symbol", "as_of"),
         storage_policy="sqlite_raw_snapshot",
         raw_table="raw_market_snapshot",
         consumers=("easyup_biga.application.coordinator:SnapshotCoordinator",),

@@ -416,13 +416,14 @@ class TestWiredIntoRealPath:
         """
         import shutil
         import subprocess
+
+        from _scan import sandbox_ignore
         work = tmp_path / "repo"
-        shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
-            # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
-            #    被原样复制进沙盒，于是三条出卡路径测试全部拿到 rc=3。
-            #    沙盒要复制的是**代码**，不是这台机器此刻的运行状态。
-            ".biga-card-stop", ".biga-card.lock",
-            ".git", "__pycache__", "data", ".pytest_cache", ".claude", "memory"))
+        # 🔴 排除规则走 `_scan.sandbox_ignore()` —— 两处沙盒共用的唯一实现。
+        #    原来这里是 `shutil.ignore_patterns(..., "data", ...)`，而那个 glob
+        #    对**每一层**生效：本意排掉仓库根的 `data/`（SQLite 库），实际连
+        #    `src/easyup_biga/data/` 一起静默丢掉。见那个函数的 docstring。
+        shutil.copytree(REPO, work, symlinks=True, ignore=sandbox_ignore(REPO))
         db = tmp_path / "t.db"
         # 预建空 schema，让 bin/biga-card 读 BEFORE（readonly）时库已存在、返回空。
         subprocess.run(
