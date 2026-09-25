@@ -85,9 +85,14 @@ pyarrow + duckdb 少一个依赖）。`test_packaging.py` 的「声明 ⇔ 代�
 `pip install` 与 `--user` 都被拒。两条路（`--break-system-packages` / 建 venv 并改
 `bin/*`）与各自代价写进 `docs/guide/install.md`。
 
-⇒ P3-4 的 Parquet 面因此**在本机尚未验证**。已补一条**真的写再读回来**的行为
-测试（`tests/test_eod_pipeline.py`，标 `installed`），装上 duckdb 后
-`pytest --run-installed` 才跑 —— 不跑它，「Parquet 能用」就只有源码里的字符串撑着。
+⇒ 已补一条**真的写再读回来**的行为测试（`tests/test_eod_pipeline.py`，标 `installed`）。
+**当天装上 duckdb 1.5.5 后已跑通**：写 Parquet → 文件落地 → 同分区同版本重写被拒
+（不可变）→ duckdb 读回逐项对内容。P3-4 的 Parquet 面由此有了行为判据。
+
+⚠️ 那条测试第一版写错了：`write_parquet_rows` 返回的第一个值是**路径字符串**不是
+`Path`，而签名里明明白白是 `tuple[str, str, int]` —— 我看过签名却照印象写。
+没装 duckdb 时它是 skip，所以这个错一直藏着。
+⇒ **标 `installed` 的测试在依赖没装时证明不了任何事，包括它自己对不对。**
 
 #### P3-6 / P3-7 **没有合**
 

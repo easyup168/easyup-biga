@@ -337,15 +337,28 @@ materialize 回调 ⇒ **独立一件事，下一轮收**。
 > （`tools/verify/phase1_acceptance.py` 就是那一次验收本身）；
 > 用在**会一直活下去的基础设施**上就答不出问题了。
 
-##### 🔴 未落地，且原因是环境级的
+##### ⏩ Parquet 面已验证（2026-09-26 当天，duckdb 装好之后）
 
-**P3-4 的 Parquet/DuckDB 面在本机无法验证。** `duckdb` 是声明了的运行时依赖，
+`pytest --run-installed tests/test_eod_pipeline.py` 现在真的：
+写一份 Parquet → 断言文件落地 → **同分区同版本重写被拒**（不可变）→
+用 duckdb 读回来逐项对内容。
+
+⚠️ 那条测试我第一版写错了：`write_parquet_rows` 返回的第一个值是**路径字符串**
+不是 `Path`，而签名里明明白白是 `tuple[str, str, int]` —— 我看过那个签名，
+写的时候却照脑子里的印象写。装上 duckdb 一跑就 `AttributeError`。
+**照签名写测试，别照印象写。** 它没装 duckdb 时是 skip，所以这个错一直藏着 ——
+这也说明「标 installed 的测试」在依赖没装时**证明不了任何事**，包括它自己对不对。
+
+##### 🔴 环境级的前提（保留，因为它仍然约束部署）
+
+**duckdb 的装法不是「pip install 一下」。** `duckdb` 是声明了的运行时依赖，
 但本仓库的生产执行模型是 `bin/*` 直接用**系统 python3** + `sys.path` 挂载
 （不装包、无 venv），而这台机器的 python 是 PEP 668 externally-managed，
 `pip install` 与 `--user` 都被挡。装法见 [`../guide/install.md`](../guide/install.md)。
 
-⇒ 已补一条**真的写 Parquet 再读回来**的行为测试（`tests/test_eod_pipeline.py`），
-标 `installed`，装上 duckdb 后 `pytest --run-installed` 才跑。
+⇒ 行为测试在 `tests/test_eod_pipeline.py`，标 `installed`。
+默认 `pytest` 仍然 hermetic（2169 passed / 433 skipped），
+`--run-installed` 时 2172 passed —— 多出来的三条就是它。
 
 ##### P3-6 / P3-7 **没有合**
 
