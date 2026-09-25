@@ -1586,6 +1586,7 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 | Phase | 内容 | 出口条件 |
 |---|---|---|
 | 2 | 补齐到 **7** 个 agent（不含 `discipline`）+ Stage1/2 并行 + 完整 Card | `missing[]` 在真实缺数据时非空 ≥5 次；延迟预算按实测重推（**不照抄 105s**） |
-| 3 | 数据层加厚 + `discipline`（含它的输入源）+ 独立飞书应用 + 第一条 cron | 每条 cron 都有**被证明的**消费方 |
+| 3 | **数据平台地基 + 第一条 cron**（设计与 14 条适配裁定见 [`docs/design/phase-3-data-platform.md`](docs/design/phase-3-data-platform.md)）| `python3 tools/verify/exit_conditions.py` 全绿 —— 含「每条 cron 都有**被证明的**消费方」 |
+| 3b | `discipline`（含它的输入源）+ 独立飞书应用 | 🔴 **2026-09-25 从 Phase 3 拆出**。`discipline` 推迟的原始理由（输入源不存在，硬建只能编）至今成立；独立飞书与数据平台无耦合 |
 | 4 | 测量层：安慰剂基准 + Card 状态的区分力检验 | `BLOCK/WARNING` 与 T+5 结果按日聚类 t 有区分力 |
 | 5 | （很久以后）自动下单 | **硬前提：Phase 4 通过**。在 Card 的 BLOCK 被证明有区分力之前接下单 = 新增一道空转门 |
