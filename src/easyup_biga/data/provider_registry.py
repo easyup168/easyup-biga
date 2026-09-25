@@ -39,7 +39,8 @@ from .contracts import DatasetDefinition, ProviderDefinition
 from .registry import DATASET_REGISTRY
 
 __all__ = ["PROVIDERS", "PROVIDER_REGISTRY", "PROVIDER_IDS", "ProviderNotRegistered",
-           "get_provider", "datasets_of", "uses_provider", "provider_for_source"]
+           "get_provider", "datasets_of", "uses_provider", "provider_for_source",
+           "role_of"]
 
 
 class ProviderNotRegistered(KeyError):
@@ -165,3 +166,29 @@ def provider_for_source(dataset_id: str, source: str) -> str:
             f"  前缀不是 provider_id：sina 与 sina_calendar 都写 'sina:'，"
             f"所以要按「本 dataset 登记了谁」求交集，不能直接取前缀。")
     return hits[0]
+
+
+def role_of(dataset_id: str, provider_id: str) -> "ProviderRole":
+    """这个 provider 在这个 dataset 上扮演什么角色。未绑定就 fail closed。
+
+    🔴 角色属于「dataset × provider」这条边，而本仓库把那条边**内联**在
+    `DatasetDefinition` 的三个字段里（只有几个 dataset 时，独立的 binding 表
+    是纯开销）。外部实现用的是一张平行的 `PROVIDER_BINDINGS` 元组 ——
+    那与 dataset 侧的三个字段是一对**孪生清单**，两处各写一份必然漂。
+    这里从唯一手写处派生，语义等价。
+    """
+    from .contracts import ProviderRole
+    ds = DATASET_REGISTRY.get(dataset_id)
+    if ds is None:
+        raise KeyError(f"未注册的数据集 {dataset_id!r}")
+    if provider_id == ds.primary_provider:
+        return ProviderRole.PRIMARY
+    if provider_id in ds.fallback_providers:
+        return ProviderRole.FALLBACK
+    if provider_id in ds.validation_providers:
+        return ProviderRole.VALIDATOR
+    raise ValueError(
+        f"{provider_id!r} 没有绑定到 {dataset_id!r}。\n"
+        f"  该 dataset 登记的：primary={ds.primary_provider!r} "
+        f"fallback={list(ds.fallback_providers)} validation={list(ds.validation_providers)}\n"
+        f"  要新增角色就改 data/registry.py 里那个 dataset 的字段。")

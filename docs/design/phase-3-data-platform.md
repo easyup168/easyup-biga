@@ -1,6 +1,6 @@
 # Phase 3 设计 —— 数据平台地基 + 第一条调度
 
-> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ✅ / P3-2 ✅ / P3-3 🔶 / P3-4 ⬜）
+> 📄 **阶段 · 进行中**（P3-0…P3-3 ✅🔶 / P3-4 🔶 / P3-5 🔶 / P3-6 ⬜ / P3-7 ⬜）
 > **覆盖**：Phase 3 的设计基线、范围、里程碑、出口条件，以及本仓库对外部设计的适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
 
 > Phase 3 的**设计 SSOT**。结构性问题（存储平面选型、失败模式清单、表结构）
@@ -275,6 +275,86 @@ Data Run 状态机、快照/分区/质量记录类型、构造时校验、分区
 ⚠️ 这是同一个坑的**第三个实例**——前两个（运行时总闸被复制进沙盒、构建产物
 没排除）就记在那份注释里。前两次的修法都是「往名单里再加一个名字」，
 而名单的**形状**一直是错的。
+
+#### ⏩ P3-4 / P3-5 部分落地（2026-09-26）：外部「P3-0…P3-10R 完整包」的深度评审
+
+外部交付了一份覆盖 P3-0…P3-10R 的 source-overlay（64 个源文件）。
+它的自述很诚实：`code_acceptance: PASS` / `live_acceptance: NOT RUN`，
+并且明确写着「**code baseline closed，不等于 all live production acceptance completed**」。
+
+##### 🔴 为什么不能整份覆盖
+
+它的基线是**它自己的 P3-3**，而本仓库在 P3-0…P3-3 做过十几处结构性修正。
+逐项扫描：`source_prefix` / `ProviderNotRegistered` / `throttle` /
+`QUALITY_POLICIES` 在它的 overlay 里**出现在 0 个文件**。
+直接覆盖 = 把那些修正**静默回退**。
+
+⇒ 按层选择性合并，保留本仓库的模型。
+
+##### 评审查出的五处
+
+| # | 问题 | 性质 |
+|---|---|---|
+| 1 | **双发布路径**：`Phase3Publisher` 与 `DatasetSnapshotService` 逐项相同地各走一遍 `DataRun → RawArtifact → Partition → Quality → Snapshot` | 🔴 L-3，且直接违反设计 v1 风险 1 的裁定「新写一个独立 snapshot manager —— **禁止**」 |
+| 2 | **P3-4 的 Parquet 读写零行为覆盖**：三条相关断言分别是「路径字符串拼得对不对」「pyproject 里有没有那个子串」「analytics 源码里有没有 `read_parquet` 这个词」 | 🔴 全落在「❌ 源码里有没有这个字符串」那一列 |
+| 3 | systemd `WorkingDirectory=%h/easyup-biga` | 🔴 **路径根本不对**（本仓库在 `~/.openclaw-biga/workspace`），装上起不来 |
+| 4 | 单元名 `biga-eod-daily-bars` 是 `biga-` 前缀不是 `-biga` 后缀 | 🔴 不满足 `isolation.py` 判据；又因它引用的路径不是 `.openclaw-biga`，守卫**根本不会把它算成 BigA 的单元** —— 比报红更糟 |
+| 5 | `bin/biga-data` 改成 `exec python -m …` | 🔴 本机**没有 `python`**，只有 `python3`；而且它整份覆盖了既有的 `list`/`providers` |
+
+3/4/5 是同一个形状：**这套 deploy/CLI 面从没在这个环境里跑过**。
+
+##### 本轮合进来的
+
+```text
+data/file_store.py        Parquet/raw 文件面（同目录 temp → fsync → 读回校验 → 原子 replace）
+data/records.py           各 dataset 的领域记录类型
+data/publication.py       行级发布入口 —— **薄层，委托账本**
+data/analytics.py         DuckDB 跨日查询
+data/review_outcomes.py   确定性复盘指标
+data/snapshot_resolver.py 按 EvidenceSet 解析冻结快照
+data/eod_pipeline.py + datasets/{eod_daily_bars,tradability,adjustment_factors,emotion_close}
+providers/eastmoney_eod.py
+```
+
+##### 消掉那条双发布路径的做法
+
+`DatasetSnapshotService.publish()` **只做加法**（质量终态、修订链两个可选能力），
+P3-2 的既有行为一个字节不变；行级发布改成 `DatasetRowPublisher`，
+只管 raw 归档 + Parquet + 算发布请求，**账本交回唯一那处**。
+
+⚠️ 顺带发现：`src/easyup_biga/data/datasets/security_master.py`（P3-3，**我上一轮自己合进来的**）
+里还有**第三处**账本流程。上一轮没看出来 —— L-3 最容易在 grep 共同调用时现形，
+而不是在读 diff 时。它中间还要写 fact 表，消除它需要给发布服务加一个
+materialize 回调 ⇒ **独立一件事，下一轮收**。
+
+##### 模块命名：`phase3_` 前缀全部去掉
+
+`phase3_storage` / `phase3_models` / `phase3_publication` / `test_phase3_p34_p310`
+犯的是 `docs/README.md` 那条「不许按阶段/步骤切分」的同一条：
+**到 Phase 5 时这些名字只告诉你它是什么时候加的，不告诉你它是什么。**
+
+> 判据：阶段名用在**会随阶段结束而完结**的东西上是对的
+> （`tools/verify/phase1_acceptance.py` 就是那一次验收本身）；
+> 用在**会一直活下去的基础设施**上就答不出问题了。
+
+##### 🔴 未落地，且原因是环境级的
+
+**P3-4 的 Parquet/DuckDB 面在本机无法验证。** `duckdb` 是声明了的运行时依赖，
+但本仓库的生产执行模型是 `bin/*` 直接用**系统 python3** + `sys.path` 挂载
+（不装包、无 venv），而这台机器的 python 是 PEP 668 externally-managed，
+`pip install` 与 `--user` 都被挡。装法见 [`../guide/install.md`](../guide/install.md)。
+
+⇒ 已补一条**真的写 Parquet 再读回来**的行为测试（`tests/test_eod_pipeline.py`），
+标 `installed`，装上 duckdb 后 `pytest --run-installed` 才跑。
+
+##### P3-6 / P3-7 **没有合**
+
+P3-7 的 `required_datasets` 引用 `cn.sector.board_snapshot` / `cn.news.flash` /
+`cn.market.limit_pool` —— 那些要等 P3-6 把五条 direct feed 迁完并进册才存在。
+而 P3-6 要重写 6 个 skill + orchestrator（**生产决策路径**）。
+
+⇒ 那是这包里风险最高的一块，单独一轮做，按设计自己的规矩
+「旧行为回归全绿 + 新红灯测试全绿」逐个里程碑收。
 
 ### 3.1 schema 分步（v1–v22 永不修改）
 

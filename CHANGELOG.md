@@ -15,6 +15,97 @@
 
 ## [未发布]
 
+### 新增 · Phase 3 · P3-4 / P3-5 部分落地 —— 外部「P3-0…P3-10R 完整包」深度评审后选择性合并
+
+外部交付覆盖 P3-0…P3-10R 的 source-overlay（64 个源文件）。它的自述很诚实：
+`code_acceptance: PASS` / `live_acceptance: NOT RUN`，并明确写着
+「code baseline closed ≠ all live production acceptance completed」。
+
+#### 🔴 不能整份覆盖：它会静默回退本仓库 P3-0…P3-3 的全部修正
+
+它的基线是**它自己的 P3-3**。逐项扫描它的 overlay：
+`source_prefix` / `ProviderNotRegistered` / `throttle` / `QUALITY_POLICIES`
+**出现在 0 个文件**。⇒ 按层选择性合并。
+
+#### 评审查出五处
+
+1. 🔴 **双发布路径** —— `Phase3Publisher` 与既有 `DatasetSnapshotService` 逐项相同地
+   各走一遍 `DataRun → RawArtifact → Partition → Quality → Snapshot`。
+   这是 L-3，而且直接违反设计 v1 风险 1 的裁定：「新写一个完全独立的 snapshot
+   manager —— **禁止**，通用层必须由现有 Vertical Slice 演化而来」。
+2. 🔴 **P3-4 的 Parquet 读写零行为覆盖** —— 三条相关断言分别是「路径字符串拼得对
+   不对」「pyproject 里有没有 `"duckdb>=1.0,<2"` 这个子串」「analytics 源码里有没有
+   `read_parquet` 这个词」。把 `write_parquet_rows` 整个删掉，三条照样绿。
+3. 🔴 systemd `WorkingDirectory=%h/easyup-biga` —— **路径根本不对**，本仓库在
+   `~/.openclaw-biga/workspace`，装上起不来。
+4. 🔴 单元名 `biga-eod-daily-bars` 是 `biga-` 前缀不是 `-biga` 后缀 ⇒ 不满足
+   `isolation.py` 的判据；又因它引用的路径也不是 `.openclaw-biga`，守卫**根本不会
+   把它算成 BigA 的单元** —— 比报红更糟，是静默漏检。
+5. 🔴 `bin/biga-data` 改成 `exec python -m …` —— 本机**没有 `python`** 只有 `python3`，
+   且整份覆盖了既有的 `list` / `providers`。
+
+⇒ 3/4/5 是同一个形状：**这套 deploy/CLI 面从没在这个环境里跑过**。三者都没合。
+
+#### 消掉那条双发布路径
+
+`DatasetSnapshotService.publish()` **只做加法**（质量终态、修订链两个可选能力），
+P3-2 的既有行为一个字节不变；行级发布改写成 `DatasetRowPublisher`，只管
+raw 归档 + Parquet + 算发布请求，**账本交回唯一那处**。
+
+⚠️ 顺带发现 `src/easyup_biga/data/datasets/security_master.py`（P3-3，**我上一轮
+自己合进来的**）里还有**第三处**账本流程。上一轮没看出来 ——
+**L-3 最容易在 grep 共同调用时现形，而不是在读 diff 时。**
+消除它需要给发布服务加一个 materialize 回调（它中间要写 fact 表）⇒ 下一轮收。
+
+#### 模块命名：`phase3_` 前缀全部去掉
+
+```text
+phase3_storage.py     → file_store.py      （类 Phase3FileStore → FileStore）
+phase3_models.py      → records.py
+phase3_publication.py → publication.py     （同时整份重写）
+test_phase3_p34_p310  → test_eod_pipeline
+```
+
+犯的是 `docs/README.md` 那条「不许按阶段/步骤切分」的同一条：
+到 Phase 5 时 `phase3_storage.py` 只告诉你它**什么时候**加的，不告诉你它**是什么**。
+
+> 判据：阶段名用在**会随阶段结束而完结**的东西上是对的
+> （`tools/verify/phase1_acceptance.py` 就是那一次验收本身）；
+> 用在**会一直活下去的基础设施**上就答不出问题了。
+
+#### 🔴 零依赖到此为止，而且守卫是当场报红的
+
+`duckdb` 进 `[project.dependencies]`（Parquet 的**写与读都走它**，比
+pyarrow + duckdb 少一个依赖）。`test_packaging.py` 的「声明 ⇔ 代码双向一致」
+在它第一次被 import 进来时**当场报红** —— 零依赖这个属性是被明写着交出去的，
+不是悄悄消失的。
+
+⚠️ **装法不是「pip install 一下」**：生产执行模型是 `bin/*` 直接用系统 `python3`
+（不装包、无 venv），而本机 python 是 PEP 668 externally-managed，
+`pip install` 与 `--user` 都被拒。两条路（`--break-system-packages` / 建 venv 并改
+`bin/*`）与各自代价写进 `docs/guide/install.md`。
+
+⇒ P3-4 的 Parquet 面因此**在本机尚未验证**。已补一条**真的写再读回来**的行为
+测试（`tests/test_eod_pipeline.py`，标 `installed`），装上 duckdb 后
+`pytest --run-installed` 才跑 —— 不跑它，「Parquet 能用」就只有源码里的字符串撑着。
+
+#### P3-6 / P3-7 **没有合**
+
+P3-7 的 `required_datasets` 引用 `cn.sector.board_snapshot` / `cn.news.flash` /
+`cn.market.limit_pool`，那些要等 P3-6 把五条 direct feed 迁完并进册才存在；
+而 P3-6 要重写 6 个 skill + orchestrator（**生产决策路径**）。
+⇒ 这包里风险最高的一块，单独一轮按「旧行为回归全绿 + 新红灯测试全绿」逐里程碑收。
+
+#### 实测
+
+```text
+schema  仍 v27（本批不新增 migration —— 他们的 schema 与本仓库表集合完全一致）
+测试    1952 → 1955 条，2170 passed / 0 failed（+1 条标 installed 的 Parquet 往返测试，装上 duckdb 才跑）
+```
+
+---
+
+
 ### 新增 · Phase 3 · P3-3：Security Master（schema v27）—— 链路建成，**上游未探活**
 
 第一张 point-in-time 的事实表：某个知识截止时刻下，A 股市场上有哪些票。

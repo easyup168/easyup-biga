@@ -74,6 +74,12 @@ class SnapshotPublishRequest:
     quality_metrics: Mapping[str, object]
     quality_issues: tuple[DataIssue, ...] = ()
     data_version: int = 1
+    #: 🔴 质量裁定的结果。非 `COMPLETE` 时**发布分区与质量报告，但不出快照** ——
+    #: 「数据有问题」和「什么都没发生」是两件事：前者要留下可审计的痕迹。
+    quality_status: DatasetStatus = DatasetStatus.COMPLETE
+    #: 修订：这次发布取代的是哪个分区/快照（`--new-revision`）。旧版本永不覆盖。
+    supersedes_partition_id: str | None = None
+    supersedes_snapshot_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +191,7 @@ class DatasetSnapshotService:
                 # one-to-many lineage edge for P3-2; do not lie with one arbitrary FK.
                 raw_artifact_id=(request.raw_artifacts[0].artifact_id
                                  if len(request.raw_artifacts) == 1 else None),
+                supersedes_partition_id=request.supersedes_partition_id,
             )
             save_dataset_partition(partition, path=self._path)
 
@@ -195,13 +202,27 @@ class DatasetSnapshotService:
                 data_run_id=data_run_id,
                 dataset_id=request.dataset_id,
                 partition_id=partition.partition_id,
-                status=DatasetStatus.COMPLETE,
+                status=request.quality_status,
                 policy_id=definition.quality_policy,
                 metrics=dict(request.quality_metrics),
                 issues=request.quality_issues,
                 checked_at=now_cn().isoformat(),
             )
             save_quality_report(quality, path=self._path)
+
+            # 🔴 质量没过 ⇒ 到此为止：分区与质量报告都留下了（可审计），
+            #    但**不出快照**。下游只认快照 ⇒ 坏数据进不了决策，
+            #    而「为什么没进」查得到。
+            if request.quality_status is not DatasetStatus.COMPLETE:
+                terminal = ("FAILED" if request.quality_status is DatasetStatus.FAILED
+                            else request.quality_status.value)
+                transition_data_run(data_run_id, state, terminal, path=self._path)
+                return SnapshotPublishResult(
+                    data_run_id=data_run_id, snapshot_id="",
+                    partition_id=partition.partition_id,
+                    quality_report_id=quality.quality_report_id,
+                    as_of=request.as_of, knowledge_cutoff=request.knowledge_cutoff,
+                )
 
             transition_data_run(data_run_id, state, "PUBLISHING", path=self._path)
             state = "PUBLISHING"
@@ -217,6 +238,7 @@ class DatasetSnapshotService:
                 partition_ids=(partition.partition_id,),
                 quality_report_id=quality.quality_report_id,
                 content_sha256=request.content_sha256,
+                supersedes_snapshot_id=request.supersedes_snapshot_id,
             )
             save_dataset_snapshot(snapshot, path=self._path)
             transition_data_run(data_run_id, state, "SNAPSHOT_CREATED", path=self._path)
@@ -233,6 +255,83 @@ class DatasetSnapshotService:
             )
         except Exception:
             # Best-effort audit closure; never mask the original failure.
+            try:
+                transition_data_run(data_run_id, state, "FAILED", path=self._path)
+            except Exception:
+                pass
+            raise
+
+
+    def record_unpublishable(
+        self,
+        *,
+        dataset_id: str,
+        job_id: str,
+        partition_key: Mapping[str, str],
+        trigger_id: str,
+        provider_id: str,
+        raw_artifacts: Sequence[RawArtifact],
+        status: DatasetStatus,
+        quality_metrics: Mapping[str, object],
+        quality_issues: tuple[DataIssue, ...] = (),
+        data_version: int = 1,
+    ) -> str:
+        """这次取到了数据、但**发不出分区**（比如一行都没有）。返回 `data_run_id`。
+
+        🔴 为什么不是「什么都不做」：raw 已经落盘了，provider 也真的被调用过。
+        丢掉这段等于让「今天没数据」和「今天没跑」在库里长得一模一样 ——
+        而排查时最先要区分的就是这两件事。
+
+        ⚠️ 与 `publish()` 是**两条不同的流程**（这条没有分区、没有快照），
+        不是它的副本。账本的写入仍然只由本类负责。
+        """
+        definition = get_dataset(dataset_id)
+        now = now_cn().isoformat()
+        data_run_id = new_data_run_id()
+        open_data_run(
+            DataJobRun(
+                data_run_id=data_run_id, job_id=job_id, dataset_id=dataset_id,
+                partition_key=partition_key, requested_data_version=data_version,
+                trigger_id=trigger_id, created_at=now,
+            ),
+            path=self._path,
+        )
+        state = "RECEIVED"
+        try:
+            transition_data_run(data_run_id, state, "FETCHING", path=self._path)
+            state = "FETCHING"
+            for attempt_no, artifact in enumerate(raw_artifacts, start=1):
+                save_raw_artifact(artifact, path=self._path)
+                record_provider_attempt(
+                    ProviderAttempt(
+                        data_run_id=data_run_id, provider_id=provider_id,
+                        role=ProviderRole.PRIMARY, attempt_no=attempt_no,
+                        status=ProviderAttemptStatus.SUCCEEDED,
+                        started_at=artifact.retrieved_at, finished_at=artifact.retrieved_at,
+                        elapsed_ms=0, artifact_id=artifact.artifact_id,
+                    ),
+                    path=self._path,
+                )
+            transition_data_run(data_run_id, state, "RAW_STORED", path=self._path)
+            state = "RAW_STORED"
+            transition_data_run(data_run_id, state, "NORMALIZING", path=self._path)
+            state = "NORMALIZING"
+            transition_data_run(data_run_id, state, "VALIDATING", path=self._path)
+            state = "VALIDATING"
+            save_quality_report(
+                QualityReport(
+                    quality_report_id=new_quality_report_id(), data_run_id=data_run_id,
+                    dataset_id=dataset_id, partition_id=None, status=status,
+                    policy_id=definition.quality_policy,
+                    metrics=dict(quality_metrics), issues=quality_issues,
+                    checked_at=now_cn().isoformat(),
+                ),
+                path=self._path,
+            )
+            terminal = "FAILED" if status is DatasetStatus.FAILED else status.value
+            transition_data_run(data_run_id, state, terminal, path=self._path)
+            return data_run_id
+        except Exception:
             try:
                 transition_data_run(data_run_id, state, "FAILED", path=self._path)
             except Exception:
