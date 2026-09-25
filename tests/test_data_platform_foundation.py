@@ -72,17 +72,25 @@ def test_只激活已有生产持久链的数据集():
     声明「又有一个数据集归平台管了」，逼人做一次明确的动作，而不是往注册表里
     悄悄加一行。
     """
-    assert set(DATASET_REGISTRY) == {"cn.trading_calendar", "cn.index.daily_bars"}
+    assert set(DATASET_REGISTRY) == {
+        "cn.trading_calendar", "cn.index.daily_bars",
+        # P3-3 加入。⚠️ 它与前两个**不同**：前两个的生产链在跑，这一个的
+        # provider 尚未在本机探活成功（见适配器模块头）。注册它是因为整条链
+        # 已经建成且有读路径；取不到数时 Data Run 会 FAILED、不发布快照 ——
+        # fail-closed，不是「注册了就等于能用」。
+        "cn.security_master",
+    }
 
 
-def test_schema到v26且七张地基表都在(tmp_path):
+def test_schema到v27且八张地基表都在(tmp_path):
     db = tmp_path / "biga.db"
-    assert init_schema(db) == SCHEMA_VERSION == 26
+    assert init_schema(db) == SCHEMA_VERSION == 27
     with connect(db, readonly=True) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {
         "data_job_runs", "data_run_events", "provider_attempts", "raw_artifacts",
         "dataset_partitions", "quality_reports", "dataset_snapshots", "evidence_set_datasets",
+        "fact_security_master",
     } <= tables
 
 

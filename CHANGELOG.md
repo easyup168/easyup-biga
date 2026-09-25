@@ -15,6 +15,96 @@
 
 ## [未发布]
 
+### 新增 · Phase 3 · P3-3：Security Master（schema v27）—— 链路建成，**上游未探活**
+
+第一张 point-in-time 的事实表：某个知识截止时刻下，A 股市场上有哪些票。
+
+```text
+v27  fact_security_master                  每行挂在不可变分区上，UNIQUE(partition_id, instrument_id)
+data/datasets/security_master.py           归一 / 质量裁定 / 落 fact / 发快照
+providers/eastmoney_security_master.py     抓取层（⚠️ 本机尚未探活成功）
+bin/biga-security-master                   同步命令，三态退出码
+tools/verify/security_master_probe.py      手工探活工具
+```
+
+#### 外部实现有一处做得特别对，原样保留
+
+**Point-in-time honesty boundary**：这个源只给当前在册名单、没有完整退市历史，
+所以只宣称「从 BigA 第一次成功同步那天起」的 point-in-time，
+**不把今天的名单回填成一份历史快照**。
+
+那正是 R-3 的正解。一个能「提供」历史 universe 的 Security Master 比一个诚实说
+「我只有从今天起」的更危险 —— 回测会拿今天的名单去跑三年前，而**幸存者偏差
+不会报错**，它只会让结果好看。
+
+#### 🔴 但它的 provider 从没打过真接口
+
+`TEST_RESULTS.md` 原文："Live Eastmoney network fetching was not executed."
+URL、三个 host、过滤串、分页、字段编号 —— 全是没验证的。
+而本仓库开发流程第一条是「设计先探活」。
+
+本仓库补做探活（2026-09-26）：`clist/get` 三个 host 全失败，而**同一分钟内**
+兄弟端点 `ulist.np` / `push2ex` 都返回 `rc:0` 真数据 ⇒ 502 是个有意义的信号。
+但继续打十来个请求之后**连对照组也开始 502** —— 我把自己限流了，
+结论再也没法复验。
+
+⇒ 状态如实记成 **未验证**（不是「不可用」），留
+`tools/verify/security_master_probe.py` 在不被限流时复验。
+
+⇒ 三条教训：
+- **一次失败什么都证明不了**，先建对照组
+- **探针会制造它要观察的现象**
+- 🔴 **「不可用」和「我没验成」是两件事**，而它们在屏幕上长得一样（R-3）
+
+#### 按公开参考实现 `a-stock-data` 改掉抓取层三处
+
+| # | 外部实现 | 依据 |
+|---|---|---|
+| 1 | `ThreadPoolExecutor(2)` 并发翻约 54 页、零间隔 | 参考实现的东财统一入口是**串行 + 最小间隔 1 秒 + 抖动**，注明「避免高频被封 IP」；实测十来个请求即被整体 502 |
+| 2 | `urlencode(..., safe="+:")` 让 `+` 裸上线 | query 里的裸 `+` 服务端解成**空格**（`m:1+t:2` → `m:1 t:2`）；参考实现走 params，编成 `%2B` |
+| 3 | 主域 `push2delay` 在前 | 参考实现顺序是 `push2` → `push2delay` |
+
+⇒ 顺带在 `providers/http.py` 加 `throttle(domain)`：按限流域的最小请求间隔，
+调用方主动调（不自动对所有源生效 —— 只有东财这一类需要，而「这个 host 属于
+哪个限流域」只有调用方知道）。
+
+⚠️ 它的 source 写成 `eastmoney:security_master/current` —— 那是东财的**第三套
+名字**（库里既有的东财 raw 行前缀是 `em:`）。已改成 `em:`；注册表里的适配器级
+id 是 `eastmoney_security_master`，两者由 `provider_for_source()` 换算。
+
+⚠️ `quality_policy="cn-security-master-v1"` **又**指向不存在的策略 —— P3-2 加的
+P12 守卫当场抓到。已在 `data/quality.py` 补齐（含它**不检查**什么：退市历史、
+跨源交叉验证、以及「provider 本身还没探活成功」）。
+
+#### 🔴 我自己判错一次
+
+我一度写下「它少发了 `po/np/fltt/invt/fid` 五个参数」—— **那是错的**。
+常量块里只列了两个，实际请求发了十个，比参考实现还多一个 `ut`。
+我看的是文件顶部的常量，没看 `_fetch_page()` 里真正拼的 dict。
+
+⇒ **按「代码长什么样」下判断，而不是按「它实际做什么」。**
+这与守卫落错地方是同一个毛病，只是这次发生在读代码的时候。
+
+#### 注册一个「链路建成但源没验」的数据集
+
+P11 守卫要求每个注册的 dataset 答得出谁读它。`cn.security_master` 有读路径
+（`security_universe_at`）、链路整条建成，只是上游取不到数。
+
+判断：**注册**。取不到数时的行为是 **fail-closed**（Data Run 转 FAILED、
+不发布快照、CLI 退非零），注册表没有撒谎。但这件事必须**写在注册表里**：
+provider 的 title 直接写着「本机尚未探活成功」，质量策略的 `not_checked` 里也写着。
+
+#### 实测
+
+```text
+schema  v26 → v27
+测试    1938 → 1952 条，2251 passed / 0 failed
+探活    tools/verify/security_master_probe.py 退 2（判不了 —— 仍被限流）
+```
+
+---
+
+
 ### 新增 · Phase 3 · P3-2：把已在生产的 index_daily 冻结接进通用血缘
 
 红线是**什么都不变**：Agent 输出、Run、Card、raw hash 语义、手工单跑的 fallback

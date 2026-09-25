@@ -1062,6 +1062,38 @@ CREATE INDEX IF NOT EXISTS ix_evidence_dataset_snapshot
 
 
 
+_V27 = """
+CREATE TABLE IF NOT EXISTS fact_security_master (
+    security_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    partition_id TEXT NOT NULL REFERENCES dataset_partitions(partition_id),
+    instrument_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    exchange TEXT NOT NULL CHECK(exchange IN ('SSE','SZSE','BSE')),
+    name TEXT NOT NULL,
+    security_type TEXT NOT NULL CHECK(security_type IN ('STOCK')),
+    board TEXT NOT NULL CHECK(board IN ('SSE_MAIN','STAR','SZSE_MAIN','CHINEXT','BSE')),
+    list_date TEXT,
+    delist_date TEXT,
+    status TEXT NOT NULL CHECK(status IN ('LISTED','DELISTED','UNKNOWN')),
+    available_at TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    raw_artifact_id TEXT NOT NULL REFERENCES raw_artifacts(artifact_id),
+    created_at TEXT NOT NULL,
+    UNIQUE(partition_id, instrument_id)
+);
+CREATE INDEX IF NOT EXISTS ix_security_master_partition_status
+    ON fact_security_master(partition_id, status, exchange);
+CREATE INDEX IF NOT EXISTS ix_security_master_instrument
+    ON fact_security_master(instrument_id, available_at);
+CREATE INDEX IF NOT EXISTS ix_security_master_symbol
+    ON fact_security_master(symbol, available_at);
+""" + _append_only("fact_security_master", "Security Master snapshots are immutable")
+
+
+#: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
+
+
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
     (2, _V2),
@@ -1089,6 +1121,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (24, _V24),
     (25, _V25),
     (26, _V26),
+    (27, _V27),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

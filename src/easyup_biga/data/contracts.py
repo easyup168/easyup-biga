@@ -134,6 +134,17 @@ class DataIssue:
     severity: str
     detail: str
     retryable: bool = False
+    instrument_id: str | None = None
+    field: str | None = None
+    source_ref: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """落库用的扁平形式。**由 issue 自己负责** —— 写入层不该知道它有哪些字段。"""
+        return {
+            "code": self.code, "severity": self.severity, "detail": self.detail,
+            "retryable": self.retryable, "instrument_id": self.instrument_id,
+            "field": self.field, "source_ref": self.source_ref,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,13 +453,6 @@ class QualityReport:
     metrics: Mapping[str, Any] = field(default_factory=dict)
     issues: tuple[DataIssue, ...] = ()
     checked_at: str = ""
-
-    def to_issue_dicts(self) -> list[dict[str, Any]]:
-        return [
-            {"code": i.code, "severity": i.severity, "detail": i.detail,
-             "retryable": i.retryable}
-            for i in self.issues
-        ]
 
 
 @dataclass(frozen=True, slots=True)

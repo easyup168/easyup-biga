@@ -375,3 +375,149 @@ def list_evidence_set_datasets(
             (evidence_set_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# ─────────────────────────── Security Master（P3-3）的写入与 point-in-time 查询
+#
+# 取自外部 P3-3 实现包。查询先选「在给定 knowledge_cutoff 下可见的最新 COMPLETE
+# 快照」，再只读属于那个冻结分区的行 —— 这是 point-in-time 的关键：
+# **不能用今天的名单回答昨天的问题**。
+def save_security_master_records(
+    partition_id: str,
+    records: Any,
+    *,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """Persist one immutable normalized Security Master partition.
+
+    ``records`` are intentionally duck-typed to avoid coupling the generic
+    persistence module to a dataset-specific dataclass at import time.
+    """
+    items = tuple(records)
+    if not items:
+        raise ValueError("security master partition cannot be empty")
+    with connect(path) as conn:
+        partition = conn.execute(
+            "SELECT dataset_id,provider_id,raw_artifact_id "
+            "FROM dataset_partitions WHERE partition_id=?",
+            (partition_id,),
+        ).fetchone()
+        if partition is None:
+            raise ValueError("security master partition does not exist")
+        if partition["dataset_id"] != "cn.security_master":
+            raise ValueError("partition is not cn.security_master")
+        if partition["raw_artifact_id"] is None:
+            raise ValueError("security master partition requires raw artifact lineage")
+
+        now = now_cn().isoformat()
+        rows = []
+        for item in items:
+            if item.provider_id != partition["provider_id"]:
+                raise ValueError("security record provider differs from partition provider")
+            if item.raw_artifact_id != partition["raw_artifact_id"]:
+                raise ValueError("security record raw lineage differs from partition")
+            rows.append(
+                (
+                    partition_id,
+                    item.instrument_id,
+                    item.symbol,
+                    item.exchange.value,
+                    item.name,
+                    item.security_type.value,
+                    item.board.value,
+                    item.list_date,
+                    item.delist_date,
+                    item.status.value,
+                    item.available_at,
+                    item.retrieved_at,
+                    item.provider_id,
+                    item.raw_artifact_id,
+                    now,
+                )
+            )
+        try:
+            conn.executemany(
+                "INSERT INTO fact_security_master "
+                "(partition_id,instrument_id,symbol,exchange,name,security_type,board,list_date,"
+                "delist_date,status,available_at,retrieved_at,provider_id,raw_artifact_id,"
+                "created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+        except sqlite3.IntegrityError as exc:
+            raise DataStoreConflict(
+                "security master partition contains duplicate identities"
+            ) from exc
+    return len(rows)
+
+
+def find_security_master_snapshot_at(
+    knowledge_cutoff: str,
+    *,
+    path: pathlib.Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Return the latest COMPLETE Security Master visible at ``knowledge_cutoff``."""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT snapshot_id FROM dataset_snapshots "
+            "WHERE dataset_id='cn.security_master' AND status=? "
+            "AND knowledge_cutoff<=? "
+            "ORDER BY knowledge_cutoff DESC,data_version DESC,created_at DESC LIMIT 1",
+            (DatasetStatus.COMPLETE.value, knowledge_cutoff),
+        ).fetchone()
+    return load_dataset_snapshot(str(row["snapshot_id"]), path=path) if row else None
+
+
+def load_security_master_records(
+    snapshot_id: str,
+    *,
+    path: pathlib.Path | str | None = None,
+) -> list[dict[str, Any]]:
+    snapshot = load_dataset_snapshot(snapshot_id, path=path)
+    if snapshot is None:
+        raise ValueError(f"security master snapshot does not exist: {snapshot_id}")
+    if snapshot["dataset_id"] != "cn.security_master":
+        raise ValueError("snapshot is not cn.security_master")
+    partition_ids = tuple(snapshot["manifest"].get("partition_ids") or ())
+    if not partition_ids:
+        raise ValueError("security master snapshot has no partition lineage")
+    placeholders = ",".join("?" for _ in partition_ids)
+    with connect(path, readonly=True) as conn:
+        rows = conn.execute(
+            "SELECT instrument_id,symbol,exchange,name,security_type,board,list_date,delist_date,"
+            "status,available_at,retrieved_at,provider_id,raw_artifact_id,partition_id "
+            f"FROM fact_security_master WHERE partition_id IN ({placeholders}) "
+            "ORDER BY instrument_id",
+            partition_ids,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def security_universe_at(
+    knowledge_cutoff: str,
+    *,
+    exchange: str | None = None,
+    status: str = "LISTED",
+    path: pathlib.Path | str | None = None,
+) -> list[dict[str, Any]]:
+    snapshot = find_security_master_snapshot_at(knowledge_cutoff, path=path)
+    if snapshot is None:
+        return []
+    rows = load_security_master_records(str(snapshot["snapshot_id"]), path=path)
+    return [
+        row
+        for row in rows
+        if row["status"] == status and (exchange is None or row["exchange"] == exchange)
+    ]
+
+
+def security_at(
+    instrument_id: str,
+    knowledge_cutoff: str,
+    *,
+    path: pathlib.Path | str | None = None,
+) -> dict[str, Any] | None:
+    for row in security_universe_at(knowledge_cutoff, status="LISTED", path=path):
+        if row["instrument_id"] == instrument_id:
+            return row
+    return None

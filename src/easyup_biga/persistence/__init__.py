@@ -65,6 +65,11 @@ from .schema import SCHEMA_VERSION
 # Phase 3 数据平台的元数据落库（P3-1）。走同一个 `connect()` 边界，
 # 不另起第二个库、不另开写路径 —— I-4「DB 唯一入口」对它同样成立。
 from .data import (
+    find_security_master_snapshot_at,
+    load_security_master_records,
+    save_security_master_records,
+    security_at,
+    security_universe_at,
     DataRunTransitionError,
     DataStoreConflict,
     UnknownDataRun,
@@ -84,6 +89,11 @@ from .data import (
 )
 
 __all__ = [
+    "find_security_master_snapshot_at",
+    "load_security_master_records",
+    "save_security_master_records",
+    "security_at",
+    "security_universe_at",
     "assert_snapshot_linkable",
     "DataRunTransitionError",
     "DataStoreConflict",

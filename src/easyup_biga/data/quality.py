@@ -77,6 +77,24 @@ QUALITY_POLICIES: dict[str, QualityPolicy] = {
             ),
         ),
         QualityPolicy(
+            policy_id="cn-security-master-v1",
+            checks=(
+                "归一化后的条数达到下限（空名单/半截名单不放行）",
+                "provider 自报的 total 与归一化后的条数相等",
+                "instrument_id 唯一",
+                "沪 / 深 / 北三个交易所都有票（少一个说明过滤串漏了一段）",
+                "没有 list_date 晚于快照日期的行",
+            ),
+            not_checked=(
+                "🔴 **退市历史**。这个源只给当前在册名单 —— point-in-time 从 BigA "
+                "第一次成功同步那天起成立，不宣称覆盖之前。",
+                "名称/板块的准确性（只校验枚举合法，不与第二个源交叉验证）",
+                "🔴 **这个 provider 本身还没在本机探活成功**（见它的模块头）。"
+                "策略再严也挡不住「源根本取不到」—— 那种情况下 Data Run 会 FAILED，"
+                "不会发布快照。",
+            ),
+        ),
+        QualityPolicy(
             policy_id="cn-trading-calendar-v1",
             checks=(),
             not_checked=(

@@ -65,6 +65,12 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina_calendar",),
     ),
     ProviderDefinition(
+        provider_id="eastmoney_security_master",
+        title="东财全市场 A 股名单 —— ⚠️ 本机尚未探活成功，见适配器模块头",
+        source_prefix="em",
+        modules=("easyup_biga.providers.eastmoney_security_master",),
+    ),
+    ProviderDefinition(
         provider_id="szse",
         title="深交所官方日历 —— 本项目部署环境连不通，作 fallback 保留",
         source_prefix="szse",

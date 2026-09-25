@@ -1,6 +1,6 @@
 # Phase 3 设计 —— 数据平台地基 + 第一条调度
 
-> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ✅ / P3-2 ✅ / P3-3 ⬜）
+> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ✅ / P3-2 ✅ / P3-3 🔶 / P3-4 ⬜）
 > **覆盖**：Phase 3 的设计基线、范围、里程碑、出口条件，以及本仓库对外部设计的适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
 
 > Phase 3 的**设计 SSOT**。结构性问题（存储平面选型、失败模式清单、表结构）
@@ -229,7 +229,7 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 | P3-0 | 契约 + Dataset/Provider Registry + `bin/biga-data` | — | ✅ |
 | P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ✅ |
 | P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ✅ |
-| P3-3 | Security Master（point-in-time universe） | **v27** | ⬜ |
+| P3-3 | Security Master（point-in-time universe） | **v27** | 🔶 **链路建成，上游未探活** |
 | P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ⬜ |
 | P3-5 | Tradability + Adjustment Factors | — | ⬜ |
 | P3-6 | 迁移 §2.2 那五条 direct feed | — | ⬜ |
@@ -285,7 +285,7 @@ v24  provider_attempts / raw_artifacts             raw_artifacts 只存文件 me
 v25  dataset_partitions / quality_reports / dataset_snapshots
                                                    UNIQUE(dataset_id, partition_key, data_version)
 v26  evidence_set_datasets                         UNIQUE(evidence_set_id, dataset_id)
-v27  fact_security_master                          append-only，按 available_at 读可见版本
+v27  fact_security_master                          append-only，按 available_at 读可见版本（P3-3 ✅）
 ```
 
 `evidence_set_datasets`（v26）是 v1 相对旧草案的一处新增：**关键血缘要能用 SQL 查，
@@ -325,6 +325,45 @@ provider 才能验「出处不会说谎」。
 一次冻结发布**一个**分区（bundle 里有多个 symbol），按 symbol 切等于声称有多个。
 外部 P3-2 自己也改了这个值 —— 而本仓库的 `_check_partition_keys()`
 （P3-1 加的）会在写入时当场抓到它，这正是把那个字段变成承重件的收益。
+
+#### ⏩ P3-3 落地（2026-09-26）：整条链建成，**但上游还没探活成功**
+
+外部 P3-3 实现的设计侧有一处做得特别对，原样保留：
+
+> **Point-in-time honesty boundary** —— 这个源只给当前在册名单、没有完整退市
+> 历史，所以只宣称「从 BigA 第一次成功同步那天起」的 point-in-time，
+> **不把今天的名单回填成一份历史快照**。
+
+那正是 R-3 的正解：算不出来就说算不出来。
+
+🔴 **但它的 `TEST_RESULTS.md` 写着 "Live Eastmoney network fetching was not
+executed"** —— 整个 provider 从没打过真接口，而仓库开发流程第一条是「设计先探活」。
+
+本仓库补做探活（2026-09-26）：`clist/get` 在三个 host 上全失败，而**同一分钟内**
+兄弟端点 `ulist.np` / `push2ex` 都返回了 `rc:0` 真数据；随后因请求过密被整体
+限流，未能复验。⇒ 状态记作 **未验证**，不是「不可用」。
+
+⇒ `python3 tools/verify/security_master_probe.py` 在不被限流时复验（退出码三态）。
+
+##### 按公开参考实现 `a-stock-data` 改掉抓取层两处
+
+那是一份记录每个端点实测可用参数、主源/备胎顺序与风控经验的速查库
+（外部设计 v1 的 §14 也把它列为 Provider 调研的参考）。
+
+| # | 外部实现 | 依据 | 本仓库 |
+|---|---|---|---|
+| 1 | `ThreadPoolExecutor(2)` 并发翻约 54 页、零间隔 | 参考实现的东财统一入口是**串行 + 最小间隔 1 秒 + 抖动**，注明「避免高频被封 IP」；实测十来个请求即被整体 502 | 串行 + `http.throttle("eastmoney")` |
+| 2 | `urlencode(..., safe="+:")` 让 `+` 裸上线 | query 里的裸 `+` 服务端解成**空格**（`m:1+t:2` → `m:1 t:2`）；参考实现走 requests params，编成 `%2B` | `safe=":,"`，显式 `%2B` |
+| 3 | 主域 `push2delay` 在前 | 参考实现的顺序是 `push2` → `push2delay` | 对齐 |
+
+⚠️ 顺带：它的 source 写成 `eastmoney:security_master/current` —— 那是东财的
+**第三套名字**（库里既有的东财 raw 行前缀是 `em:`）。已改成 `em:`，
+注册表里的适配器级 id 是 `eastmoney_security_master`，两者由
+`provider_for_source()` 换算。
+
+⚠️ 纠正我自己的一处误判：我一度说它「少发了 `po/np/fltt/invt/fid` 五个参数」。
+**那是错的** —— 常量块里只列了两个，实际请求发了十个，比参考实现还多一个 `ut`。
+看常量不看调用点，就是按「代码长什么样」而不是「它实际做什么」下判断。
 
 ### 3.2 P3-2 的红线
 

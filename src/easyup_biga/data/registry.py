@@ -50,6 +50,24 @@ __all__ = ["DATASETS", "DATASET_REGISTRY", "DATASET_IDS", "get_dataset"]
 #:    这是探针抓出来的：第一版把唯一性断言打在 dict 上，弄坏了也不红（L-13）。
 DATASETS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
+        dataset_id="cn.security_master",
+        title="沪深北全市场 A 股名单（point-in-time universe）",
+        schema_version=1,
+        primary_provider="eastmoney_security_master",
+        fallback_providers=(),
+        # 🔴 故意留空。参考实现 `a-stock-data` 给「股票列表」记了备胎
+        #    （datacenter-web + 腾讯批量），但那条路本仓库一次都没探活过 ——
+        #    登记一个没验过的备胎，等于承诺一条降级路径而它可能也是断的。
+        validation_providers=(),
+        # 一次同步一个分区：这份名单描述的是**取回那一刻**的在册状态。
+        partition_keys=("as_of_date",),
+        storage_policy="sqlite_fact_security_master",
+        quality_policy="cn-security-master-v1",
+        raw_table="raw_market_snapshot",
+        fact_table="fact_security_master",
+        consumers=("easyup_biga.persistence.data:security_universe_at",),
+    ),
+    DatasetDefinition(
         dataset_id="cn.trading_calendar",
         title="A 股交易日历（含交易所已公布的未来排期）",
         schema_version=1,

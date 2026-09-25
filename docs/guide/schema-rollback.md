@@ -17,7 +17,7 @@ print('SCHEMA_VERSION =', SCHEMA_VERSION, '| 迁移条数 =', len(MIGRATIONS))
 ```
 
 ```
-SCHEMA_VERSION = 26 | 迁移条数 = 26
+SCHEMA_VERSION = 27 | 迁移条数 = 27
 ```
 
 | 版本 | 一句话（摘自 `schema.py` 对应迁移体正上方的注释） |
@@ -48,6 +48,7 @@ SCHEMA_VERSION = 26 | 迁移条数 = 26
 | v24 | 取数出处：`provider_attempts` + `raw_artifacts`。`raw_artifacts` 只存 URI/哈希/元数据，正文在文件里；小体积的 `raw_market_snapshot` **不迁移** |
 | v25 | 通用发布元数据：`dataset_partitions` + `quality_reports` + `dataset_snapshots`。`UNIQUE(dataset_id, partition_key_json, data_version)` ——修订出新版本，旧版本永不覆盖 |
 | v26 | `evidence_set_datasets`：EvidenceSet → DatasetSnapshot 的冻结血缘。**关键血缘要能用 SQL 查**，不能只藏在 manifest JSON 里（与 v16 加 Run Provenance 三列同一个教训）|
+| v27 | `fact_security_master`：沪深北全市场 A 股名单的 point-in-time fact 层。每行挂在一个不可变 `DatasetPartition` 上，`UNIQUE(partition_id, instrument_id)`；交易所 / 板块 / 状态都有 CHECK 枚举。⚠️ 上游 provider 尚未在本机探活成功 —— 表建好了，链路 fail-closed |
 
 ## 为什么没有 DOWN migration
 
