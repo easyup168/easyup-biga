@@ -41,6 +41,32 @@ import sqlite3  # store-exempt: 本文件是围栏本身 —— 它要补丁 sql
 
 import pytest
 
+
+def pytest_addoption(parser):
+    """P1-3：默认 hermetic —— 需要真实服务/安装环境的测试必须显式开关才跑。"""
+    parser.addoption("--run-live", action="store_true", default=False,
+                     help="运行需要在线服务的测试（@pytest.mark.live）")
+    parser.addoption("--run-installed", action="store_true", default=False,
+                     help="运行需要本机已安装 OpenClaw profile 的测试（@pytest.mark.installed）")
+    parser.addoption("--run-git", action="store_true", default=False,
+                     help="运行需要 git 仓库的测试（@pytest.mark.git，source ZIP 里没有 .git）")
+
+
+def pytest_collection_modifyitems(config, items):
+    """默认跳过 installed / live / git 标记的测试；可以通过 --run-* 开关启用。"""
+    switches = {
+        "live": config.getoption("--run-live"),
+        "installed": config.getoption("--run-installed"),
+        "git": config.getoption("--run-git"),
+    }
+    for marker, enabled in switches.items():
+        if enabled:
+            continue
+        skip = pytest.mark.skip(reason=f"need --run-{marker}")
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)
+
 #: 允许的目的地。回环留着，是为了将来可能出现的本地假服务器；
 #: 真实数据源一个都不在里面。
 _ALLOWED_HOSTS = {"127.0.0.1", "::1", "localhost"}

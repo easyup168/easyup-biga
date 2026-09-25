@@ -17,6 +17,52 @@
 
 ---
 
+## [0.3.4] - 2026-09-25
+
+### 新增 · 最终审阅包全部修复（Final Review Followup Pack）
+
+专家二次评审追加发现的 7 项（A1–A3、B1–B4），按评审推荐顺序逐项实施。
+
+**A1：bin/biga-card spawn 核验接入真实 Run 级路径**
+原来 `spawn_check.py "$NOW"` 传的是决策号（date string），按 decision 聚合——同一
+decision 的其他 run 的 spawn 记录会被借用而通过检查。改为：orchestrator 结束后从
+`decision_runs WHERE decision_id=$NOW` 取 `run_id`，再以 `--run-id $RUN_ID` 调
+`spawn_check.py`。如果查不到 run_id（不应发生）直接 exit 4，不退化到旧路径。
+`phase1_acceptance.py` 同步添加 `--run-id` 参数，透传给 `check_1_spawned()`。
+新增守卫测试：`test_出卡流程使用run级精确spawn核验`（bin/biga-card 必须含 `--run-id`）。
+
+**A2：`save_evidence_set()` run-bound 时强制非空 `decision_id`**
+旧写法 `if run_id is not None and decision_id is not None` 允许 `run_id=fake,
+decision_id=None` 绕过 `_assert_run_owns_decision`——证据链断掉但不报错。
+改为 `if run_id is not None:` 先判 `decision_id` 非空（否则 ValueError），再调验证函数。
+新增 `record_online_agent_run()` 严格 API：三个字段（decision_id / orchestration_run_id /
+runtime_run_id）全部必须非空，任一为空立刻 ValueError，不允许历史路径混入在线路径。
+新增测试：`test_record_online_agent_run_要求runtime_run_id非空`、
+`test_save_evidence_set_run_id非空时decision_id不能为None`。
+
+**A3：`save_replay_card()` 不可变守卫**
+原来 `save_replay_card()` 直接调 `save_card()`，没有任何内容比较——回放可以静默改
+status/headline 等业务结论，让本来是 WAIT 的卡变成 BUY 也不报错。
+改为：加载父记录，用 `comparable()`（已剥除 `ALLOWED_REPLAY_CHANGES` 字段）做
+JSON 比对，不同则 ValueError。同时把 `model_ref` 加入 `ALLOWED_REPLAY_CHANGES`
+——换模型是合法的回放场景（model_ref 是执行元数据，不是业务结论）。
+`replay.py` 对 ValueError 捕获、打印清晰错误并 return 1（而非 Python 崩溃）。
+更新 `test_回放不覆盖原始记录`（改为换模型但不改结论），新增
+`test_回放不能改业务结论`（强行改 status 应被拒）。
+
+**B1：conftest.py 默认 hermetic 自动跳过**
+新增 `pytest_addoption` + `pytest_collection_modifyitems`：`installed`/`live`/`git`
+标记的测试默认被 skip（`reason="need --run-xxx"`），不需要调用方记得加 `-m` 过滤。
+裸 `pytest` 现在也是零失败（1844 passed, 57 skipped）。
+测试条数守卫同步更新：排除 installed/live/git 标记的条目，使口径与 CI 的 `-m` 过滤一致。
+
+### 变更
+
+- `ALLOWED_REPLAY_CHANGES` 新增 `model_ref`（换模型回放是合法场景，不是业务结论变更）
+- `test_回放不覆盖原始记录` 改为用换模型而不是换 status 来验证追加行为
+
+---
+
 ## [0.3.3] - 2026-09-25
 
 ### 新增 · I 节补完 —— 剩余守卫全部到位

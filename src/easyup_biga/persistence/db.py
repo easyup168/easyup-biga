@@ -1381,6 +1381,56 @@ def record_agent_run(
         return int(cur.lastrowid)
 
 
+def record_online_agent_run(
+    *,
+    decision_id: str,
+    orchestration_run_id: str,
+    runtime_run_id: str,
+    agent: str,
+    task_id: str,
+    status: str,
+    started_at: str,
+    finished_at: str,
+    elapsed_ms: int,
+    model: str | None = None,
+    verdict: str | None = None,
+    missing_count: int = 0,
+    error: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """在线路径专用的严格 API：三个 provenance 字段全部必须非空。
+
+    与 record_agent_run() 的区别：这里 decision_id / orchestration_run_id /
+    runtime_run_id 全部是位置必填语义，任何一个为空立刻抛 ValueError，
+    不允许传 None 绕过校验。用于 card_ops.persist() 的在线路径（批 P1-2）。
+    """
+    for name, value in {
+        "decision_id": decision_id,
+        "orchestration_run_id": orchestration_run_id,
+        "runtime_run_id": runtime_run_id,
+        "agent": agent,
+    }.items():
+        if not value:
+            raise ValueError(f"online agent run requires {name} —— 传了空值或 None")
+    return record_agent_run(
+        decision_id=decision_id,
+        task_id=task_id,
+        agent=agent,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        elapsed_ms=elapsed_ms,
+        model=model,
+        verdict=verdict,
+        missing_count=missing_count,
+        error=error,
+        runtime_run_id=runtime_run_id,
+        orchestration_run_id=orchestration_run_id,
+        provenance_mode="online",
+        path=path,
+    )
+
+
 def record_verdict_run(
     v: AgentVerdict,
     *,
@@ -1666,8 +1716,14 @@ def save_evidence_set(
     now = now_cn().isoformat()
     try:
         with connect(path) as conn:
-            # P1-1：run_id 非空时，确认 Run 存在且属于 decision_id。
-            if run_id is not None and decision_id is not None:
+            # P1-1：run_id 非空时，decision_id 必须同时非空，且确认 Run 属于该 decision。
+            # 🔴 旧写法 `if run_id is not None and decision_id is not None` 允许用
+            #    run_id=fake, decision_id=None 绕过校验——那条路的证据链断掉了却不报错。
+            if run_id is not None:
+                if not decision_id:
+                    raise ValueError(
+                        "run-bound evidence set requires decision_id —— "
+                        "run_id 非空时 decision_id 不能为 None")
                 _assert_run_owns_decision(conn, run_id=run_id, decision_id=decision_id)
             conn.execute(
                 "INSERT INTO evidence_sets "

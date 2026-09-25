@@ -148,7 +148,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.store:
         rid = _record_id_of(args.decision_id)
-        new_id = persist(replayed, replay_of=rid)
+        try:
+            new_id = persist(replayed, replay_of=rid)
+        except ValueError as e:
+            print(f"❌ 回放落库被拒：{e}", file=sys.stderr)
+            return 1
         print(f"回放已追加 record_id={new_id}（replay_of={rid}，原记录未改动）",
               file=sys.stderr)
 

@@ -252,15 +252,26 @@ class TestReplay:
         assert "不一致" in capsys.readouterr().err
 
     def test_回放不覆盖原始记录(self, db):
+        """回放追加新行、不改原始行；换模型（model_ref 在 ALLOWED_REPLAY_CHANGES 里）是合法的。"""
         self._seed(db)
-        assert replay.main([DID, "--status", "AVOID", "--headline", "更保守",
-                            "--model-ref", "anthropic/claude-opus-5", "--store"]) == 0
+        # 换模型但不改业务结论 —— 应该成功
+        assert replay.main([DID, "--model-ref", "anthropic/claude-opus-5", "--store"]) == 0
         assert load_online_card(DID).status == "WAIT"    # 在线那条没变
         with connect(db, readonly=True) as c:
             rows = c.execute("SELECT record_id, replay_of, status "
                              "FROM decision_records ORDER BY record_id").fetchall()
-        assert [r["status"] for r in rows] == ["WAIT", "AVOID"]
+        assert [r["status"] for r in rows] == ["WAIT", "WAIT"]
         assert rows[1]["replay_of"] == rows[0]["record_id"]
+
+    def test_回放不能改业务结论(self, db):
+        """P1-2 不可变守卫：回放卡的 status/headline 等业务结论不许与原卡不同。"""
+        self._seed(db)
+        # 强行改 status：save_replay_card 应该拒绝
+        rc = replay.main([DID, "--status", "AVOID", "--headline", "更保守",
+                          "--model-ref", "anthropic/claude-opus-5", "--store"])
+        assert rc != 0, (
+            "回放卡改了 status（WAIT→AVOID），save_replay_card 应该拒绝、"
+            f"replay.main 应该返回非零，实际返回 {rc}")
 
     def test_model_ref不层层累积版本后缀(self, db):
         """回放取回的 model_ref 已带 (synth/N)，不剥掉会越叠越长。"""

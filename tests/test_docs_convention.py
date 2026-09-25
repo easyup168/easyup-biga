@@ -410,8 +410,14 @@ def test_文档里的测试条数与实测一致(request):
         pytest.skip("拿不到 git 跟踪清单，条数无从比较")
 
     # 🔴 只数「这个提交里真的有的」那些 case —— 见 `_tracked_docs()` 的说明。
+    # P1-3：conftest 的 pytest_collection_modifyitems 把 installed/live/git 标记
+    # 的测试改成 skip（而不是 deselect）——这样 bare pytest 也不失败。
+    # 但这些测试**仍在 session.items** 里，若计入 collected 会比 CI（-m 过滤后）
+    # 多出来，导致条数对不上。在这里排除，让口径与 CI 对齐。
+    _SKIP_MARKERS = frozenset({"installed", "live", "git"})
     collected = sum(1 for it in request.session.items
-                    if not _is_untracked_doc_case(it, tracked))
+                    if not _is_untracked_doc_case(it, tracked)
+                    and not any(m.name in _SKIP_MARKERS for m in it.own_markers))
 
     bad = []
     for rel in _LIVE_TEST_COUNT_DOCS:

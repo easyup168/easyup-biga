@@ -308,7 +308,15 @@ fi
 # 🔴 spawn 核验 + 毒行巡检 —— 沿用既有 gate 与退出码语义（F3 / F-4）。
 #    orchestrator 是真 spawn（走 Adapter → subagent_runs），核验理应通过；
 #    留着它是纵深防御，退出码语义与老路径一致（4 = spawn 未过，6 = 历史毒行）。
-$PY tools/verify/spawn_check.py "$NOW"
+#
+# P1-2：按 orchestration_run_id（Run 级）精确核验，防止同 decision 的别的 Run
+#    借用本次 spawn 记录通过检查。run_id 从 decision_runs 取，与 NOW 严格绑定。
+RUN_ID=$(_sql "SELECT run_id FROM decision_runs WHERE decision_id='$NOW' ORDER BY created_at DESC LIMIT 1")
+if [ -z "$RUN_ID" ]; then
+  echo "🔴 找不到本次执行的 run_id（决策号 $NOW）——spawn 核验无法按 Run 级精确核验。" >&2
+  exit 4
+fi
+$PY tools/verify/spawn_check.py --run-id "$RUN_ID"
 SPAWN_RC=$?
 echo
 $PY tools/verify/readback_check.py
@@ -318,7 +326,7 @@ echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-ch
 if [ "$SPAWN_RC" -ne 0 ]; then
   echo >&2
   echo "🔴 spawn 核验未通过（rc=$SPAWN_RC）—— 卡（$NOW）不能证明 Specialist 真被调用过。" >&2
-  echo "   rc=1 有伪造 · rc=2 判不了（读不到运行时记录）。细节：spawn_check.py $NOW" >&2
+  echo "   rc=1 有伪造 · rc=2 判不了（读不到运行时记录）。细节：spawn_check.py --run-id $RUN_ID" >&2
   exit 4
 fi
 if [ "$READBACK_RC" -ne 0 ]; then

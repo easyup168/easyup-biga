@@ -256,6 +256,14 @@ class TestWiredIntoRealPath:
             "spawn_check.py 没有被出卡流程调用 —— \n"
             "  一个不会被跑到的检查，和没有这个检查是一回事。")
 
+    def test_出卡流程使用run级精确spawn核验(self):
+        """P1-2：bin/biga-card 必须用 --run-id 做 Run 级核验，不能用决策号。"""
+        text = (REPO / "bin" / "biga-card").read_text(encoding="utf-8")
+        run = text.split("# ── 出新卡")[1]
+        assert "--run-id" in run, (
+            "bin/biga-card 调 spawn_check.py 时没有 --run-id —— "
+            "那样查的是决策级，同一个 decision 的其他 Run 的 spawn 记录会被借用。")
+
     @staticmethod
     def _orch_path(work) -> pathlib.Path:
         return work / "skills" / "decision-card" / "scripts" / "orchestrator.py"
@@ -1169,3 +1177,42 @@ class TestRunIsolation:
         assert row is not None
         assert row["provenance_mode"] == "online", (
             f"在线路径 provenance_mode 应为 'online'，实际为 {row['provenance_mode']!r}")
+
+    def test_record_online_agent_run_要求runtime_run_id非空(self, tmp_path):
+        """P1-2：record_online_agent_run 三个字段全部必须非空，空 runtime_run_id 必须抛。"""
+        from _store import init_schema
+        from _store.db import record_online_agent_run
+        from tests._provenance import open_test_run, TEST_RUN_ID
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE)
+
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="runtime_run_id"):
+            record_online_agent_run(
+                decision_id=MINE,
+                orchestration_run_id=TEST_RUN_ID,
+                runtime_run_id="",
+                agent="market",
+                task_id=MINE, status="ok",
+                started_at="2026-09-25T09:00:00",
+                finished_at="2026-09-25T09:00:01",
+                elapsed_ms=1000, path=db)
+
+    def test_save_evidence_set_run_id非空时decision_id不能为None(self, tmp_path, monkeypatch):
+        """P1-2：save_evidence_set 接 run_id 时 decision_id=None 必须抛 ValueError。"""
+        from _store import init_schema, save_evidence_set
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        monkeypatch.setenv("BIGA_DB_PATH", str(db))
+
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="decision_id"):
+            save_evidence_set(
+                evidence_set_id="es-test-gap",
+                decision_id=None,
+                manifest={},
+                run_id="missing-run",
+                path=db)

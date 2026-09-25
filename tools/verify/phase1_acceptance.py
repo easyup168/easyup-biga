@@ -891,6 +891,7 @@ def check_7_nvm() -> Check:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Phase 1 验收自检")
     ap.add_argument("--decision-id", help="要核对的 decision_id")
+    ap.add_argument("--run-id", help="按 orchestration_run_id 精确核验 spawn（P1-2）")
     ap.add_argument("--live", action="store_true", help="允许联网（第 5 项需要）")
     ap.add_argument("--baseline", type=pathlib.Path,
                     help="邻居基线 JSON（第 6 项需要）")
@@ -913,7 +914,7 @@ def main(argv: list[str] | None = None) -> int:
         baseline = json.loads(args.baseline.read_text())
 
     checks = [
-        check_1_spawned(args.decision_id),
+        check_1_spawned(args.decision_id, run_id=args.run_id),
         check_2_verdict(args.decision_id),
         check_3_card_sections(args.decision_id),
         check_4_replay(args.decision_id),

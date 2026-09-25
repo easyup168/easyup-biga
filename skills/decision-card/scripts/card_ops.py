@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from collections.abc import Mapping
@@ -38,6 +39,7 @@ from _contract import (  # noqa: E402
     card_event_type,
 )
 from _store import (  # noqa: E402
+    load_card_by_record_id,
     load_online_card,
     load_verdict,
     load_verdict_meta,
@@ -247,7 +249,12 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
 #:
 #: `comparable()` 只剥这些字段；`replay.py` 的 `--check` 读它来决定
 #: 「什么变化算正常、什么算回放失真」。两处共用同一份集合（L-3 的正解）。
-ALLOWED_REPLAY_CHANGES: frozenset[str] = frozenset({"generated_at", "elapsed_ms", "run_id"})
+ALLOWED_REPLAY_CHANGES: frozenset[str] = frozenset({
+    "generated_at",
+    "elapsed_ms",
+    "run_id",
+    "model_ref",  # 回放换模型是合法场景，model_ref 是执行元数据，不是业务结论
+})
 
 
 def save_online_card(card: DecisionCard,
@@ -258,7 +265,24 @@ def save_online_card(card: DecisionCard,
 
 def save_replay_card(card: DecisionCard,
                      parent_record_id: int | None) -> int:
-    """回放路径：落库 Card（不入队通知），返回 record_id。"""
+    """回放路径：落库 Card（不入队通知），返回 record_id。
+
+    🔴 P1-2 不可变守卫：回放卡的业务结论不许与原卡不同。
+    允许变化的字段见 ALLOWED_REPLAY_CHANGES（时戳 / 耗时 / run_id）。
+    其他任何字段不同 ⇒ 抛 ValueError，不落库。
+    """
+    if parent_record_id is not None:
+        parent = load_card_by_record_id(parent_record_id)
+        if parent is not None:
+            expected = json.dumps(comparable(parent), ensure_ascii=False,
+                                  sort_keys=True, separators=(",", ":"))
+            actual = json.dumps(comparable(card), ensure_ascii=False,
+                                sort_keys=True, separators=(",", ":"))
+            if expected != actual:
+                raise ValueError(
+                    "replay changed immutable business content —— "
+                    "回放卡与原卡的业务结论不同（状态/标题/判定等），"
+                    "只有 ALLOWED_REPLAY_CHANGES 里的字段允许变化。")
     return save_card(card, replay_of=parent_record_id)
 
 

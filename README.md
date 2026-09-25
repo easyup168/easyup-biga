@@ -7,7 +7,7 @@
 [![Status](https://img.shields.io/badge/status-architecture%20baseline%20v1-2ea043)](TODO.md)
 [![Phase](https://img.shields.io/badge/PHASE-2%20specialists%20%C2%B7%20in%20progress-d29922)](docs/design/phase-2-specialists.md)
 [![Agents](https://img.shields.io/badge/AGENTS-7%20%2F%208-1f6feb)](#pipeline-中有哪些-agent)
-[![Tests](https://img.shields.io/badge/1813%20TESTS-PASSING-2ea043)](#当前实现状态)
+[![Tests](https://img.shields.io/badge/1817%20TESTS-PASSING-2ea043)](#当前实现状态)
 [![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20v19-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
@@ -296,7 +296,7 @@ Replay
 | 全量 Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1813 条测试，SQLite schema v19**，全部通过。
+当前仓库有 **1817 条测试，SQLite schema v19**，全部通过。
 
 🔴 **"确定性编排升级"（把工作流从提示词搬进程序）已完成 Baseline 冻结**，
 不代表 **Phase 2 本身**已经收口——两者是并行、互不代表对方的判据。Phase 2
@@ -462,7 +462,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── data/            SQLite 事实层（不入库）
 ├── tools/verify/    巡检：隔离 / spawn 核验 / 延迟 / 缺失台账 / 配置基线 / 公开审查
 │                   退出码三态由 `_verdict.py` 唯一定义（0 过 / 1 不过 / 2 判不了）
-├── tests/           1813 条测试
+├── tests/           1817 条测试
 ├── docs/
 │   ├── design/      架构文档（SSOT）+ 各阶段设计
 │   ├── guide/       操作手册（安装 / 使用 / Schema 回滚）
