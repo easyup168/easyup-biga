@@ -36,7 +36,7 @@ from _store import (
     load_raw_snapshot,
     load_verdicts,
     next_decision_id,
-    record_agent_run,
+    record_legacy_agent_run,
     record_verdict_run,
     reserve_decision_id,
     save_card,
@@ -152,7 +152,7 @@ class TestAppendOnly:
     )
     def test_UPDATE被数据库拒绝(self, db, table, sql):
         save_card(make_card(), path=db)
-        record_agent_run(task_id=TID, agent="emotion", status="completed",
+        record_legacy_agent_run(task_id=TID, agent="emotion", status="completed",
                          started_at="t0", finished_at="t1", elapsed_ms=1, path=db)
         save_raw_snapshot(source="em:api", as_of="a", retrieved_at="b",
                           payload={"k": 1}, raw_text=json.dumps({"k": 1}), path=db)
@@ -178,7 +178,7 @@ class TestAppendOnly:
         「真跑一次 UPDATE 和一次 DELETE 看拒不拒」，不是「触发器名字还在不在」。
         （`db` fixture 走完整迁移到 v9，所以这里的 agent_runs 是改名之后的。）
         """
-        record_agent_run(task_id=TID, agent="market", status="completed",
+        record_legacy_agent_run(task_id=TID, agent="market", status="completed",
                          started_at="a", finished_at="b", elapsed_ms=1,
                          runtime_run_id="rt-x", path=db)
         with pytest.raises(AppendOnlyViolation, match="只追加"):
@@ -383,9 +383,12 @@ class TestDecisionRecords:
         # 🔴 回放必须**沿用原卡那份冻结证据**（REPLAY_FROZEN_LINEAGE）。
         #    `make_verdict()` 每次取 now_cn()，不带 verdicts 就等于换了一份证据 ——
         #    那不是回放，是另造一张卡挂在 replay_of 上。
+        # 🔴 N1：回放卡不许带 run_id —— 它复用的是在线那次执行的身份，
+        #    而回放没有执行过任何东西（写边界现在拦它）。
         replay = make_card(status="AVOID", model_ref="anthropic/claude-opus-5",
                            verdicts=list(original.verdicts),
-                           missing=list(original.missing))
+                           missing=list(original.missing),
+                           run_id=None, from_store=True)
         save_card(replay, replay_of=rid, path=db)
 
         # 在线那条仍然是原始结论
@@ -432,7 +435,8 @@ class TestDecisionIdAllocation:
         rid = save_card(original, path=db)
         save_card(make_card(decision_id="BIGA-20260919-001", status="AVOID",
                             verdicts=list(original.verdicts),
-                            missing=list(original.missing)),
+                            missing=list(original.missing),
+                            run_id=None, from_store=True),
                   replay_of=rid, path=db)
         # 回放记录用的是同一个 decision_id，不该把 002 也算成已占用
         assert next_decision_id(day="20260919") == "BIGA-20260919-002"
@@ -450,7 +454,7 @@ class TestDecisionIdAllocation:
 
 class TestAgentRuns:
     def test_记一次执行(self, db):
-        rid = record_agent_run(
+        rid = record_legacy_agent_run(
             task_id=TID, agent="emotion", status="completed", verdict="PASS",
             model="anthropic/claude-sonnet-5", elapsed_ms=8400,
             started_at="2026-09-19T10:05:00+08:00",
@@ -469,7 +473,7 @@ class TestAgentRuns:
 
     def test_按agent过滤(self, db):
         for a in ("emotion", "risk", "emotion"):
-            record_agent_run(task_id=TID, agent=a, status="completed",
+            record_legacy_agent_run(task_id=TID, agent=a, status="completed",
                              started_at="a", finished_at="b", elapsed_ms=1, path=db)
         assert len(list_agent_runs(agent="emotion", path=db)) == 2
         assert len(list_agent_runs(path=db)) == 3
@@ -480,7 +484,7 @@ class TestAgentRuns:
         这是 J2-3 结构化 join 的全部原料 —— 落不进去，spawn 核验就没有硬绑定
         可用，只能永远走文本匹配的退回分支（静默退化，看起来一切正常）。
         """
-        record_agent_run(task_id=TID, agent="market", status="completed",
+        record_legacy_agent_run(task_id=TID, agent="market", status="completed",
                          started_at="a", finished_at="b", elapsed_ms=1,
                          runtime_run_id="rt-abc123", path=db)
         row = list_agent_runs(agent="market", path=db)[0]
@@ -488,7 +492,7 @@ class TestAgentRuns:
 
     def test_runtime_run_id默认为空(self, db):
         """不传就是 NULL —— 历史行与回放路径都靠它如实表达「不知道 spawn id」。"""
-        record_agent_run(task_id=TID, agent="market", status="completed",
+        record_legacy_agent_run(task_id=TID, agent="market", status="completed",
                          started_at="a", finished_at="b", elapsed_ms=1, path=db)
         assert list_agent_runs(agent="market", path=db)[0]["runtime_run_id"] is None
 
@@ -552,7 +556,8 @@ class TestAgentRunsIsLedgerNotProof:
                 continue
             for n in ast.walk(tree):
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
-                        and n.func.id in ("record_agent_run", "record_verdict_run"):
+                        and n.func.id in ("record_online_agent_run", "record_unproven_spawn_attempt",
+                                  "record_legacy_agent_run", "record_verdict_run"):
                     callers.add(rel)
         assert callers, (
             "没有业务代码写 agent_runs 了？那这条测试的前提变了，"

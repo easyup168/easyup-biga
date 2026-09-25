@@ -261,6 +261,34 @@ class TestOnlineCardRequiresProvenance:
         with pytest.raises(ValueError, match=expect):
             save_card(bad, replay_of=rid, path=db)
 
+    @pytest.mark.parametrize("kind", ["run_id", "notification"])
+    def test_回放写边界拒绝在线语义(self, db, kind):
+        """N1：回放不是一次执行 —— 不许带在线 run_id，也不许入队通知。
+
+        🔴 `replay.py --store` 本来就 run_id=None、不入队 —— 但那是**调用方的
+        习惯**，不是写边界的规则。评审用低层 API 实测：run_id 被原样留下、
+        通知真的入了队。一条只在某个入口成立的规则等于没有规则（同 P1-3）。
+
+        sabotage 验证：删掉 db.py replay 分支里那两个 raise，本条两个参数都变红。
+        """
+        from _store import save_card_with_notifications
+        original = _card()
+        rid = save_card(original, path=db)
+        base = dict(from_store=True, verdicts=list(original.verdicts),
+                    evidence_set_id=original.evidence_set_id,
+                    input_verdict_refs=list(original.input_verdict_refs))
+        if kind == "run_id":
+            bad = _card(run_id=TEST_RUN_ID, **base)        # 复用在线那次执行的身份
+            with pytest.raises(ValueError, match="run_id"):
+                save_card(bad, replay_of=rid, path=db)
+        else:
+            ok = _card(run_id=None, **base)
+            with pytest.raises(ValueError, match="通知"):
+                save_card_with_notifications(
+                    ok, [{"event_type": "card_completed", "aggregate": DID,
+                          "payload": {"decision_id": DID}}],
+                    replay_of=rid, path=db)
+
     def test_回放可以给出新结论(self, db):
         """守卫的反面：血缘不变时，换结论**必须**被放行 —— 那是回放的用途。"""
         original = _card()
@@ -427,19 +455,27 @@ class TestLegacySynthesizeCLI:
     def test_只渲染不落库时放行(self, db):
         assert self._run(db, "--no-store").returncode == 0
 
-    def test_落库时每条verdict恰好一条agent_runs(self, db):
-        """P2-2：standalone synthesize 不许重复记账。
+    def test_standalone合成不写任何执行账本行(self, db):
+        """B2 §5.3：standalone `synthesize.py` **一行 `agent_runs` 都不该写**。
 
-        🔴 这条守的是 v0.3.1 删掉的那段**手工账本循环** —— 它在 `persist()`
-        内部也记一遍的前提下又记了一遍，于是每条 Verdict 双写。
+        🔴 语义在 v0.5.0 反过来了，值得说清为什么：
 
-        ⚠️ 已有的 `test_在线路径记账_每个verdict一行` 覆盖不到它：那条测的是
-        `card_ops.persist()`，而双写发生在 `synthesize.py` 这一层 ——
-        **修复之前那条也是绿的**。把手工循环加回去，只有本条会红。
+        旧版 `persist()` 在 `runtime_run_ids is None` 时「给所有 verdict 记账」，
+        于是这条命令会写出 6 行 `provenance_mode='online'` 且 `runtime_run_id`
+        全空的记录。可它**没有 spawn 任何东西** —— 它只是把库里已有的 Verdict
+        拼成一张卡。那些行不描述任何执行事实，却长得像执行证据（L-8 幽灵行），
+        而且会让 spawn 核验对这个 run 报出一串「判不了」。
+
+        ⇒ 新语义：`runtime_run_ids` **就是**执行溯源本身，没有它就没有执行可记。
+
+        ⚠️ 这条替代了原来那条「每条 verdict 恰好一行」。那条守的是
+        P2-2（不许双写），而**零行**同样满足「不许双写」，且是更强的要求。
+        双写的防线现在在 `test_decision_card.py` 的在线路径那两条上。
+
+        sabotage 验证：把 `card_ops.persist()` 里
+        `if runtime_run_ids is not None else ()` 那半句去掉，本条变红。
         """
         import os
-        # 🔴 原件必须带 run_id：P1-1 起在线卡不许引用 NULL-run 的历史 Verdict。
-        #    `_run()` 落的是不带 run_id 的那种（它服务的两条测试测的是更早的闸门）。
         vid = save_verdict(_verdict(), run_id=TEST_RUN_ID, path=db)
         em = []
         for m in absent_registrations(["market"]):
@@ -453,13 +489,10 @@ class TestLegacySynthesizeCLI:
             env={**os.environ, "BIGA_DB_PATH": str(db)})
         assert r.returncode == 0, r.stderr
         with connect(db, readonly=True) as c:
-            rows = c.execute("SELECT agent, COUNT(*) n FROM agent_runs "
-                             "GROUP BY agent").fetchall()
-        assert [(r0["agent"], r0["n"]) for r0 in rows] == [("market", 1)], (
-            "每条 Verdict 应当恰好一条 agent_runs —— "
-            f"实际 {[(r0['agent'], r0['n']) for r0 in rows]}。"
-            "两条 = synthesize.py 和 persist() 各记了一遍（P2-2）。")
-
+            n = c.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
+        assert n == 0, (
+            f"standalone 合成写了 {n} 行 agent_runs —— 它没有 spawn 任何东西，"
+            "那些行不描述执行事实（B2 §5.3）")
 
 class TestSaveVerdictRunValidation:
     """P1-1 补完：save_verdict 在线模式必须核验 run_id 真的存在于 decision_runs。

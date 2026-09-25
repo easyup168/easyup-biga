@@ -57,7 +57,9 @@ __all__ = [
     "load_verdict_ids_for_run",
     "next_decision_id",
     "reserve_decision_id",
-    "record_agent_run",
+    "record_online_agent_run",
+    "record_unproven_spawn_attempt",
+    "record_legacy_agent_run",
     "list_agent_runs",
     "save_raw_snapshot",
     "load_raw_snapshot",
@@ -409,6 +411,21 @@ def save_card_with_notifications(
             #    旧版只靠 `replay_of` 参数非空来判定档位，没有查父记录的 decision_id，
             #    攻击者可以传 Decision A 的 record_id 给 Decision B 的卡。
             else:
+                # 🔴 N1：回放**不是一次执行**，两样东西不许带。
+                #    正常的 `replay.py --store` 本来就 run_id=None、不入队通知，
+                #    但那是**调用方的习惯**，不是写边界的规则 —— 评审用低层
+                #    `save_card_with_notifications(replay_card, [通知], replay_of=…)`
+                #    实测：run_id 被原样留下、通知真的入了队。
+                if card.run_id is not None:
+                    raise ValueError(
+                        f"回放卡不得带 run_id（给的是 {card.run_id!r}）—— "
+                        "它复用的是**在线那次执行**的身份，而回放没有执行过任何东西。"
+                        "将来若要给「换模型重评」一个身份，另加 evaluation_run_id，"
+                        "不要复用这个（N1）。")
+                if notifications:
+                    raise ValueError(
+                        f"回放不得入队外发通知（给了 {len(notifications)} 条）—— "
+                        "回放没有产生新的业务事件，推它等于对同一个决策重复告警（N1）。")
                 parent_row = conn.execute(
                     "SELECT decision_id, card_json FROM decision_records "
                     "WHERE record_id=?",
@@ -1327,7 +1344,7 @@ def load_outcome(
 # ───────────────────────────────────────────────────────────────── agent_runs
 
 
-def record_agent_run(
+def _record_agent_run(
     *,
     task_id: str,
     agent: str,
@@ -1402,14 +1419,22 @@ def record_agent_run(
         #    只认两个值，且两者与 orchestration_run_id 的组合是固定的 ——
         #    否则「传 provenance_mode='legacy' 换取 decision 级的弱名称匹配」
         #    就是一条调用方自己就能打开的降级开关。
-        if provenance_mode not in (None, "online", "legacy"):
+        if provenance_mode not in (None, "online", "online_unproven", "legacy"):
             raise ValueError(
-                f"provenance_mode 只能是 'online' / 'legacy' / None，"
+                f"provenance_mode 只能是 'online' / 'online_unproven' / 'legacy' / None，"
                 f"给的是 {provenance_mode!r} —— 安全档位不是自由文本（P1-2）")
         if provenance_mode == "legacy" and orchestration_run_id is not None:
             raise ValueError(
                 "legacy 账本行不得带 orchestration_run_id —— "
                 "带着它就是一次在线执行，只是想用弱判据核验它（P1-2 §5.6）")
+        # 🔴 B2 §5.1：**`online` 必须有 run**。评审 PoC 实测：显式传
+        #    `provenance_mode='online'` + `orchestration_run_id=None` 会被接受 ——
+        #    一行自称「在线执行证据」、却不属于任何一次 BigA 编排的记录。
+        if provenance_mode in ("online", "online_unproven") \
+                and orchestration_run_id is None:
+            raise ValueError(
+                f"provenance_mode={provenance_mode!r} 必须带 orchestration_run_id —— "
+                "一行自称在线执行的账本，总得属于某一次编排（B2 §5.1）")
         if provenance_mode is None and orchestration_run_id is not None:
             provenance_mode = "online"
         cur = conn.execute(
@@ -1460,10 +1485,18 @@ def record_online_agent_run(
         "orchestration_run_id": orchestration_run_id,
         "runtime_run_id": runtime_run_id,
         "agent": agent,
+        "task_id": task_id,
     }.items():
         if not value:
             raise ValueError(f"online agent run requires {name} —— 传了空值或 None")
-    return record_agent_run(
+    # 🔴 B2 §5.2：写边界自己拥有这条不变量，不靠「生产路径恰好传对了」。
+    #    公开签名允许调用方给一个不同的 task_id —— 那样这行账本会声称
+    #    「决策 A 的执行」，却挂在任务 B 上。
+    if task_id != decision_id:
+        raise ValueError(
+            f"online agent run 要求 task_id == decision_id，"
+            f"给的是 task_id={task_id!r} / decision_id={decision_id!r}（B2 §5.2）")
+    return _record_agent_run(
         decision_id=decision_id,
         task_id=task_id,
         agent=agent,
@@ -1480,6 +1513,83 @@ def record_online_agent_run(
         provenance_mode="online",
         path=path,
     )
+
+
+def record_unproven_spawn_attempt(
+    *,
+    decision_id: str,
+    orchestration_run_id: str,
+    agent: str,
+    task_id: str,
+    status: str,
+    started_at: str,
+    finished_at: str,
+    elapsed_ms: int,
+    reason: str = "runtime_run_id capture failed",
+    model: str | None = None,
+    verdict: str | None = None,
+    missing_count: int = 0,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """**确实发起过 spawn、但没捞回 runtime_run_id** 时用它（`provenance_mode='online_unproven'`）。
+
+    🔴 为什么要单独一个档位，而不是记成 `online` 再留空 `runtime_run_id`
+    ------------------------------------------------------------------
+    那样这一行会**自称完整的在线证据**，而它证不了任何事。B2 §5.4 要的是：
+    「发生过」与「证明得了」分开记 —— 漏账比记一条判不了的账更糟，
+    但把判不了的账记成「已证明」比漏账还糟。
+
+    核验侧把 `online_unproven` 归进 `unsupported_provenance_mode` ⇒ UNKNOWN，
+    既不冤枉它是伪造，也不让它冒充证据。
+    """
+    if task_id != decision_id:
+        raise ValueError(
+            f"unproven spawn attempt 要求 task_id == decision_id，"
+            f"给的是 {task_id!r} / {decision_id!r}")
+    for name, value in {"decision_id": decision_id, "agent": agent,
+                        "orchestration_run_id": orchestration_run_id}.items():
+        if not value:
+            raise ValueError(f"unproven spawn attempt requires {name}")
+    return _record_agent_run(
+        decision_id=decision_id, task_id=task_id, agent=agent, status=status,
+        started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
+        model=model, verdict=verdict, missing_count=missing_count, error=reason,
+        runtime_run_id=None, orchestration_run_id=orchestration_run_id,
+        provenance_mode="online_unproven", path=path)
+
+
+def record_legacy_agent_run(
+    *,
+    task_id: str,
+    agent: str,
+    status: str,
+    started_at: str,
+    finished_at: str,
+    elapsed_ms: int,
+    decision_id: str | None = None,
+    model: str | None = None,
+    verdict: str | None = None,
+    missing_count: int = 0,
+    error: str | None = None,
+    runtime_run_id: str | None = None,
+    path: pathlib.Path | str | None = None,
+) -> int:
+    """历史 / 手工路径的账本行（`provenance_mode='legacy'`，**不带 run**）。
+
+    ⚠️ 允许带 `runtime_run_id`：v10 起这一列就存在，那之前落的行本来就可能有值
+    而 `provenance_mode` 为 NULL。它不构成在线证据（核验侧走 `legacy_only`
+    ⇒ UNKNOWN），也不受 `ux_online_runtime_run_id` 约束。
+
+    🔴 它存在是为了让「我知道这行证不了什么」变成一个**要显式说出口**的选择。
+    裸插入接口（`_record_agent_run`）已改私有 —— 公开面上只剩三个入口，
+    每个入口的名字就说清了它写的是哪一档证据（B2 §5.4）。
+    """
+    return _record_agent_run(
+        decision_id=decision_id, task_id=task_id, agent=agent, status=status,
+        started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
+        model=model, verdict=verdict, missing_count=missing_count, error=error,
+        runtime_run_id=runtime_run_id, orchestration_run_id=None,
+        provenance_mode="legacy", path=path)
 
 
 def record_verdict_run(
@@ -1512,7 +1622,7 @@ def record_verdict_run(
             elapsed_ms=v.elapsed_ms, model=model,
             started_at=started_at, finished_at=finished_at, path=path,
         )
-    return record_agent_run(
+    return _record_agent_run(
         task_id=v.task_id, agent=v.agent, status=v.status, verdict=v.verdict,
         missing_count=len(v.missing), elapsed_ms=v.elapsed_ms,
         decision_id=decision_id, model=model, runtime_run_id=runtime_run_id,

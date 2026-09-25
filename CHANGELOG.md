@@ -17,6 +17,172 @@
 
 ---
 
+## [0.5.0] - 2026-09-25
+
+### 修复 · v1 最终架构收口评审（`biga-final-architecture-closure-review-2026092503`）
+
+评审判定 **架构 ACCEPTED / 发布 HOLD**，两组阻塞项 + 四项非阻塞。
+这是一份**固定范围**的收口评审，不是又一轮开放式查找 —— 它给了明确的
+Definition of Done 和「冻结之后不再重开 v1 架构评审」的契约。
+
+---
+
+#### B1 · Runtime Proof 还不是**精确身份证明**
+
+上一版证明的是「账本里这个 `runtime_run_id` 在运行时库里出现过」。
+评审两个 PoC 实测**都 PASS**：
+
+```text
+§4.1  账本 market 行填了 news 那次 spawn 的 id        → PASS
+§4.2  Run B 的账本行填了同 decision 下 Run A 的 id     → PASS
+```
+
+前者是「一次真 spawn 给另一个 agent 背书」，后者是「另一次编排给这次背书」。
+要证的其实是**三元组**：
+
+```text
+(BigA orchestration_run_id, agent, OpenClaw runtime_run_id)
+```
+
+**做了四件事**：
+
+1. **运行时记录不再被压成 id 集合。** 取数时把 `task` / `payload_json` 一并带回，
+   `agent` 本来就有。归一化**只在取数处做一次**（消费端各解析一遍就是 L-3）。
+
+2. **每个 spawn 任务带一行机器可读的 BigA run 标记**（`BIGA-RUN-ID: <run_id>`，
+   定义在契约层，生产方与消费方共用）。
+   🔴 **不复用提示词里那句 `--run-id`** —— 那是给 agent 的指令、措辞已经改过几次，
+   拿它解析就是按字符串形状写判据（L-13）。
+   ⚠️ **risk 也必须带**：它的 skill 不收 `--run-id`（事实由编排器落、assessment
+   从 fact 行继承），所以**只有这一行**能把 risk 那次 spawn 绑回 BigA 的 run。
+
+3. **`verify_agent_rows` 改成逐条比三元组**，移植
+   `reference/runtime_proof_triple.py`。新增三个 FAIL 原因码
+   （`runtime_agent_mismatch` / `runtime_biga_run_mismatch` / `expected_agent_missing`）
+   与两个 UNKNOWN（`runtime_agent_unavailable` / `runtime_biga_run_unavailable`）。
+   ⚠️ 「任务文本里没有标记」判 **UNKNOWN 不是 FAIL** —— v22 之前 spawn 的都这样，
+   把「没有」读成「对不上」会把一批历史真 run 判成伪造。
+
+4. **冻结 `expected_spawn_agents`**（schema v22，`decision_runs` 新列）。
+
+   🔴 **期望 Verdict 名单 ≠ 期望 spawn 名单。** 卡上的 `expected_roster` 回答
+   「该有谁的判定」，spawn 核验要回答「该**启动**谁」——`risk` 可以在确定性早退里
+   由编排器直接算出事实、根本不被 spawn。所以计划只冻 Stage 1 五个。
+
+   🔴 更要紧的是它必须冻在**开 run 时**，而不是核验时按当天的 Registry 反推：
+   将来加 agent / 删 agent / 把某个 agent 换成确定性策略之后，用今天的名单核老卡
+   会得出错的期望集（评审 N2）。没冻过计划的老 run **整体降级为 UNKNOWN**，
+   不退回今天的 Registry 报 PASS。
+
+   ⇒ 计划里点名的 agent **没有账本行 = FAIL**。上一版算成 ABSENT，于是只要一个
+   agent 过，`spawn_check` 就退 0 —— 那条名为「每个 Specialist 都真被 spawn 了」
+   的命令，实际上不要求这次期望的每一个都在（评审 §4.3 的 PoC）。
+
+5. **schema v22 还加了 `ux_online_runtime_run_id`**：一个 `runtime_run_id` 不许
+   给两条在线行背书（评审 §4.4 实测 `Run A/market` 与 `Run B/news` 可以共用）。
+   ⚠️ 加索引前实测过存量：在线行与全表都 0 组重复 —— 评审特意叮嘱了先查再加。
+
+---
+
+#### B2 · 执行账本写边界还能造出幽灵行 / 无效在线行
+
+**裸插入接口改私有**（`_record_agent_run`），公开面上只剩三个入口，
+每个名字说清它写的是**哪一档证据**：
+
+```text
+record_online_agent_run        完整在线证据
+record_unproven_spawn_attempt  确实 spawn 过，但没捞回 runtime id
+record_legacy_agent_run        历史 / 手工路径，不带 run
+```
+
+三处收紧：
+
+- **§5.1 `online` 必须带 run。** 评审 PoC：显式传 `provenance_mode='online'` +
+  `orchestration_run_id=None` 会被接受 —— 一行自称在线执行证据、却不属于任何
+  一次 BigA 编排的记录。
+- **§5.2 `task_id` 必须等于 `decision_id`。** 生产路径一直传对，但**写边界自己
+  要拥有这条不变量**，不能靠「恰好传对了」。
+- **§5.3/§5.5 `runtime_run_ids is None` ⇒ 一行都不记。**
+  🔴 **这条语义是反过来的。** 旧版「不给映射就给所有 verdict 记账」，于是
+  standalone `synthesize.py`（它只是把库里已有的 Verdict 拼成一张卡、**没有
+  spawn 任何东西**）会写出 6 行 `provenance_mode='online'` 且 `runtime_run_id`
+  全空的记录。那些行不描述任何执行事实，却长得像执行证据（L-8 幽灵行）。
+  ⇒ 新语义：**映射就是执行溯源本身，没有它就没有执行可记。**
+
+- **`online_unproven` 新档位**：确实发起过 spawn 但没捞回 id 时用它。
+  漏账比记一条判不了的账更糟，但**把判不了的账记成「已证明」比漏账还糟**。
+  核验侧把它归进 UNKNOWN —— 不冤枉、也不放行。
+
+---
+
+#### N1 · 回放写边界拒绝在线语义
+
+`replay.py --store` 本来就 `run_id=None`、不入队通知 —— 但那是**调用方的习惯**，
+不是写边界的规则。评审用低层 API 实测：run_id 被原样留下、通知真的入了队。
+⇒ 写边界现在两样都拒。将来若要给「换模型重评」一个身份，另加 `evaluation_run_id`，
+不复用在线那次执行的 run（评审建议）。
+
+#### N3 · README 数字口径：「选中」不是「通过」
+
+徽章写的是 `N hermetic`，而那个数是**选中**条数，其中一部分是 skip。
+把 selected 当成 passed 报 = 把「没跑」写成「跑过了」。徽章文案改成 `N selected`，
+README 补一行说明这三个数分别是什么。
+
+#### N4 · CI 增加 Python 3.13 lane
+
+`fail-fast: false` —— 3.13 红了不该挡住 3.12 的结论（3.12 才是
+`requires-python` 声明支持的那个）。
+
+---
+
+### 新增 · 红灯测试（全部做过 sabotage-revert）
+
+```text
+market 不能借用 news 的 runtime_id          删掉 agent 比对 → 红
+Run B 不能借用 Run A 的 runtime_id          删掉 biga_run 比对 → 红
+三元组都对才算通过（守卫的反面）
+缺了期望的 Stage 1 agent 不许通过           改回 ABSENT → 红
+没有 run 标记的历史记录判不了而不是伪造
+没冻过计划的老 run 整体降级
+同一个 runtime_id 不能绑两条在线行
+裸插入接口不对外
+online 档位必须带 run
+online 要求 task_id == decision_id
+unproven 档位不冒充在线证据 / 核验里算判不了
+standalone 合成不写任何执行账本行           去掉 None 分支 → 红
+没给执行溯源映射就一行都不记
+回放写边界拒绝在线 run_id / 通知（两个参数）
+```
+
+### 已知未完成
+
+```text
+Phase 2 条件 3（真实否决）  等一个命中 risk 六条阈值之一的交易日。不是开发问题
+```
+
+### 验证 · Live E2E（B1/B2 第一次走真实路径）
+
+`BIGA-20260925-002`，rc=0，66.8s / $0.88（预算 90s）：
+
+```text
+冻结的 expected_spawn_agents  ["emotion","market","news","sector","technical"]
+agent_runs 6/6                provenance_mode='online' + 真实 runtime_run_id
+逐 agent 三元组               6/6 exact_run_agent_runtime_match
+  （含 risk —— 它是条件 spawn、不在计划里，但真被 spawn 了，也过了三元组）
+phase1_acceptance             PASS 8 · FAIL 0 · PENDING 1
+  第 8 项「端到端 < 90s」由 elapsed_ms 的修复解锁，此前永远判不了
+```
+
+🔴 **真实运行里发现并修掉的一个洞**：`risk` 是条件 spawn、不在冻结计划里，
+于是核验**完全跳过了它** —— 给一个计划外的 agent 伪造一行在线记录，
+没有任何东西会看它一眼。⇒ 核验范围改成「计划 ∪ 实际有在线账本行的 agent」：
+计划里的必须证明得了（缺席即 FAIL），计划外但有行的**也要**过三元组。
+这条是静态审查看不出来的 —— 它要一次真实的条件早退才会显形。
+
+测试 1891 条 Hermetic 选中 / 1928 passed / 0 failed；source ZIP 1889 / 0 failed。
+
+---
+
 ## [0.4.0] - 2026-09-25
 
 ### 新增 · 交易日历：`fact_trading_calendar` 第一次真的有数据
@@ -7927,7 +8093,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
-[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.4.0...HEAD
+[未发布]: https://github.com/easyup168/easyup-biga/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/easyup168/easyup-biga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/easyup168/easyup-biga/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/easyup168/easyup-biga/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/easyup168/easyup-biga/compare/v0.3.4...v0.3.6

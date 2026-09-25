@@ -386,13 +386,33 @@ class TestPersistWritesAgentRunsLedger:
     """
 
     def test_在线路径记账_每个verdict一行(self, db):
+        """给了执行溯源映射 ⇒ 每个 agent **恰好一行**（`sorted(...)==` 也钉住了不许双写）。"""
         c = _synth(decision_id=DID, verdicts=full_roster(),
                                 judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
-        card_ops.persist(c)
+        rr = {v.agent: f"openclaw-{v.agent}" for v in c.verdicts}
+        card_ops.persist(c, runtime_run_ids=rr)
         rows = list_agent_runs(decision_id=DID, path=db)
         assert sorted(r["agent"] for r in rows) == sorted(STANCE_VOCAB), (
-            "在线 persist() 必须给每个 verdict 记一行 agent_runs，"
+            "在线 persist() 必须给每个被 spawn 的 agent 记一行 agent_runs，"
             "否则 spawn_check.py 永远判不了")
+
+    def test_没给执行溯源映射就一行都不记(self, db):
+        """B2 §5.5：`runtime_run_ids is None` ⇒ **零行**。
+
+        🔴 这条语义是反过来的（v0.5.0 改）。旧版「不给映射就给所有 verdict 记账」
+        会让 standalone 合成写出一串自称在线、却证不了任何事的幽灵账本行
+        —— 它根本没 spawn 过任何东西（评审 B2 §5.3 的 PoC）。
+
+        ⇒ 映射**就是**执行溯源本身；没有它，就没有执行可记。
+
+        sabotage 验证：去掉 `persist()` 里 `if runtime_run_ids is not None else ()`
+        那半句，本条变红。
+        """
+        c = _synth(decision_id=DID, verdicts=full_roster(),
+                   judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
+        card_ops.persist(c)
+        assert list_agent_runs(decision_id=DID, path=db) == [], (
+            "没有执行溯源映射却写了账本行 —— 那些行不描述任何执行事实")
 
     def test_在线路径走严格API_record_online_agent_run(self, db, monkeypatch):
         """P1-2：provenance 三字段齐全时，账本必须经过 `record_online_agent_run()`。
@@ -404,16 +424,18 @@ class TestPersistWritesAgentRunsLedger:
 
         sabotage 验证：把 `record_verdict_run()` 里那段路由删掉，本条立刻变红。
         """
-        import _store.db as _db
+        # 🔴 打在 `card_ops` 的名字上，不是 `_store.db` 上 —— `persist()` 现在
+        #    直接 `from _store import record_online_agent_run`，绑定发生在导入时，
+        #    改 db 模块上的那个属性对它没有影响（第一版就是这么写的，patch 无效）。
         seen: list[tuple[str, str, str]] = []
-        real = _db.record_online_agent_run
+        real = card_ops.record_online_agent_run
 
         def spy(**kw):
             seen.append((kw["agent"], kw["orchestration_run_id"],
                          kw["runtime_run_id"]))
             return real(**kw)
 
-        monkeypatch.setattr(_db, "record_online_agent_run", spy)
+        monkeypatch.setattr(card_ops, "record_online_agent_run", spy)
         c = _synth(decision_id=DID, verdicts=full_roster(),
                    judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
         rr = {v.agent: f"openclaw-{v.agent}" for v in c.verdicts}
@@ -431,9 +453,8 @@ class TestPersistWritesAgentRunsLedger:
         不记就是漏账（账本行数与真实 spawn 次数脱节）。它只是走宽松分支，
         由 `spawn_proof_for_run()` 判成 UNKNOWN —— R-3，不是 PASS 也不是伪造。
         """
-        import _store.db as _db
         called: list[str] = []
-        monkeypatch.setattr(_db, "record_online_agent_run",
+        monkeypatch.setattr(card_ops, "record_online_agent_run",
                             lambda **kw: called.append(kw["agent"]))
         c = _synth(decision_id=DID, verdicts=full_roster(),
                    judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
@@ -443,13 +464,24 @@ class TestPersistWritesAgentRunsLedger:
         rows = list_agent_runs(decision_id=DID, path=db)
         assert sorted(r["agent"] for r in rows) == sorted(STANCE_VOCAB), \
             "宽松分支必须照样记账 —— 漏账比记一条判不了的账更糟"
+        # 🔴 B2 §5.4：它记的是 `online_unproven`，**不许冒充完整的在线证据**。
+        assert {r["provenance_mode"] for r in rows} == {"online_unproven"}, (
+            "没捞回 runtime_run_id 的行必须是 online_unproven —— "
+            f"实际 {sorted({r['provenance_mode'] for r in rows})}")
 
     def test_回放路径不记账(self, db):
         c = _synth(decision_id=DID, verdicts=full_roster(),
                                 judgment=judgment(), model_ref="anthropic/claude-sonnet-5")
-        rid = card_ops.persist(c)
+        rid = card_ops.persist(c, runtime_run_ids={v.agent: f"rr-{v.agent}"
+                                                   for v in c.verdicts})
         before = len(list_agent_runs(decision_id=DID, path=db, limit=1000))
-        card_ops.persist(c, replay_of=rid)
+        # 🔴 N1：回放卡不许带 run_id（写边界拦它），所以重建一张不带的。
+        replayed = _synth(decision_id=DID, verdicts=list(c.verdicts),
+                          judgment=judgment(), model_ref="anthropic/claude-sonnet-5",
+                          historical=True, run_id=None,
+                          evidence_set_id=c.evidence_set_id,
+                          verdict_refs=list(c.input_verdict_refs))
+        card_ops.persist(replayed, replay_of=rid)
         after = len(list_agent_runs(decision_id=DID, path=db, limit=1000))
         assert after == before, (
             "回放不该重复记账——它没有重新执行任何 agent，"

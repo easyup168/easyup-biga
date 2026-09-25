@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Iterable
 import sqlite3
 from typing import Any
 
@@ -58,24 +59,42 @@ class UnknownRun(RuntimeError):
     """对一个没 `open_run` 过的 run_id 做转移 / 查状态。"""
 
 
-def open_run(ctx: RunContext, *, path: pathlib.Path | str | None = None) -> str:
+def open_run(ctx: RunContext, *, expected_spawn_agents: "Iterable[str] | None" = None,
+             path: pathlib.Path | str | None = None) -> str:
     """开一个新 run：写 `decision_runs` 头 + 初始事件（进入 `RECEIVED`）。返回 run_id。
 
     🔴 只能开一次：`decision_runs.run_id` 是主键，同一个 run_id 再 open 会撞主键。
     初始事件的 `from_state` 是 NULL —— 进入 RECEIVED 之前没有状态，它不是一次
     「转移」，所以不过 `LEGAL_TRANSITIONS` 那道校验（open_run 是唯一入口）。
+
+    Args:
+        expected_spawn_agents: 这次 run **期望 spawn 谁**，开 run 时就冻死（schema v22）。
+
+            🔴 **它不等于卡上的 `expected_roster`。** 后者回答「该有谁的判定」，
+            前者回答「该**启动**谁」—— `risk` 可以在确定性早退里由编排器直接算出
+            事实、根本不被 spawn，那时它有 Verdict 但不该有运行时记录。
+
+            🔴 更要紧的是它必须**冻在这里**，而不是核验时按当天的 Registry 反推：
+            将来加 agent、删 agent、把某个 agent 从 LLM 换成确定性策略之后，
+            用今天的名单去核一张老卡会得出错的期望集（评审 N2）。
+
+            不给 ⇒ 存 NULL ⇒ 核验对这个 run 只能给 UNKNOWN + 警告，
+            **不会**退回今天的 Registry 再报 PASS。
     """
     if not isinstance(ctx, RunContext):
         raise TypeError(f"open_run 只接受 _contract.RunContext，收到 {type(ctx).__name__}")
     now = now_cn().isoformat()
+    plan = (json.dumps(sorted(set(expected_spawn_agents)), ensure_ascii=False)
+            if expected_spawn_agents is not None else None)
     with connect(path) as conn:
         try:
             conn.execute(
                 "INSERT INTO decision_runs "
                 "(run_id, decision_id, trigger_id, evidence_set_id, origin, "
-                " non_interactive, created_at) VALUES (?,?,?,?,?,?,?)",
+                " non_interactive, created_at, expected_spawn_agents) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (ctx.run_id, ctx.decision_id, ctx.trigger_id, ctx.evidence_set_id,
-                 ctx.origin, int(ctx.non_interactive), ctx.created_at),
+                 ctx.origin, int(ctx.non_interactive), ctx.created_at, plan),
             )
         except sqlite3.IntegrityError as e:
             if "decision_runs" in str(e) or "run_id" in str(e):
@@ -248,3 +267,20 @@ def run_journey(
         "events": events,
         "current_state": events[-1]["to_state"] if events else None,
     }
+
+
+def expected_spawn_agents(run_id: str, *,
+                          path: pathlib.Path | str | None = None) -> list[str] | None:
+    """这次 run 开的时候冻下的「期望 spawn 名单」。没有冻过 ⇒ `None`。
+
+    🔴 `None` ≠ 空名单。前者是「这个 run 早于 schema v22，不知道当时期望谁」——
+    核验必须据此报 UNKNOWN + 警告；后者是「明确期望 spawn 零个 agent」。
+    把两者混成一个值，历史 run 就会被按空名单核成 PASS（评审 N2 要防的正是这个）。
+    """
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT expected_spawn_agents FROM decision_runs WHERE run_id=?",
+            (run_id,)).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return list(json.loads(row[0]))

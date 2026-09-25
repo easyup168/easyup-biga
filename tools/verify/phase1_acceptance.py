@@ -33,7 +33,8 @@ _REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from _contract import CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS  # noqa: E402
+from _contract import (CN_TZ, STAGE1_AGENTS, STAGE2_AGENTS,  # noqa: E402
+                       parse_run_marker)
 
 import isolation  # noqa: E402  —— I-1 的唯一判据，见下方 F19 的注释
 
@@ -266,6 +267,10 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
                     d = dict(r)
                     d["agent"] = to_agent(d)
                     d["source"] = table
+                    # 🔴 两张表的文本列名不同（`task` / `payload_json`），归一化
+                    #    **只在这里做一次** —— 消费端各解析一遍就是第二套口径（L-3）。
+                    d["biga_run_id"] = parse_run_marker(
+                        d.get("task") or d.get("payload_json"))
                     out.append(d)
                 return True
             except sqlite3.Error:
@@ -275,14 +280,17 @@ def _runtime_spawn_records(decision_id: str) -> list[dict] | None:
         #    里抠可靠）。先读它，`subagent_runs` 只用来补老库缺的部分。
         ok2 = _pull(
             "task_runs",
-            "SELECT run_id, agent_id, child_session_key, created_at FROM task_runs"
+            # 🔴 B1：把 `task`（任务原文）一并取回 —— 里面带着 BigA 写进去的
+            #    `BIGA-RUN-ID: <run_id>` 标记。没有它，运行时侧就只剩一个
+            #    孤立的 run_id，证不了「这次 spawn 属于**哪一次** BigA 编排」。
+            "SELECT run_id, agent_id, child_session_key, created_at, task FROM task_runs"
             " WHERE task LIKE ?" + _REAL_SPAWN_SQL + " ORDER BY created_at DESC",
             lambda d: d.get("agent_id"))
 
         # ② subagent_runs —— 子集。老库里没有 task_runs 时它是唯一来源。
         ok1 = _pull(
             "subagent_runs",
-            "SELECT run_id, child_session_key, created_at FROM subagent_runs"
+            "SELECT run_id, child_session_key, created_at, payload_json FROM subagent_runs"
             " WHERE payload_json LIKE ? ORDER BY created_at DESC",
             lambda d: (seg[0] if (seg := (d.get("child_session_key") or "")
                                   .split(":")[1:2]) else None))
@@ -464,8 +472,27 @@ class SpawnProof:
 #: （裁定 13 的 discipline 根本不建；risk 在两种确定性早退里不被 spawn），
 #: 判成 FAIL 会让每一张 roster 不满的卡都红。评审正文 §5.4 写的也是
 #: 「没有行 → ABSENT」，是 reference 代码与正文不一致，这里跟正文。
-def verify_agent_rows(rows: list[dict], *, runtime_ids: set[str]) -> tuple[str, str]:
-    """`(status, reason)`，status ∈ {ABSENT, PASS, FAIL, UNKNOWN}。"""
+def verify_agent_rows(rows: list[dict], *,
+                      runtime_by_id: dict[str, dict],
+                      expected_agent: str,
+                      expected_biga_run_id: str) -> tuple[str, str]:
+    """`(status, reason)`，status ∈ {ABSENT, PASS, FAIL, UNKNOWN}。
+
+    🔴 判据是**三元组**，不是「这个 id 在运行时库里出现过」：
+
+        (BigA orchestration_run_id, agent, OpenClaw runtime_run_id)
+
+    上一版只比 `ledger.runtime_run_id in runtime_ids`，于是两条都通不过：
+
+    ======================================  ==========================
+    market 的账本行填了 news 那次 spawn 的 id  上一版 ⇒ **PASS**
+    Run B 的账本行填了 Run A 那次 spawn 的 id  上一版 ⇒ **PASS**
+    ======================================  ==========================
+
+    前者是「一次真 spawn 给另一个 agent 背书」，后者是「同 decision 的另一次
+    执行给这次背书」—— 两者都不是「这次 run 真的启动了这个 agent」。
+    ⇒ 逐条移植评审 `reference/runtime_proof_triple.py::verify_exact_runtime_identity`。
+    """
     if not rows:
         return "ABSENT", "no_agent_run"
 
@@ -486,18 +513,44 @@ def verify_agent_rows(rows: list[dict], *, runtime_ids: set[str]) -> tuple[str, 
         #    本身就是不该存在的状态（v21 的唯一索引拦它），不是「查不到」。
         return "FAIL", "duplicate_online_rows"
 
-    runtime_run_id = online[0].get("runtime_run_id")
+    row = online[0]
+    if row.get("agent") != expected_agent:
+        return "FAIL", "ledger_agent_mismatch"
+
+    runtime_run_id = row.get("runtime_run_id")
     if not runtime_run_id:
         return "UNKNOWN", "missing_runtime_run_id"
-    if runtime_run_id not in runtime_ids:
+
+    runtime = runtime_by_id.get(runtime_run_id)
+    if runtime is None:
         return "FAIL", "runtime_record_not_found"
-    return "PASS", "runtime_exact_match"
+
+    # ── 以下三条是 B1 新增的，上一版一条都没查 ──────────────────────────
+    if runtime.get("agent") is None:
+        return "UNKNOWN", "runtime_agent_unavailable"
+    if runtime.get("agent") != expected_agent:
+        return "FAIL", "runtime_agent_mismatch"
+    if runtime.get("biga_run_id") is None:
+        # 任务文本里没有 BIGA-RUN-ID 标记 —— v22 之前 spawn 的都这样。
+        # 🔴 UNKNOWN 不是 FAIL：把「没有标记」读成「对不上」会把一批历史真 run
+        #    判成伪造。
+        return "UNKNOWN", "runtime_biga_run_unavailable"
+    if runtime.get("biga_run_id") != expected_biga_run_id:
+        return "FAIL", "runtime_biga_run_mismatch"
+
+    return "PASS", "exact_run_agent_runtime_match"
 
 
 #: 原因码 → 给人看的一句话。**只有这一份**（L-3）：
 #: `spawn_check.py` 与 `check_1_spawned()` 都从这里取，不各写一遍措辞。
 #: 🔴 每一条都要说清「所以该去查什么」——报错要指路，不能只说判不了。
 _UNPROVEN_HINT: dict[str, str] = {
+    "runtime_biga_run_unavailable":
+        "运行时任务文本里没有 BIGA-RUN-ID 标记——v22 之前 spawn 的都这样。证不了，但也不算伪造",
+    "runtime_agent_unavailable":
+        "运行时记录里读不出 agent（表结构变了？）—— 证不了",
+    "legacy_run_without_spawn_plan":
+        "这个 run 早于 schema v22，没冻过「期望 spawn 名单」——只能按今天的 Registry 猜，而那对改过 agent 名册的历史 run 会猜错，所以一律降级为判不了",
     "unsupported_provenance_mode":
         "账本行的 provenance_mode 不是 online/legacy（多半是 v19 之前落的历史行）"
         "—— 证不了也不算伪造",
@@ -517,6 +570,14 @@ _UNPROVEN_HINT: dict[str, str] = {
 #: FAIL 的原因码 → 给人看的一句话。与上面分开，因为**排查方向完全不同**：
 #: UNKNOWN 去查数据与时机，FAIL 去查「谁写了这行 / 为什么运行时没有它」。
 _FAIL_HINT: dict[str, str] = {
+    "runtime_biga_run_mismatch":
+        "🔴 运行时那条记录属于**另一次 BigA 编排** —— 同 decision 的别的 run 的 spawn 被拿来给这次背书",
+    "runtime_agent_mismatch":
+        "🔴 运行时那条记录属于**另一个 agent** —— 一次真 spawn 被拿来给别的 agent 背书。查谁填的 runtime_run_id",
+    "ledger_agent_mismatch":
+        "账本行的 agent 与期望不符（取行时按 agent 分组过，出现它说明数据被改过）",
+    "expected_agent_missing":
+        "计划里点名要 spawn 这个 agent，但这次 run 的账本里**一行都没有**——它没被启动，或者启动了但账本没记上。查 orchestrator 的 Stage 1 结果",
     "duplicate_online_rows":
         "同一次 run 同一个 agent 有**多条** online 账本行 —— "
         "一条真的 runtime_run_id 会把另一条伪造的盖住，所以整体不作数。"
@@ -709,17 +770,50 @@ def spawn_proof_for_run(run_id: str) -> SpawnProof:
             unreadable_reason=("读不到运行时的 spawn 记录"
                                "（subagent_runs / task_runs 两张都不在，或在却读不了）"))
 
-    runtime_ids = {r.get("run_id") for r in spawns if r.get("run_id")}
+    # 🔴 B1：保留**完整记录**，不再压成 id 集合 —— agent 与 biga_run_id 都要比。
+    runtime_by_id = {r["run_id"]: r for r in spawns if r.get("run_id")}
+
+    # 🔴 B1/N2：期望名单读**开 run 时冻下的那份**，不读今天的 Registry。
+    from _store import expected_spawn_agents as _frozen_plan
+    plan = _frozen_plan(run_id)
+    plan_warning: str | None = None
+    if plan is None:
+        # v22 之前开的 run 没冻过计划。**不退回今天的 Registry 报 PASS** ——
+        # 那正是 N2 要防的：加/删 agent 之后，用今天的名单核老卡会得出错的期望集。
+        plan_warning = "legacy_run_without_spawn_plan"
+        plan = [a for a in list(STAGE1_AGENTS) + list(STAGE2_AGENTS)
+                if a != "discipline"]
 
     status: dict[str, tuple[str, str]] = {}
     out: dict[str, tuple[bool, bool]] = {}
     unproven: dict[str, str] = {}
     failed: dict[str, str] = {}
-    for agent in list(STAGE1_AGENTS) + list(STAGE2_AGENTS):
-        if agent == "discipline":
-            continue
-        st, reason = verify_agent_rows(rows_by_agent.get(agent, []),
-                                       runtime_ids=runtime_ids)
+    # 🔴 核验范围 = 计划 ∪ **实际有在线账本行的 agent**。
+    #    只按计划走会留一个洞：给一个**不在计划里**的 agent 伪造一行在线记录，
+    #    它根本不会被看一眼。实测发现——`risk` 是条件 spawn、不在计划里，
+    #    但这次它真的被 spawn 了、也真的有账本行，而核验完全跳过了它。
+    #    ⇒ 计划里的**必须**证明得了（缺席即 FAIL）；计划外但有行的**也要**过三元组。
+    extra = sorted(set(rows_by_agent) - set(plan))
+    for agent in list(plan) + extra:
+        st, reason = verify_agent_rows(
+            rows_by_agent.get(agent, []),
+            runtime_by_id=runtime_by_id,
+            expected_agent=agent,
+            expected_biga_run_id=run_id)
+        # 🔴 计划里点名的 agent **没有账本行 = FAIL**，不是 ABSENT。
+        #    上一版把它算成 ABSENT ⇒ 只要有一个 agent 过，`spawn_check` 就退 0 ——
+        #    于是那条名为「每个 Specialist 都真被 spawn 了」的命令，实际上
+        #    不要求这次期望的每一个 agent 都在（评审 §4.3 的 PoC）。
+        if st == "ABSENT":
+            st, reason = "FAIL", "expected_agent_missing"
+        # 🔴 没冻过计划时的降级：**PASS 和「缺席」两个方向都要降**。
+        #    · PASS → UNKNOWN：不知道当时期望谁，就不能说「都齐了」
+        #    · expected_agent_missing → UNKNOWN：同理，不知道期望谁，
+        #      就不能指控某个 agent 缺席（那个名单是按今天的 Registry 猜的）
+        #    ⚠️ 其余 FAIL（agent 对不上 / run 对不上 / 运行时查无此记录）**不降**：
+        #      那些是**观察到的**矛盾，与「当时期望谁」无关。
+        if plan_warning and (st == "PASS" or reason == "expected_agent_missing"):
+            st, reason = "UNKNOWN", plan_warning
         status[agent] = (st, reason)
         # 三个旧视图从同一份判据派生 —— 不各算一遍（L-3）。
         out[agent] = {"ABSENT": (False, False),

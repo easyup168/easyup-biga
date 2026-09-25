@@ -38,6 +38,8 @@ from .notify import (
 )
 from .run import (
     INITIAL_STATE,
+    RUN_MARKER_PREFIX,
+    RUN_MARKER_RE,
     LEGAL_TRANSITIONS,
     RUN_ORIGINS,
     RUN_STATES,
@@ -46,6 +48,7 @@ from .run import (
     RunState,
     new_evidence_set_id,
     new_run_context,
+    parse_run_marker,
     new_run_id,
     new_trigger_id,
 )
@@ -118,6 +121,9 @@ __all__ = [
     "RUN_STATES",
     "TERMINAL_STATES",
     "RunContext",
+    "RUN_MARKER_PREFIX",
+    "RUN_MARKER_RE",
+    "parse_run_marker",
     "RunState",
     "new_evidence_set_id",
     "new_run_context",

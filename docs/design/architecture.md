@@ -622,6 +622,7 @@ v16 到 v20 **都不新增表** —— 只给已有表加列与改约束，所�
 | v19 | `agent_runs.provenance_mode` | 区分在线执行行与历史行，是 Run 级 spawn 核验的三态判据 |
 | v20 | 撤掉 v18 | 一条不变量不许有两个名字 |
 | v21 | `ux_online_agent_run_once` | 一次 run 一个 agent 至多一条在线账本行——多条时一条真 `runtime_run_id` 会把另一条伪造的**盖住** |
+| v22 | `decision_runs.expected_spawn_agents` + `ux_online_runtime_run_id` | 冻结「这次该启动谁」；一个运行时 id 不许给两行背书（见 §5.3.8）|
 
 🔴 v18 / v20 这一来一回值得留在这里，因为它是 **L-3 的一个新鲜样本**：
 v18 照抄外部评审给的建议索引，**没有先查这条不变量是不是已经有人在守** ——
@@ -630,13 +631,63 @@ v18 照抄外部评审给的建议索引，**没有先查这条不变量是不�
 ⇒ 评审给的是**形状**，不是「你缺这个」；照抄之前先 grep 一遍。
 由 `tests/test_run_provenance.py::test_一个run至多一个切片的约束只应有一条` 钉住。
 
-完整 21 个版本各一句话摘要见 [`schema-rollback.md`](../guide/schema-rollback.md)，
+完整 22 个版本各一句话摘要见 [`schema-rollback.md`](../guide/schema-rollback.md)，
 权威说明仍是 `schema.py` 逐条迁移体正上方的注释。
 
 ⚠️ **只读打开一个还不存在的库**会抛 `StoreNotInitialised`（v5 加），
 而不是裸的 `sqlite3.OperationalError`。它与「schema 建好但零行」是两回事 ——
 后者是全新环境的**正常状态**，把它也报成错会有人为了消警告去塞假数据。
 巡检工具据此统一退出码 2（判不了），见 §9 的 R-3。
+
+#### 5.3.8 Spawn 证明为什么必须是**三元组**
+
+要证的不是「这个 runtime id 在运行时库里出现过」，是：
+
+```text
+(BigA orchestration_run_id, agent, OpenClaw runtime_run_id)
+```
+
+少任何一条边，都有一条真实可走的路绕过去（外部评审 2026092503 实测两条 PoC）：
+
+| 少哪条边 | 后果 |
+|---|---|
+| 不比 agent | 一次真 spawn 可以给**另一个 agent** 背书（news 的 run 证明 market 的行）|
+| 不比 BigA run | 同一 decision 下**另一次编排**的 spawn 可以给这次背书 |
+| 不查期望名单 | 只证明了一个 agent，`spawn_check` 照样退 0 |
+
+🔴 把两边绑在一起的那根线，是**运行时记下的任务文本里带着 BigA 的 run id**
+（`_contract.RUN_MARKER_PREFIX`）。这段文本是 OpenClaw 抄下来的，BigA 事后改不了它
+—— 这正是「被验证方写不到的地方才算证据」那条前提的落点。
+
+⚠️ **不要拿提示词里那句 `--run-id …` 当判据**：那是给 agent 的指令，措辞会改
+（已经改过几次），拿它解析就是按字符串形状写判据（L-13）。
+
+🔴 **期望 Verdict 名单 ≠ 期望 spawn 名单。** 卡上的 `expected_roster` 回答
+「该有谁的判定」；`decision_runs.expected_spawn_agents`（v22）回答「该**启动**谁」。
+`risk` 可以在确定性早退里由编排器直接算出事实、根本不被 spawn —— 它有 Verdict
+但不该有运行时记录。两份名单合并，那两条正确路径就会被核成红的。
+
+计划必须在**开 run 时**冻死：将来加 / 删 agent 之后，用今天的 Registry 去核一张
+老卡会得出错的期望集。没冻过计划的老 run **整体降级为 UNKNOWN**，不退回今天的
+Registry 报 PASS。
+
+#### 5.3.9 执行账本的三个写入口
+
+裸插入接口是私有的（`_record_agent_run`）。公开面上只有三个，名字就说清了
+它写的是**哪一档证据**：
+
+| 入口 | provenance_mode | 什么时候用 |
+|---|---|---|
+| `record_online_agent_run` | `online` | 三字段齐、`task_id==decision_id`、runtime id 未被别的在线行占用 |
+| `record_unproven_spawn_attempt` | `online_unproven` | 确实 spawn 过，但没捞回 runtime id |
+| `record_legacy_agent_run` | `legacy` | 历史 / 手工路径，不带 run |
+
+🔴 **`runtime_run_ids is None` ⇒ `persist()` 一行都不记。** 映射**就是**执行溯源
+本身。旧语义「不给映射就给所有 verdict 记账」会让 standalone 合成写出一串自称
+在线、却证不了任何事的幽灵行 —— 它根本没 spawn 过任何东西。
+
+🔴 **`online_unproven` 为什么要单独一档**：漏账比记一条判不了的账更糟，但
+**把判不了的账记成「已证明」比漏账还糟**。核验侧把它判成 UNKNOWN。
 
 #### 5.3.7 交易日历：为什么换源、以及那三层
 

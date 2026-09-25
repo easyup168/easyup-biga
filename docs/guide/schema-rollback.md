@@ -17,7 +17,7 @@ print('SCHEMA_VERSION =', SCHEMA_VERSION, '| 迁移条数 =', len(MIGRATIONS))
 ```
 
 ```
-SCHEMA_VERSION = 21 | 迁移条数 = 21
+SCHEMA_VERSION = 22 | 迁移条数 = 22
 ```
 
 | 版本 | 一句话（摘自 `schema.py` 对应迁移体正上方的注释） |
@@ -43,6 +43,7 @@ SCHEMA_VERSION = 21 | 迁移条数 = 21
 | v19 | `agent_runs.provenance_mode` —— 区分在线执行行与历史行 |
 | v20 | 撤掉 v18（**`DROP INDEX`**）—— 一条不变量不许有两个名字 |
 | v21 | 一次 run 里一个 agent 至多一条**在线**账本行 —— 多条时真 id 会掩盖伪造 id |
+| v22 | 冻结「这次该启动谁」（`expected_spawn_agents`）+ 一个运行时 id 不许给两行背书 |
 
 ## 为什么没有 DOWN migration
 

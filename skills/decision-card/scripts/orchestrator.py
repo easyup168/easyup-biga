@@ -41,7 +41,8 @@ sys.path.insert(0, str(_HERE.parent.parent.parent.parent / "skills"))
 #    共用同一份计算，不发明第二套（skill 目录带连字符，脚本文件是下划线，加路径后可 import）。
 sys.path.insert(0, str(_HERE.parent.parent.parent / "risk-check" / "scripts"))
 
-from _contract import (  # noqa: E402
+from _contract import (
+    RUN_MARKER_PREFIX,  # noqa: E402
     EXPECTED_ROSTER,
     RISK_AGENT,
     SNAPSHOT_INDEX_AGENTS,
@@ -168,7 +169,12 @@ class DecisionOrchestrator:
         did = ctx.decision_id or reserve_decision_id(by="orchestrator")
         if ctx.decision_id != did:
             ctx = dataclasses.replace(ctx, decision_id=did)
-        open_run(ctx)  # RECEIVED
+        # 🔴 开 run 就把「期望 spawn 谁」冻死（schema v22 / 评审 B1）。
+        #    只冻 Stage 1 五个：`risk` 是**条件 spawn** —— 两种确定性早退里由编排器
+        #    直接算出事实、根本不启动它。把 risk 写进计划，那两条路就会被核成
+        #    「少了一个期望 agent」而报红，而它们恰恰是正确行为。
+        #    ⚠️ 这与卡上的 `expected_roster` 是两份名单，不要合并（见 open_run 的说明）。
+        open_run(ctx, expected_spawn_agents=list(STAGE1_AGENTS))  # RECEIVED
 
         state = RunState.RECEIVED
         run_timeout = max(30, self.stage1_sec)
@@ -259,7 +265,7 @@ class DecisionOrchestrator:
                     # verdict_ref、按判断表给 stance、amend 一行（新提示词见 _risk_task）。
                     gid_r = f"g-{ctx.run_id[:8]}-risk"
                     rh = ad.start(RISK_AGENT, did,
-                                  self._risk_task(did, risk_ref, risk_fb),
+                                  self._risk_task(did, risk_ref, risk_fb, ctx.run_id),
                                   group_id=gid_r, run_timeout_sec=max(30, self.risk_sec))
                     try:
                         risk_budget = self._stage_timeout(deadline, self.risk_sec)
@@ -438,6 +444,23 @@ class DecisionOrchestrator:
             pass
 
     # ── 任务文本（给 Specialist / risk / 判官的指令）──────────────────────
+    @staticmethod
+    def _run_marker(run_id: str) -> str:
+        """给任务文本加一行**机器可读**的 BigA run 标记。
+
+        🔴 它不是给 agent 看的指令，是给**核验**看的证据。
+        spawn 核验要证明的三元组是
+        `(BigA orchestration_run_id, agent, OpenClaw runtime_run_id)` ——
+        前两项在 BigA 自己的账本里，第三项在运行时库里，而把它们**绑在一起**
+        的那根线，只能是运行时记下的任务文本里带着 BigA 的 run id。
+
+        ⚠️ 为什么不复用提示词里那句 `--run-id {run_id}`：那是**指令**，
+        措辞随时会改（它已经改过几次），拿它当判据就是按字符串形状写判据（L-13）。
+        这一行是**契约**：格式固定、只此一处、由 `RUN_MARKER_RE` 解析。
+        """
+        return f"\n{RUN_MARKER_PREFIX}{run_id}\n"
+
+
     def _specialist_task(self, agent: str, did: str, evidence_set_id: str,
                          run_id: str) -> str:
         # 🔴 绝不在指令里出现日期（ORCHESTRATION.md 反复踩过）——走宽松模式，
@@ -457,9 +480,9 @@ class DecisionOrchestrator:
                 f"\n本次决策的指数日线已冻结（evidence_set_id={evidence_set_id}）。"
                 f"跑 skill 时必须再加 --evidence-set-id {evidence_set_id} —— "
                 f"读这份冻结快照，不要自己联网抓日线，这样所有 Specialist 看的是同一份。")
-        return base
+        return base + self._run_marker(run_id)
 
-    def _risk_task(self, did: str, risk_ref: int, fb) -> str:
+    def _risk_task(self, did: str, risk_ref: int, fb, run_id: str) -> str:
         # 🔴 批 F：事实已由编排器算好并落库（verdict_ref=risk_ref）。risk 不再自己跑
         #    risk_check.py —— 只读这份事实、按它 AGENTS.md 的判断表给 stance、amend 一行。
         #    事实字段全给它（自包含），免得它去 grep/find 找东西（dev-workflow §5）；
@@ -479,7 +502,11 @@ class DecisionOrchestrator:
             f"── 提交判断 ──\n"
             f"照你 AGENTS.md「最后一步」那条命令，--ref 填 {risk_ref}、--stance 填你的结论：\n"
             f"  python3 skills/decision-card/scripts/amend_verdict.py --ref {risk_ref} --stance <你的判断>\n"
-            f"（verdict={fb.verdict}：UNKNOWN 时 stance 只能「无法判定」。）")
+            f"（verdict={fb.verdict}：UNKNOWN 时 stance 只能「无法判定」。）"
+            # 🔴 risk 也必须带标记。它的 skill 不收 --run-id（事实由编排器落、
+            #    assessment 从 fact 行继承），所以**只有这一行**能把这次 spawn
+            #    绑回 BigA 的 run —— 没有它，risk 这一支永远证不了。
+            + self._run_marker(run_id))
 
     def _synth_task(self, did: str, verdicts) -> str:
         return (

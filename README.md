@@ -6,8 +6,8 @@
 
 [![Status](https://img.shields.io/badge/status-architecture%20baseline%20hardening-d29922)](TODO.md)
 [![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
-[![Tests](https://img.shields.io/badge/tests-1875%20hermetic-555)](#当前实现状态)
-[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v21-555)](docs/tutorial/04-store-layer.md)
+[![Tests](https://img.shields.io/badge/tests-1891%20selected-555)](#当前实现状态)
+[![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v22-555)](docs/tutorial/04-store-layer.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2ea043)](LICENSE)
 [![Trading](https://img.shields.io/badge/live%20trading-disabled-555)](#当前边界)
 
@@ -334,7 +334,7 @@ Trigger
 → DecisionCard
 ```
 
-这条链的 Run Provenance 已完整落地（schema v21）：一张卡属于哪次执行、
+这条链的 Run Provenance 已完整落地（schema v22）：一张卡属于哪次执行、
 基于哪份切片，现在是一句 SQL，不必解 `card_json`。
 
 ### 5. Runtime Proof 不能由业务代码自证
@@ -423,7 +423,7 @@ Notification = FAILED / RETRYING
 | Apache-2.0 开源合规基础 | ✅ |
 | Run → EvidenceSet → Verdict → Card 强身份闭环 | ✅ |
 | 真实 Run / EvidenceSet 根节点写边界校验 | ✅ |
-| Run-scoped OpenClaw Spawn Proof | ✅ |
+| Exact Runtime Proof（BigA run + agent + OpenClaw runtime 三元组） | ✅ 真实运行实测 6/6 `exact_run_agent_runtime_match` |
 | Schema Migration 原子性 | ✅ |
 | 通知 Worker 单实例防重复发送 | ✅ |
 | Source ZIP / Clean Clone 默认测试全绿 | ✅ |
@@ -431,17 +431,25 @@ Notification = FAILED / RETRYING
 | 飞书启动失败重试策略 | 🔶 固定次数，无指数退避 |
 | Phase 2 出口条件 4（缺失跨天累积） | ✅ 跨 4 天 44 张卡（`tools/verify/exit_conditions.py`）|
 | Phase 2 出口条件 3（真实否决落库） | ⬜ 等一个命中 risk 阈值的交易日——不是开发问题 |
+| Phase 2 出口条件 5（延迟预算） | ✅ `elapsed_ms` 已修，实测 66.8s / $0.88（预算 90s）|
+| AgentRun 写边界闭合（三个显式入口） | ✅ 裸接口已私有 |
 | 交易日历（`market_is_open` 认节假日） | ✅ 2026-09-25 起真的认了（`bin/biga-calendar`）|
 | Dataset / Provider / Pipeline Registry | ⬜ 后续 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
 
-当前仓库有 **1875 条测试，SQLite schema v21**，全部通过。
+当前仓库有 **1890 条 Hermetic 测试选中，SQLite schema v22**，0 failed。
 
 | 口径 | 数字 | 怎么复现 |
 |---|---|---|
-| Hermetic（徽章与上面这个数用的就是它） | 1844 passed · 0 failed | `pytest`（clean clone / source ZIP 都是这个数） |
+| Hermetic **选中** | 见徽章 | `pytest -m "not installed and not live and not git"` |
+| 其中 **通过 / 跳过 / 失败** | 见下方 CI 输出 | 🔴 **「选中」不是「通过」** —— 见下 |
 | 环境相关（需显式开关） | `installed` 2 · `git` 2 | `pytest --run-installed` / `--run-git` |
-| Live Acceptance（真实 OpenClaw + 飞书） | ⬜ **未跑** | 需要盘中真实数据，见下 |
+| Live Acceptance（`phase1_acceptance --run-id`） | **PASS 8 · FAIL 0 · PENDING 1** | `BIGA-20260925-002`；剩 1 项需 `--live` 断源 |
+
+🔴 **「选中」≠「通过」。** 徽章上那个数是**选中**的条数；其中一部分是 skip
+（禁网、需要真实环境）。把 selected 当成 passed 报，就是把「没跑」写成「跑过了」——
+外部评审 N3 点名的正是这个。⇒ 徽章文案改成 `N selected`，具体 passed/skipped
+以 CI 输出为准（`tools/verify/sync_test_count.sh` 同步的是选中数）。
 
 🔴 **「全部通过」指的是 Hermetic 那一行，不包含 Live。** 这三个数以前混在一句话里，
 外部评审因此数出「至少三套数字」—— 徽章停在一个早就不成立的旧值上（同步脚本的
@@ -454,8 +462,8 @@ Notification = FAILED / RETRYING
 
 | tag | 指向 | 现在该怎么读它 |
 |---|---|---|
-| **`v0.4.0`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
-| `v0.3.6` · `v0.3.7` | 前两次复核 | 过程快照 |
+| **`v0.5.0`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
+| `v0.3.6` · `v0.3.7` · `v0.4.0` | 前几次复核 | 过程快照 |
 | `v1-architecture-baseline` | 一个更早的提交 | ⚠️ **已解冻，不再代表「可发布」。**保留是因为它是历史事实（当时确实 sign-off 过），不是因为它仍然成立 |
 | `v0.3.1` … `v0.3.4` | 各自的发布点 | 过程快照 |
 
@@ -693,7 +701,7 @@ Phase 2 跑通之后，出过好几次同一形状的事故：证据合成到错
 ├── bin/             biga / biga-card / biga-notify / biga-reap
 ├── deploy/openclaw/ Agent、Tool Policy、Profile 与 systemd 配置
 ├── tools/verify/    隔离、spawn、延迟、预算、配置与读回核验
-├── tests/           1875 条测试
+├── tests/           1891 条测试
 ├── docs/
 │   ├── design/      当前架构与阶段设计
 │   ├── guide/       安装、使用、回滚与运维

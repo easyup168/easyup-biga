@@ -56,8 +56,12 @@ ALL = [a for a in list(STAGE1_AGENTS) + list(STAGE2_AGENTS) if a != "discipline"
 MINE, OTHER = "BIGA-20260921-777", "BIGA-20260921-778"
 
 
-def fake_runtime_db(path: pathlib.Path, runs: list[tuple[str, str]]) -> pathlib.Path:
+def fake_runtime_db(path: pathlib.Path, runs: list[tuple[str, str]],
+                    biga_run_id: str | None = None) -> pathlib.Path:
     """造一份运行时状态库。`runs = [(agent, decision_id), …]`。
+
+    `biga_run_id`：往 payload 里写 `BIGA-RUN-ID:` 标记（B1 的三元组判据靠它）。
+    不给 ⇒ 不写，模拟 v22 之前 spawn 的记录（核验对它只能给 UNKNOWN）。
 
     字段形状照抄真库：`child_session_key` 是 `agent:<name>:subagent:<uuid>`，
     决策号明文出现在 `payload_json` 里。
@@ -71,7 +75,9 @@ def fake_runtime_db(path: pathlib.Path, runs: list[tuple[str, str]]) -> pathlib.
         conn.execute("INSERT INTO subagent_runs VALUES (?,?,?,?,?,?)", (
             f"run-{i}", f"agent:{agent}:subagent:uuid-{i}",
             "agent:main:card-1", "agent:main:card-1", 1000 + i,
-            f'{{"prompt":"本次决策编号 {did}，请…"}}'))
+            f'{{"prompt":"本次决策编号 {did}，请…'
+            + (f"\\nBIGA-RUN-ID: {biga_run_id}" if biga_run_id else "")
+            + '"}'))
     conn.commit()
     conn.close()
     return path
@@ -1204,7 +1210,7 @@ class TestRunIsolation:
     def test_record_agent_run_在线路径校验run归属(self, tmp_path):
         """P1-2：record_agent_run 带 orchestration_run_id 时必须核验 run 属于 decision。"""
         from _store import init_schema
-        from _store.db import record_agent_run
+        from _store.db import _record_agent_run as record_agent_run
         from tests._provenance import open_test_run, TEST_RUN_ID
 
         db = tmp_path / "t.db"
@@ -1223,7 +1229,7 @@ class TestRunIsolation:
     def test_record_agent_run_在线路径写入provenance_mode(self, tmp_path):
         """P1-2：orchestration_run_id 非空时，provenance_mode 自动置为 'online'。"""
         from _store import init_schema
-        from _store.db import record_agent_run, connect
+        from _store.db import _record_agent_run as record_agent_run, connect
         from tests._provenance import open_test_run, TEST_RUN_ID
 
         db = tmp_path / "t.db"
@@ -1304,7 +1310,8 @@ class TestProvenanceModeIsRead:
 
     RID = "c" * 32
 
-    def _wire(self, tmp_path, monkeypatch, rows, runtime):
+    def _wire(self, tmp_path, monkeypatch, rows, runtime, *,
+              runtime_biga_run: str | None = None):
         """`rows = [(agent, runtime_run_id|None, provenance_mode|None)]` 落真库。
 
         ⚠️ `provenance_mode=None` 会被 `record_agent_run()` 自动置成 `'online'`
@@ -1316,12 +1323,15 @@ class TestProvenanceModeIsRead:
         走 `_store.connect()`（事实层的唯一入口，不是裸 sqlite3）。
         """
         from _store import init_schema
-        from _store.db import record_agent_run
+        from _store.db import _record_agent_run as record_agent_run
         from tests._provenance import open_test_run
 
         db = tmp_path / "biga.db"
         init_schema(db)
-        open_test_run(db, decision_id=MINE, run_id=self.RID)
+        # 🔴 冻结「期望 spawn 谁」= 这批 rows 点名的那些。不冻 ⇒ 核验把这个 run
+        #    当成 v22 之前的老 run 整体降级为 UNKNOWN，测到的就不是想测的那条分支。
+        open_test_run(db, decision_id=MINE, run_id=self.RID,
+                      expected_spawn_agents=sorted({a for a, _, _ in rows}))
         monkeypatch.setenv("BIGA_DB_PATH", str(db))
         seen_online: set[str] = set()
         for agent, rr, mode in rows:
@@ -1337,8 +1347,10 @@ class TestProvenanceModeIsRead:
             else:
                 self._raw_row(db, agent=agent, runtime_run_id=rr,
                               provenance_mode=(None if mode == "__NULL__" else mode))
+        # 运行时记录带上本 run 的 BIGA-RUN-ID 标记 —— B1 三元组的第三条边。
         monkeypatch.setenv("BIGA_RUNTIME_DB",
-                           str(fake_runtime_db(tmp_path / "rt.db", runtime)))
+                           str(fake_runtime_db(tmp_path / "rt.db", runtime,
+                                               biga_run_id=runtime_biga_run or self.RID)))
         return db
 
     def _raw_row(self, db, *, agent, runtime_run_id, provenance_mode):
@@ -1449,7 +1461,7 @@ class TestProvenanceModeIsRead:
     def test_v21索引让重复在线行写不进来(self, tmp_path, monkeypatch):
         """库层的另一半：上面那种状态**根本不该能写进来**。"""
         from _store import init_schema
-        from _store.db import record_agent_run
+        from _store.db import _record_agent_run as record_agent_run
         from tests._provenance import open_test_run
 
         db = tmp_path / "t.db"
@@ -1467,7 +1479,7 @@ class TestProvenanceModeIsRead:
     def test_provenance_mode不是自由文本(self, tmp_path):
         """§5.6：调用方不能靠传字符串给自己换一个更弱的安全档位。"""
         from _store import init_schema
-        from _store.db import record_agent_run
+        from _store.db import _record_agent_run as record_agent_run
         from tests._provenance import open_test_run
 
         db = tmp_path / "t.db"
@@ -1536,7 +1548,7 @@ class TestOnlineLedgerRequiresDecision:
 
     def test_缺decision_id被拒(self, tmp_path):
         from _store import init_schema
-        from _store.db import record_agent_run
+        from _store.db import _record_agent_run as record_agent_run
 
         db = tmp_path / "t.db"
         init_schema(db)
@@ -1550,7 +1562,7 @@ class TestOnlineLedgerRequiresDecision:
     def test_伪造run不会留下自称online的行(self, tmp_path):
         """判据落在**库里有没有那行**上 —— 抛异常但仍然写进去等于没修。"""
         from _store import init_schema
-        from _store.db import connect, record_agent_run
+        from _store.db import _record_agent_run as record_agent_run, connect
 
         db = tmp_path / "t.db"
         init_schema(db)
@@ -1564,3 +1576,299 @@ class TestOnlineLedgerRequiresDecision:
             n = c.execute("SELECT COUNT(*) FROM agent_runs "
                           "WHERE provenance_mode='online'").fetchone()[0]
         assert n == 0, "校验没拦住：库里留下了一行自称 online 却指向假 run 的账本"
+
+
+class TestExactRuntimeIdentity:
+    """B1：spawn 证明必须是**三元组**精确匹配，不是「这个 id 出现过」。
+
+        (BigA orchestration_run_id, agent, OpenClaw runtime_run_id)
+
+    🔴 上一版只比 `ledger.runtime_run_id in runtime_ids`，评审两个 PoC 都实测
+    **PASS**：news 的 spawn 给 market 背书、Run A 的 spawn 给 Run B 背书。
+    逐条移植 `reference/runtime_proof_triple.py::verify_exact_runtime_identity`。
+
+    sabotage 验证：把 `verify_agent_rows` 里 `runtime_agent_mismatch` /
+    `runtime_biga_run_mismatch` 两条判断删掉，对应两条立刻变红。
+    """
+
+    RID = "e" * 32
+    OTHER_RID = "f" * 32
+
+    def _build(self, tmp_path, monkeypatch, *, ledger, runtime_rows,
+               plan, run_id=None):
+        """`ledger=[(agent, runtime_run_id)]`，`runtime_rows=[(agent, run_id, biga_run)]`。"""
+        from _store import init_schema
+        from _store.db import _record_agent_run as record_agent_run
+        from tests._provenance import open_test_run
+
+        rid = run_id or self.RID
+        db = tmp_path / "biga.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE, run_id=rid, expected_spawn_agents=plan)
+        monkeypatch.setenv("BIGA_DB_PATH", str(db))
+        for agent, rr in ledger:
+            record_agent_run(task_id=MINE, agent=agent, status="ok",
+                             started_at="t", finished_at="t", elapsed_ms=1,
+                             decision_id=MINE, runtime_run_id=rr,
+                             orchestration_run_id=rid, path=db)
+
+        rt = tmp_path / "rt.db"
+        conn = sqlite3.connect(rt)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, requester_session_key TEXT,"
+                     " task_kind TEXT, task TEXT, created_at INTEGER)")
+        for i, (agent, run, biga_run) in enumerate(runtime_rows):
+            marker = f"\nBIGA-RUN-ID: {biga_run}" if biga_run else ""
+            conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)", (
+                run, agent, f"agent:{agent}:subagent:uuid-{i}",
+                "agent:main:orchestrator-x", None,
+                f"本次决策编号 {MINE}。请…{marker}", 1000 + i))
+        conn.commit()
+        conn.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(rt))
+        return rid
+
+    def test_market不能借用news的runtime_id(self, tmp_path, monkeypatch):
+        """评审 §4.1 的 PoC：一次真 spawn 被拿来给**另一个 agent** 背书。"""
+        rid = self._build(
+            tmp_path, monkeypatch,
+            ledger=[("market", "runtime-news")],
+            runtime_rows=[("news", "runtime-news", "e" * 32)],
+            plan=["market"])
+        st, reason = pa.spawn_proof_for_run(rid).status["market"]
+        assert (st, reason) == ("FAIL", "runtime_agent_mismatch"), (st, reason)
+        assert spawn_check.main(["--run-id", rid]) == 1
+
+    def test_run_b不能借用run_a的runtime_id(self, tmp_path, monkeypatch):
+        """评审 §4.2 的 PoC：同一 decision 下，另一次 BigA 编排的 spawn 来背书。
+
+        🔴 运行时侧那条记录的 agent 是对的、决策号也是对的 —— 只有
+        `BIGA-RUN-ID` 对不上。没有这个标记，这条路根本发现不了。
+        """
+        rid = self._build(
+            tmp_path, monkeypatch,
+            ledger=[("market", "runtime-from-a")],
+            runtime_rows=[("market", "runtime-from-a", self.OTHER_RID)],
+            plan=["market"])
+        st, reason = pa.spawn_proof_for_run(rid).status["market"]
+        assert (st, reason) == ("FAIL", "runtime_biga_run_mismatch"), (st, reason)
+
+    def test_三元组都对才算通过(self, tmp_path, monkeypatch):
+        """守卫的反面：三条边都对上时**必须** PASS，否则守卫是空转的。"""
+        rid = self._build(
+            tmp_path, monkeypatch,
+            ledger=[("market", "runtime-ok")],
+            runtime_rows=[("market", "runtime-ok", "e" * 32)],
+            plan=["market"])
+        st, reason = pa.spawn_proof_for_run(rid).status["market"]
+        assert (st, reason) == ("PASS", "exact_run_agent_runtime_match"), (st, reason)
+        assert spawn_check.main(["--run-id", rid]) == 0
+
+    def test_缺了期望的stage1_agent不许通过(self, tmp_path, monkeypatch):
+        """评审 §4.3 的 PoC：只证明了一个 agent，`spawn_check` 却退 0。
+
+        判据落在**退出码**上 —— 那条命令叫「每个 Specialist 都真被 spawn 了」，
+        它必须要求这次**计划里**的每一个都在。
+        """
+        rid = self._build(
+            tmp_path, monkeypatch,
+            ledger=[("market", "runtime-ok")],
+            runtime_rows=[("market", "runtime-ok", "e" * 32)],
+            plan=["market", "sector", "news", "technical", "emotion"])
+        proof = pa.spawn_proof_for_run(rid)
+        assert proof.status["market"][0] == "PASS"
+        for a in ("sector", "news", "technical", "emotion"):
+            assert proof.status[a] == ("FAIL", "expected_agent_missing"), proof.status[a]
+        assert spawn_check.main(["--run-id", rid]) != 0, (
+            "五个期望 agent 只证明了一个，spawn_check 仍然退 0")
+
+    def test_没有run标记的历史记录判不了而不是伪造(self, tmp_path, monkeypatch):
+        """v22 之前 spawn 的任务文本里没有标记 —— UNKNOWN，不是 FAIL。
+
+        把「没有标记」读成「对不上」会把一批历史真 run 判成伪造。
+        """
+        rid = self._build(
+            tmp_path, monkeypatch,
+            ledger=[("market", "runtime-old")],
+            runtime_rows=[("market", "runtime-old", None)],
+            plan=["market"])
+        st, reason = pa.spawn_proof_for_run(rid).status["market"]
+        assert (st, reason) == ("UNKNOWN", "runtime_biga_run_unavailable"), (st, reason)
+        assert spawn_check.main(["--run-id", rid]) == 2
+
+    def test_没冻过计划的老run整体降级(self, tmp_path, monkeypatch):
+        """评审 N2：不许拿**今天的 Registry** 去核一个老 run 然后报 PASS。"""
+        rid = self._build(
+            tmp_path, monkeypatch,
+            ledger=[("market", "runtime-ok")],
+            runtime_rows=[("market", "runtime-ok", "e" * 32)],
+            plan=None)                      # ← 不冻计划
+        st, reason = pa.spawn_proof_for_run(rid).status["market"]
+        assert st == "UNKNOWN" and reason == "legacy_run_without_spawn_plan", (st, reason)
+        assert spawn_check.main(["--run-id", rid]) == 2
+
+
+class TestRuntimeIdUniqueness:
+    """B1 §4.4：一个 runtime_run_id 不许给两行背书（schema v22 的唯一索引）。"""
+
+    def test_同一个runtime_id不能绑两条在线行(self, tmp_path):
+        from _store import init_schema
+        from _store.db import _record_agent_run as record_agent_run
+        from tests._provenance import open_test_run
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        ra, rb = "1" * 32, "2" * 32
+        open_test_run(db, decision_id=MINE, run_id=ra)
+        open_test_run(db, decision_id=MINE, run_id=rb)
+        # contract-exempt: record_agent_run() 的入参，不是 AgentVerdict
+        base = dict(task_id=MINE, status="ok", started_at="t", finished_at="t",
+                    elapsed_ms=1, decision_id=MINE, path=db)
+        record_agent_run(agent="market", orchestration_run_id=ra,
+                         runtime_run_id="shared-runtime", **base)
+        with pytest.raises(Exception) as e:
+            record_agent_run(agent="news", orchestration_run_id=rb,
+                             runtime_run_id="shared-runtime", **base)
+        assert "UNIQUE" in str(e.value).upper() or "已被" in str(e.value), e.value
+
+
+class TestAgentRunWriteBoundary:
+    """B2：执行账本的公开写边界 —— 三个入口，每个名字说清它写的是哪一档证据。
+
+    🔴 裸插入接口已改私有（`_record_agent_run`）。公开面上只剩：
+
+    ============================== ==========================================
+    `record_online_agent_run`      完整在线证据（三字段齐 + task_id==decision_id）
+    `record_unproven_spawn_attempt` 确实 spawn 过，但没捞回 runtime id
+    `record_legacy_agent_run`      历史 / 手工路径，不带 run
+    ============================== ==========================================
+
+    sabotage 验证：把 `_record_agent_run` 改回公开名并从 `__all__` 暴露，
+    `test_裸插入接口不对外` 变红。
+    """
+
+    RID = "9" * 32
+
+    @pytest.fixture()
+    def db(self, tmp_path):
+        from _store import init_schema
+        from tests._provenance import open_test_run
+        p = tmp_path / "t.db"
+        init_schema(p)
+        open_test_run(p, decision_id=MINE, run_id=self.RID)
+        return p
+
+    def test_裸插入接口不对外(self):
+        """公开面上不许再有一个「什么都能写」的入口。"""
+        import _store
+        import _store.db as _db
+        assert not hasattr(_store, "record_agent_run"), (
+            "`record_agent_run` 又被导出了 —— 它能写出任何形状的账本行，"
+            "包括自称在线却不属于任何 run 的那种")
+        assert "record_agent_run" not in getattr(_db, "__all__", []), \
+            "`__all__` 里还留着裸接口"
+        assert hasattr(_db, "_record_agent_run"), "私有实现应当还在（内部三个入口用它）"
+
+    def test_online档位必须带run(self, db):
+        """B2 §5.1 的 PoC：显式 `provenance_mode='online'` + 无 run，曾经被接受。"""
+        from _store.db import _record_agent_run
+        with pytest.raises(ValueError, match="orchestration_run_id"):
+            _record_agent_run(task_id=MINE, agent="market", status="ok",
+                              started_at="t", finished_at="t", elapsed_ms=1,
+                              decision_id=MINE, runtime_run_id="runtime-x",
+                              orchestration_run_id=None,
+                              provenance_mode="online", path=db)
+
+    def test_online要求task_id等于decision_id(self, db):
+        """B2 §5.2：写边界自己拥有这条不变量，不靠「生产路径恰好传对了」。"""
+        from _store.db import record_online_agent_run
+        with pytest.raises(ValueError, match="task_id"):
+            record_online_agent_run(
+                decision_id=MINE, task_id="BIGA-20260101-999",
+                orchestration_run_id=self.RID, runtime_run_id="runtime-x",
+                agent="market", status="ok", started_at="t", finished_at="t",
+                elapsed_ms=1, path=db)
+
+    def test_unproven档位不冒充在线证据(self, db):
+        """确实 spawn 过、但没捞回 id ⇒ 记，且**明确标成证不了**。"""
+        from _store import connect, record_unproven_spawn_attempt
+        record_unproven_spawn_attempt(
+            decision_id=MINE, task_id=MINE, orchestration_run_id=self.RID,
+            agent="market", status="ok", started_at="t", finished_at="t",
+            elapsed_ms=1, path=db)
+        with connect(db, readonly=True) as c:
+            row = c.execute("SELECT provenance_mode, runtime_run_id, error "
+                            "FROM agent_runs").fetchone()
+        assert row["provenance_mode"] == "online_unproven"
+        assert row["runtime_run_id"] is None
+        assert row["error"], "要写下为什么证不了，否则事后分不清是没发生还是没捞到"
+
+    def test_unproven在核验里算判不了不算伪造(self, tmp_path, monkeypatch):
+        """它是第三态的一部分：不冤枉、也不放行。"""
+        from _store import init_schema, record_unproven_spawn_attempt
+        from tests._provenance import open_test_run
+        p = tmp_path / "t.db"
+        init_schema(p)
+        open_test_run(p, decision_id=MINE, run_id=self.RID,
+                      expected_spawn_agents=["market"])
+        monkeypatch.setenv("BIGA_DB_PATH", str(p))
+        record_unproven_spawn_attempt(
+            decision_id=MINE, task_id=MINE, orchestration_run_id=self.RID,
+            agent="market", status="ok", started_at="t", finished_at="t",
+            elapsed_ms=1, path=p)
+        monkeypatch.setenv("BIGA_RUNTIME_DB",
+                           str(fake_runtime_db(tmp_path / "rt.db",
+                                               [("market", MINE)],
+                                               biga_run_id=self.RID)))
+        st, _ = pa.spawn_proof_for_run(self.RID).status["market"]
+        assert st == "UNKNOWN", f"online_unproven 应判不了，实际 {st}"
+
+
+class TestOffPlanAgentsStillVerified:
+    """计划外但有在线账本行的 agent **也要**过三元组。
+
+    🔴 这个洞是真实运行里发现的：`risk` 是条件 spawn、不在冻结计划里，
+    这次它真被 spawn 了、也真有账本行 —— 而核验**完全跳过了它**。
+    只按计划走 ⇒ 给一个计划外的 agent 伪造一行在线记录，没有任何东西会看它一眼。
+
+    sabotage 验证：把 `spawn_proof_for_run` 里 `+ extra` 去掉，本条变红。
+    """
+
+    RID = "7" * 32
+
+    def test_计划外的伪造行也被抓(self, tmp_path, monkeypatch):
+        from _store import init_schema
+        from _store.db import _record_agent_run
+        from tests._provenance import open_test_run
+
+        db = tmp_path / "t.db"
+        init_schema(db)
+        open_test_run(db, decision_id=MINE, run_id=self.RID,
+                      expected_spawn_agents=["market"])      # ← risk 不在计划里
+        monkeypatch.setenv("BIGA_DB_PATH", str(db))
+        # contract-exempt: record 入参，不是 AgentVerdict
+        base = dict(task_id=MINE, status="ok", started_at="t", finished_at="t",
+                    elapsed_ms=1, decision_id=MINE,
+                    orchestration_run_id=self.RID, path=db)
+        _record_agent_run(agent="market", runtime_run_id="rt-market", **base)
+        _record_agent_run(agent="risk", runtime_run_id="rt-forged", **base)
+
+        rt = tmp_path / "rt.db"
+        conn = sqlite3.connect(rt)   # store-exempt: 外部运行时库的仿件
+        conn.execute("CREATE TABLE task_runs (run_id TEXT, agent_id TEXT,"
+                     " child_session_key TEXT, requester_session_key TEXT,"
+                     " task_kind TEXT, task TEXT, created_at INTEGER)")
+        conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)", (
+            "rt-market", "market", "agent:market:subagent:u1",
+            "agent:main:orchestrator-x", None,
+            f"本次决策编号 {MINE}\nBIGA-RUN-ID: {self.RID}", 1000))
+        conn.commit(); conn.close()
+        monkeypatch.setenv("BIGA_RUNTIME_DB", str(rt))
+
+        proof = pa.spawn_proof_for_run(self.RID)
+        assert proof.status["market"][0] == "PASS"
+        assert "risk" in proof.status, (
+            "计划外但有在线账本行的 agent 被完全跳过了 —— 伪造一行就能躲开核验")
+        assert proof.status["risk"] == ("FAIL", "runtime_record_not_found"), \
+            proof.status["risk"]
+        assert spawn_check.main(["--run-id", self.RID]) == 1

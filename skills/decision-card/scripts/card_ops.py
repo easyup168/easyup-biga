@@ -38,10 +38,11 @@ from _contract import (  # noqa: E402
     card_event_type,
 )
 from _store import (  # noqa: E402
+    record_online_agent_run,
+    record_unproven_spawn_attempt,
     load_online_card,
     load_verdict,
     load_verdict_meta,
-    record_verdict_run,
     save_card,
     save_card_with_notifications,
 )
@@ -174,7 +175,7 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
             runtime_run_ids: Mapping[str, str] | None = None) -> int:
     """落库，返回 `record_id`。在线路径 `replay_of=None`，回放路径填原始 record_id。
 
-    🔴 只在在线路径记账本（`agent_runs`，`record_verdict_run`）——回放不重新
+    🔴 只在在线路径记账本（`agent_runs`）——回放不重新
     执行任何 agent，给回放记一遍「执行」是假账。这与 `synthesize()` 保持纯函数
     是同一个理由的另一半：`persist()` 才是 IO 边界，账本这类「这次真的跑过」
     的记录只能长在这里，不能长在纯函数里。
@@ -197,26 +198,37 @@ def persist(card: DecisionCard, *, replay_of: int | None = None,
     live 验证时才暴露（不是安全洞：把成功误判成失败，不是把失败误判成成功）。
     """
     if replay_of is None:
-        for v in card.verdicts:
-            # 🔴 批 F：runtime_run_ids 提供时，它的 key 集就是「本次真正被 spawn 的 agent」
-            #    的权威名单 —— 只给这些 agent 记执行账本行（agent_runs）。risk 在两种
-            #    确定性早退（证据跨决策污染 / 完全没有上游）里由编排器**免费**算出事实、
-            #    根本没被 spawn：给它记一行「执行过」既是 L-8 幽灵账本行（记了没发生的事），
-            #    又会让 spawn_check 把它误判成伪造（agent_runs 有行、运行时 subagent_runs
-            #    没有 ⇒ forged）。⚠️ 判据是 key 在不在，不是 rr.get() 的值 —— 被 spawn 但
-            #    没拿到 runtime_run_id 的 agent 是「key 在、值 None」，仍要记账。
-            #    不提供 runtime_run_ids（synthesize.py / 测试 / 回放）时维持原样：给所有 verdict 记账。
-            if runtime_run_ids is not None and v.agent not in runtime_run_ids:
+        # 🔴 B2 §5.5：`runtime_run_ids is None` ⇒ **一行账本都不记**。
+        #
+        #    旧语义是「不提供映射就给所有 verdict 记账」，于是 standalone
+        #    `synthesize.py`（它只是把已有的 Verdict 拼成一张卡、**没有 spawn
+        #    任何东西**）会写出 6 行 `provenance_mode='online'` 且
+        #    `runtime_run_id` 全空的记录 —— 评审 PoC 实测。
+        #    那些行不描述任何执行事实，却长得像执行证据，是 L-8 的幽灵账本行。
+        #
+        #    ⇒ 语义改成：**映射是「执行溯源」本身，没有它就没有执行可记。**
+        for v in card.verdicts if runtime_run_ids is not None else ():
+            # 批 F：key 集是「本次真正被 spawn 的 agent」的权威名单。
+            # risk 在两种确定性早退里由编排器免费算出事实、未被 spawn ⇒ 不在映射里。
+            if v.agent not in runtime_run_ids:
                 continue
-            record_verdict_run(v, decision_id=card.decision_id,
-                               started_at=card.generated_at,
-                               finished_at=card.generated_at,
-                               model=card.model_ref,
-                               runtime_run_id=(runtime_run_ids or {}).get(v.agent),
-                               # 🔴 批 N：账本行指回**我们自己**那次编排执行尝试。
-                               #    取 card.run_id 而不是另传一个参数 —— 卡和账本必须
-                               #    说同一次执行，两个入参就是两套口径的起点。
-                               orchestration_run_id=card.run_id)
+            rr = runtime_run_ids[v.agent]
+            # contract-exempt: 账本写入的入参，不是 AgentVerdict
+            common = dict(decision_id=card.decision_id, task_id=v.task_id,
+                          agent=v.agent, status=v.status, verdict=v.verdict,
+                          missing_count=len(v.missing), elapsed_ms=v.elapsed_ms,
+                          model=card.model_ref,
+                          started_at=card.generated_at,
+                          finished_at=card.generated_at,
+                          # 🔴 批 N：账本行指回**我们自己**那次编排执行尝试。
+                          #    取 card.run_id，不另传参数 —— 卡和账本必须说同一次执行。
+                          orchestration_run_id=card.run_id)
+            if rr:
+                record_online_agent_run(runtime_run_id=rr, **common)
+            else:
+                # 🔴 「key 在、值 None」= 确实发起过 spawn，但没捞回 runtime id。
+                #    记，但**不许冒充完整证据**（B2 §5.4）：单独一个档位。
+                record_unproven_spawn_attempt(**common)
         # 🔴 批 G-I：在线路径出卡后，把这张卡分到一类外发通知并入队 —— **与 Card 落库
         #    同一个事务**（save_card_with_notifications）。要么卡和通知一起进库，要么
         #    一起回滚（探针 P1）。event_type 由 `_contract.card_event_type` 从卡本身推

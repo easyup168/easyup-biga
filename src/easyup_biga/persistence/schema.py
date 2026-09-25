@@ -882,6 +882,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_online_agent_run_once
 """
 
 
+# v22: 两件事 —— 冻结「这次 run 期望 spawn 谁」+ 运行时 id 在线唯一（B1/B2）。
+#
+# 🔴 `decision_runs.expected_spawn_agents`：**期望 Verdict 名单 ≠ 期望 spawn 名单**
+# -----------------------------------------------------------------------------
+# 卡上冻的 `expected_roster` 回答「这次该有谁的判定」，而 spawn 核验要回答的是
+# 「这次该**启动**谁」。两者不等价：`risk` 可以在确定性早退里由编排器直接算出
+# 事实、**根本不被 spawn**，那时它有 Verdict 但不该有运行时记录。
+#
+# 更要命的是「按今天的 Registry 反推当时该有谁」——将来加 macro、删 news、
+# 把 risk 从 LLM 换成确定性策略之后，拿今天的名单去核一张老卡会得出错的期望集。
+# ⇒ 名单必须在**开 run 时冻进这一行**，核验读它，不读今天的 Registry。
+#
+# 存 JSON 数组文本（`["market","sector",…]`）。NULL = v22 之前的老 run：
+# 核验对它们只能给 UNKNOWN + 警告，**不能**退回今天的 Registry 再报 PASS
+# —— 那正是这一列要消灭的东西。
+#
+# 🔴 `ux_online_runtime_run_id`：一个运行时 id 不许证明两行
+# ---------------------------------------------------------
+# v21 管的是 `(orchestration_run_id, agent)` 唯一，管不了**同一个 runtime_run_id
+# 被两行引用**。评审 PoC 实测：`Run A/market` 与 `Run B/news` 可以同时存
+# `shared-runtime`，两行都被接受 —— 于是一次真实 spawn 可以给两行背书。
+#
+# ⚠️ 加索引前实测过存量：在线行与全表都没有重复的 `runtime_run_id`（0 组），
+#    所以这条迁移不会在既有库上失败。评审也特意叮嘱了先查再加。
+_V22 = """
+ALTER TABLE decision_runs ADD COLUMN expected_spawn_agents TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_online_runtime_run_id
+    ON agent_runs(runtime_run_id)
+    WHERE provenance_mode = 'online' AND runtime_run_id IS NOT NULL;
+"""
+
+
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
@@ -905,6 +938,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (19, _V19),
     (20, _V20),
     (21, _V21),
+    (22, _V22),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

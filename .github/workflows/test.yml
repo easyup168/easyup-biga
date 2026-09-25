@@ -9,13 +9,20 @@ jobs:
     # 默认测试套件：只跑不依赖本机环境的测试（无 OpenClaw profile / bin/biga / .git）。
     # 目标：clean clone 里 pytest 0 failed 0 error。
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 🔴 3.12 是**声明支持**的版本（pyproject 的 requires-python）；
+        #    3.13 是提前探路（评审 N4）。fail-fast: false —— 3.13 红了不该
+        #    挡住 3.12 的结论，否则「支持的那个版本到底行不行」查不出来。
+        python-version: ["3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |

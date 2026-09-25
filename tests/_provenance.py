@@ -66,17 +66,24 @@ TEST_EVIDENCE_SET_ID = es_id_for(TEST_RUN_ID)
 
 
 def open_test_run(path, *, decision_id: str | None = None,
-                  run_id: str = TEST_RUN_ID) -> str:
+                  run_id: str = TEST_RUN_ID,
+                  expected_spawn_agents=None) -> str:
     """在测试库里真的开一个 run，返回它的 `run_id`。
 
     幂等：同一个 `run_id` 重复开会撞主键，所以内部先查一次。
+
+    `expected_spawn_agents`（schema v22）：这次 run 期望 spawn 谁。
+    🔴 不给 ⇒ 存 NULL ⇒ spawn 核验会把这个 run 当成「v22 之前的老 run」降级为
+    UNKNOWN。多数测试不关心 spawn 核验，留空是对的；**测 spawn 的那些必须给**，
+    否则测到的是降级分支而不是它想测的那条。
     """
     with connect(path, readonly=True) as conn:
         if conn.execute("SELECT 1 FROM decision_runs WHERE run_id=?",
                         (run_id,)).fetchone():
             return run_id
     open_run(new_run_context(origin="cli", non_interactive=True,
-                             decision_id=decision_id, run_id=run_id), path=path)
+                             decision_id=decision_id, run_id=run_id),
+             expected_spawn_agents=expected_spawn_agents, path=path)
     return run_id
 
 

@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,9 @@ from .card import DECISION_ID_RE
 from .evidence import now_cn
 
 __all__ = [
+    "RUN_MARKER_PREFIX",
+    "RUN_MARKER_RE",
+    "parse_run_marker",
     "RunState",
     "RUN_STATES",
     "TERMINAL_STATES",
@@ -209,6 +213,39 @@ def new_trigger_id(origin: str) -> str:
     `trigger_id`（天然幂等，批 G）。这里给 CLI/cron 生成一个带时间与随机尾巴的。
     """
     return f"{origin}-{now_cn().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+
+#: 写进**每一个** spawn 任务文本的机器可读 BigA run 标记。
+#:
+#: 🔴 它是 spawn 核验那根**跨系统的线**。要证明的三元组是
+#: `(BigA orchestration_run_id, agent, OpenClaw runtime_run_id)`：
+#: 前两项在 BigA 自己的账本里（被验证方自己写的），第三项在 OpenClaw 运行时库里
+#: （被验证方碰不到）。把两边绑在一起的唯一办法，是让**运行时记下的任务文本**
+#: 里带着 BigA 的 run id —— 那段文本是运行时抄下来的，BigA 事后改不了它。
+#:
+#: ⚠️ **不要拿提示词里那句 `--run-id …` 当判据。** 那是给 agent 的指令，
+#: 措辞会改（已经改过几次）；拿它解析就是按字符串形状写判据（L-13）。
+#: 这一行是契约：格式固定、定义只此一处、生产方（orchestrator）与消费方
+#: （spawn 核验）共用它。
+RUN_MARKER_PREFIX = "BIGA-RUN-ID: "
+
+#: 从任务文本 / payload 里抠标记。run_id 是 32 位小写 hex（见 `new_run_id`）。
+#: ⚠️ 收紧到 hex32 是有意的：宽松的 `(\S+)` 会把后面跟着的标点、引号、
+#: JSON 转义一起吃进来，而那种错**看起来像不匹配**，排查方向完全错。
+RUN_MARKER_RE = re.compile(RUN_MARKER_PREFIX + r"([0-9a-f]{32})")
+
+
+def parse_run_marker(text: str | None) -> str | None:
+    """从一段运行时文本里取 BigA run id。取不到返回 `None`（不抛）。
+
+    🔴 `None` 必须被消费方当成 **UNKNOWN**，不是「不匹配」：
+    v22 之前 spawn 的任务里根本没有这个标记，把「没有」读成「对不上」
+    会把一批历史真 run 判成伪造。
+    """
+    if not text:
+        return None
+    m = RUN_MARKER_RE.search(text)
+    return m.group(1) if m else None
 
 
 @dataclass(frozen=True)
