@@ -29,12 +29,20 @@ market/sector/technical 仍各自调 `fetch_index_daily`，跟今天一模一样
 在旁边把机制建好、验实。真正让 Specialist 改口读冻结快照是 **D-II**，它会改变
 现有 skill 的实际行为，需要先有这层被验实的地基。
 
-⇒ 因此现在 `freeze_index_daily` **还没有生产调用方**（编排器没接它）。它的读取方
-  是 `read_index_daily` 本身 + 探针（`tests/test_snapshot.py`）。调度层的消费方
-  在 D-II 出现。这是分批施工里一段**显式登记**的空档（与批 B 建 `evidence_sets`
-  表时「只建表、无生产方」同形），不是零消费方死配置（L-1）——见
-  `TODO.md`「批 D 施工空档」。误删这层不会有测试变红，但会把一段被记录在案的
-  中间态变成「谁建的、干嘛的」都答不上来的孤儿。
+⇒ 当时（D-I）`freeze_index_daily` **还没有生产调用方**，读取方只有
+  `read_index_daily` 本身 + 探针。那是分批施工里一段**显式登记**的空档
+  （与批 B 建 `evidence_sets` 表时「只建表、无生产方」同形），不是零消费方
+  死配置（L-1）。
+
+⏩ **2026-09-25 更正：那段空档早就结束了。** 批 D-II 已把它接进生产 ——
+  `skills/decision-card/scripts/orchestrator.py` 在 Stage 1 之前调用它冻结
+  sh/sz@120 根，market/sector/technical 带 `--evidence-set-id` 读同一份。
+
+  🔴 本段此前一直写着「现在还没有生产调用方」，**而它已经不成立很久了**。
+  这类漂移的危害不是读者少知道一件事，是**读者据此做决定**：一份说自己
+  没有生产调用方的模块，看起来是可以随便改签名的。
+  （外部设计 `BigA Data Architecture v1` 独立重扫源码时也点出了这处，
+  列在它的 gap 表 `Docs | coordinator 注释有历史漂移 | CLEANUP`。）
 """
 
 from __future__ import annotations

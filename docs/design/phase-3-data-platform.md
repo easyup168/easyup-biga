@@ -1,375 +1,312 @@
 # Phase 3 设计 —— 数据平台地基 + 第一条调度
 
-> 📄 **阶段 · 未开工**（适配裁定已定 2026-09-25 / P3-0 ⬜）
-> **覆盖**：Phase 3 的范围、里程碑、出口条件，以及外部设计包的 14 条适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
+> 📄 **阶段 · 进行中**（P3-0 ✅ / P3-1 ⬜）
+> **覆盖**：Phase 3 的设计基线、范围、里程碑、出口条件，以及本仓库对外部设计的适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
 
 > Phase 3 的**设计 SSOT**。结构性问题（存储平面选型、失败模式清单、表结构）
 > 仍以 [`architecture.md`](architecture.md) 为准 —— 本文不复制它，只在偏离时指名。
 
 ---
 
-## 0. 这份设计从哪来，以及为什么需要一章「裁定单」
+## 0. 设计基线
 
-2026-09-25 收到一份外部设计包（7 份文档 + 4 份参考代码骨架），解压在
-`docs/external/biga-phase3-data-platform-foundation-revised/`。
+**`BigA Data Architecture v1`（2026-09-25 收到）** 是 Phase 3 的设计基线。
+它**取代**了此前的「Phase 3 Data Platform Foundation」草案。
 
-它的方向与本仓库**高度一致**：包里提的四个存储平面（SQLite 控制面 / Raw 文件 /
-Parquet / DuckDB），[`architecture.md`](architecture.md) §5.1 早就逐项写死了选型
-**和触发条件**。所以它不是一份需要重新论证的新架构，而是把 §5.1 里
-「选型已定、未建」的三个平面**真的建起来**的施工图 —— 最贵的那部分论证已经做完了。
+两版的关键差别不在内容，在**它是怎么写出来的**：v1 是照 Phase 2 收口源码
+重新扫描得到的，旧草案是从理想架构反推的。结果是旧草案有两条与现状直接冲突
+（schema 从 v21 起排 —— 实际已是 v22；交易日历主源写官方端点 —— 实际那条路
+在本项目的部署环境里连不通、零生产调用方），而 v1 两条都对。
 
-🔴 **但它是按通用工程写的，不知道本仓库的守卫、裁定与既有实现。**
-逐条核对下来有 **14 处**会撞：其中 5 处会让现有守卫真的报红，4 处在替我们做
-一个没被讨论过的决定，5 处是包自身的内部矛盾或缺口。
+🔴 **两份外部材料都不在仓库里**（`.gitignore` 排除了 `docs/external/*`）
+⇒ 本文每条都自包含，不写「见外部包 §N」。
 
-### 为什么裁定单必须自包含
+### 0.1 本仓库先做的 14 条裁定，v1 怎么处理的
 
-`.gitignore` 第 62 行是 `/docs/external/*` —— 那个包**不在仓库里**
-（`external/` 下现在被跟踪的三份是当初显式 force-add 的）。
-⇒ 任何人 clone 下来都看不到它。所以下面每一条都**先复述外部包说了什么**，
-再给裁定，而不是写「见外部包 §N」。指向一个 clone 不出来的东西，
-和 [`../../CLAUDE.md`](../../CLAUDE.md) 里那条「一个 clone 不出来的数字比写 ⬜ 更糟」
-是同一个毛病。
+2026-09-25 早些时候，我按旧草案出过一份 14 条适配裁定。v1 到手后逐条对照：
 
-🔴 **开工时以本文为准，不以外部包为准。**
+| 结果 | 条数 | 说明 |
+|---|---|---|
+| **v1 独立得出同样结论** | 9 | schema v23 起排 / `required_datasets` 延到 P3-7 / 注册表在代码里照 `AGENT_REGISTRY` 形状 / 日历主源是 `sina_calendar` 而 `szse` 保留 / 不新建第二个 provider 包 / Manifest 缺版本按 v1 读 / DuckDB 推迟 / 不重写 Decision Kernel / `bin/biga-data` 独立 CLI |
+| **v1 更精确，按它改** | 4 | 见 §0.2 |
+| **v1 未涉及，本仓库自己的裁定保留** | 1 | 退出码映射（§1.2） |
 
----
+⚠️ 那 9 条是**独立到达**的 —— 我靠探活查库，v1 靠重扫源码。两条路得出同一个
+结论，这件事本身比任何一条结论都更值得记：**当设计与现状冲突时，现状赢，而
+查现状的成本比想象中低。**
 
-## 1. 适配裁定单
+### 0.2 v1 推翻了我的 5 处，其中 1 处是我判错
 
-| # | 外部包说 | 本仓库的实际 | 裁定 |
-|---|---|---|---|
-| 1 | Schema 从 **v21** 起 | `SCHEMA_VERSION = 22` | 从 **v23** 起排 |
-| 2 | CLI `biga data run <job>` | `bin/biga` 是纯 passthrough | 新建 **`bin/biga-data`** |
-| 3 | `eod-daily-bars.timer` | 单元名是共享命名空间（R-2） | **`eod-daily-bars-biga.timer`** |
-| 4 | 涨跌家数进 emotion dataset | 裁定 15：归 market | 拆出 **`cn.market.breadth`** |
-| 5 | 四份 `phase-3-*.md` + 三个新目录 | 一个阶段一份设计文档 | 合成**本文**一份 |
-| 6 | 独立 ADR 记存储选型 | §5.1 已逐项写死 | **不落 ADR**，增量补进 §5.1 |
-| 7 | 默认可以用第三方库 | `dependencies = []` | **pyarrow 进 dependencies** |
-| 8 | DuckDB 是 Phase 3 的一个平面 | §5.1：它不独立触发 | **推迟**到选股闭环 |
-| 9 | `required_datasets` 在 P3-0 验收 | registry.py 写明「现在不装」 | 跟 Resolver 一起进 **P3-7** |
-| 10 | 日历表改名扩列（同时又说「保留现实现」） | 现表是另一套列名 | **保留现表**，只注册不改列 |
-| 11 | Manifest **v2** | 现有 manifest 没有版本字段 | 缺字段 ⇒ **按 v1 读** |
-| 12 | `TIMEOUT → 1` | `_verdict.py`：2 查数据 / 1 查代码 | **`TIMEOUT → 2`** |
-| 13 | 范围只有数据平台 | 路线图还有 discipline / 飞书 / cron | **数据平台 + 第一条 cron** |
-| 14 | 16 条手写出口条件（两份，还不一样） | Phase 2 已吃过手写清单的亏 | 进 **`exit_conditions.py`** |
+P3-0 已按 v1 全部改过。逐条记在这里，因为每一条都是可复用的判断。
 
-下面按「会不会静默出错」分组展开。
+#### ① 注册范围：7 个 → 2 个（我判错了）
 
----
+我按「`raw_market_snapshot.source` 里真实出现过的 7 组」全收，理由是
+**「只收一半，『系统里有哪些数据集』就有两份答案」**。
 
-### 1.1 🔴 会撞守卫 / 破裁定（1–5）
+v1 写死：P3-0 只注册**现有持久链**的两个（`cn.trading_calendar` /
+`cn.index.daily_bars`），其余「在对应迁移 PR 才激活，避免 Registry 成为愿望清单」，
+并规划了一条守卫 **`no zero-consumer active dataset`**。
 
-#### 裁定 1 · Schema 从 v23 起排
+🔴 **v1 是对的，而且理由正是本仓库自己那条。** 我的理由把两个问题混成一个：
 
-外部包给的参考 schema 建七张表（`data_job_runs` / `data_run_events` /
-`provider_attempts` / `raw_artifacts` / `dataset_partitions` / `quality_reports` /
-`dataset_snapshots`），并规划 v21…v24 四步迁移。
+- 「系统里有哪些数据集」—— 今天的答案在**各 skill 的代码里**，Registry
+  收不收都改变不了。
+- 「Data Platform 管着哪些」—— 这才是名册该答的。
 
-实测 `SCHEMA_VERSION = 22`：**v21 与 v22 都已被占用**（v21 = `ux_online_agent_run_once`，
-v22 = `decision_runs.expected_spawn_agents` + `ux_online_runtime_run_id`）。
+那 5 个今天是 agent 直连 provider 的遗留路径，平台对它们一无所知。收进来
+等于让名册**声称管着 5 个它完全没接手的东西** —— 就是
+「点名了一个不存在的东西，读者会认为这条已经有人管了」。
 
-⇒ 七张表从 **v23** 起排。
+⇒ 待迁的 5 个记在 §2.2 的迁移清单里，各自在 P3-6 进册。
 
-> 🔴 这正是 **v20 撤 v18** 那次的形状 —— 当时照抄评审建议的索引名、没先 grep
-> 一遍既有约束，造出一条与 `ux_evidence_set_per_run` 逐字相同的索引（L-3）。
-> 照抄外部材料里的版本号是同一个动作。
+#### ② `provider_id` 从「站点前缀」改成「适配器级」（我判错的那一处的根）
 
-#### 裁定 2 · CLI 是 `bin/biga-data`，不是 `biga data`
+我取 `raw_market_snapshot.source` 的前缀，于是新浪的日线、日历、快讯合成
+一个 `sina`。**那个模型答错了它自己要答的问题**：`datasets_of("sina")` 会说
+「sina 挂了影响 3 个数据集」，而那是三个可以各自独立挂的端点 ——
+它系统性地**高估影响面**，而「它挂了会影响什么」正是这份名册的主要用途。
 
-外部包建议 `biga data list` / `biga data run eod-daily-bars --trade-date …`。
+⇒ `provider_id` 与 `providers/` 下的模块同名。我原本要守的那件事
+（别让同一个源有三套名字）挪到 `ProviderDefinition.source_prefix`，
+由测试单向钉住。
 
-[`bin/biga`](../../bin/biga) 是**纯 passthrough**：最后一行
-`exec "$BIGA_NODE" "$BIGA_ENTRY" --profile biga "$@"`。
-`biga data …` 会被原样转给 openclaw CLI，而它没有 `data` 子命令。
+#### ③ dataset id 命名与一处**概念**错误
 
-本仓库自己的 CLI 一直是**独立可执行文件**：`biga-card` / `biga-calendar` /
-`biga-notify` / `biga-reap`。⇒ 新建 **`bin/biga-data`**，子命令沿用包里的
-`list` / `run` / `status` / `snapshots` / `show-snapshot`，全部支持 `--json`。
+| 我写的 | v1 | 差别 |
+|---|---|---|
+| `cn.index.quote` | `cn.index.realtime_quote` | 命名 |
+| `cn.sector.rankings` | `cn.sector.board_snapshot` | 命名 |
+| `cn.market.emotion_close` | `cn.market.limit_pool` + `cn.market.emotion_close` | **概念** |
 
-> 这条不改的话不会静默出错 —— 它会当场报「未知子命令」。列在这里是因为
-> 它会污染 P3-1 的验收标准（写了一条跑不起来的命令）。
+最后一条不是改名：v1 把**原始涨停/炸板/跌停池**（observed，东财端点）与
+**情绪收盘指标**（derived，算出来的）拆成两个 dataset。我注册的那条内容其实是
+前者、名字用了后者 —— 而后者今天**根本不存在**（emotion agent 自己算，没落成
+数据集）。这正是裁定 16 的 `observed` / `derived` 之分在 dataset 层的体现。
 
-#### 裁定 3 · systemd 单元名带 `-biga` 后缀
+#### ④ 状态枚举分层：`DataStatus` → `DataRunStatus`
 
-外部包 §11 写第一条 Timer 是 `eod-daily-bars.timer`。
+v1 另有一个 `DatasetStatus`（`COLLECTING`/`VALIDATING`/`COMPLETE`/`PARTIAL`/
+`QUARANTINED`/`FAILED`/`SUPERSEDED`）描述**快照**的状态。我那个枚举描述的是
+**一次执行**的终态 —— 两层东西，几个值同名。
 
-**systemd 用户单元名是两套实例共享的命名空间**（红线 R-2 第 2 处）。既有单元
-全部带后缀（`notify-worker-biga.timer` / `stale-run-reaper-biga.timer`），
-由 [`tools/verify/isolation.py`](../../tools/verify/isolation.py) 的
-`check_namespaces` 守着 —— **这条会真的报红**。
+⇒ 改名 `DataRunStatus`，`COMPLETE` → `COMPLETED`（v1 的 Data Run 终态列表就是
+带 D 的，那个字母正是与 `DatasetStatus.COMPLETE` 拉开距离的地方）。
+`DatasetStatus` 等 P3-1 有快照可标时再加。
 
-⇒ `eod-daily-bars-biga.timer` / `.service`。装之前照例确认
-`OPENCLAW_SYSTEMD_UNIT` 是空的。
+#### ⑤ `coordinator.py` 的注释漂移
 
-#### 裁定 4 · 涨跌家数拆成 `cn.market.breadth`，不进 emotion dataset
+v1 的 gap 表点名 `Docs | coordinator 注释有历史漂移 | CLEANUP`。核实属实：
+它的 docstring 写着「现在 `freeze_index_daily` **还没有生产调用方**」，
+而 `orchestrator.py` 早在批 D-II 就接了。已修。
 
-外部包的 `cn.market.emotion_close` schema 里有 `advance_count` / `decline_count` /
-`advance_decline_ratio`，而 §7「Emotion 数据迁移」把这个 dataset 交给 Emotion Agent。
-
-**涨跌家数归 market 是裁定 15 的首次适用。** 代码里两处都写着：
-[`emotion_calc.py:25`](../../skills/emotion-calc/scripts/emotion_calc.py#L25)
-「🔴 涨跌家数不在这里（裁定 15）」、
-[`market_calc.py:22`](../../skills/market-calc/scripts/market_calc.py#L22)
-「上游文档把它同时派给了两个 agent」—— 是的，**同一份上游材料已经犯过一次**。
-还有一道全仓静态扫描 [`tests/test_field_single_producer.py`](../../tests/test_field_single_producer.py) 专门盯它。
-
-⚠️ 裁定 15 的但书是「**约束 agent，不约束 provider**」。所以问题不在于某张表里
-存了这些字段，而在于 `required_datasets` 把它**绑给 emotion 消费**。
-
-⇒ 拆成独立 dataset **`cn.market.breadth`**，消费方是 market。
-`cn.market.emotion_close` 只留涨停/跌停/炸板/连板那几个。
-
-#### 裁定 5 · 合成本文一份，不新建 `plan/` `test/` `adr/`
-
-外部包有四份 `phase-3-*.md`，分装在 `docs/design/` `docs/plan/` `docs/test/`
-`docs/adr/` 四个目录。
-
-- `test_一个阶段只有一份设计文档` 会红（四份 `phase-3-*`）
-- `plan/` `test/` `adr/` 不在 [`docs/README.md`](../README.md) 的类别表里，
-  `test_文件名符合所在目录的规则` 会红在「先去 docs/README.md 定义它」
-- 每份文档开头必须有类别标记 + `**覆盖**：` + `**不覆盖**：`，包里一份都没写
-
-⇒ 范围/里程碑/出口条件全部收进**本文**；测试清单进 `tests/` 与
-`exit_conditions.py`（见裁定 14）；ADR 见裁定 6。
+> 🔴 这类漂移的危害不是读者少知道一件事，是**读者据此做决定**：
+> 一份说自己没有生产调用方的模块，看起来是可以随便改签名的。
 
 ---
 
-### 1.2 🔶 它在替我们做决定（6–9）
+## 1. 本仓库的适配裁定
 
-#### 裁定 6 · 不落 ADR，把增量补进 §5.1
+v1 已经吸收了绝大部分。**仍然只在本仓库成立**的只剩下面几条。
 
-外部包里单独有一份 ADR，记四平面选型、Rejected 清单
-（PG / Redis / Kafka / ClickHouse / K8s）与 Revisit Triggers。
+### 1.1 systemd 单元名带 `-biga` 后缀
 
-[`architecture.md`](architecture.md) §5.1 **逐项都有**，而且切 PG 的触发条件更具体
-（>1 个并发写进程 / 需要跨机 / 单表 >5000 万行）。再放一份 ADR 就是 L-3：
-同一判据两个出处，改了一份忘另一份，剩下那份仍然看起来权威。
+v1 的 systemd 一节写 `biga data run eod-daily-bars --trade-date ...`，没写单元名。
+**systemd 用户单元名是两套实例共享的命名空间**（红线 R-2 第 2 处），既有单元
+全部带后缀，由 [`isolation.py`](../../tools/verify/isolation.py) 的
+`check_namespaces` 守着 —— **写默认名那条守卫会真的报红**。
 
-⇒ 不落这份 ADR。它真正**新增**的两条 Revisit Trigger（「多人同时使用」、
-「SQLite 长期锁冲突」）补进 §5.1 的触发条件列表。
+⇒ `eod-daily-bars-biga.timer` / `.service`。装之前确认 `OPENCLAW_SYSTEMD_UNIT` 是空的。
 
-#### 裁定 7 · pyarrow 进 `dependencies`，DuckDB 不进
+### 1.2 退出码对齐 `_verdict.py`
 
-⚠️ 先纠正一个容易搞错的点：`dependencies = []` 那道守卫
-（[`tests/test_packaging.py`](../../tests/test_packaging.py)）钉的是
-**「声明 ⇔ 代码双向一致」**，不是「零依赖」。加 pyarrow 并声明它，**守卫照样绿**。
+v1 **没有**规定 Data Job 的退出码映射 ⇒ 这条是本仓库自己的裁定，不是偏离。
 
-所以这是纯粹的产品取舍，代价是真实的但不在守卫上：
-**「clone 下来就能跑」变成「先联网装 pyarrow」** —— 对一份同时是开源教程的仓库
-有实感影响。
-
-⇒ 已裁定：**pyarrow 进 `[project.dependencies]`**。CHANGELOG 要写清为什么
-（§5.1 把「全市场 EOD 第一次建的时候就该用 Parquet」写死了，不是数据长大了才搬）。
-
-⇒ **不**走 optional-dependencies + 降级：那会让同一个 dataset 有两套存储口径、
-两条读路径，正是 L-3 的形状，而降级路径几乎不会被测到。
-
-#### 裁定 8 · DuckDB 推迟到选股闭环
-
-外部包把 DuckDB 列为 Phase 3 的四个平面之一，完成定义里有「DuckDB 跨日查询成功」。
-
-§5.1 写得很清楚：**DuckDB 不是独立触发的** —— 它是查 Parquet 用的引擎，真正
-有意义的触发点是「第一版选股闭环」开工（需要对全市场做批量特征计算）。
-
-Phase 3 里没有选股消费方 ⇒ 现在建就是 **L-1 零消费方**，本仓库最优先防范的
-失败模式。
-
-⇒ Phase 3 只建 Parquet（它有消费方：EOD bars 自己）。DuckDB 连同
-`duckdb` 依赖一起推迟。
-
-#### 裁定 9 · `required_datasets` 跟 Snapshot Resolver 一起进 P3-7
-
-外部包把「Agent `required_datasets` 全部存在」列进 **P3-0 的验收**。
-
-[`src/easyup_biga/domain/registry.py`](../../src/easyup_biga/domain/registry.py#L32)
-的 docstring 里有一整段专门写了当时**为什么不装这个字段**：
-「装一个没有消费方的字段就是一条 L-1 死配置」。
-
-Phase 3 确实解除了当时的理由（那时只有一个 dataset 走完全链）。但它的消费方
-**Snapshot Resolver 要到 P3-7 才有** —— 若按包里的顺序，P3-1…P3-6 这五个里程碑
-里它就是死配置。
-
-⇒ 字段跟 Resolver 同批进。P3-0 的验收改成「Dataset ID 唯一 / Provider ID 唯一 /
-未知 Dataset fail closed」三条，去掉第四条。
-
----
-
-### 1.3 ⚪ 包自身的矛盾与缺口（10–14）
-
-#### 裁定 10 · 交易日历保留现表，只注册不改列
-
-外部包自相矛盾：实施计划说「保留当前实现」，数据模型却给了一套改名扩列的 schema
-（`trade_date`→`calendar_date`、`source`→`provider_id`、`snapshot_id`→`raw_artifact_id`，
-另加 `exchange` / `previous_open_date` / `next_open_date` / `session_type` / `available_at`）。
-
-实测 `fact_trading_calendar` 是前一套，1326 行，批 L 刚落地，
-`market_is_open()` 正依赖它。
-
-⇒ **保留现表与现列名**。Phase 3 只补外围：Dataset 注册 / Provider 注册 /
-Quality Policy / DataJobResult / 覆盖状态。改列名要等到真有第二个交易所
-（现在只有一个来源、一个交易所，`exchange` 列没有消费方）。
-
-#### 裁定 11 · Manifest 缺版本字段 ⇒ 按 v1 读
-
-外部包定义 EvidenceSet Manifest **v2**（`manifest_version` / `knowledge_cutoff` /
-`datasets`），又在兼容性一节规定「未知状态 **fail closed**」。
-
-实测现库 12 行 `evidence_sets`，manifest 的键是
-`['frozen_bars', 'kind', 'symbols']` —— **没有 `manifest_version`**。
-照字面实现，这 12 张卡的 replay 全部挂掉。
-
-⇒ 读端显式规定：**缺 `manifest_version` ⇒ 按 v1 读**（`kind == "index_daily"`）。
-这不是给 fail-closed 开口子 —— v1 是一个**已知**状态，不是未知状态。
-写端从 P3-7 起一律写 `manifest_version: "2"`。
-
-> 🔴 验收判据不是「新卡能读」，是 **replay 那 12 张老卡仍然逐张通过**。
-
-#### 裁定 12 · 退出码对齐 `_verdict.py`
-
-外部包给的映射：`0 → COMPLETE/SKIPPED`、`1 → FAILED/CANCELLED/TIMEOUT`、
-`2 → PARTIAL/QUARANTINED`。
-
-本仓库有退出码的**唯一定义**
+本仓库有退出码的唯一定义
 （[`tools/verify/_verdict.py`](../../tools/verify/_verdict.py)）：
 `0 = PASS` / `1 = FAIL（查了真的不对，去看代码）` / `2 = UNKNOWN（没查成，
-去看数据与时机，别改代码）`，docstring 原话是「**`2` 去查数据，`1` 去查代码**」。
+去看数据与时机）`，原话是「**`2` 去查数据，`1` 去查代码**」。
 
-对照下来：`PARTIAL/QUARANTINED → 2` 是对的（覆盖率不足、双源冲突都是数据问题）；
-**`TIMEOUT → 1` 是错的** —— 超时是典型的「去看数据源/环境/时机」。
+| `DataRunStatus` | 退出码 | 为什么 |
+|---|---:|---|
+| `COMPLETED` / `SKIPPED_UP_TO_DATE` | 0 | 已经是最新不算失败 |
+| `FAILED` | 1 | 去看代码 / 配置 |
+| `PARTIAL` / `QUARANTINED` / `TIMEOUT` | 2 | 都是数据与时机问题 |
+| `CANCELLED` | 130 | 人按的 Ctrl-C，SIGINT 惯例，**不进三态** |
 
-⇒ **`TIMEOUT → 2`**。`CANCELLED` 是人主动中断，既不是 FAIL 也不是 UNKNOWN，
-单独走 `130`（SIGINT 惯例），不塞进三态。
+🔴 `TIMEOUT → 2` 是与旧草案的实质分歧（它退 1）。超时是典型的「去看数据源 /
+环境」，退 1 会让排查方向天生是错的。
 
-#### 裁定 13 · 范围 = 数据平台 + 第一条 cron
+⚠️ 这三个数字因此在仓库里有两个出处（L-3 的形状）⇒ 由
+[`tests/test_data_registry.py`](../../tests/test_data_registry.py) 钉住两者不矛盾。
+没有把 `_verdict.py` 搬进包里：它的 docstring 明确把范围限定为
+「`tools/verify/` 下工具的进程退出码」，搬过来等于擅自扩大它的管辖。
 
-[`TODO.md`](../../TODO.md) 的路线图写的 Phase 3 是
-**数据层加厚 + `discipline`（含它的输入源）+ 独立飞书应用 + 第一条 cron**，
-出口条件是「每条 cron 都有**被证明的**消费方」。外部包只覆盖第一项。
+### 1.3 `cn.market.limit_pool` 不许绑给 emotion 消费市场宽度
 
-⇒ Phase 3 = **数据平台 + 第一条 cron**。理由：EOD job 的 timer 天然就是第一条
-调度，路线图那条出口条件对它**直接适用、且能真的验**（消费方就是 EvidenceSet）。
+v1 已经把宽度（`cn.market.breadth`）与情绪池（`cn.market.limit_pool`）分成
+两个 dataset，方向与裁定 15 一致。这里补一句仓库特有的约束：
 
-⇒ 推到 **Phase 3b**：
-- `discipline` —— 裁定 13 推迟它的理由**至今成立**：输入源仍不存在，硬建只能编
-- 独立飞书应用 —— 与数据平台无耦合，现有 outbox 两张表已够 Phase 3 告警用
+P3-6 迁移时，`cn.market.breadth` 的消费方是 **market**，不是 emotion。
+代码两处都写着这件事（[`emotion_calc.py:25`](../../skills/emotion-calc/scripts/emotion_calc.py#L25)、
+[`market_calc.py:22`](../../skills/market-calc/scripts/market_calc.py#L22)），
+还有一道全仓静态扫描 [`test_field_single_producer.py`](../../tests/test_field_single_producer.py) 盯着。
 
-🔴 这是一次**明确的范围收窄**，不是遗漏。路线图那一行要同步改，
-否则它会静默变成一张对不上的表（Phase 2 条件 4「达成了四天没人知道」就是这个形状）。
+⚠️ 裁定 15 的但书是「约束 agent，不约束 provider」—— 所以问题不在于哪张表
+存了它，而在于 `required_datasets`（P3-7）把它绑给谁消费。
 
-#### 裁定 14 · 出口条件进 `exit_conditions.py`
+### 1.4 文档落地形态
 
-外部包有**两份**手写出口条件清单（架构文档 16 条 + 实施计划 16 条），
-而且内容不完全一样 —— 本身就是 L-3。
+v1 是 17 份文档 + 4 份 ADR。本仓库文档规约是**一个阶段一份设计文档**
+（`test_一个阶段只有一份设计文档`），且只有 `design/` `tutorial/` `guide/`
+`external/` 四个类别 ⇒ 全部收进**本文**；测试清单进 `tests/` 与
+`exit_conditions.py`；ADR-001 的四平面选型**不另起文件** ——
+[`architecture.md`](architecture.md) §5.1 早就逐项写死了，再放一份就是 L-3。
 
-Phase 2 刚吃过这个亏：条件 4 早就达成，**四天没人知道**，因为状态表是手写的。
-那次的产物就是 [`tools/verify/exit_conditions.py`](../../tools/verify/exit_conditions.py)。
+### 1.5 范围 = 数据平台 + 第一条 cron
 
-⇒ Phase 3 的出口条件**从第一天就进那个脚本**，能由程序判定的全部进，
-判不了的（演练类）在脚本里显式返回 `UNKNOWN`，不塞进 PASS。详见 §4。
+[`TODO.md`](../../TODO.md) 路线图原本把 Phase 3 写成
+「数据层加厚 + `discipline` + 独立飞书应用 + 第一条 cron」。
+
+⇒ Phase 3 = **数据平台 + 第一条 cron**（EOD timer 天然就是它，路线图那条出口
+条件「每条 cron 都有被证明的消费方」对它直接适用且能真的验）。
+`discipline`（输入源仍不存在）与独立飞书应用推到 **Phase 3b**。路线图已同步拆分。
 
 ---
 
 ## 2. 范围
 
-### 做
+### 2.1 做
 
 ```text
-Dataset Registry / Provider Registry / Data Job Registry
-通用 Raw Artifact Store（文件 + SQLite 元数据）
-Dataset Partition Store（Parquet）
-Dataset Snapshot + Quality Report
-第一批 Dataset：security_master / trading_calendar / index.daily_bars /
-                equity.daily_bars / security.tradability /
-                equity.adjustment_factors / market.emotion_close / market.breadth
-Snapshot Resolver + EvidenceSet Manifest v2
+Dataset / Provider Registry（代码唯一源，按 Milestone 激活）
+Data Run 状态机 + Raw Artifact + Partition + Quality + Dataset Snapshot 元数据
+把现有 index_daily Vertical Slice 接到通用 DatasetSnapshotService
+Security Master（point-in-time universe）
+全市场 EOD Daily Bars：Raw 归档 → Parquet → DuckDB
+Tradability + Adjustment Factors
+把 agent 直连 provider 的遗留路径迁到冻结事实
+SnapshotResolver + required_datasets + EvidenceSet Manifest v2
 第一条 cron：eod-daily-bars-biga.timer
 ```
 
-### 不做（本阶段）
+### 2.2 待迁清单（今天在跑，但**不由平台管**）
+
+这五条是 agent 直连 provider 的遗留路径。它们**不在 Registry 里**，
+各自在 P3-6 的迁移 PR 中进册；每迁一条，对应 skill 的生产路径删掉 direct fetch。
+
+| dataset_id | 今天谁在取 | 适配器 |
+|---|---|---|
+| `cn.index.realtime_quote` | market | `tencent` |
+| `cn.market.breadth` | market | `eastmoney` |
+| `cn.sector.board_snapshot` | sector | `eastmoney` |
+| `cn.market.limit_pool` | emotion | `eastmoney` |
+| `cn.news.flash` | news | `sina_news` |
+
+另有 `cn.market.emotion_close` —— 它是 **derived**（由 `limit_pool` 算出），
+不是 provider 原始数据集，随 P3-6 一起定型。
+
+### 2.3 不做（本阶段）
 
 ```text
-DuckDB / 分析查询平面        —— 裁定 8，推到选股闭环
-discipline agent             —— 裁定 13，推到 Phase 3b
-独立飞书应用                 —— 裁定 13，推到 Phase 3b
-分钟线 / Tick                —— §5.1 未触发
-PostgreSQL / Kafka / 多机    —— §5.1 的触发条件一条都没成立
-全部历史回填                 —— Phase 3 只保证「从今天起每天有」
-news dataset                 —— 见下
+discipline agent / 独立飞书应用   —— §1.5，推到 Phase 3b
+PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件一条都没成立
+分钟线 / Tick
+全部历史回填                     —— 只保证「从今天起每天有」
+重写 Phase 2 Decision Kernel     —— v1 的硬约束，所有改动沿现有边界扩展
 ```
 
-> ⚠️ **第一批 dataset 不含 news。** 而 Phase 2 出口条件 5 卡着的「盘后 198s
-> 超预算」，根因正是收盘后快讯量翻倍。⇒ **别把 P3-6（emotion 不再联网）
-> 当成顺带解决延迟问题记进 Phase 3 的账** —— 它不解决。
+> ⚠️ 第一批 dataset 不含 news 的**平台化**。而 Phase 2 出口条件 5 卡着的
+> 「盘后 198s 超预算」根因正是收盘后快讯量翻倍 ⇒ 别把 P3-6 当成顺带解决
+> 延迟问题记进 Phase 3 的账，它要到 news 那一条迁完才可能有影响。
 
 ---
 
 ## 3. 里程碑
 
-| # | 内容 | 与外部包的差异 |
-|---|---|---|
-| P3-0 ✅ | 契约 + Dataset/Provider Registry + `bin/biga-data list\|providers` | 去掉 `required_datasets` 验收（裁定 9）；CLI 从 P3-1 **拉前**（见下） |
-| P3-1 | Schema **v23** 七张表 + 四个 Store + `bin/biga-data` 骨架 | 版本号（1）、CLI 形态（2） |
-| P3-2 | 交易日历注册进 Registry | 保留现表现列名（10） |
-| P3-3 | Security Master（沪深北统一 `instrument_id`、point-in-time universe） | — |
-| P3-4 | EOD Daily Bars 全链 + **第一条 cron** | Parquet/pyarrow（7）、单元名（3）、cron 进范围（13） |
-| P3-5 | Tradability + Adjustment Factors | — |
-| P3-6 | Emotion 迁移 + 拆出 `cn.market.breadth` | 涨跌家数归属（4） |
-| P3-7 | Snapshot Resolver + `required_datasets` + Manifest v2 | 字段时机（9）、v1 兼容（11） |
+| # | 内容 | schema | 状态 |
+|---|---|---|---|
+| P3-0 | 契约 + Dataset/Provider Registry + `bin/biga-data` | — | ✅ |
+| P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ⬜ |
+| P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ⬜ |
+| P3-3 | Security Master（point-in-time universe） | **v27** | ⬜ |
+| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ⬜ |
+| P3-5 | Tradability + Adjustment Factors | — | ⬜ |
+| P3-6 | 迁移 §2.2 那五条 direct feed | — | ⬜ |
+| P3-7 | SnapshotResolver + `required_datasets` + EvidenceSet v2 | — | ⬜ |
 
-#### ⏩ P3-0 落地（2026-09-25）：两处与本表不同
+🔴 **每个里程碑的出口都是「旧行为回归全绿 + 新红灯测试全绿」**，
+Data Platform 不允许破坏 Decision Kernel。
 
-**一 · `bin/biga-data list` 从 P3-1 拉到 P3-0。** 理由是裁定 9 的同一条道理：
-名册自己也得有消费方。P3-0 若只交付两张注册表，它在 P3-1 之前就是一条
-L-1 死配置 —— 而本文刚用这条理由拒绝了 `required_datasets` 提前进场。
-CLI 只读静态定义，很小，且让这个里程碑可以被**演示**而不是只能被阅读。
+### 3.1 schema 分步（v1–v22 永不修改）
 
-**二 · 注册表收的是「今天真的在跑的全部 7 组」，不是 §2 的目标清单。**
-两份清单不是一回事：§2 列的是 Phase 3 要给它们建**全链**（Raw → Parquet →
-Snapshot）的数据集；注册表回答的是「这个系统里有哪些数据集」。
-后者只收一部分，这个问题立刻有两份答案 —— 而注册表是后来的那份，它会输。
+```text
+v23  data_job_runs / data_run_events               复用 Decision Run 的 append-only + CAS
+v24  provider_attempts / raw_artifacts             raw_artifacts 只存文件 metadata
+                                                   小体积的 raw_market_snapshot 不迁移
+v25  dataset_partitions / quality_reports / dataset_snapshots
+                                                   UNIQUE(dataset_id, partition_key, data_version)
+v26  evidence_set_datasets                         UNIQUE(evidence_set_id, dataset_id)
+v27  fact_security_master                          append-only，按 available_at 读可见版本
+```
 
-⇒ 实际注册：`cn.trading_calendar` / `cn.index.daily_bars` / `cn.index.quote` /
-`cn.market.breadth` / `cn.market.emotion_close` / `cn.sector.rankings` /
-`cn.news.flash`。还没探活过的（`cn.equity.daily_bars`、`cn.security_master`
-等）**不进** —— 占位符会让人以为这条链已经有人管了。
+`evidence_set_datasets`（v26）是 v1 相对旧草案的一处新增：**关键血缘要能用 SQL 查，
+不能只藏在 manifest JSON 里** —— 这正是 schema v16 加 Run Provenance 三列时学到的东西。
 
-⚠️ 顺带修正裁定 4 的一处表述：`cn.market.breadth` 不是「Phase 3 才拆出来的」，
-它本来就是一个独立的生产数据集（东财 `push2delay/ulist.np`，41 条 raw）。
-裁定 4 真正要防的是**把它绑给 emotion 消费**，那条仍然成立。
+### 3.2 P3-2 的红线
 
-🔴 **P3-4 是唯一的生产级 Vertical Slice** —— 它是第一个走完
-`Provider → Raw → Normalize → Quality → Parquet → Snapshot → EvidenceSet`
-全链的 dataset。前三个里程碑的意义全在于让它能被建出来。
+```text
+现有 Agent 输出 / Run / Card 行为不变
+raw hash 语义不变
+手工单跑 skill 的 fallback 不突然失效
+```
+
+这一步验证的是通用框架，**不新增业务数据** —— 所以「什么都没变」就是它的成功判据。
+
+### 3.3 P3-4 才引入的东西
+
+`duckdb` 运行时依赖、Raw 文件归档、Parquet 数据面、EOD job。
+🔴 **到这一步才加依赖**，不提前 —— `pyarrow`/`duckdb` 进来之前，
+「clone 下来就能跑」这个事实还成立一天算一天。
 
 ---
 
 ## 4. 出口条件
 
 🔴 **判据是 `python3 tools/verify/exit_conditions.py`，不是这张表。**
-表只用来读，脚本才是权威（裁定 14）。
+Phase 2 刚吃过手写状态表的亏（条件 4 达成了四天没人知道）。
 
 | # | 条件 | 能否程序判定 |
 |---|---|---|
-| 1 | Dataset / Provider Registry 各唯一，未知 Dataset fail closed | ✅ AST + 契约测试 |
-| 2 | Agent 不直接 import Provider | ✅ AST 扫描 |
-| 3 | 每个 Partition 有 schema/version/hash/row_count | ✅ 查库 |
-| 4 | 每个 Snapshot 有 Quality Status | ✅ 查库 |
-| 5 | EOD Job **连续 5 个交易日** COMPLETE | ✅ 查库（跨天累积，急不得） |
-| 6 | 重跑幂等（第二次 `SKIPPED_UP_TO_DATE`，snapshot_id 相同） | ✅ 测试 |
-| 7 | 修订出 v2，v1 的 partition 文件仍在 | ✅ 测试 |
-| 8 | EvidenceSet 能引用 Dataset Snapshot | ✅ 查库 |
-| 9 | **老的 12 张卡 replay 仍逐张通过** | ✅ `replay --check` |
-| 10 | Replay 不联网 | ✅ `test_no_network` 同款围栏 |
-| 11 | 默认测试全离线全绿 | ✅ `pytest` |
-| 12 | 第一条 cron 有**被证明的**消费方 | ✅ 判据是调度命令的字面量 |
-| 13 | Provider Fallback 演练成功 | 🔶 演练 —— 脚本只能报 `UNKNOWN` |
-| 14 | Quarantine（双源冲突）演练成功 | 🔶 演练 |
-| 15 | 隔离自检重跑（新增 timer ⇒ 共享命名空间那项） | ✅ `isolation.py` |
-| 16 | 每个里程碑都有教程章节 | 🔶 人判 |
+| 1 | schema 从 v22 起追加，v1–v22 一行没改 | ✅ |
+| 2 | Dataset Registry 是代码唯一源，无零消费方条目 | ✅ AST + 契约测试 |
+| 3 | Provider Registry 有真实消费方 | ✅ |
+| 4 | 现有 `index_daily` 走通用快照框架 | ✅ 回归 |
+| 5 | Security Master 支持 point-in-time universe | ✅ |
+| 6 | 全市场 EOD 走通 Raw → Normalize → Quality → Parquet → Snapshot | ✅ |
+| 7 | Tradability 能把停牌与「数据缺失」分开 | ✅ |
+| 8 | 复权因子与原始 OHLC 独立保存 | ✅ |
+| 9 | EvidenceSet v2 **结构化**引用 DatasetSnapshot | ✅ 查库 |
+| 10 | 生产路径上的 Agent 不再自己选 Provider | ✅ AST |
+| 11 | Replay 全离线 | ✅ |
+| 12 | 修订不改写历史快照 | ✅ |
+| 13 | DuckDB 能跨日查询 EOD 分区 | ✅ |
+| 14 | 默认 pytest 仍然 hermetic（无网 / 无 profile / 无 .git 可跑） | ✅ |
+| 15 | Phase 2 kernel 回归全绿 | ✅ |
+| 16 | **老卡 replay 仍逐张通过**（manifest 缺版本按 v1 读） | ✅ |
+| 17 | 第一条 cron 有**被证明的**消费方 | ✅ 判据是调度命令的字面量 |
+| 18 | 连续 5 个交易日 EOD COMPLETED | ✅ 跨天累积 |
+| 19 | Primary→Fallback 演练 | 🔶 演练 |
+| 20 | QUARANTINED 演练 | 🔶 演练 |
+| 21 | 修订 v2 演练 | 🔶 演练 |
+| 22 | Raw 篡改检测演练 | 🔶 演练 |
+| 23 | source ZIP 恢复 + replay 演练 | 🔶 演练 |
+| 24 | 隔离自检重跑（新增 timer ⇒ 共享命名空间那项） | ✅ |
 
-> 🔶 那三条判不了的，脚本里**显式返回 `UNKNOWN`（退出码 2）**，
-> 不许塌进 PASS —— 红线 R-3。
+> 🔶 演练类在脚本里**显式返回 `UNKNOWN`（退出码 2）**，不许塌进 PASS —— 红线 R-3。
+
+完成后打 tag `v1-data-platform-foundation`，然后**停止继续打磨数据地基**，
+进入 Review → Screening → CandidateSet → TradingPlan → Realtime → Backtest。
 
 ---
 
@@ -377,13 +314,13 @@ Snapshot）的数据集；注册表回答的是「这个系统里有哪些数据
 
 | 门 | 状态 |
 |---|---|
-| `v1-architecture-baseline` tag 存在 | ✅ 已存在 |
+| `v1-architecture-baseline` tag | ✅ 已存在 |
 | Full hermetic tests 0 failed | ✅ |
-| Phase 2 出口条件 3（真实否决落库） | ⬜ **等一个够极端的交易日**，与 Phase 3 无依赖 |
+| Phase 2 出口条件 3（真实否决落库） | ⬜ 等一个够极端的交易日，与 Phase 3 无依赖 |
 | Phase 2 出口条件 5（延迟预算第三次重推） | 🔶 待裁定，与 Phase 3 无依赖 |
-| **裁定 11：换掉共享的 anthropic 凭据** | 🔴 **见下** |
+| **裁定 11：换掉共享的 anthropic 凭据** | 🔴 见下 |
 
-🔴 **凭据这条是真的门，外部包的前置条件清单里没有它。**
+🔴 **凭据这条是真的门，两版外部设计的前置条件清单里都没有它。**
 [`CLAUDE.md`](../../CLAUDE.md) 写的是「Phase 3 之前必须换成 BigA 自己的凭据，
 触发条件任一成立即换：① 能够申请到独立凭据 ② 出现第一次因这条耦合导致的误判排查」。
 
@@ -400,7 +337,7 @@ Phase 3b  discipline（含输入源）+ 独立飞书应用
 Phase 4   测量层：安慰剂基准 + Card 的区分力检验
 ```
 
-Phase 3 建的东西里，**选股 / 回测 / 复盘会直接复用**的是：
-point-in-time Security Master、Trading Calendar、Daily Bars、Tradability、
-Adjustment Factors 这五件。它们是「以后想做什么都绕不开」的那一层 ——
+Phase 3 建的东西里，**选股 / 回测 / 复盘会直接复用**的是：point-in-time
+Security Master、Trading Calendar、Daily Bars、Tradability、Adjustment Factors
+这五件。它们是「以后想做什么都绕不开」的那一层 ——
 这也是 Phase 3 值得在 discipline 之前做的理由。

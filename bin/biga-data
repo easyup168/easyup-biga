@@ -10,7 +10,7 @@
 # 见 docs/design/phase-3-data-platform.md 裁定 2。
 #
 # 用法
-#   bin/biga-data list                列出已注册的数据集
+#   bin/biga-data list                列出已注册的数据集（Data Platform 已接管的）
 #   bin/biga-data providers           列出数据源，以及各自被哪些数据集用到
 #   bin/biga-data <子命令> --json     同样的内容，机器可读
 #
@@ -48,6 +48,7 @@ def cmd_list(as_json: bool) -> int:
             "storage_policy": d.storage_policy,
             "raw_table": d.raw_table,
             "fact_table": d.fact_table,
+            "consumers": list(d.consumers),
         }
         for d in DATASET_REGISTRY.values()
     ]
@@ -64,7 +65,8 @@ def cmd_list(as_json: bool) -> int:
         print(f"  {r['dataset_id']:25} {r['primary_provider']:8}{extra}")
         print(f"  {'':25} {r['title']}")
         tables = r["raw_table"] + (f" + {r['fact_table']}" if r["fact_table"] else "")
-        print(f"  {'':25} → {r['storage_policy']}（{tables}）\n")
+        print(f"  {'':25} → {r['storage_policy']}（{tables}）")
+        print(f"  {'':25} 读它的：{'、'.join(r['consumers'])}\n")
     return 0
 
 
@@ -73,6 +75,7 @@ def cmd_providers(as_json: bool) -> int:
         {
             "provider_id": p.provider_id,
             "title": p.title,
+            "source_prefix": p.source_prefix,
             "modules": list(p.modules),
             # 🔴 派生而非手写 —— 见 data/provider_registry.py 的模块头
             "datasets": list(datasets_of(p.provider_id)),
@@ -84,8 +87,9 @@ def cmd_providers(as_json: bool) -> int:
         return 0
     print(f"已注册 {len(rows)} 个数据源：\n")
     for r in rows:
-        print(f"  {r['provider_id']:9} {r['title']}")
-        print(f"  {'':9} 它挂了会影响：{'、'.join(r['datasets']) or '（无）'}\n")
+        print(f"  {r['provider_id']:15} {r['title']}")
+        print(f"  {'':15} source 前缀 {r['source_prefix']}: · "
+              f"它挂了会影响：{'、'.join(r['datasets']) or '（无）'}\n")
     return 0
 
 

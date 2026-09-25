@@ -11,21 +11,26 @@
   P2  provider_id 唯一，且 key 与定义一致
   P3  每个 dataset 引用的 provider 都已注册（含 fallback / validation）
   P4  未知 id **fail closed** —— 抛异常且错误消息指路，不返回 None
-  P5  🔴 provider_id 与源码里的 `source` 前缀**同口径**（东财是 `em` 不是 `eastmoney`）
+  P5  🔴 每个 provider 的 `source_prefix` 在源码里真的作为 `"<prefix>:` 出现过
   P6  每个 provider 的 `modules` 真的 import 得到
   P7  每个 dataset 点名的 raw_table / fact_table 在**真实建出来的库**里存在
   P8  退出码映射覆盖全部状态，且与 `tools/verify/_verdict.py` 的三态不矛盾
-  P9  `datasets_of()` 的派生与 DATASET_REGISTRY 双向对得上
+  P9  `datasets_of()` 的派生与 DATASET_REGISTRY 双向对得上（+ 三角色覆盖用合成定义测）
   P10 `bin/biga-data` 真的跑得起来 —— 名册有**行为上**的消费方，不是零消费方
+  P11 🔴 没有零消费方的已激活 dataset（外部设计 §16 的 `no zero-consumer active dataset`）
 
 🔴 P5 的判据为什么是「注册表 → 源码」单向
 -----------------------------------------
-第一版想扫 `providers/` 下的 `"<x>:` 字面量再和注册表对齐，**那是错的**：
-`"em:` 根本不在 `providers/eastmoney.py` 里（它在各 skill 里拼），而
-`providers/` 下另有 `"https:` / `"m:` / `"fbt:` 这类噪音前缀。
-反向扫会既漏又噪 —— 正是 L-13「守卫查的地方和它声称守的地方不是同一处」。
-⇒ 只做单向：每个**注册了的** provider_id 必须在源码里作为 `"<id>:` 出现过。
-   它精确命中要防的那件事：有人写 `provider_id="eastmoney"`。
+反向（扫源码里的 `"<x>:` 再和注册表对齐）既漏又噪：某些前缀根本不在对应的
+provider 模块里（在各 skill 里拼），而 `providers/` 下另有 `"https:` / `"m:` /
+`"fbt:` 这类噪音前缀 —— 正是 L-13「守卫查的地方和它声称守的地方不是同一处」。
+⇒ 只做单向：每个**注册了的** `source_prefix` 必须在源码里作为 `"<prefix>:`
+   出现过。它精确命中要防的那件事：同一个数据源冒出第三套名字。
+
+⚠️ 钉的是 `source_prefix` 不是 `provider_id`。`provider_id` 是**适配器级**的
+（与 `providers/` 下的模块同名），而库里的 `source` 前缀是**站点级**的 ——
+`sina` 与 `sina_calendar` 都写 `sina:`。两者不是一对一，拿 `provider_id`
+去源码里找 `"sina_calendar:` 会误报。
 """
 
 from __future__ import annotations
@@ -45,14 +50,16 @@ import _verdict  # noqa: E402
 
 from easyup_biga.data import (  # noqa: E402
     DATASET_REGISTRY,
+    DatasetDefinition,
     DATASETS,
     PROVIDER_REGISTRY,
     PROVIDERS,
-    DataStatus,
+    DataRunStatus,
     datasets_of,
     exit_code_for,
     get_dataset,
     get_provider,
+    uses_provider,
 )
 from easyup_biga.persistence.db import connect, init_schema  # noqa: E402
 
@@ -127,16 +134,43 @@ def test_未知id是fail_closed而不是返回None(fn, bad):
 
 
 # ── P5：provider_id 与既有 source 前缀同口径 ────────────────────────────────
-def test_provider_id与源码里的source前缀同口径():
+def test_provider的source前缀在源码里真的用着():
     """P5：见模块头。判据是注册表 → 源码的**单向**存在性。"""
     blob = "\n".join(p.read_text(encoding="utf-8") for p in _py_sources())
-    absent = [pid for pid in PROVIDER_REGISTRY if f'"{pid}:' not in blob]
+    absent = [(p.provider_id, p.source_prefix) for p in PROVIDER_REGISTRY.values()
+              if f'"{p.source_prefix}:' not in blob]
     assert not absent, (
-        f"这些 provider_id 在源码里找不到对应的 \"<id>: 字面量：{absent}\n"
-        f"  provider_id 取的是 raw_market_snapshot.source 的前缀"
-        f"（sina:kline/... 的 sina），不是模块名。\n"
-        f"  写模块名（如 eastmoney）会造出第三套口径：源码一套、库里一套、注册表又一套。"
+        f"这些 source_prefix 在源码里找不到对应的 \"<prefix>: 字面量：{absent}\n"
+        f"  source_prefix 取的是 raw_market_snapshot.source 的前缀"
+        f"（sina:kline/... 的 sina）。\n"
+        f"  它存在的理由是别让同一个数据源在源码、库、注册表里有三套名字。"
     )
+
+
+def test_没有零消费方的已激活dataset():
+    """P11：外部设计 §16 的 `no zero-consumer active dataset`。
+
+    🔴 判据是**符号真的存在**（import 模块 + hasattr），不是「字符串在不在」。
+    后者会被 docstring、注释、同名的局部变量骗过去（L-13 的常见入口）。
+
+    这条守的是本仓库最优先防范的失败模式（L-1）：注册一个没人读的数据集，
+    名册看起来完整，实际在替一件没人做的事背书。
+    """
+    broken = []
+    for d in DATASETS:
+        if not d.consumers:
+            broken.append((d.dataset_id, "consumers 为空 —— 答不出谁读它就还不该进册"))
+            continue
+        for ref in d.consumers:
+            mod, _, sym = ref.partition(":")
+            try:
+                m = importlib.import_module(mod)
+            except Exception as e:                       # noqa: BLE001
+                broken.append((d.dataset_id, f"{ref} 的模块 import 不到: {e!r}"))
+                continue
+            if sym and not hasattr(m, sym):
+                broken.append((d.dataset_id, f"{ref} 的符号 {sym} 不存在"))
+    assert not broken, f"零消费方 / 消费方指不到：{broken}"
 
 
 # ── P6：modules 真的存在 ────────────────────────────────────────────────────
@@ -181,18 +215,18 @@ def test_退出码覆盖全部状态且与verdict三态不矛盾():
     钉的是**语义**不是数值相等：`_verdict` 的 `1 = 去看代码` / `2 = 去看数据`，
     数据任务的状态必须落在同一个含义上。
     """
-    for s in DataStatus:                      # 一个状态都不许漏（fail closed 的反面）
+    for s in DataRunStatus:                      # 一个状态都不许漏（fail closed 的反面）
         exit_code_for(s)
 
-    assert exit_code_for(DataStatus.COMPLETE) == _verdict.PASS
-    assert exit_code_for(DataStatus.SKIPPED_UP_TO_DATE) == _verdict.PASS
+    assert exit_code_for(DataRunStatus.COMPLETED) == _verdict.PASS
+    assert exit_code_for(DataRunStatus.SKIPPED_UP_TO_DATE) == _verdict.PASS
     # 「查了真的不对，去看代码」
-    assert exit_code_for(DataStatus.FAILED) == _verdict.FAIL
+    assert exit_code_for(DataRunStatus.FAILED) == _verdict.FAIL
     # 「没查成，去看数据与时机」—— TIMEOUT 在这一类（裁定 12 改掉了参考骨架的 1）
-    for s in (DataStatus.PARTIAL, DataStatus.QUARANTINED, DataStatus.TIMEOUT):
+    for s in (DataRunStatus.PARTIAL, DataRunStatus.QUARANTINED, DataRunStatus.TIMEOUT):
         assert exit_code_for(s) == _verdict.UNKNOWN, f"{s} 应落在 UNKNOWN(2)"
     # 人按的 Ctrl-C 不参与三态
-    assert exit_code_for(DataStatus.CANCELLED) not in (
+    assert exit_code_for(DataRunStatus.CANCELLED) not in (
         _verdict.PASS, _verdict.FAIL, _verdict.UNKNOWN)
 
     with pytest.raises(ValueError, match="未知的数据任务状态"):
@@ -221,6 +255,27 @@ def test_datasets_of的派生与注册表双向一致():
         for pid in (d.primary_provider, *d.fallback_providers, *d.validation_providers):
             assert d.dataset_id in datasets_of(pid), \
                 f"{d.dataset_id} 用了 {pid}，但 datasets_of({pid}) 里没有它"
+
+
+def test_三种角色都算用到_用合成定义测():
+    """P9b：**不依赖当前注册了什么。**
+
+    🔴 探针当场证明了这条的必要性：P3-0 收窄到两个 dataset 后
+    `validation_providers` 全是空的，于是把 `uses_provider` 里那一整条
+    validation 判断删掉，上面那条 P9 照样全绿 —— 守卫没写错，是数据不再
+    走到那条分支。「当前数据恰好测不到」和「守卫漏了」在结果上一模一样。
+    """
+    def ds(**kw):
+        base = dict(dataset_id="x", title="t", primary_provider="P",
+                    fallback_providers=(), validation_providers=(),
+                    partition_keys=(), storage_policy="s",
+                    raw_table="raw_market_snapshot", consumers=("m:s",))
+        return DatasetDefinition(**{**base, **kw})
+
+    assert uses_provider(ds(), "P"), "primary 角色没认出来"
+    assert uses_provider(ds(fallback_providers=("F",)), "F"), "fallback 角色没认出来"
+    assert uses_provider(ds(validation_providers=("V",)), "V"), "validation 角色没认出来"
+    assert not uses_provider(ds(), "没用到的"), "不相干的 provider 被算成用到了"
 
 
 # ── P10：名册有行为上的消费方 ───────────────────────────────────────────────

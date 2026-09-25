@@ -191,9 +191,18 @@ Phase 3 之前必须换成 BigA 自己的凭据。触发条件任一成立即换
 
 用户级 `~/.claude/skills/dev-workflow` 是**邻居项目**的流程 ——
 它的 Track D 要求同时改 `~/.openclaw/cron/jobs.json`，**照做会直接破坏 I-1**。
-在本仓库工作时项目级那份优先，`/dev-workflow` 会命中它。
 
-十条要点（详见那份文件）：设计先探活 / 加东西的四个必答问题 /
+🔴 **不要靠 `/dev-workflow` 自动选中仓库内那份 —— 实测它命中的是用户级那份。**
+2026-09-25（P3-0 开工）实测：`/dev-workflow` 加载进来的 base dir 是
+`~/.claude/skills/dev-workflow`，正文满篇是邻居项目的目录与远端部署流程。
+本句原文写的是「项目级那份优先，`/dev-workflow` 会命中它」——**那是假的**，
+而它的危害正是这类断言的典型形状：读的人以为有机制兜着，于是不再核对。
+
+⇒ 动手前**直接读** `.claude/skills/dev-workflow/SKILL.md`，
+或者加载完先确认 base dir 落在仓库内。
+
+十条要点（详见那份文件）：设计先探活 / 加东西的**五个**必答问题（第五问
+「这份清单有没有孪生、谁派生谁」是外部评审加的）/
 守卫用探针验证会红 / 重构要两个独立信号 / **诊断先看工具调用序列再改提示词** /
 端到端必须开新会话且等结算 / 指标先问「什么时候不该红」/ 报错要指路 /
 文档与 CHANGELOG 同 commit / 明确列出哪些邻居流程不适用。
@@ -453,7 +462,7 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 |---|---|
 | Agent | **7 / 8**。`main` + Stage 1 五个（market/sector/technical/emotion/news）+ Stage 2 `risk`。<br>第 8 个 `discipline` **故意不建**（裁定 13：没有输入源） |
 | 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v22**，十一张表，只追加由触发器强制（v4 时这句话是**假的** —— 分配器没有触发器，五取四；v6 起 `agent_verdicts` 加 `kind` 列区分事实/判断/合体；v9 收敛 `run_id` 三同名；v10 `run_id` capture 贯穿全链；v11 加 `ux_fact_per_task_agent`——一个 `(task_id, agent)` 至多一份 fact 原件（批 F）；v12 加外发通知 `notification_outbox` / `notification_deliveries` 两张只追加表（批 G-I）；v13 给 `raw_market_snapshot` 加 `raw_text`，`content_sha256` 改基于原始响应文本算（批 I）；v14 给 `decision_ids` 加 `trigger_id` 列做入站幂等键（批 G-II）；v15 加 `fact_trading_calendar`——**第一张真实的 `fact_*` 表**，深交所官方日历，`market_is_open` 认节假日了（批 L）；v16 加 Run Provenance 三列 + `ux_evidence_set_per_run`——一张在线卡属于哪次执行、基于哪份切片，现在是一句 SQL 而不是解 card_json（批 N）；v17 把 Fact 唯一约束从 `(task_id, agent)` 拆成按 run 分区的两条——「一次执行一份事实」，同一决策的第二个 run 因此能写自己的那份（批 O）；v18 `ux_evidence_sets_run`——一次 run 至多一个 EvidenceSet（P1-1）；v19 `agent_runs.provenance_mode`——区分在线执行行与历史行，Run 级 spawn 核验的三态判据（P1-2）；v20 撤掉 v18——它与 v16 的 `ux_evidence_set_per_run` **逐字相同**，一条不变量两个名字就是 L-3（照抄评审给的建议索引、没先 grep 一遍既有约束）；v21 `ux_online_agent_run_once`——一次 run 一个 agent 至多一条在线账本行，多条时一条真 `runtime_run_id` 会把另一条伪造的盖住；v22 `decision_runs.expected_spawn_agents`（冻结「这次该启动谁」，**不等于**卡上的 expected_roster）+ `ux_online_runtime_run_id`（一个运行时 id 不许给两行背书）） |
-| 测试 | 1913 条 |
+| 测试 | 1915 条 |
 | 端到端 | 盘中 172.6s / $1.20（预算 **180s**）；**盘后 198s / $1.37 —— 超预算**，因为收盘后一小时快讯量翻倍（184 vs ~70 条）|
 | 隔离 | `tools/verify/isolation.py` **三态**（`UNKNOWN` 不计入通过）；判据由 `tests/test_isolation.py` 钉住 |
 | 外部评审 | 两份，共 29 条，**全部处理完**（见 `TODO.md` 的合并台账）|

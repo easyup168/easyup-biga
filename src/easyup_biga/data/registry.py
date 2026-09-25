@@ -1,38 +1,37 @@
 """DATASET_REGISTRY —— 数据集名册的**唯一源**。
 
-沿用外部 Phase 3 设计包 `reference/registry_example.py` 的形状
-（`dict[dataset_id, DatasetDefinition]`），内容全部换成**探活查到的真实情况**。
+照 `domain/registry.py` 的 `AGENT_REGISTRY` 形状：一处手写、其余派生、反向测试
+（外部设计 `BigA Data Architecture v1` 的 ADR-002 逐字确认了这个模式）。
 
-🔴 为什么不能照抄参考骨架里的条目
----------------------------------
-参考骨架给 `cn.trading_calendar` 写的是 `primary_provider="szse_calendar"`、
-`partition_keys=("month",)`。实测：
+🔴 名册答的是「**Data Platform 管着哪些数据集**」，不是「系统里有哪些数据集」
+------------------------------------------------------------------------
+这两个问题的答案今天**不一样**，混起来是本名册最容易犯的错 —— 我第一版就犯了。
 
-```text
-fact_trading_calendar 全部 1326 行的 source = sina:calendar/klc_td_sh
-providers/szse.py 有测试、有导出，但没有任何生产调用方
-```
+第一版按「`raw_market_snapshot.source` 里真实出现过的 7 组」全收，理由是
+「只收一半就会有两份答案」。那个理由把两个问题混成了一个：
 
-深交所那条路**在本项目的部署环境里连不通**（`bin/biga-calendar` 与
-`providers/tradetime.py` 的模块头都写着这件事），所以批 L 之后真正在跑的是
-`sina_calendar`。照抄参考骨架 = 注册一个在这台机器上**一行都没产出过**的主源，
-并且 `("month",)` 那个切片键也只对深交所的 monthList 端点成立。
+  · 「系统里有哪些数据集」—— 今天的答案在**各 skill 的代码里**，不在这里。
+    Registry 收不收它们，都改变不了这一点。
+  · 「Data Platform 管着哪些」—— 这才是本名册该答的。
 
-⇒ 开发流程 §1「设计先探活」在 P3-0 的对应动作，就是先查库再写注册表。
+而那 5 个（realtime_quote / breadth / board_snapshot / limit_pool / news.flash）
+今天是 **agent 直接访问 provider** 的遗留路径，Data Platform 对它们一无所知。
+把它们收进来，等于让名册**声称管着 5 个它完全没接手的东西** ——
+正是本仓库那条「点名了一个不存在的东西，读者会认为这条已经有人管了」。
 
-名册的范围：**今天真的在跑的全部数据集**
------------------------------------------
-不是「Phase 3 要做的那几个」。这两份清单不一样，混起来就是本注册表最容易
-出的错：注册表只收一部分，于是「系统里有哪些数据集」立刻有了第二份答案。
+⇒ 条目**按 Milestone 激活**：有真实生产者或消费者才进来（ADR-002）。
+  待迁的 5 个记在 `docs/design/phase-3-data-platform.md` 的迁移清单里，
+  各自在 P3-6 的迁移 PR 中进册。
 
-⇒ 判据取 `raw_market_snapshot.source` 里**真实出现过**的前缀与端点（实测 7 组），
-  一个不漏地收进来。将来 P3-3/P3-4 的新数据集是往这里加，不是另起一份。
+🔴 探活过、但仍然不进册的例子
+-----------------------------
+外部草案给 `cn.trading_calendar` 写的主源是深交所官方端点。实测
+`fact_trading_calendar` 全部 1326 行的 source 是 `sina:calendar/klc_td_sh`，
+而 `providers/szse.py` 有测试、有导出、**零生产调用方**（部署环境连不通）。
+⇒ primary 是 `sina_calendar`，`szse` 作 fallback 保留。
 
-⚠️ 还没有 `cn.equity.daily_bars` / `cn.security_master` / `cn.security.tradability`
-/ `cn.equity.adjustment_factors` —— 它们的 Provider **一次都还没探活过**。
-参考骨架给的是 `candidate_primary` / `candidate_fallback` 这种占位符，
-那是诚实的写法，但占位符不该进真注册表：注册一个不存在的 provider，
-读的人会以为这条链已经有人管了。它们在 P3-3 / P3-4 探活之后再进来。
+这条说明「探活」与「该不该进册」是两个独立判据：探活回答「它是真的吗」，
+Milestone 激活回答「今天有人用它吗」。两个都过才进来。
 """
 
 from __future__ import annotations
@@ -53,83 +52,35 @@ DATASETS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
         dataset_id="cn.trading_calendar",
         title="A 股交易日历（含交易所已公布的未来排期）",
-        # 🔴 主源是 sina 不是深交所 —— 见模块头。szse 作为 fallback 保留：
-        #    它是**官方**源，在连得通的环境里它才是更权威的那个。
-        primary_provider="sina",
+        # 实测主源是新浪不是深交所 —— 见模块头。szse 作 fallback 保留：
+        # 它是**官方**源，在连得通的环境里它才是更权威的那个。
+        primary_provider="sina_calendar",
         fallback_providers=("szse",),
         validation_providers=(),
-        # sina 那个端点一次返回全量（往回 730 天 + 未来），没有自然切片。
-        # 参考骨架写 ("month",) 是按深交所 monthList 的形状写的，换主源后不成立。
+        # 新浪那个端点一次返回全量（往回 730 天 + 未来），没有自然切片。
+        # 外部草案写 ("month",) 是按深交所 monthList 的形状写的，换主源后不成立。
         partition_keys=(),
         storage_policy="sqlite_fact",
         raw_table="raw_market_snapshot",
         fact_table="fact_trading_calendar",
+        consumers=(
+            "easyup_biga.providers.tradetime:market_is_open",
+            "easyup_biga.persistence.db:is_trading_day",
+        ),
     ),
     DatasetDefinition(
         dataset_id="cn.index.daily_bars",
         title="指数日线（market/sector/technical 共用的脊梁）",
         primary_provider="sina",
         fallback_providers=(),
-        # tencent 是唯一自带完整时间戳的源，risk 拿它做交叉校验（架构 §6.2）。
-        validation_providers=("tencent",),
-        partition_keys=("trade_date",),
-        storage_policy="sqlite_raw_snapshot",
-        raw_table="raw_market_snapshot",
-    ),
-    DatasetDefinition(
-        dataset_id="cn.index.quote",
-        title="指数实时行情（成交额 + 唯一自带时间戳的源）",
-        primary_provider="tencent",
-        fallback_providers=(),
-        validation_providers=(),
-        # 实时快照按时刻取，不按交易日切。
-        partition_keys=(),
-        storage_policy="sqlite_raw_snapshot",
-        raw_table="raw_market_snapshot",
-    ),
-    DatasetDefinition(
-        dataset_id="cn.market.breadth",
-        title="涨跌家数与上涨占比（市场宽度）",
-        primary_provider="em",
-        fallback_providers=(),
-        validation_providers=(),
-        # ⚠️ 这个端点**不带任何日期**（架构 §6.2）⇒ trade_date 是推断出来的。
-        #    切片键仍然是它 —— 但用的人要知道这个日期的来路不同于日线。
-        partition_keys=("trade_date",),
-        storage_policy="sqlite_raw_snapshot",
-        raw_table="raw_market_snapshot",
-    ),
-    DatasetDefinition(
-        dataset_id="cn.market.emotion_close",
-        title="涨停 / 跌停 / 炸板 / 连板（情绪股池）",
-        primary_provider="em",
-        fallback_providers=(),
+        # 🔴 **故意留空。** tencent 今天确实被 market-calc 用来取成交额并与日线
+        #    互相印证，但那是 skill 内部的事，不走 Registry 的 validator 流程。
+        #    写上等于点名一个今天没人执行的角色 —— 等 P3-2 真的接上再填。
         validation_providers=(),
         partition_keys=("trade_date",),
         storage_policy="sqlite_raw_snapshot",
         raw_table="raw_market_snapshot",
-    ),
-    DatasetDefinition(
-        dataset_id="cn.sector.rankings",
-        title="板块榜（概念 / 行业）",
-        primary_provider="em",
-        fallback_providers=(),
-        validation_providers=(),
-        # 与家数同款：榜单不带日期，trade_date 取自新浪日线。
-        partition_keys=("trade_date",),
-        storage_policy="sqlite_raw_snapshot",
-        raw_table="raw_market_snapshot",
-    ),
-    DatasetDefinition(
-        dataset_id="cn.news.flash",
-        title="7×24 财经快讯",
-        primary_provider="sina",
-        fallback_providers=(),
-        validation_providers=(),
-        # 连续事件流，**没有「收盘」概念**（架构 §6.2 / FIX-03）⇒ 无自然切片。
-        partition_keys=(),
-        storage_policy="sqlite_raw_snapshot",
-        raw_table="raw_market_snapshot",
+        consumers=("easyup_biga.application.coordinator:SnapshotCoordinator",),
     ),
 )
 

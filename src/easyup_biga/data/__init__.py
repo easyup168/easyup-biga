@@ -13,7 +13,7 @@ from .contracts import (
     EXIT_CANCELLED,
     DataIssue,
     DatasetDefinition,
-    DataStatus,
+    DataRunStatus,
     ProviderDefinition,
     exit_code_for,
 )
@@ -23,6 +23,7 @@ from .provider_registry import (
     PROVIDERS,
     datasets_of,
     get_provider,
+    uses_provider,
 )
 from .registry import DATASET_IDS, DATASET_REGISTRY, DATASETS, get_dataset
 
@@ -35,11 +36,12 @@ __all__ = [
     "PROVIDER_REGISTRY",
     "PROVIDERS",
     "DataIssue",
-    "DataStatus",
+    "DataRunStatus",
     "DatasetDefinition",
     "ProviderDefinition",
     "datasets_of",
     "exit_code_for",
     "get_dataset",
     "get_provider",
+    "uses_provider",
 ]
