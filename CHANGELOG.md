@@ -15,6 +15,93 @@
 
 ## [未发布]
 
+### 新增 · Phase 3 · P3-11…P3-17 落地 —— 外部「P3-0…P3-17 完整包」深度评审后选择性合并
+
+外部交付了 P3-0…P3-17 的完整 source overlay（115 个文件），自述为
+「Phase 3 Code Complete / Live Production Acceptance 待真实环境执行」——
+这个边界划得对，没有把时间相关的生产证据伪装成已完成。
+
+#### 为什么仍然不能整份覆盖
+
+与上一包同一个形状：它的基线是**它自己的 P3-3**。逐项扫 overlay，
+`source_prefix` / `ProviderNotRegistered` / `throttle` / `QUALITY_POLICIES`
+出现在 **0 个文件** ⇒ 覆盖等于把本仓库 P3-0…P3-3 的十几处修正静默回退。
+⇒ 只合 P3-11…P3-17 那一层，逐个适配到本仓库的名字与口径。
+
+#### 合进来的
+
+`replay`（离线回放）/ `lineage_audit`（PIT + 修订链）/ `integrity`（字节重算 +
+Specialist 采数边界）/ `manifest_compat`（manifest v1↔v2）/ `failover`（集中式
+Primary→Fallback）/ `drills`（六项演练判据）/ `acceptance`（哈希链验收账本）/
+`finalizer` + `tools/verify/phase3_acceptance.py`（发布闸门）/ `cli`（18 个子命令）。
+
+#### 评审改掉的五处 —— 五条都是同一类：**判据挂在了会漂的东西上**
+
+1. 🔴 `code_ready = not [e for e in errors if not e.startswith("five consecutive") …]`
+   —— 代码面与上线面两类错误堆进同一个 list，再用**错误文案的前缀**捞回来分类。
+   今天碰巧对，因为文案恰好互不重叠；改个措辞结论就翻面，而不会有任何测试红。
+   ⇒ `code_errors` / `live_errors` 从头就是两个 list，测试直接打在这两个字段上。
+2. 🔴 一张硬编码的 7 条 `provider → 模块路径` map ——
+   注册了但不在 map 里的 provider **一个都不查**，而它打印的结论是
+   「registered network provider modules exist」。守卫查的地方和它声称守的地方
+   不是同一处（L-13）。⇒ 从 `ProviderDefinition.modules` 派生。
+3. 🔴 一张手写的平行 `PROVIDER_BINDINGS` 元组 —— 与 `DatasetDefinition` 的
+   primary/fallback/validation 三个字段是**孪生清单**。漂了不会报错，只会让
+   failover 按一份清单走、`role_of()` 按另一份答题，两者各自自洽。
+   ⇒ `bindings_for_dataset()` 从唯一手写处派生。
+4. 🔴 验收账本用 `datetime.now(timezone.utc)` —— 违反「时间一律北京时间」。
+   这类 bug 的形状是**差 8 小时但仍然是个合法时刻**，不报错。⇒ `now_cn()`。
+5. 🔴 `status.startswith("FAILED")` 判一次取数尝试是否失败 —— 按字符串形状分类。
+   多一个 `FAILED_*` 值或某个值改名，判据会静默跟着变。
+   ⇒ 对 `ProviderAttemptStatus` 的取值做集合判定。
+
+#### 没合的三处 deploy/CLI 面（同一个根因：它从没在本机跑过）
+
+systemd 单元名是 `biga-` 前缀而非 `-biga` 后缀（R-2 的守卫因此**根本不会把它
+算成 BigA 的单元** —— 比报红更糟）、`WorkingDirectory` 指向不存在的路径、
+可执行文件写 `python`（本机只有 `python3`）。
+
+#### 也没合 P3-6 / P3-7
+
+P3-7 的 `required_datasets` 引用的三个 dataset 要等 P3-6 迁完才存在，
+而 P3-6 要重写 6 个 skill + `orchestrator.py` —— **生产决策路径**。
+单独一轮做，按设计自己的规矩「旧行为回归全绿 + 新红灯测试全绿」逐个收。
+
+### 修复 · 文件哈希校验：文件被删走的是另一个异常类型
+
+`FileStore.verify_file_hash()` 原本直接 `path.read_bytes()`。文件**被删掉**时
+抛的是 `FileNotFoundError`，而调用方（篡改演练、回放、完整性审计）捕的是
+`FileStoreError`。
+
+> 🔴 最彻底的那种篡改 —— 把文件整个删掉 —— 反而绕过了为篡改准备的那条分支。
+
+⇒ 归一成 `FileStoreError`，并补了一条专门钉它的测试。
+
+### 变更 · `bin/biga-data` 从 heredoc 退成薄壳，实现搬进 `src/easyup_biga/data/cli.py`
+
+子命令从 2 个长到 18 个。写在 heredoc 里的那份既不能被 import、也不能被单元
+测试直接调 —— 想验一条子命令就只能起子进程。对外行为一个字节不变：
+`list` / `providers` 的输出格式、`--json` 的两种位置、用法错误的「未知子命令」
+措辞与非零退出码，都由既有的 P10 / P10b 两条判据继续钉着。
+
+### 已知问题 · 🔴 P3-4 / P3-5 的四个 dataset 模块今天是**死代码**
+
+新增的发布闸门第一次运行就照出来了：
+
+```text
+❌ P3-4 尚未落地 ⇒ 注册表里没有：['cn.equity.daily_bars', 'cn.security.tradability']
+❌ P3-5 尚未落地 ⇒ 注册表里没有：['cn.equity.adjustment_factors', 'cn.market.emotion_close']
+```
+
+这四个模块在**上一轮**已合入 `src/easyup_biga/data/datasets/`，但对应的
+`DatasetDefinition` 从没进过注册表 ⇒ 一调 `run()` 就在 `get_dataset()` 抛。
+
+> 值得记的不是「漏了四行注册」，而是：**模块合进来了 ≠ 它能跑。**
+> 上一轮那四个模块的测试全绿，因为它们测的是 `write_parquet_rows` 这类
+> **不经过注册表**的下层函数。⇒「有测试」和「有能跑到底的路径」是两件事。
+
+下一轮的第一件事，见 `TODO.md` 的 Phase 3 一节。
+
 ### 新增 · Phase 3 · P3-4 / P3-5 部分落地 —— 外部「P3-0…P3-10R 完整包」深度评审后选择性合并
 
 外部交付覆盖 P3-0…P3-10R 的 source-overlay（64 个源文件）。它的自述很诚实：

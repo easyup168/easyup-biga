@@ -1581,6 +1581,70 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 ---
 
+## Phase 3 · 数据平台地基（当前阶段，分支 `phase3`）
+
+设计 SSOT：[`docs/design/phase-3-data-platform.md`](docs/design/phase-3-data-platform.md)（含 14 条适配裁定）。
+
+### 已落地（`phase3` 分支）
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| P3-0 | ✅ | 契约 + Dataset/Provider Registry（`src/easyup_biga/data/`）|
+| P3-1 | ✅ | schema v23–v26 元数据地基，与外部实现包**合并**而非覆盖 |
+| P3-2 | ✅ | 已在生产的 index_daily 冻结接进通用血缘 |
+| P3-3 | ✅ | Security Master（schema v27）—— 链路建成，**上游仍未探活成功** |
+| P3-4 / P3-5 | 🔶 | 部分落地：Parquet 面 + EOD 管线 + 四个 dataset。Parquet 已有行为判据 |
+| P3-6 / P3-7 | ⬜ | **未合**，见下 |
+
+### ⬜ 下一轮的顺序（2026-09-26 定）
+
+🔴 **按这个顺序做，理由是风险递增、且后一件依赖前一件。**
+
+- [ ] **⓪ 把 P3-4/P3-5 的四个 dataset 注册进 `data/registry.py`** —— 🔴 **它们今天跑不了**。
+      `cn.equity.daily_bars` / `cn.security.tradability` / `cn.equity.adjustment_factors` /
+      `cn.market.emotion_close` 四个模块在 `datasets/` 下，但注册表里没有它们的
+      `DatasetDefinition` ⇒ 一调 `run()` 就在 `get_dataset()` 抛。
+      **验收**：`python3 tools/verify/phase3_acceptance.py --code-only` 的
+      「P3-4 / P3-5 尚未落地」两行消失；每个新 dataset 都有被证明的消费方（P11 守卫）。
+      ⚠️ **不是四行配置**：`tradability` / `emotion_close` 用的 `provider_id="derived-biga"`
+      是个**派生伪 provider**，它没有采数模块。要先定：派生数据集在 Provider Registry
+      里到底算不算一个 provider（牵涉裁定 15「一个事实一个生产 agent」与裁定 16
+      的 `derived` 证据类别）。**先定这个，再写注册**。
+      **为什么排最前**：它让上一轮合进来的四个模块从死代码变成活代码，
+      且范围比 ① 还小 —— 但它有一个真的设计问题要先答。
+
+- [ ] **① `security_master` 的账本收口** —— `src/easyup_biga/data/datasets/security_master.py`
+      里还有**第三处**账本流程（它在流程中段直接写 `fact_security_master` 行）。
+      **验收**：`DatasetSnapshotService` 加一个 `materialize` 回调，三处账本流程收敛成一处；
+      探针：把回调删掉，`tests/test_security_master.py` 必须红。
+      **为什么排第一**：范围最小、不碰生产决策路径，且它是 L-3 的活实例 ——
+      留着它，后面每加一个 dataset 都会有人照着它再抄一遍。
+      ⚠️ 它是**我自己上一轮合进来的**，当轮没看出来。
+      **L-3 最容易在 grep 共同调用时现形，不是在读 diff 时。**
+
+- [ ] **② P3-6：五条 direct feed 迁进 Dataset 层** —— 重写 6 个 skill + `orchestrator.py`。
+      **验收**：设计自己的规矩 —— 「旧行为回归全绿 + 新红灯测试全绿」，**逐个里程碑收**，
+      不允许一次性替换。
+      **为什么最危险**：这是**生产决策路径**。改坏了不报错，只是某天 Card 上的数不对。
+
+- [ ] **③ P3-7：`required_datasets` resolver** —— 依赖 ② 完成。
+      它引用的 `cn.sector.board_snapshot` / `cn.news.flash` / `cn.market.limit_pool`
+      **在 ② 之前根本不存在** ⇒ 提前做等于引用不存在的 dataset id。
+
+### ⬜ 余留（不阻塞，但别忘）
+
+- [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`，
+      挑一个没被限流的时候跑。过了就删掉 provider title 与 `data/quality.py`
+      的 `not_checked` 里那两处「尚未探活成功」的说明。
+      ⚠️ 上次探活失败是**我自己把自己限流了**（连控制组端点都 502）⇒
+      当时记的是「未验证」，不是「不可用」——**这两个不是一回事**。
+
+- [ ] deploy / CLI 面三件（外部包给的那份**没合**，因为它从没在本机跑过）：
+      systemd 单元名必须 `-biga` **后缀**（R-2；前缀式的 `biga-xxx` 守卫根本不认，**比报红更糟**）、
+      `WorkingDirectory` 指向本仓库、可执行文件用 `python3`（本机没有 `python`）。
+
+---
+
 ## 路线图（Phase 3+ 不要提前做）
 
 | Phase | 内容 | 出口条件 |

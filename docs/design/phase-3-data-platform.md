@@ -230,10 +230,17 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 | P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ✅ |
 | P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ✅ |
 | P3-3 | Security Master（point-in-time universe） | **v27** | 🔶 **链路建成，上游未探活** |
-| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ⬜ |
-| P3-5 | Tradability + Adjustment Factors | — | ⬜ |
+| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | 🔶 **代码在，未进注册表** |
+| P3-5 | Tradability + Adjustment Factors | — | 🔶 同上 |
 | P3-6 | 迁移 §2.2 那五条 direct feed | — | ⬜ |
 | P3-7 | SnapshotResolver + `required_datasets` + EvidenceSet v2 | — | ⬜ |
+| P3-11 | 确定性离线回放 | — | ✅ |
+| P3-12 | point-in-time / 修订链审计 | — | ✅ |
+| P3-13 | PIT 安全的 DuckDB 查询（`query_eod_as_of`） | — | ✅ |
+| P3-14 | 完整性重算 + Specialist 采数边界 AST 判据 | — | ✅ |
+| P3-15 | 演练框架 + 集中式 Primary→Fallback | — | ✅ |
+| P3-16 | 哈希链式上线验收账本 | — | ✅ |
+| P3-17 | 发布闸门 `tools/verify/phase3_acceptance.py` | — | ✅ |
 
 🔴 **每个里程碑的出口都是「旧行为回归全绿 + 新红灯测试全绿」**，
 Data Platform 不允许破坏 Decision Kernel。
@@ -473,6 +480,66 @@ raw hash 语义不变
 `duckdb` 运行时依赖、Raw 文件归档、Parquet 数据面、EOD job。
 🔴 **到这一步才加依赖**，不提前 —— `pyarrow`/`duckdb` 进来之前，
 「clone 下来就能跑」这个事实还成立一天算一天。
+
+#### ⏩ P3-11..P3-17 落地（2026-09-26）：外部完整包深度评审后**选择性**合并
+
+外部交付了 P3-0..P3-17 的完整 source overlay。**不能整份覆盖** —— 它的基线是
+它自己的 P3-3，逐项扫 overlay：`source_prefix` / `ProviderNotRegistered` /
+`throttle` / `QUALITY_POLICIES` 出现在 **0 个文件**。覆盖等于把本仓库
+P3-0..P3-3 的十几处修正静默回退。
+
+合进来的是 P3-11..P3-17 那一层（`replay` / `lineage_audit` / `integrity` /
+`manifest_compat` / `failover` / `drills` / `acceptance` / `finalizer` / `cli`），
+逐个适配到本仓库的名字与口径。评审改掉的五处：
+
+| # | 外部写法 | 问题 | 本仓库的做法 |
+|---|---|---|---|
+| 1 | `code_ready = not [e for e in errors if not e.startswith("five consecutive") …]` | **判据挂在错误文案上**（L-13）。改个措辞结论就翻面，且不会有测试红 | `code_errors` / `live_errors` 从头就是两个 list |
+| 2 | 一张硬编码的 7 条 `provider → 模块路径` map | 注册了但不在 map 里的 provider **一个都不查** —— 守卫查的地方和它声称守的地方不是同一处 | 从 `ProviderDefinition.modules` 派生 |
+| 3 | 一张手写的平行 `PROVIDER_BINDINGS` 元组 | 与 `DatasetDefinition` 的 primary/fallback/validation 三个字段是**孪生清单**，漂了不报错 | `bindings_for_dataset()` 从唯一手写处派生 |
+| 4 | `datetime.now(timezone.utc)` 写验收账本 | 违反「时间一律北京时间」。这类 bug 的形状是**差 8 小时但仍然是个合法时刻**，不报错 | `now_cn()` |
+| 5 | `status.startswith("FAILED")` 判尝试失败 | 按字符串形状分类。多一个 `FAILED_*` 值或改名，判据静默跟着变 | 对 `ProviderAttemptStatus` 取值做集合判定 |
+
+另外三处**没合**：systemd 单元名是 `biga-` 前缀而非 `-biga` 后缀（R-2 的守卫
+根本不会把它算成 BigA 的单元，**比报红更糟**）、`WorkingDirectory` 指向
+不存在的路径、可执行文件写 `python`（本机没有这个名字）。
+
+P3-6 / P3-7 也没合 —— P3-7 引用的三个 dataset 要等 P3-6 迁完才存在，
+而 P3-6 要重写 6 个 skill + `orchestrator.py`（**生产决策路径**）。
+
+##### 🔴 闸门第一次跑就照出上一轮的欠账
+
+`tools/verify/phase3_acceptance.py --code-only` 第一次运行即报：
+
+```text
+❌ P3-4 尚未落地 ⇒ 注册表里没有：['cn.equity.daily_bars', 'cn.security.tradability']
+❌ P3-5 尚未落地 ⇒ 注册表里没有：['cn.equity.adjustment_factors', 'cn.market.emotion_close']
+```
+
+P3-4/P3-5 的四个 dataset 模块在上一轮已合入 `src/easyup_biga/data/datasets/`，
+但对应的 `DatasetDefinition` **从没进过注册表** ⇒ 它们一调 `run()` 就会在
+`get_dataset()` 抛 —— **今天是死代码**。
+
+> 这条值得记下来的不是「漏了四行注册」，而是：
+> **模块合进来了 ≠ 它能跑。** 上一轮四个模块的测试都绿，因为那些测试测的是
+> `write_parquet_rows` 这类不经过注册表的下层函数。
+> ⇒ 「有测试」和「有能跑到底的路径」是两件事。
+
+### 3.4 `tools/verify/phase3_acceptance.py` —— Phase 3 的发布闸门
+
+它回答两个**分开的**问题，并用三态退出码把它们区分开（口径见 `_verdict.py`）：
+
+| 退出码 | 含义 | 下一步 |
+|---|---|---|
+| `0` | 代码面齐了 **且** 上线证据够了 | 打 tag `v1-data-platform-foundation` |
+| `1` | **代码面**有问题 | 去看代码：少了模块 / 注册表指向空气 / 依赖没声明 |
+| `2` | 代码面没问题，**证据不足** | 去跑演练、去等够五个交易日 |
+
+🔴 区分 1 和 2 是它存在的主要理由。外部实现两者都退 `1` ——
+于是「还没跑够五天」和「代码写坏了」在 CI 里长一个样，而这两件事下一步完全不同。
+
+⚠️ **它今天必然退 1**，因为 P3-4/P3-5/P3-6 的 dataset 还没进注册表。
+这是诚实的红，不是坏掉的守卫 —— 按裁定 14，没达成就写 `⬜`/`🔶`，不写 `✅`。
 
 ---
 

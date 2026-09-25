@@ -192,3 +192,31 @@ def role_of(dataset_id: str, provider_id: str) -> "ProviderRole":
         f"  该 dataset 登记的：primary={ds.primary_provider!r} "
         f"fallback={list(ds.fallback_providers)} validation={list(ds.validation_providers)}\n"
         f"  要新增角色就改 data/registry.py 里那个 dataset 的字段。")
+
+
+def bindings_for_dataset(dataset_id: str) -> tuple["DatasetProviderBinding", ...]:
+    """这个 dataset 的全部 dataset × provider × role 边，**从注册表派生**。
+
+    🔴 为什么不是一张手写的 `PROVIDER_BINDINGS` 元组（外部实现的做法）：
+    那与 `DatasetDefinition` 的 primary/fallback/validation 三个字段是一对
+    **孪生清单** —— 同一件事写两处。漂了不会报错，只会让 failover 按一份
+    清单走、而 `role_of()` 按另一份答题，两者各自自洽。
+    ⇒ 这里只从唯一手写处（`registry.DATASETS`）算出来。
+
+    顺序是确定性的：PRIMARY → FALLBACK（按 id 排）→ VALIDATOR（按 id 排）。
+    """
+    from .contracts import DatasetProviderBinding, ProviderRole
+    ds = DATASET_REGISTRY.get(dataset_id)
+    if ds is None:
+        raise KeyError(f"未注册的数据集 {dataset_id!r}")
+    out = [DatasetProviderBinding(dataset_id, ds.primary_provider, ProviderRole.PRIMARY)]
+    out += [DatasetProviderBinding(dataset_id, pid, ProviderRole.FALLBACK)
+            for pid in sorted(ds.fallback_providers)]
+    out += [DatasetProviderBinding(dataset_id, pid, ProviderRole.VALIDATOR)
+            for pid in sorted(ds.validation_providers)]
+    return tuple(out)
+
+
+def all_bindings() -> tuple["DatasetProviderBinding", ...]:
+    """全注册表的边，按 dataset 定义顺序展开。同样是派生值，不手写。"""
+    return tuple(b for ds_id in DATASET_REGISTRY for b in bindings_for_dataset(ds_id))

@@ -66,8 +66,20 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
 
 
-def _partition_json(value: Any) -> str:
+def partition_key_json(value: Any) -> str:
+    """分区键 → 落库用的规范 JSON。**唯一口径。**
+
+    🔴 公开它是因为读侧（血缘审计、演练）也要用同一个字符串去 `WHERE
+    partition_key_json=?`。外部实现里读侧自己又 `json.dumps(...)` 了两遍 ——
+    形状一样、参数一样，所以今天对得上；而它们对不上的那天，查询只会返回
+    **零行**，被读成「这个分区没有修订链」，不是「键编码变了」。
+    ⇒ 那是静默 fail-open（R-3），不是报错。
+    """
     return _json(canonical_partition_key(value))
+
+
+#: 历史私名，写侧 20 余处在用 —— 与 `partition_key_json` 是同一个函数，不是两套。
+_partition_json = partition_key_json
 
 
 def _check_partition_keys(dataset_id: str, partition_key: Any) -> None:
@@ -195,6 +207,17 @@ def save_raw_artifact(artifact: RawArtifact, *, path: pathlib.Path | str | None 
     return artifact.artifact_id
 
 
+def load_raw_artifact(
+    artifact_id: str, *, path: pathlib.Path | str | None = None
+) -> dict[str, Any] | None:
+    """按 id 取一条原始工件的元数据（不读 body —— body 在文件面或 raw 表里）。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT * FROM raw_artifacts WHERE artifact_id=?", (artifact_id,)
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
 def record_provider_attempt(attempt: ProviderAttempt, *, path: pathlib.Path | str | None = None) -> int:
     get_provider(attempt.provider_id)
     with connect(path) as conn:
@@ -242,6 +265,21 @@ def save_dataset_partition(
         except sqlite3.IntegrityError as exc:
             raise DataStoreConflict("dataset partition identity/version conflict") from exc
     return partition.partition_id
+
+
+def load_dataset_partition(
+    partition_id: str, *, path: pathlib.Path | str | None = None
+) -> dict[str, Any] | None:
+    """按 id 取一个分区。`partition_key` 已解回 dict —— 与 `load_dataset_snapshot` 同形。"""
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT * FROM dataset_partitions WHERE partition_id=?", (partition_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    out["partition_key"] = json.loads(out.pop("partition_key_json"))
+    return out
 
 
 def save_quality_report(report: QualityReport, *, path: pathlib.Path | str | None = None) -> str:

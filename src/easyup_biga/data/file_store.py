@@ -246,8 +246,19 @@ class FileStore:
             con.close()
 
     def verify_file_hash(self, uri: str, expected_sha256: str) -> None:
+        """重算文件哈希并与预期对齐。对不上、或文件没了，都抛 `FileStoreError`。
+
+        🔴 「文件不存在」必须和「内容被改」走**同一个异常类型**。
+        否则调用方 `except FileStoreError` 捕到的是「改了」，而删掉整个文件
+        会漏成一个 `FileNotFoundError` 往上冒 —— 最彻底的那种篡改反而绕过了
+        为篡改准备的那条分支。
+        """
         path = Path(uri)
-        actual = _sha256_bytes(path.read_bytes())
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise FileStoreError(f"file is unreadable: {path} ({exc})") from exc
+        actual = _sha256_bytes(data)
         if actual != expected_sha256:
             raise FileStoreError(
                 f"file hash mismatch: {path} expected={expected_sha256} actual={actual}"

@@ -9,102 +9,14 @@
 # 仓库自己的 CLI 一直是独立文件：biga-card / biga-calendar / biga-notify / biga-reap。
 # 见 docs/design/phase-3-data-platform.md 裁定 2。
 #
-# 用法
-#   bin/biga-data list                列出已注册的数据集（Data Platform 已接管的）
-#   bin/biga-data providers           列出数据源，以及各自被哪些数据集用到
-#   bin/biga-data <子命令> --json     同样的内容，机器可读
+# 🔴 实现不在这个文件里，在 src/easyup_biga/data/cli.py
+# ------------------------------------------------------
+# 子命令长到 18 个之后，写在 heredoc 里的那份既不能 import、也不能被单元
+# 测试直接调 —— 想验一条子命令就只能起子进程。⇒ 壳只负责挂 PYTHONPATH。
 #
-# 退出码：0 正常 / 1 用法错误。数据任务的三态退出码（裁定 12）在 P3-1 随
-# `run` 子命令进来，那时才有状态可退。
+# ⚠️ `python3` 不是 `python`：本机没有 `python` 这个名字。
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT" || exit 1
-
-exec python3 - "$@" <<'PY'
-import json
-import pathlib
-import sys
-
-sys.path.insert(0, str(pathlib.Path.cwd() / "src"))
-from easyup_biga.data import (  # noqa: E402
-    DATASET_REGISTRY, PROVIDER_REGISTRY, datasets_of,
-)
-
-USAGE = """用法：
-  bin/biga-data list          列出已注册的数据集
-  bin/biga-data providers     列出数据源，以及各自被哪些数据集用到
-  加 --json 输出机器可读格式"""
-
-
-def cmd_list(as_json: bool) -> int:
-    rows = [
-        {
-            "dataset_id": d.dataset_id,
-            "title": d.title,
-            "primary_provider": d.primary_provider,
-            "fallback_providers": list(d.fallback_providers),
-            "validation_providers": list(d.validation_providers),
-            "partition_keys": list(d.partition_keys),
-            "storage_policy": d.storage_policy,
-            "raw_table": d.raw_table,
-            "fact_table": d.fact_table,
-            "consumers": list(d.consumers),
-        }
-        for d in DATASET_REGISTRY.values()
-    ]
-    if as_json:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
-        return 0
-    print(f"已注册 {len(rows)} 个数据集：\n")
-    for r in rows:
-        extra = ""
-        if r["fallback_providers"]:
-            extra += f" · fallback {'/'.join(r['fallback_providers'])}"
-        if r["validation_providers"]:
-            extra += f" · 校验 {'/'.join(r['validation_providers'])}"
-        print(f"  {r['dataset_id']:25} {r['primary_provider']:8}{extra}")
-        print(f"  {'':25} {r['title']}")
-        tables = r["raw_table"] + (f" + {r['fact_table']}" if r["fact_table"] else "")
-        print(f"  {'':25} → {r['storage_policy']}（{tables}）")
-        print(f"  {'':25} 读它的：{'、'.join(r['consumers'])}\n")
-    return 0
-
-
-def cmd_providers(as_json: bool) -> int:
-    rows = [
-        {
-            "provider_id": p.provider_id,
-            "title": p.title,
-            "source_prefix": p.source_prefix,
-            "modules": list(p.modules),
-            # 🔴 派生而非手写 —— 见 data/provider_registry.py 的模块头
-            "datasets": list(datasets_of(p.provider_id)),
-        }
-        for p in PROVIDER_REGISTRY.values()
-    ]
-    if as_json:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
-        return 0
-    print(f"已注册 {len(rows)} 个数据源：\n")
-    for r in rows:
-        print(f"  {r['provider_id']:15} {r['title']}")
-        print(f"  {'':15} source 前缀 {r['source_prefix']}: · "
-              f"它挂了会影响：{'、'.join(r['datasets']) or '（无）'}\n")
-    return 0
-
-
-def main(argv: list[str]) -> int:
-    args = [a for a in argv if a != "--json"]
-    as_json = "--json" in argv
-    if len(args) != 1:
-        print(USAGE, file=sys.stderr)
-        return 1
-    cmd = {"list": cmd_list, "providers": cmd_providers}.get(args[0])
-    if cmd is None:
-        print(f"未知子命令 {args[0]!r}\n\n{USAGE}", file=sys.stderr)
-        return 1
-    return cmd(as_json)
-
-
-raise SystemExit(main(sys.argv[1:]))
-PY
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m easyup_biga.data.cli "$@"
