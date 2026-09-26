@@ -123,6 +123,29 @@ class PoolResult:
         raw: 解析后的完整响应对象（落 raw 层的 `payload_json`）。
         raw_text: 🔴 数据源发来的**原始响应文本**（`get_json_and_text` 交出的那段），
             带到 `save_raw_snapshot(raw_text=...)`；`content_sha256` 基于它算（批 I）。
+        row_fields: 🔴 **这个源的 `rows` 里真正带哪些明细字段**（显式声明，不靠猜）。
+
+            备用源给的明细往往比主源少，而**少掉的那些有默认值**：
+
+            ============================  =========================================
+            缺什么                          不声明的话会算出什么
+            ============================  =========================================
+            `lbc`（连板次数）                `_ladder` 里 ``int(r.get("lbc") or 1)``
+                                          ⇒ 每只都算首板 ⇒ ``max_streak=1``、
+                                          ``streak_ladder={1: N}``
+                                          —— **宣称今天一个连板都没有**
+            `zbc`（炸板次数）                ``int(r.get("zbc") or 0) == 0`` 恒真
+                                          ⇒ ``seal_never_broken_rate=1.0``
+                                          —— **宣称全都没炸过板**
+            整个 `rows`                     上面两条同时发生，外加
+                                          ``seal_never_broken_rate=0.0``
+            ============================  =========================================
+
+            **三种错法都不报错。** 而且 `rows=()` 本身是**合法状态** ——
+            东财盘前实测就是 `tc=0` + `pool=[]`，那是「今天真的 0 家」。
+            ⇒ 「有没有这个字段」不能从数据里推，只能由适配器**说出来**。
+
+            默认值是东财的（它两个都给）。备用源自己收窄。
     """
 
     pool: str
@@ -132,6 +155,7 @@ class PoolResult:
     rows: list[dict[str, Any]]
     raw: dict[str, Any]
     raw_text: str | None = None
+    row_fields: frozenset[str] = frozenset({"lbc", "zbc"})
 
     @property
     def server_as_of(self) -> datetime | None:

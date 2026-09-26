@@ -235,9 +235,17 @@ DATASETS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
         dataset_id="cn.market.limit_pool",
         title="决策交易日涨停/炸板/跌停池冻结",
-        schema_version=1,
+        # v2：行上多了 `row_fields_json` —— 这个源的明细里**真正有哪些字段**。
+        # 不升版本的话，旧分区与新分区在同一个 dataset 下形状不同，
+        # 而读取方拿不到它时只能靠「rows 空不空」猜，而空是合法状态。
+        schema_version=2,
         primary_provider="eastmoney",
-        fallback_providers=(), validation_providers=(),
+        # 🔴 备用源**换了一家**：东财自己的付费 AI 接口也能给计数，
+        #    但它和主源同属一家，厂商级故障会一起挂。新浪那条是从
+        #    全市场快照自算的，走完全不同的链路。
+        #    ⚠️ 它**只给三个计数** —— 连板梯队与未炸板占比单日截面
+        #      给不出来，消费方靠 `row_fields` 判，不靠猜。
+        fallback_providers=("sina_limit_pool",), validation_providers=(),
         partition_keys=("evidence_set_id",), storage_policy="parquet_evidence_bundle",
         quality_policy="cn-limit-pool-v1", raw_table="raw_artifacts",
         consumers=("easyup_biga.data.decision_client:DecisionDataClient",),

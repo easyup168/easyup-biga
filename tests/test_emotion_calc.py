@@ -387,3 +387,70 @@ class TestPreSessionZeros:
             wired[k] = pool(k, 0, [], qdate="20260918")
         v = build()
         assert not any(m.code == "emotion.pool.not_yet_formed" for m in v.missing)
+
+
+class TestDegradedPoolSource:
+    """🔴 备用源只给计数时，**不许把派生值算出来**。
+
+    2026-09-26 `cn.market.limit_pool` 接上第一个非东财的备胎（新浪自算）。
+    它给三个计数，但给不出每只票的 `lbc`（连板次数）与 `zbc`（炸板次数）——
+    单日 OHLC 截面里没有这两样。
+
+    而消费侧的默认值**正好指向最危险的方向**：
+
+        `int(r.get("lbc") or 1)`   ⇒ 每只都算首板 ⇒ `max_streak=1`
+                                      「今天最高才 1 板」
+        `int(r.get("zbc") or 0)==0` ⇒ 恒真 ⇒ `seal_never_broken_rate=1.0`
+                                      「全都没炸过板」
+
+    **两条都不报错。** 而且 `rows=[]` 本身是合法状态
+    （东财盘前 `tc=0` + `pool=[]`，那是真的 0 家）——
+    所以「有没有这个字段」不能从数据里推，只能由适配器**说出来**。
+    """
+
+    def _degraded(self, wired, fields=frozenset()):
+        """把涨停池换成「只给计数」的形态（模拟备用源供数）。"""
+        wired["limit_up"] = dataclasses.replace(
+            pool("limit_up", 54, []), row_fields=fields)
+        return build()
+
+    def test_缺lbc时不产出连板三件套(self, wired):
+        v = self._degraded(wired)
+        for f in ("max_streak", "streak_2plus_count", "streak_ladder"):
+            assert f not in v.result, f"{f} 不该被编出来"
+
+    def test_缺lbc要说出来而不是静默(self, wired):
+        v = self._degraded(wired)
+        codes = {m.code for m in v.missing}
+        assert "emotion.streak.unavailable" in codes, codes
+        txt = next(str(m) for m in v.missing if m.code == "emotion.streak.unavailable")
+        assert "不等于" in txt, "必须说清楚「不是今天没有连板」"
+
+    def test_缺zbc时不产出未炸板占比(self, wired):
+        v = self._degraded(wired)
+        assert "seal_never_broken_rate" not in v.result
+        assert "emotion.seal_rate.unavailable" in {m.code for m in v.missing}
+
+    def test_计数本身仍然产出(self, wired):
+        """降级的价值就在这里 —— 三个计数比「全部无法判定」有用得多。"""
+        v = self._degraded(wired)
+        assert v.result["limit_up_count"] == 54
+        assert "limit_down_count" in v.result and "broken_board_count" in v.result
+
+    def test_声明了字段就照常算(self, wired):
+        """⚠️ 反向的一半：守卫不能把主源也挡掉。"""
+        v = build()
+        assert v.result["max_streak"] == 4
+        assert "seal_never_broken_rate" in v.result
+        assert not [m for m in v.missing if m.code.startswith("emotion.streak")]
+
+    def test_空rows且声明有字段时不误伤(self, wired):
+        """🔴 `rows=[]` + 声明有 `lbc` = 东财盘前的**真 0 家**。
+
+        这时该照常产出 `max_streak=0`，而不是报「源不提供」——
+        把「真的没有」说成「不知道」同样是失真，只是方向相反。
+        """
+        wired["limit_up"] = pool("limit_up", 0, [])
+        v = build()
+        assert v.result.get("max_streak") == 0
+        assert "emotion.streak.unavailable" not in {m.code for m in v.missing}

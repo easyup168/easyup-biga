@@ -118,7 +118,7 @@ python3 tools/verify/source_survey.py --markdown # 贴文档
 | `cn.index.realtime_quote` | 腾讯 | — | |
 | `cn.market.breadth` | 东财 `ulist.np` | **新浪（自算）** | 主源**报数**、备用源**数数**；口径多北交所；「平盘」的定义变成我们定的 |
 | `cn.sector.board_snapshot` | 东财 `clist` | 新浪 `newFLJK` | 🔴 **换的是整套分类体系**，见 §3.2；另缺主力净流入与板块涨跌家数 |
-| `cn.market.limit_pool` | 东财 `push2ex` | — | |
+| `cn.market.limit_pool` | 东财 `push2ex` | **新浪（自算）** | 🔴 备用源**只给三个计数** —— 连板次数 `lbc` 与炸板次数 `zbc` 单日 OHLC 截面给不出来。消费方靠 `row_fields` 判，不靠「rows 空不空」猜 |
 | `cn.news.flash` | **财联社 `v1/roll`** | **新浪 7×24** | `level`（源侧重要性档位）**只有主源有** ⇒ 降级后进 `missing[]`，不补默认档；条数 8.6 → 34 条/小时 |
 
 ### 3.1 🔴 盘中 dataset 的备胎进度（原文：**五个一个都没有**）
@@ -129,7 +129,7 @@ python3 tools/verify/source_survey.py --markdown # 贴文档
 | ~~`cn.sector.board_snapshot`~~ | ✅ **2026-09-26 已配上**（`sina_boards`）| 同花顺热榜口径不对（那是热门**股**不是板块快照）。真正对口径的是新浪 `newFLJK.php` |
 | `cn.index.realtime_quote` | 正常 | 新浪 `hq.sinajs.cn` ✅ |
 | ~~`cn.news.flash`~~ | ✅ **2026-09-26 已配上**（财联社转正为主源、新浪降为备用）| 「财联社需签名暂不可用」是**错的**：死的是旧 `nodeapi`，`v1/roll` 一直在，签名 `md5(sha1(字典序 query))` 零 key |
-| `cn.market.limit_pool` | 正常 | 暂无（`push2ex` 与 `push2` 不同组，本次未受牵连）|
+| ~~`cn.market.limit_pool`~~ | ✅ **2026-09-26 已配上**（`sina_limit_pool`，从全市场快照自算）| 东财自家的付费 AI 接口也能给计数且当天可用，但**同属一家** —— 厂商级故障会一起挂，不算真备胎 |
 
 ⚠️ **候选 ≠ 已登记。** 登记一个**没探活过**的备胎比没有备胎更糟 ——
 它承诺了一条可能也是断的降级路径。上面这些刚探活过，

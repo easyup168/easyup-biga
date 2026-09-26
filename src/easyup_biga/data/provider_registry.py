@@ -159,6 +159,13 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina_news",),
     ),
     ProviderDefinition(
+        provider_id="sina_limit_pool",
+        title="新浪涨跌停/炸板家数 —— cn.market.limit_pool 的 FALLBACK；"
+              "从全市场快照自算，只给计数（连板与炸板次数单日截面给不出来）",
+        source_prefix="sina",
+        modules=("easyup_biga.providers.sina_limit_pool",),
+    ),
+    ProviderDefinition(
         provider_id="cls_news",
         title="财联社电报 —— cn.news.flash 的 PRIMARY；唯一带 level 重要性档位的快讯源",
         source_prefix="cls",

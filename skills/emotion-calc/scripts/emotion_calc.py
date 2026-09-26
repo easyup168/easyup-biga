@@ -86,6 +86,7 @@ from _data import (  # noqa: E402
     SourceError,
     as_of_for_trade_date,
     fetch_pool,
+    source_prefix_of,
     session_in_progress,
 )
 from _store import (  # noqa: E402
@@ -128,6 +129,8 @@ class Collector:
         self.evidence_set_id = evidence_set_id
         self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.pools: dict[str, PoolResult] = {}
+        #: pool → **实际供数方**（降级时与 dataset 的 primary 不同）。
+        self.pool_provider: dict[str, str | None] = {}
         self.missing: list[str] = []
         self.warnings: list[str] = []
         self.raw_ids: list[int] = []
@@ -164,10 +167,13 @@ class Collector:
             return
         try:
             if self._data is not None:
-                r, frozen_hash = self._data.read_pool(self.evidence_set_id, pool)
+                r, frozen_hash, served_by = self._data.read_pool(
+                    self.evidence_set_id, pool)
             else:
                 r = fetch_pool(pool, self._target_date())
                 frozen_hash = None
+                # 直连路径没有降级链（provider 选择归冻结层）⇒ 只可能是东财。
+                served_by = "eastmoney"
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                           "emotion.pool.unavailable"))
@@ -194,7 +200,9 @@ class Collector:
         #    `--no-store` 跑出来的证据**全都没有 raw_hash** —— 同一段代码、同一份
         #    数据，可追溯性却取决于一个与追溯无关的开关。
         #    市场/板块/快讯三个 skill 本来就是先算哈希再判 store，这里是唯一的例外。
-        source = f"em:push2ex/{pool}"
+        with self._lock:
+            self.pool_provider[pool] = served_by
+        source = _pool_source(pool, served_by)
         if self._data is not None:
             with self._lock:
                 if frozen_hash:
@@ -226,6 +234,23 @@ class Collector:
         if len(dates) > 1:
             return None
         return dates.pop()
+
+
+def _pool_source(pool: str, provider_id: str | None) -> str:
+    """股池 Evidence 的 `source` —— 按**实际供数方**拼，不写死主源。
+
+    🔴 这里曾经是 `f"em:push2ex/{pool}"` 的字面量，**写死在 8 处**。
+    股池有了备用源之后，降级过的那天 Evidence 会指着一个**没供过数的源** ——
+    比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+    （板块与涨跌家数都踩过同一个坑，这是第三处。）
+
+    ⚠️ 备用源是**自算**的（从全市场快照数出来），不是报数 ⇒
+    它的 source 形状也不一样，不能只换前缀。
+    """
+    if provider_id is None or provider_id == "eastmoney":
+        return f"em:push2ex/{pool}"
+    prefix = source_prefix_of(provider_id)
+    return f"{prefix}:hs_a/{pool}"
 
 
 def _ladder(rows: list[dict[str, Any]]) -> dict[int, int]:
@@ -322,25 +347,45 @@ def build_fact_bundle(
         dt = c.pools.get("limit_down")
 
         if zt:
-            add("limit_up_count", zt.total, "涨停家数", "em:push2ex/limit_up",
+            add("limit_up_count", zt.total, "涨停家数", _pool_source("limit_up", c.pool_provider.get("limit_up")),
                 kind="observed")
-            ladder = _ladder(zt.rows)
-            add("max_streak", max(ladder) if ladder else 0, "最高板",
-                "em:push2ex/limit_up", kind="derived")
-            add("streak_2plus_count", sum(v for k, v in ladder.items() if k >= 2),
-                "连板家数(≥2)", "em:push2ex/limit_up", kind="derived")
-            add("streak_ladder", {str(k): v for k, v in ladder.items()},
-                "连板梯队分布", "em:push2ex/limit_up", kind="derived")
-            never_broken = sum(1 for r in zt.rows if int(r.get("zbc") or 0) == 0)
-            add("seal_never_broken_rate",
-                round(never_broken / zt.total, 4) if zt.total else None,
-                "全天未炸板占比", "em:push2ex/limit_up", kind="derived")
+            # 🔴 逐项按**源自己声明的明细字段**决定算不算，不看 rows 空不空。
+            #
+            #    `rows=()` 是**合法状态**（东财盘前 tc=0 + pool=[]，真的 0 家），
+            #    而「这个源不给明细」是另一回事 —— 两者在数据上长得一样。
+            #    照着空列表硬算，得到的是**三条不报错的假事实**：
+            #      `max_streak=1`（`lbc` 缺失默认 1 ⇒ 宣称一个连板都没有）
+            #      `seal_never_broken_rate=1.0`（`zbc` 缺失默认 0 ⇒ 宣称全没炸过）
+            #      或 `=0.0`（rows 全空 ⇒ 宣称全炸了）
+            if "lbc" in zt.row_fields:
+                ladder = _ladder(zt.rows)
+                add("max_streak", max(ladder) if ladder else 0, "最高板",
+                    _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+                add("streak_2plus_count", sum(v for k, v in ladder.items() if k >= 2),
+                    "连板家数(≥2)", _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+                add("streak_ladder", {str(k): v for k, v in ladder.items()},
+                    "连板梯队分布", _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+            else:
+                c.missing.append(MissingItem(
+                    "连板梯队（最高板 / 连板家数 / 梯队分布）—— 本次供数方不提供"
+                    "每只票的连板次数。**这不等于「今天没有连板」**，"
+                    "只等于这个源没说",
+                    "emotion.streak.unavailable"))
+            if "zbc" in zt.row_fields:
+                never_broken = sum(1 for r in zt.rows if int(r.get("zbc") or 0) == 0)
+                add("seal_never_broken_rate",
+                    round(never_broken / zt.total, 4) if zt.total else None,
+                    "全天未炸板占比", _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+            else:
+                c.missing.append(MissingItem(
+                    "全天未炸板占比 —— 本次供数方不提供每只票的炸板次数",
+                    "emotion.seal_rate.unavailable"))
 
         if zb:
-            add("broken_board_count", zb.total, "炸板家数", "em:push2ex/broken_board",
+            add("broken_board_count", zb.total, "炸板家数", _pool_source("broken_board", c.pool_provider.get("broken_board")),
                 kind="observed")
         if dt:
-            add("limit_down_count", dt.total, "跌停家数", "em:push2ex/limit_down",
+            add("limit_down_count", dt.total, "跌停家数", _pool_source("limit_down", c.pool_provider.get("limit_down")),
                 kind="observed")
 
         # 炸板率需要两个池同时在场 —— 缺一个就不是「算出来是 0」，是「算不出来」。
@@ -377,8 +422,8 @@ def build_fact_bundle(
         # 🔴 三个股池各自报 qdate，取**共识**（不一致就是 None）⇒ 它出自那几份响应，
         # 不是任何单一一份。批 4 之前这里没有 raw_hash 也说不清为什么，
         # 曾被我错判成「表键对不上的 bug」—— 实际是跨源，用 raw_origins 指回全部。
-        add("trade_date", qdate, "交易日", "em:push2ex/qdate", kind="observed",
-            origins=raw_origins(c.hashes.get(f"em:push2ex/{name}")
+        add("trade_date", qdate, "交易日", _pool_source("qdate", next(iter(c.pool_provider.values()), None)), kind="observed",
+            origins=raw_origins(c.hashes.get(_pool_source(name, c.pool_provider.get(name)))
                                 for name in c.pools))
     else:
         c.missing.append(MissingItem("全部情绪指标 —— 没有任何股池返回可用的交易日",

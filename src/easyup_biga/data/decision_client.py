@@ -77,6 +77,9 @@ from .datasets import emotion_close
 from easyup_biga.providers.sina_boards import (
     fetch_boards as _sina_fetch_boards,
 )
+from easyup_biga.providers.sina_limit_pool import (
+    fetch_all_pools as _sina_all_pools,
+)
 from easyup_biga.providers.sina_breadth import (
     fetch_breadth as _sina_fetch_breadth,
 )
@@ -192,6 +195,17 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500):
 
 def fetch_feed(*, pages: int = 1):
     return _fetch_feed(pages=pages)
+
+
+def _sina_pools_in_order(trade_date: str, names) -> list:
+    """新浪自算三池，按 `names` 的顺序返回。
+
+    🔴 **一次抓取**。写成 `[_sina_all_pools(d)[n] for n in names]` 会
+    每次迭代都重新拉一遍全市场（~5 MB × 3 / 24 秒），而且三个池在时间上
+    还会不一致 —— 盘中尤其明显。我写第一版时就是那样，这行注释是它的墓志铭。
+    """
+    pools = _sina_all_pools(trade_date)
+    return [pools[n] for n in names]
 
 
 def _json(value: Any) -> str:
@@ -398,21 +412,39 @@ class DecisionDataClient:
                     for a in attempts),
             )
         if dataset_id == "cn.market.limit_pool":
-            pools = [_fetch_pool(name, trade_date) for name in
-                     ("limit_up", "broken_board", "limit_down")]
+            # 🔴 走降级链。2026-09-26 起这个 dataset 终于有了备用源 ——
+            #    而且是**换了一家**：东财自己的付费 AI 接口也能给计数，
+            #    但它和主源同属一家，厂商级故障会一起挂。
+            #    新浪那条是从全市场快照自算的，走的是完全不同的链路。
+            _names = ("limit_up", "broken_board", "limit_down")
+            attempts: list[ProviderExecutionAttempt] = []
+            outcome = execute_with_fallback(
+                dataset_id,
+                {"eastmoney": lambda: [_fetch_pool(n, trade_date) for n in _names],
+                 "sina_limit_pool": lambda: _sina_pools_in_order(trade_date, _names)},
+                on_attempt=attempts.append,
+            )
+            pools = outcome.value
             rows = [{
                 "pool": p.pool,
                 "requested_date": p.requested_date,
                 "qdate": p.qdate,
                 "total": p.total,
                 "rows_json": _json(p.rows),
+                # 🔴 **这个源的明细里真正有哪些字段**，落库带出去。
+                #    不落的话，读回来只能靠「rows 空不空」猜 ——
+                #    而 `rows=[]` 是合法状态（真的 0 家）。
+                "row_fields_json": _json(sorted(p.row_fields)),
             } for p in pools]
             raw_text = _json({p.pool: p.raw_text or _json(p.raw) for p in pools})
             result = self.publisher.publish(
                 dataset_id=dataset_id, job_id="decision-freeze-limit-pool",
-                provider_id="eastmoney", partition_key=key, raw_text=raw_text,
+                provider_id=outcome.provider_id, partition_key=key, raw_text=raw_text,
                 rows=rows, as_of=trade_date,
                 quality_metrics={"row_count": len(rows), "trade_date": trade_date},
+                failover_attempts=tuple(
+                    (a.provider_id, a.role.value, a.succeeded, a.error)
+                    for a in attempts),
             )
             # P3-5 integration: close emotion is a deterministic daily derivative of
             # the same three pools; publish it through its own immutable dataset.
@@ -421,14 +453,19 @@ class DecisionDataClient:
             broken = by_name["broken_board"]
             down = by_name["limit_down"]
             denom = up.total + broken.total
-            streaks = [int(row.get("lbc") or 1) for row in up.rows]
+            # 🔴 `lbc` 缺失时 `or 1` 会把每只票算成首板 ⇒ `max=1`，
+            #    而那是一条**不报错的假事实**（"今天最高才 1 板"）。
+            #    源没声明这个字段就交 `None` —— 算不出来要说算不出来（R-3）。
+            streaks = ([int(row.get("lbc") or 1) for row in up.rows]
+                       if "lbc" in up.row_fields else None)
             emotion_close.run(
                 _MappingEmotionCollector({
                     "limit_up_count": up.total,
                     "limit_down_count": down.total,
                     "broken_limit_count": broken.total,
                     "broken_limit_rate": (broken.total / denom if denom else None),
-                    "max_consecutive_limit": max(streaks) if streaks else 0,
+                    "max_consecutive_limit": (max(streaks) if streaks else 0)
+                                             if streaks is not None else None,
                     "advance_count": None,
                     "decline_count": None,
                 }),
@@ -567,19 +604,38 @@ class DecisionDataClient:
         return (BoardResult(kind, len(boards), boards, raw={}, raw_text=None),
                 frozen.raw_hash, frozen.provider_id)
 
-    def read_pool(self, evidence_set_id: str, pool: str) -> tuple[PoolResult, str | None]:
+    def read_pool(
+        self, evidence_set_id: str, pool: str
+    ) -> tuple[PoolResult, str | None, str | None]:
+        """返回 `(股池, raw_hash, **实际供数方**)`。
+
+        ⚠️ 第三项是 2026-09-26 加的，与 `read_boards` / `read_news` /
+        `read_breadth` 同一个理由：写死主源字面量会让降级过的那次
+        Evidence 指着一个没供过数的源。
+
+        🔴 `row_fields` 也从分区里读回来 —— 备用源只给计数，
+        而 `rows=[]` 是**合法状态**（真的 0 家）。靠「空不空」推断
+        会让 emotion 算出 `max_streak=1`、`seal_never_broken_rate=1.0`
+        这类**不报错的假事实**。
+        """
         frozen = self._frozen(evidence_set_id, "cn.market.limit_pool")
         row = next((r for r in frozen.rows if str(r["pool"]) == pool), None)
         if row is None:
             raise SourceError(f"cn.market.limit_pool 没有 pool={pool}")
+        # ⚠️ 用 `.get`：schema v1 的分区没有这一列。
+        #    读不到时退回**东财的字段集** —— v1 只可能是东财产的。
+        raw_fields = row.get("row_fields_json")
+        fields = (frozenset(json.loads(str(raw_fields))) if raw_fields
+                  else frozenset({"lbc", "zbc"}))
         result = PoolResult(
             pool=pool,
             requested_date=str(row["requested_date"]),
             qdate=None if row["qdate"] is None else str(row["qdate"]),
             total=int(row["total"]),
             rows=list(json.loads(str(row["rows_json"]))), raw={}, raw_text=None,
+            row_fields=fields,
         )
-        return result, frozen.raw_hash
+        return result, frozen.raw_hash, frozen.provider_id
 
     def read_news(
         self, evidence_set_id: str
