@@ -13,7 +13,11 @@
 
 ---
 
-## [未发布]
+## [0.7.0] - 2026-09-26
+
+> 无人值守跑完的一轮：TODO ⓪ / ① / ⓪-c / ②a 四个里程碑。
+> 三个真 bug 的共同形状是**「看起来有、其实没有」**——
+> 修订功能一次都没成功过、账本流程有三份实现、降级路径声明了却不存在。
 
 ### 新增 · P3-6a：provider 选择进数据层，交易日历的降级路径第一次真的存在
 
@@ -9218,6 +9222,7 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
+[0.7.0]: https://github.com/easyup168/easyup-biga/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/easyup168/easyup-biga/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/easyup168/easyup-biga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/easyup168/easyup-biga/compare/v0.4.0...v0.5.0
