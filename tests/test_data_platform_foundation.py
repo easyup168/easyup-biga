@@ -65,21 +65,14 @@ def _run() -> DataJobRun:
     )
 
 
-def test_只激活已有生产持久链的数据集():
-    """P3-0 的范围判据：只注册现有持久链的两个。
+def test_Phase3收口后所有必需dataset都已激活():
+    """P4-G0：注册表必须与 Phase 3 发布闸门的必需数据集完全一致。
 
-    🔴 这条会随 P3-6 的每次迁移 PR 而改 —— 那是**有意的**：改这条测试就是在
-    声明「又有一个数据集归平台管了」，逼人做一次明确的动作，而不是往注册表里
-    悄悄加一行。
+    这条从早期「只激活 3 个」升级为收口判据：P3-4～P3-6 每个迁移项都
+    已有真实生产/消费链，不能再把未接管的数据集登记成名义条目。
     """
-    assert set(DATASET_REGISTRY) == {
-        "cn.trading_calendar", "cn.index.daily_bars",
-        # P3-3 加入。⚠️ 它与前两个**不同**：前两个的生产链在跑，这一个的
-        # provider 尚未在本机探活成功（见适配器模块头）。注册它是因为整条链
-        # 已经建成且有读路径；取不到数时 Data Run 会 FAILED、不发布快照 ——
-        # fail-closed，不是「注册了就等于能用」。
-        "cn.security_master",
-    }
+    from easyup_biga.data.finalizer import REQUIRED_DATASETS
+    assert set(DATASET_REGISTRY) == set(REQUIRED_DATASETS)
 
 
 def test_schema到v27且八张地基表都在(tmp_path):

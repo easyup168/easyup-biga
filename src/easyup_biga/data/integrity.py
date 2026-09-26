@@ -117,9 +117,9 @@ def audit_specialist_provider_boundary(
 ) -> IntegrityReport:
     """P3-6 的出口判据：生产 Specialist 零直连采数模块。
 
-    ⚠️ **今天必然是红的** —— 五个 skill 还在直接 `from _sources import ...`，
-    那正是 P3-6 要迁的东西。所以它的消费方不是 CI 的绿灯，是 P3-6 的验收。
-    在那之前，用 `specialist_provider_imports()` 盯住「别再多一个」。
+    P4-G0 后这条应当常驻为绿：五个生产 Specialist 只允许依赖 `_data`
+    决策数据边界，Provider 选择与联网冻结由 Data 层拥有。任何 `_sources` 或
+    `easyup_biga.providers` 回流都视为架构回归。
     """
     checks: list[str] = []
     errors: list[str] = []

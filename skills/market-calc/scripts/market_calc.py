@@ -79,7 +79,8 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
     INDEX_PCT_LIMIT,
     BreadthResult,
     IndexDaily,
@@ -143,6 +144,7 @@ class Collector:
         # 给了就读冻结快照（不联网、不重复落盘），没给自己抓（手工调试路径）。
         self.evidence_set_id = evidence_set_id
         self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
+        self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.daily: dict[str, IndexDaily] = {}
         self.quotes: dict[str, IndexQuote] = {}
         self.breadth: BreadthResult | None = None
@@ -236,19 +238,30 @@ class Collector:
                                           "market.turnover.source_broken"))
             return
         try:
-            q, quote_body = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+            if self._data is not None:
+                q, frozen_hash = self._data.read_index_quote(self.evidence_set_id)
+                quote_body = None
+            else:
+                q, quote_body = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+                frozen_hash = None
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"成交额 —— 数据源不可用: {e}",
                                           "market.turnover.unavailable"))
             return
         with self._lock:
             self.quotes = q
-        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它。
-        # raw_text 用整段响应体 `quote_body`（批 I）：raw 层里那份 {code: 片段} 是从
-        # body 抠出来重排的派生物，content_sha256 要证明源字节只能用 body 本身。
-        self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
-                       max(v.server_as_of or now_cn() for v in q.values()),
-                       quote_body)
+        if self._data is not None:
+            # P3-6/P3-7: Provider 已由 Orchestrator 在 Data 层冻结；Specialist
+            # 只声明这份 EvidenceSet 的溯源，不重复联网/落 raw。
+            with self._lock:
+                if frozen_hash:
+                    self.hashes["tencent:quote"] = frozen_hash
+                self.es_ids["tencent:quote"] = self.evidence_set_id
+        else:
+            # 手工单跑仍允许 DataClient 的 live helper 取数。
+            self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
+                           max(v.server_as_of or now_cn() for v in q.values()),
+                           quote_body)
 
     def collect_breadth(self) -> None:
         if "breadth" in self.break_source:
@@ -256,17 +269,26 @@ class Collector:
                                           "market.breadth.source_broken"))
             return
         try:
-            b = fetch_breadth()
+            if self._data is not None:
+                b, frozen_hash = self._data.read_breadth(self.evidence_set_id)
+            else:
+                b = fetch_breadth()
+                frozen_hash = None
         except SourceError as e:
             self._note(missing=MissingItem(f"涨跌家数 —— 数据源不可用: {e}",
                                           "market.breadth.unavailable"))
             return
         with self._lock:
             self.breadth = b
-        # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
-        # 套上日线的交易日，就是把实时数写成上一个交易日的事实。
-        self._keep_raw("em:push2delay/ulist.np", b.raw,
-                       b.server_as_of or now_cn(), b.raw_text)
+        if self._data is not None:
+            with self._lock:
+                if frozen_hash:
+                    self.hashes["em:push2delay/ulist.np"] = frozen_hash
+                self.es_ids["em:push2delay/ulist.np"] = self.evidence_set_id
+        else:
+            # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
+            self._keep_raw("em:push2delay/ulist.np", b.raw,
+                           b.server_as_of or now_cn(), b.raw_text)
         # ⚠️ 不在这里发 as_of 警告：它依赖交易日，而交易日要等日线回来才知道。
         #    并行采集下在这里读是竞态，统一放到全部完成后做。
 

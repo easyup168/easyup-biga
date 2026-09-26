@@ -43,6 +43,8 @@ USAGE = """用法：
   bin/biga-data run-eod [--trade-date]    跑当日 EOD 日线
   bin/biga-data run-eod-bundle [--trade-date]
                                           跑 EOD 整包（日线 + 可交易性）
+  bin/biga-data run-adjustment-factors --csv <path> [--trade-date]
+                                          导入独立复权因子数据集
   bin/biga-data query-eod <start> <end>   跨日查询（取盘上最新修订）
   bin/biga-data query-eod-asof <cutoff> <start> <end>
                                           跨日查询（只用 cutoff 当时可见的修订）
@@ -100,6 +102,10 @@ def build_parser() -> tuple[argparse.ArgumentParser, frozenset[str]]:
         item = add(name)
         item.add_argument("--trade-date")
         item.add_argument("--new-revision", action="store_true")
+    item = add("run-adjustment-factors")
+    item.add_argument("--csv", required=True)
+    item.add_argument("--trade-date")
+    item.add_argument("--new-revision", action="store_true")
     item = add("query-eod")
     item.add_argument("start_date")
     item.add_argument("end_date")
@@ -266,6 +272,13 @@ def _dispatch(args: argparse.Namespace) -> Any:
             "universe_count": result.universe_count,
             "normalized_bar_count": result.normalized_bar_count,
         }
+    if cmd == "run-adjustment-factors":
+        from .datasets.adjustment_factors import CsvAdjustmentFactorProvider, run
+        trade_date = args.trade_date or now_cn().strftime("%Y%m%d")
+        return _publish_result(run(
+            CsvAdjustmentFactorProvider(args.csv), trade_date,
+            db_path=args.db, data_root=args.data_root,
+            new_revision=args.new_revision))
     if cmd == "query-eod":
         from .analytics import query_eod_between
         return query_eod_between(

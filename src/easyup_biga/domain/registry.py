@@ -47,6 +47,8 @@ __all__ = [
     "RISK_AGENT",
     "SNAPSHOT_INDEX_AGENTS",
     "EXPECTED_ROSTER",
+    "required_datasets_for",
+    "required_datasets_for_agents",
 ]
 
 
@@ -74,6 +76,7 @@ class AgentDefinition:
     stage: int
     spawned: bool
     reads_snapshot: bool
+    required_datasets: tuple[str, ...] = ()
 
 
 class AgentRegistry:
@@ -85,11 +88,21 @@ class AgentRegistry:
     """
 
     #: —— Stage 1：分析层，五路并行扇出 ——
-    market = AgentDefinition("market", stage=1, spawned=True, reads_snapshot=True)
-    sector = AgentDefinition("sector", stage=1, spawned=True, reads_snapshot=True)
-    news = AgentDefinition("news", stage=1, spawned=True, reads_snapshot=False)
-    technical = AgentDefinition("technical", stage=1, spawned=True, reads_snapshot=True)
-    emotion = AgentDefinition("emotion", stage=1, spawned=True, reads_snapshot=False)
+    market = AgentDefinition(
+        "market", stage=1, spawned=True, reads_snapshot=True,
+        required_datasets=("cn.index.daily_bars", "cn.index.realtime_quote", "cn.market.breadth"))
+    sector = AgentDefinition(
+        "sector", stage=1, spawned=True, reads_snapshot=True,
+        required_datasets=("cn.index.daily_bars", "cn.sector.board_snapshot"))
+    news = AgentDefinition(
+        "news", stage=1, spawned=True, reads_snapshot=False,
+        required_datasets=("cn.news.flash",))
+    technical = AgentDefinition(
+        "technical", stage=1, spawned=True, reads_snapshot=True,
+        required_datasets=("cn.index.daily_bars",))
+    emotion = AgentDefinition(
+        "emotion", stage=1, spawned=True, reads_snapshot=False,
+        required_datasets=("cn.market.limit_pool",))
     #: —— Stage 2：制衡层 ——
     risk = AgentDefinition("risk", stage=2, spawned=True, reads_snapshot=False)
     #: 🔴 在册但**故意不 spawn**（裁定 13）。删掉它 `STAGE2_AGENTS` 就会少一个，
@@ -148,3 +161,21 @@ def _sole_spawned_stage2(registry: tuple[AgentDefinition, ...]) -> str:
 
 
 RISK_AGENT: str = _sole_spawned_stage2(AGENT_REGISTRY)
+
+
+def required_datasets_for(agent_id: str) -> tuple[str, ...]:
+    """Datasets required by one agent; unknown agent fails closed."""
+    for item in AGENT_REGISTRY:
+        if item.agent_id == agent_id:
+            return item.required_datasets
+    raise KeyError(f"unknown agent_id {agent_id!r}")
+
+
+def required_datasets_for_agents(agent_ids) -> tuple[str, ...]:
+    """Stable union in registry/requirement order."""
+    out: list[str] = []
+    for agent_id in agent_ids:
+        for dataset_id in required_datasets_for(agent_id):
+            if dataset_id not in out:
+                out.append(dataset_id)
+    return tuple(out)

@@ -80,7 +80,8 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
     PoolResult,
     SourceError,
     as_of_for_trade_date,
@@ -118,17 +119,22 @@ _EXPECTED_FIELDS = 10
 class Collector:
     """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
 
-    def __init__(self, date: str | None, break_source: set[str], store: bool):
+    def __init__(self, date: str | None, break_source: set[str], store: bool,
+                 evidence_set_id: str | None = None):
         self._lock = threading.Lock()
         self.date = date
         self.break_source = break_source
         self.store = store
+        self.evidence_set_id = evidence_set_id
+        self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.pools: dict[str, PoolResult] = {}
         self.missing: list[str] = []
         self.warnings: list[str] = []
         self.raw_ids: list[int] = []
         #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
         self.hashes: dict[str, str] = {}
+        #: source → 本次决策冻结的 EvidenceSet id。
+        self.es_ids: dict[str, str] = {}
 
     def _note(self, *, missing: MissingItem | None = None,
               warning: str | None = None) -> None:
@@ -157,7 +163,11 @@ class Collector:
                                           "emotion.pool.source_broken"))
             return
         try:
-            r = fetch_pool(pool, self._target_date())
+            if self._data is not None:
+                r, frozen_hash = self._data.read_pool(self.evidence_set_id, pool)
+            else:
+                r = fetch_pool(pool, self._target_date())
+                frozen_hash = None
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                           "emotion.pool.unavailable"))
@@ -184,19 +194,26 @@ class Collector:
         #    `--no-store` 跑出来的证据**全都没有 raw_hash** —— 同一段代码、同一份
         #    数据，可追溯性却取决于一个与追溯无关的开关。
         #    市场/板块/快讯三个 skill 本来就是先算哈希再判 store，这里是唯一的例外。
-        with self._lock:
-            # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
-            self.hashes[f"em:push2ex/{pool}"] = raw_text_sha256(r.raw_text)
-        if self.store:
-            got = now_cn()
-            snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
-            self._keep_raw(save_raw_snapshot(
-                source=f"em:push2ex/{pool}",
-                as_of=snap_as_of.isoformat(),
-                retrieved_at=got.isoformat(),
-                payload=r.raw,
-                raw_text=r.raw_text,
-            ))
+        source = f"em:push2ex/{pool}"
+        if self._data is not None:
+            with self._lock:
+                if frozen_hash:
+                    self.hashes[source] = frozen_hash
+                self.es_ids[source] = self.evidence_set_id
+        else:
+            with self._lock:
+                # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+                self.hashes[source] = raw_text_sha256(r.raw_text)
+            if self.store:
+                got = now_cn()
+                snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
+                self._keep_raw(save_raw_snapshot(
+                    source=source,
+                    as_of=snap_as_of.isoformat(),
+                    retrieved_at=got.isoformat(),
+                    payload=r.raw,
+                    raw_text=r.raw_text,
+                ))
 
     # -- 派生 --------------------------------------------------------------
 
@@ -226,9 +243,10 @@ def build_fact_bundle(
     break_source: set[str],
     store: bool,
     task_id: str,
+    evidence_set_id: str | None = None,
 ) -> FactBundle:
     t_start = time.monotonic()
-    c = Collector(date, break_source, store)
+    c = Collector(date, break_source, store, evidence_set_id)
 
     # 三个请求互不依赖，并行拿。串行约 20s，并行约 8s ——
     # 端到端预算卡在 90s，这一步不是调优，是能不能用的问题。
@@ -279,6 +297,7 @@ def build_fact_bundle(
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
+            evidence_set_id=resolve_provenance(source, c.es_ids),
             kind=kind,
             derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins),
         ))
@@ -400,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", default=None,
                     help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
                          "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="编排器冻结的数据集 id；给了就只读冻结 DatasetSnapshot，不直连 Provider")
     ap.add_argument("--break-source", action="append", default=[],
                     metavar="NAME",
                     help="演练用：人为中断某个数据源 "
@@ -418,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         break_source=set(args.break_source),
         store=store,
         task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+        evidence_set_id=args.evidence_set_id,
     )
     # 🔴 事实原件直接落库（批 E-I：FactBundle，不含 stance），返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：

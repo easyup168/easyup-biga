@@ -164,3 +164,46 @@ def query_eod_as_of(
         row["_snapshot_id"] = chosen[str(row["trade_date"])][0]
         row["_knowledge_cutoff"] = knowledge_cutoff
     return out
+
+
+def query_dataset_partition(
+    dataset_id: str,
+    partition_key: dict[str, str],
+    *,
+    db_path=None,
+    data_root: Path | str = "data",
+) -> list[dict[str, Any]]:
+    """Read the latest COMPLETE immutable partition for a logical key."""
+    from easyup_biga.persistence import find_dataset_snapshot, load_dataset_partition
+    from .contracts import DatasetStatus
+    from .file_store import FileStore
+
+    snapshot = find_dataset_snapshot(
+        dataset_id, partition_key, status=DatasetStatus.COMPLETE, path=db_path)
+    if snapshot is None:
+        return []
+    pids = tuple(str(x) for x in snapshot["manifest"].get("partition_ids") or ())
+    if len(pids) != 1:
+        raise RuntimeError(f"{dataset_id} expected one partition, got {len(pids)}")
+    part = load_dataset_partition(pids[0], path=db_path)
+    if part is None:
+        raise RuntimeError(f"missing DatasetPartition {pids[0]}")
+    return FileStore(data_root).read_parquet_rows(str(part["storage_uri"]))
+
+
+def query_tradability(trade_date: str, *, db_path=None, data_root: Path | str = "data"):
+    return query_dataset_partition(
+        "cn.security.tradability", {"trade_date": trade_date},
+        db_path=db_path, data_root=data_root)
+
+
+def query_adjustment_factors(trade_date: str, *, db_path=None, data_root: Path | str = "data"):
+    return query_dataset_partition(
+        "cn.equity.adjustment_factors", {"trade_date": trade_date},
+        db_path=db_path, data_root=data_root)
+
+
+def query_emotion_close(trade_date: str, *, db_path=None, data_root: Path | str = "data"):
+    return query_dataset_partition(
+        "cn.market.emotion_close", {"trade_date": trade_date},
+        db_path=db_path, data_root=data_root)

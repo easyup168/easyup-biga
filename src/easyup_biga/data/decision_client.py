@@ -1,0 +1,435 @@
+"""P3-6/P3-7 decision-data boundary.
+
+Specialists do not select network providers.  The orchestrator freezes every required
+Data Platform dataset into one EvidenceSet before Stage 1, and specialists read the
+exact frozen DatasetSnapshot through this module.
+
+Manual/ad-hoc runs may still call the live helpers here, but the provider choice remains
+inside the data layer rather than inside a specialist skill.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Iterable, Mapping
+
+from easyup_biga.domain import now_cn
+from easyup_biga.persistence import (
+    link_evidence_set_dataset,
+    load_dataset_partition,
+    load_dataset_snapshot,
+    load_evidence_set,
+    load_raw_artifact,
+)
+from easyup_biga.providers import (
+    BOARD_PCT_LIMIT,
+    INDEX_PCT_LIMIT,
+    IndexDaily,
+    as_of_for_trade_date,
+    fetch_index_daily as _fetch_index_daily,
+    implausible_bars,
+    market_is_open,
+    session_in_progress,
+)
+from easyup_biga.providers.eastmoney import (
+    Board,
+    BoardResult,
+    BreadthResult,
+    PoolResult,
+    fetch_boards as _fetch_boards,
+    fetch_breadth as _fetch_breadth,
+    fetch_pool as _fetch_pool,
+)
+from easyup_biga.providers.http import SourceError
+from easyup_biga.providers.sina_news import (
+    STALE_SEC,
+    NewsFeed,
+    NewsItem,
+    fetch_feed as _fetch_feed,
+)
+from easyup_biga.providers.tencent import (
+    IndexQuote,
+    fetch_index_quote as _fetch_index_quote,
+)
+
+from .contracts import DatasetLink, DatasetStatus
+from .file_store import FileStore
+from .datasets import emotion_close
+from .publication import DatasetRowPublisher, PublishResult
+from .snapshot_resolver import resolve_evidence_set_snapshot
+
+__all__ = [
+    "DecisionDataClient",
+    "DecisionDataFreezeResult",
+    "FrozenDataset",
+    "SourceError",
+    "BOARD_PCT_LIMIT",
+    "INDEX_PCT_LIMIT",
+    "STALE_SEC",
+    "IndexDaily",
+    "IndexQuote",
+    "BoardResult",
+    "BreadthResult",
+    "PoolResult",
+    "NewsFeed",
+    "as_of_for_trade_date",
+    "implausible_bars",
+    "market_is_open",
+    "session_in_progress",
+    "fetch_index_daily",
+    "fetch_index_quote",
+    "fetch_breadth",
+    "fetch_boards",
+    "fetch_pool",
+    "fetch_feed",
+]
+
+DIRECT_DATASETS = frozenset({
+    "cn.index.realtime_quote",
+    "cn.market.breadth",
+    "cn.sector.board_snapshot",
+    "cn.market.limit_pool",
+    "cn.news.flash",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenDataset:
+    dataset_id: str
+    snapshot_id: str
+    raw_hash: str | None
+    rows: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionDataFreezeResult:
+    evidence_set_id: str
+    frozen: Mapping[str, str]
+    errors: Mapping[str, str]
+
+    @property
+    def complete(self) -> bool:
+        return not self.errors
+
+
+class _MappingEmotionCollector:
+    """Adapter used to publish P3-5 emotion_close from the same frozen limit pools."""
+
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self.payload = dict(payload)
+
+    def collect(self, trade_date: str) -> Mapping[str, Any]:
+        _ = trade_date
+        return self.payload
+
+
+def fetch_index_daily(symbol: str, *, bars: int = 30):
+    """Ad-hoc daily-bar helper. Network ownership stays in the data layer."""
+    return _fetch_index_daily(symbol, bars=bars)
+
+
+def fetch_index_quote(codes):
+    """Ad-hoc live helper. Provider ownership stays in the data layer."""
+    return _fetch_index_quote(codes)
+
+
+def fetch_breadth():
+    return _fetch_breadth()
+
+
+def fetch_boards(kind: str):
+    return _fetch_boards(kind)
+
+
+def fetch_pool(pool: str, date: str, *, page_size: int = 500):
+    return _fetch_pool(pool, date, page_size=page_size)
+
+
+def fetch_feed(*, pages: int = 1):
+    return _fetch_feed(pages=pages)
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _raw_hash(raw_text: str) -> str:
+    return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+
+
+def _trade_date_from_evidence_set(evidence_set_id: str, *, path=None) -> str:
+    es = load_evidence_set(evidence_set_id, path=path)
+    if es is None:
+        raise SourceError(f"evidence_set_id={evidence_set_id!r} 不存在")
+    symbols = (es.get("manifest") or {}).get("symbols") or {}
+    dates = {str(v.get("trade_date") or "") for v in symbols.values() if v.get("trade_date")}
+    if len(dates) != 1:
+        raise SourceError(
+            f"EvidenceSet {evidence_set_id} 无法确定唯一交易日：{sorted(dates)}")
+    return next(iter(dates))
+
+
+class DecisionDataClient:
+    """Freeze/read the datasets consumed by the decision kernel."""
+
+    def __init__(self, *, db_path=None, data_root: str = "data") -> None:
+        self.db_path = db_path
+        self.data_root = data_root
+        self.fs = FileStore(data_root)
+        self.publisher = DatasetRowPublisher(db_path=db_path, data_root=data_root)
+
+    # ------------------------------------------------------------------ freeze
+    def freeze_required(
+        self,
+        evidence_set_id: str,
+        dataset_ids: Iterable[str],
+        *,
+        trade_date: str | None = None,
+    ) -> DecisionDataFreezeResult:
+        wanted = tuple(dict.fromkeys(dataset_ids))
+        unknown = sorted(set(wanted) - DIRECT_DATASETS - {"cn.index.daily_bars"})
+        if unknown:
+            raise ValueError(f"decision-data 不支持冻结这些 dataset：{unknown}")
+        day = trade_date or _trade_date_from_evidence_set(evidence_set_id, path=self.db_path)
+        frozen: dict[str, str] = {}
+        errors: dict[str, str] = {}
+        for dataset_id in wanted:
+            if dataset_id == "cn.index.daily_bars":
+                existing = resolve_evidence_set_snapshot(
+                    evidence_set_id, dataset_id, path=self.db_path)
+                if existing:
+                    frozen[dataset_id] = existing.snapshot_id
+                continue
+            existing = resolve_evidence_set_snapshot(
+                evidence_set_id, dataset_id, path=self.db_path)
+            if existing:
+                frozen[dataset_id] = existing.snapshot_id
+                continue
+            try:
+                result = self._freeze_one(dataset_id, evidence_set_id, day)
+                if result.status != DatasetStatus.COMPLETE or not result.snapshot_id:
+                    raise SourceError(
+                        f"{dataset_id} 冻结结果不是 COMPLETE：{result.status}")
+                link_evidence_set_dataset(
+                    DatasetLink(evidence_set_id, dataset_id, result.snapshot_id),
+                    path=self.db_path,
+                )
+                frozen[dataset_id] = result.snapshot_id
+            except (SourceError, ValueError) as exc:
+                # Provider/data-quality failures are expected degradation. Programming,
+                # storage and dependency errors must fail loudly instead of being
+                # disguised as a missing market feed.
+                errors[dataset_id] = f"{type(exc).__name__}: {exc}"
+        return DecisionDataFreezeResult(evidence_set_id, frozen, errors)
+
+    def _freeze_one(self, dataset_id: str, evidence_set_id: str, trade_date: str) -> PublishResult:
+        key = {"evidence_set_id": evidence_set_id}
+        if dataset_id == "cn.index.realtime_quote":
+            quotes, raw_text = _fetch_index_quote(("sh000001", "sz399106"))
+            rows = [
+                {
+                    "code": q.code,
+                    "name": q.name,
+                    "last": q.last,
+                    "prev_close": q.prev_close,
+                    "volume_hand": q.volume_hand,
+                    "amount_wan": q.amount_wan,
+                    "quoted_at": q.quoted_at,
+                    "raw": q.raw,
+                }
+                for q in quotes.values()
+            ]
+            as_of = max(q.quoted_dt for q in quotes.values()).isoformat()
+            return self.publisher.publish(
+                dataset_id=dataset_id, job_id="decision-freeze-realtime-quote",
+                provider_id="tencent", partition_key=key, raw_text=raw_text,
+                rows=rows, as_of=as_of,
+                quality_metrics={"row_count": len(rows), "trade_date": trade_date},
+            )
+        if dataset_id == "cn.market.breadth":
+            b = _fetch_breadth()
+            rows = [{
+                "advance": b.advance,
+                "decline": b.decline,
+                "flat": b.flat,
+                "per_market_json": _json(b.per_market),
+            }]
+            return self.publisher.publish(
+                dataset_id=dataset_id, job_id="decision-freeze-breadth",
+                provider_id="eastmoney", partition_key=key, raw_text=b.raw_text or _json(b.raw),
+                rows=rows, as_of=now_cn().isoformat(),
+                quality_metrics={"row_count": 1, "trade_date": trade_date},
+            )
+        if dataset_id == "cn.sector.board_snapshot":
+            results = [_fetch_boards("industry"), _fetch_boards("concept")]
+            rows = []
+            for result in results:
+                for b in result.boards:
+                    rows.append({
+                        "kind": result.kind,
+                        "code": b.code,
+                        "name": b.name,
+                        "pct": b.pct,
+                        "main_inflow": b.main_inflow,
+                        "advance": b.advance,
+                        "decline": b.decline,
+                        "leader": b.leader,
+                    })
+            raw_text = _json({r.kind: r.raw_text or _json(r.raw) for r in results})
+            return self.publisher.publish(
+                dataset_id=dataset_id, job_id="decision-freeze-sector-boards",
+                provider_id="eastmoney", partition_key=key, raw_text=raw_text,
+                rows=rows, as_of=now_cn().isoformat(),
+                quality_metrics={"row_count": len(rows), "trade_date": trade_date},
+            )
+        if dataset_id == "cn.market.limit_pool":
+            pools = [_fetch_pool(name, trade_date) for name in
+                     ("limit_up", "broken_board", "limit_down")]
+            rows = [{
+                "pool": p.pool,
+                "requested_date": p.requested_date,
+                "qdate": p.qdate,
+                "total": p.total,
+                "rows_json": _json(p.rows),
+            } for p in pools]
+            raw_text = _json({p.pool: p.raw_text or _json(p.raw) for p in pools})
+            result = self.publisher.publish(
+                dataset_id=dataset_id, job_id="decision-freeze-limit-pool",
+                provider_id="eastmoney", partition_key=key, raw_text=raw_text,
+                rows=rows, as_of=trade_date,
+                quality_metrics={"row_count": len(rows), "trade_date": trade_date},
+            )
+            # P3-5 integration: close emotion is a deterministic daily derivative of
+            # the same three pools; publish it through its own immutable dataset.
+            by_name = {p.pool: p for p in pools}
+            up = by_name["limit_up"]
+            broken = by_name["broken_board"]
+            down = by_name["limit_down"]
+            denom = up.total + broken.total
+            streaks = [int(row.get("lbc") or 1) for row in up.rows]
+            emotion_close.run(
+                _MappingEmotionCollector({
+                    "limit_up_count": up.total,
+                    "limit_down_count": down.total,
+                    "broken_limit_count": broken.total,
+                    "broken_limit_rate": (broken.total / denom if denom else None),
+                    "max_consecutive_limit": max(streaks) if streaks else 0,
+                    "advance_count": None,
+                    "decline_count": None,
+                }),
+                trade_date, db_path=self.db_path, data_root=self.data_root,
+            )
+            return result
+        if dataset_id == "cn.news.flash":
+            feed = _fetch_feed(pages=3)
+            rows = [{
+                "id": item.id,
+                "at": item.at.isoformat(),
+                "text": item.text,
+                "tags_json": _json(item.tags),
+                "is_quote": item.is_quote,
+            } for item in feed.items]
+            if not rows:
+                raise SourceError("cn.news.flash 取回 0 条")
+            return self.publisher.publish(
+                dataset_id=dataset_id, job_id="decision-freeze-news",
+                provider_id="sina_news", partition_key=key,
+                raw_text=feed.raw_text or _json(feed.raw), rows=rows,
+                as_of=feed.items[0].at.isoformat(),
+                quality_metrics={"row_count": len(rows)},
+            )
+        raise ValueError(dataset_id)
+
+    # ------------------------------------------------------------------- read
+    def _frozen(self, evidence_set_id: str, dataset_id: str) -> FrozenDataset:
+        resolved = resolve_evidence_set_snapshot(
+            evidence_set_id, dataset_id, path=self.db_path)
+        if resolved is None:
+            raise SourceError(
+                f"EvidenceSet {evidence_set_id} 没有冻结 required dataset {dataset_id}")
+        snapshot = load_dataset_snapshot(resolved.snapshot_id, path=self.db_path)
+        if snapshot is None:
+            raise SourceError(f"DatasetSnapshot 不存在：{resolved.snapshot_id}")
+        pids = tuple(str(x) for x in snapshot["manifest"].get("partition_ids") or ())
+        if len(pids) != 1:
+            raise SourceError(f"{dataset_id} 应恰好一个分区，实际 {len(pids)}")
+        part = load_dataset_partition(pids[0], path=self.db_path)
+        if part is None:
+            raise SourceError(f"DatasetPartition 不存在：{pids[0]}")
+        rows = tuple(self.fs.read_parquet_rows(str(part["storage_uri"])))
+        raw_hash = None
+        raw_id = part.get("raw_artifact_id")
+        if raw_id:
+            raw = load_raw_artifact(str(raw_id), path=self.db_path)
+            if raw:
+                # DatasetRowPublisher stores sha256(raw_text) here.  That is the same
+                # raw_hash convention used by Phase 2 Evidence.
+                raw_hash = str(raw["request_fingerprint"])
+        return FrozenDataset(dataset_id, resolved.snapshot_id, raw_hash, rows)
+
+    def read_index_quote(self, evidence_set_id: str) -> tuple[dict[str, IndexQuote], str | None]:
+        frozen = self._frozen(evidence_set_id, "cn.index.realtime_quote")
+        out = {}
+        for row in frozen.rows:
+            q = IndexQuote(
+                code=str(row["code"]), name=str(row["name"]), last=float(row["last"]),
+                prev_close=float(row["prev_close"]), volume_hand=int(row["volume_hand"]),
+                amount_wan=float(row["amount_wan"]), quoted_at=str(row["quoted_at"]),
+                raw=str(row["raw"]),
+            )
+            out[q.code] = q
+        return out, frozen.raw_hash
+
+    def read_breadth(self, evidence_set_id: str) -> tuple[BreadthResult, str | None]:
+        frozen = self._frozen(evidence_set_id, "cn.market.breadth")
+        if len(frozen.rows) != 1:
+            raise SourceError("cn.market.breadth 冻结分区应恰好一行")
+        row = frozen.rows[0]
+        result = BreadthResult(
+            advance=int(row["advance"]), decline=int(row["decline"]), flat=int(row["flat"]),
+            per_market=list(json.loads(str(row["per_market_json"]))), raw={}, raw_text=None,
+        )
+        return result, frozen.raw_hash
+
+    def read_boards(self, evidence_set_id: str, kind: str) -> tuple[BoardResult, str | None]:
+        frozen = self._frozen(evidence_set_id, "cn.sector.board_snapshot")
+        rows = [r for r in frozen.rows if str(r["kind"]) == kind]
+        boards = [Board(
+            code=str(r["code"]), name=str(r["name"]), pct=float(r["pct"]),
+            main_inflow=None if r["main_inflow"] is None else float(r["main_inflow"]),
+            advance=None if r["advance"] is None else int(r["advance"]),
+            decline=None if r["decline"] is None else int(r["decline"]),
+            leader=None if r["leader"] is None else str(r["leader"]),
+        ) for r in rows]
+        if not boards:
+            raise SourceError(f"cn.sector.board_snapshot 没有 kind={kind}")
+        return BoardResult(kind, len(boards), boards, raw={}, raw_text=None), frozen.raw_hash
+
+    def read_pool(self, evidence_set_id: str, pool: str) -> tuple[PoolResult, str | None]:
+        frozen = self._frozen(evidence_set_id, "cn.market.limit_pool")
+        row = next((r for r in frozen.rows if str(r["pool"]) == pool), None)
+        if row is None:
+            raise SourceError(f"cn.market.limit_pool 没有 pool={pool}")
+        result = PoolResult(
+            pool=pool,
+            requested_date=str(row["requested_date"]),
+            qdate=None if row["qdate"] is None else str(row["qdate"]),
+            total=int(row["total"]),
+            rows=list(json.loads(str(row["rows_json"]))), raw={}, raw_text=None,
+        )
+        return result, frozen.raw_hash
+
+    def read_news(self, evidence_set_id: str) -> tuple[NewsFeed, str | None]:
+        frozen = self._frozen(evidence_set_id, "cn.news.flash")
+        items = tuple(sorted((NewsItem(
+            id=int(r["id"]),
+            at=datetime.fromisoformat(str(r["at"])),
+            text=str(r["text"]),
+            tags=tuple(json.loads(str(r["tags_json"]))),
+            is_quote=bool(r["is_quote"]),
+        ) for r in frozen.rows), key=lambda x: x.at, reverse=True))
+        if not items:
+            raise SourceError("cn.news.flash 冻结分区为空")
+        return NewsFeed(items=items, raw={}, raw_text=None), frozen.raw_hash

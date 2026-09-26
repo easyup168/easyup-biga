@@ -83,6 +83,42 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         source_prefix="sina",
         modules=("easyup_biga.providers.sina",),
     ),
+    ProviderDefinition(
+        provider_id="eastmoney-eod",
+        title="东财全市场 EOD 快照",
+        source_prefix="em",
+        modules=("easyup_biga.providers.eastmoney_eod",),
+    ),
+    ProviderDefinition(
+        provider_id="derived-biga",
+        title="BigA 本地确定性派生数据",
+        source_prefix="derived",
+        modules=("easyup_biga.providers.derived",),
+    ),
+    ProviderDefinition(
+        provider_id="csv-adjustment",
+        title="本地 CSV 复权因子适配器",
+        source_prefix="csv-adjustment",
+        modules=("easyup_biga.providers.csv_adjustment",),
+    ),
+    ProviderDefinition(
+        provider_id="tencent",
+        title="腾讯指数实时行情",
+        source_prefix="tencent",
+        modules=("easyup_biga.providers.tencent",),
+    ),
+    ProviderDefinition(
+        provider_id="eastmoney",
+        title="东财 breadth / board / limit-pool 适配器",
+        source_prefix="em",
+        modules=("easyup_biga.providers.eastmoney",),
+    ),
+    ProviderDefinition(
+        provider_id="sina_news",
+        title="新浪 7x24 快讯适配器",
+        source_prefix="sina",
+        modules=("easyup_biga.providers.sina_news",),
+    ),
 )
 
 #: 按 id 索引 —— 从 `PROVIDERS` 派生，不手写。

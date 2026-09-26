@@ -69,7 +69,8 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
     BOARD_PCT_LIMIT,
     BoardResult,
     IndexDaily,
@@ -122,6 +123,7 @@ class Collector:
         # 给了就读冻结快照的日线（交易日），没给自己抓（手工调试路径）。
         self.evidence_set_id = evidence_set_id
         self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
+        self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.boards: dict[str, BoardResult] = {}
         self.daily: IndexDaily | None = None
         self.missing: list[MissingItem] = []
@@ -155,7 +157,11 @@ class Collector:
                 "sector.board.source_broken"))
             return
         try:
-            r = fetch_boards(kind)
+            if self._data is not None:
+                r, frozen_hash = self._data.read_boards(self.evidence_set_id, kind)
+            else:
+                r = fetch_boards(kind)
+                frozen_hash = None
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                            "sector.board.unavailable"))
@@ -180,9 +186,15 @@ class Collector:
 
         with self._lock:
             self.boards[kind] = r
-        # `server_as_of is None` ⇒ 板块榜不带日期，它说的就是「此刻」
-        self._keep_raw(f"em:clist/{kind}", r.raw,
-                       r.server_as_of or now_cn(), r.raw_text)
+        source = f"em:clist/{kind}"
+        if self._data is not None:
+            with self._lock:
+                if frozen_hash:
+                    self.hashes[source] = frozen_hash
+                self.es_ids[source] = self.evidence_set_id
+        else:
+            # `server_as_of is None` ⇒ 板块榜不带日期，它说的就是「此刻」
+            self._keep_raw(source, r.raw, r.server_as_of or now_cn(), r.raw_text)
 
     def collect_date(self) -> None:
         if "date" in self.break_source:

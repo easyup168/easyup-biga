@@ -69,11 +69,13 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
+    STALE_SEC,
     SourceError,
+    fetch_feed,
     market_is_open,
 )
-from _sources.sina_news import STALE_SEC, fetch_feed  # noqa: E402
 from _store import (  # noqa: E402
     is_trading_day,
     init_schema,
@@ -120,6 +122,7 @@ _EXPECTED_FIELDS = 11
 def build_fact_bundle(
     *, break_source: set[str], store: bool, task_id: str,
     window_min: int = WINDOW_MIN, max_items: int = MAX_ITEMS,
+    evidence_set_id: str | None = None,
 ) -> FactBundle:
     t_start = time.monotonic()
     result: dict[str, Any] = {}
@@ -144,6 +147,8 @@ def build_fact_bundle(
     #    派生字段返回 None —— **不硬凑一个哈希**，凑出来的溯源比没有更糟，
     #    它会让人以为查得到。
     raw_hashes: dict[str, str] = {}
+    evidence_sets: dict[str, str] = {}
+    data_client = DecisionDataClient() if evidence_set_id is not None else None
 
     def add(field: str, value: Any, label: str, source: str, *,
             kind: str | None, inputs: tuple[str, ...] = (),
@@ -154,6 +159,7 @@ def build_fact_bundle(
             field=field, value=value, source=source, label=label,
             as_of=as_of, retrieved_at=retrieved, calc_version=CALC_VERSION,
             raw_hash=resolve_provenance(source, raw_hashes),
+            evidence_set_id=resolve_provenance(source, evidence_sets),
             kind=kind,
             derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins)))
 
@@ -185,7 +191,11 @@ def build_fact_bundle(
             "news.feed.source_broken"))
     else:
         try:
-            feed = fetch_feed(pages=FETCH_PAGES)
+            if data_client is not None:
+                feed, frozen_hash = data_client.read_news(evidence_set_id)
+            else:
+                feed = fetch_feed(pages=FETCH_PAGES)
+                frozen_hash = None
         except SourceError as e:
             missing.append(MissingItem(
                 f"全部快讯 —— 数据源不可用: {e}", "news.feed.unavailable"))
@@ -215,12 +225,17 @@ def build_fact_bundle(
         # 🔴 哈希**无条件算**，不只在 store 时算 —— 否则 `--no-store` 跑出来的
         #    证据没有 raw_hash，而那正是人工核对时最常用的一条路径。
         #    批 I：基于原始响应文本算，与 save_raw_snapshot 的 content_sha256 同口径。
-        raw_hashes[src] = raw_text_sha256(feed.raw_text)
-        # 落 raw 放在 as_of 算出来之后 —— 原样落盘的那份也要标对时刻。
-        if store:
-            save_raw_snapshot(source=src, as_of=as_of.isoformat(),
-                              retrieved_at=retrieved.isoformat(),
-                              payload=feed.raw, raw_text=feed.raw_text)
+        if data_client is not None:
+            if frozen_hash:
+                raw_hashes[src] = frozen_hash
+            evidence_sets[src] = evidence_set_id
+        else:
+            raw_hashes[src] = raw_text_sha256(feed.raw_text)
+            # 落 raw 放在 as_of 算出来之后 —— 原样落盘的那份也要标对时刻。
+            if store:
+                save_raw_snapshot(source=src, as_of=as_of.isoformat(),
+                                  retrieved_at=retrieved.isoformat(),
+                                  payload=feed.raw, raw_text=feed.raw_text)
         # source 改用真实表键（原来写的 `sina:7x24` 是泛化标签，解析不到指纹）。
         add("trade_date", newest_day, "最新一条所属日期", f"derived:{src}", kind="derived")
 
@@ -324,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", default=None,
                     help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
                          "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="编排器冻结的数据集 id；给了就只读冻结 DatasetSnapshot，不直连 Provider")
     ap.add_argument("--no-store", action="store_true")
     ap.add_argument("--render", action="store_true")
     args = ap.parse_args(argv)
@@ -333,7 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         init_schema()
     fb = build_fact_bundle(break_source=set(args.break_source), store=store,
                            task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
-                           window_min=args.window_min, max_items=args.max_items)
+                           window_min=args.window_min, max_items=args.max_items,
+                           evidence_set_id=args.evidence_set_id)
     # 🔴 批 E-II：事实原件（FactBundle，不含 stance）直接落库；stance 由 agent 事后追加。
     ref = save_fact_bundle(fb, run_id=args.run_id) if store else None
 

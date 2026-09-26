@@ -27,10 +27,21 @@ from .acceptance import (
     load_acceptance_events,
     trading_days_from_db,
 )
+from easyup_biga.domain import STAGE1_AGENTS, required_datasets_for_agents
+
+from .integrity import audit_specialist_provider_boundary
 from .provider_registry import PROVIDER_REGISTRY, all_bindings
 from .registry import DATASET_REGISTRY
 
 RELEASE_TAG = "v1-data-platform-foundation"
+
+SPECIALIST_PATHS: tuple[str, ...] = (
+    "skills/market-calc/scripts/market_calc.py",
+    "skills/sector-calc/scripts/sector_calc.py",
+    "skills/news-scan/scripts/news_scan.py",
+    "skills/technical-calc/scripts/technical_calc.py",
+    "skills/emotion-calc/scripts/emotion_calc.py",
+)
 
 #: Phase 3 收口时注册表里**应该**有的 dataset，以及各自归哪个里程碑。
 #:
@@ -104,6 +115,31 @@ def _code_checks(repo: Path) -> tuple[list[str], list[str]]:
         errors.append("整个注册表没有一条 FALLBACK 绑定 —— 降级路径无从演练")
     else:
         checks.append(f"FALLBACK 绑定：{len(fallbacks)} 条")
+
+    # P3-6: 注册表齐不代表迁移完成。生产 Specialist 源码必须已经脱离
+    # provider/_sources 边界，否则仍是「名册说归平台管，运行时自己抓」。
+    boundary = audit_specialist_provider_boundary(repo, SPECIALIST_PATHS)
+    if boundary.ok:
+        checks.append(f"P3-6 Specialist Provider 边界已收口：{len(SPECIALIST_PATHS)} 个")
+    else:
+        errors.append("P3-6 Specialist 仍直连 Provider：" + "; ".join(boundary.errors))
+
+    # P3-7: Agent Registry 是 required_datasets 的唯一源，且每一个需求都必须
+    # 能在 Dataset Registry 中解析；Orchestrator 必须消费这份派生清单并冻结。
+    required = required_datasets_for_agents(STAGE1_AGENTS)
+    missing_required = sorted(set(required) - set(DATASET_REGISTRY))
+    if missing_required:
+        errors.append(f"P3-7 Agent required_datasets 未注册：{missing_required}")
+    else:
+        checks.append(f"P3-7 Agent required_datasets 可解析：{len(required)} 个")
+    orch = repo / "skills/decision-card/scripts/orchestrator.py"
+    orch_text = orch.read_text(encoding="utf-8") if orch.exists() else ""
+    if "required_datasets_for_agents" not in orch_text or ".freeze_required(" not in orch_text:
+        errors.append("P3-7 Orchestrator 尚未按 Agent Registry 冻结 required_datasets")
+    elif not (repo / "src/easyup_biga/data/snapshot_resolver.py").exists():
+        errors.append("P3-7 SnapshotResolver 缺失")
+    else:
+        checks.append("P3-7 AgentRegistry → freeze_required → SnapshotResolver 链路在位")
 
     # 🔴 provider → 模块路径从 `ProviderDefinition.modules` 派生，不另写一张表。
     #    外部实现里那张硬编码 map 只覆盖它碰巧知道的 7 个 provider，

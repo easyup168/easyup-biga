@@ -38,13 +38,11 @@ def _full_ledger(path, days):
         record_acceptance_event(path, kind)
 
 
-def test_缺的dataset按里程碑报而不是一坨id():
-    """🔴 「少了 5 个 id」和「P3-6 还没做」对读者是两件事，下一步也不同。"""
-    _checks, errors = _code_checks(REPO)
-    p36 = [e for e in errors if e.startswith("P3-6")]
-    assert len(p36) == 1, errors
-    assert "cn.news.flash" in p36[0]
-
+def test_P4G0后代码面没有里程碑缺口():
+    checks, errors = _code_checks(REPO)
+    assert not [e for e in errors if e.startswith("P3-")], errors
+    assert any("P3-6 Specialist Provider 边界已收口" in c for c in checks)
+    assert any("P3-7 AgentRegistry" in c for c in checks)
 
 def test_里程碑标注覆盖到每一个必需dataset():
     """探针：往 REQUIRED_DATASETS 加一条却忘了标里程碑，这条会红。"""
@@ -55,17 +53,17 @@ def test_代码面与上线证据是两个独立结论(tmp_path):
     ledger = tmp_path / "acceptance.jsonl"
     status = evaluate_phase3_release(
         repo=REPO, acceptance_ledger=ledger, db_path=tmp_path / "nope.db")
-    # 今天 P3-4..P3-6 未落地 ⇒ 代码面不过；证据是空的 ⇒ 上线面也不过
-    assert status.code_ready is False
+    # P4-G0 后代码面已闭环；证据账本仍为空，因此 Live Gate 独立不过。
+    assert status.code_ready is True
     assert status.live_ready is False
     assert status.release_ready is False
     # 🔴 两边的错误不许串门
-    assert any(e.startswith("P3-") for e in status.code_errors)
+    assert status.code_errors == ()
     assert not any(e.startswith("P3-") for e in status.live_errors)
     assert any("演练" in e or "交易日" in e for e in status.live_errors)
 
 
-def test_证据齐了但代码面没齐依然不放行(tmp_path):
+def test_代码面齐了但交易日连续性判不出依然不放行(tmp_path):
     """探针：把上线证据凑满，`release_ready` 仍必须是 False。
 
     这是这套闸门唯一真正的用途 —— **两把钥匙**。少测这条，
@@ -77,7 +75,7 @@ def test_证据齐了但代码面没齐依然不放行(tmp_path):
     status = evaluate_phase3_release(
         repo=REPO, acceptance_ledger=ledger, db_path=tmp_path / "nope.db")
     assert status.live_ready is False      # 读不到日历 ⇒ 连续性判不出来（R-3）
-    assert status.code_ready is False
+    assert status.code_ready is True
     assert status.release_ready is False
 
 

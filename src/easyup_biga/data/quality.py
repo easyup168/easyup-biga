@@ -39,6 +39,8 @@ QUALITY_ISSUE_CODES = frozenset({
     "data.quality.duplicate_key",
     "data.quality.coverage_below_threshold",
     "data.quality.cross_source_conflict",
+    "data.quality.invalid_ohlc",
+    "data.quality.tradability_unknown",
     "data.snapshot.not_complete",
 })
 
@@ -103,6 +105,51 @@ QUALITY_POLICIES: dict[str, QualityPolicy] = {
                 "这条策略登记在册只是为了让 registry 的引用不指向空气；"
                 "它变成真的检查要等日历接进 Data Job（P3-6 之后）。",
             ),
+        ),
+        QualityPolicy(
+            policy_id="cn-equity-eod-v1",
+            checks=("OHLC 关系合法", "instrument_id 唯一", "覆盖率达到阈值"),
+            not_checked=("复权正确性（原始 OHLC 明确不复权）",),
+        ),
+        QualityPolicy(
+            policy_id="cn-tradability-v1",
+            checks=("停牌与 provider 缺口分开", "UNKNOWN 会把快照降为 PARTIAL"),
+            not_checked=("涨跌停价格规则（本阶段不计算）",),
+        ),
+        QualityPolicy(
+            policy_id="cn-adjustment-factor-v1",
+            checks=("因子为正", "同日 instrument_id 唯一"),
+            not_checked=("与公司行动公告的第二源交叉校验",),
+        ),
+        QualityPolicy(
+            policy_id="cn-emotion-close-v1",
+            checks=("单交易日确定性汇总可发布",),
+            not_checked=("情绪分是否有预测力（Phase 4 Measurement 才回答）",),
+        ),
+        QualityPolicy(
+            policy_id="cn-realtime-quote-v1",
+            checks=("冻结分区非空", "provider 成功返回请求的指数"),
+            not_checked=("盘口级 Tick 完整性",),
+        ),
+        QualityPolicy(
+            policy_id="cn-market-breadth-v1",
+            checks=("冻结分区非空", "涨跌平字段可解析"),
+            not_checked=("端点自身不带交易日，交易日由 EvidenceSet 上下文约束",),
+        ),
+        QualityPolicy(
+            policy_id="cn-sector-board-v1",
+            checks=("行业/概念板块均冻结", "板块行非空"),
+            not_checked=("板块分类体系跨供应商一致性",),
+        ),
+        QualityPolicy(
+            policy_id="cn-limit-pool-v1",
+            checks=("涨停/炸板/跌停三池按同一交易日冻结",),
+            not_checked=("池内证券是否覆盖历史退市证券",),
+        ),
+        QualityPolicy(
+            policy_id="cn-news-flash-v1",
+            checks=("快讯分区非空", "时间戳可解析"),
+            not_checked=("新闻真伪与重要性判断——保留给 news agent",),
         ),
     )
 }
