@@ -72,6 +72,43 @@ class Probe:
     note: str = ""
 
 
+def _cls_signed_url(rn: int = 5) -> str:
+    """财联社的探针 URL **必须带签名**，否则探的是一个我们永远不会发的请求。
+
+    🔴 这里原来写死了一条**无签名**的 URL，判据是「正文里有 `data`」——
+    那两处合起来是 L-13：探针查的不是它声称在查的东西。
+    错误响应 `{"errno":...,"msg":...,"data":...}` 里照样有 `data`
+    ⇒ **签名坏掉的那天它仍然绿**。
+
+    ⚠️ 签名算法与 `providers/cls_news._sign` 同源，但这里**不 import 它** ——
+    探针的价值在于独立复现；import 过来就变成「自己验自己」。
+    """
+    import hashlib
+    params = {"appName": "CailianpressWeb", "os": "web", "sv": "7.7.5",
+              "last_time": "", "refresh_type": "1", "rn": str(rn)}
+    qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    sign = hashlib.md5(hashlib.sha1(qs.encode()).hexdigest().encode()).hexdigest()
+    return f"https://www.cls.cn/v1/roll/get_roll_list?{qs}&sign={sign}"
+
+
+def _cls_roll_shape(text: str) -> str:
+    """判据打在 `errno == 0` **且** `roll_data` 非空上。
+
+    实测 `rn>50` 会返回 `errno=0` + 空数组 —— 只判 `errno` 会漏掉它。
+    """
+    import json
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return "❌ 不是 JSON"
+    if obj.get("errno"):
+        return f"❌ errno={obj['errno']} msg={obj.get('msg')!r}"
+    rows = (obj.get("data") or {}).get("roll_data") or []
+    if not rows:
+        return "❌ errno=0 但 roll_data 为空"
+    return f"{len(rows)} 条电报，level={rows[0].get('level')!r}"
+
+
 def _zip_members(min_members: int) -> Callable[[bytes | str], str]:
     """判据打在**能不能解开**上，不在「有多少字节」上。
 
@@ -172,13 +209,13 @@ PROBES: tuple[Probe, ...] = (
           "https://www.szse.cn/", _contains("data", "有 data"),
           "🔴 本机连不通（TCP 握手后挂死）—— 见 providers/szse.py 模块头"),
     # ── 快讯 ────────────────────────────────────────────────────────────
-    Probe("sina_7x24", "快讯", "新浪", "cn.news.flash(主)",
+    Probe("cls_roll", "快讯", "财联社", "cn.news.flash(主)",
+          _cls_signed_url(), "https://www.cls.cn/", _cls_roll_shape,
+          "签名纯本地可算、零 key —— URL 由 `_cls_signed_url()` 现算"),
+    Probe("sina_7x24", "快讯", "新浪", "cn.news.flash(备)",
           "https://zhibo.sina.com.cn/api/zhibo/feed?zhibo_id=152&page_size=5&dire=f",
           "https://finance.sina.com.cn/7x24/", _contains("result", "有 result")),
-    Probe("cls_roll", "快讯", "财联社", "cn.news.flash(候选备胎)",
-          "https://www.cls.cn/v1/roll/get_roll_list?app=CailianpressWeb&category=&last_time=&os=web&refresh_type=1&rn=5&sv=7.7.5",
-          "https://www.cls.cn/", _contains("data", "有 data")),
-    Probe("jin10_flash", "快讯", "金十", "cn.news.flash(候选备胎)",
+    Probe("jin10_flash", "快讯", "金十", "cn.news.flash(候选，口径未核)",
           "https://www.jin10.com/flash_newest.js", "https://www.jin10.com/",
           lambda t: f"{len(t)} 字节"),
     # ── 板块 ────────────────────────────────────────────────────────────

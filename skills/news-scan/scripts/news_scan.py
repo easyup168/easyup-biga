@@ -72,9 +72,11 @@ from _contract import (  # noqa: E402
 from _data import (  # noqa: E402
     DecisionDataClient,
     STALE_SEC,
+    STALE_SEC_BY_PROVIDER,
     SourceError,
     fetch_feed,
     market_is_open,
+    source_prefix_of,
 )
 from _store import (  # noqa: E402
     is_trading_day,
@@ -117,6 +119,22 @@ MAX_ITEMS = 120
 FETCH_PAGES = 3
 
 _EXPECTED_FIELDS = 11
+
+
+def _news_source(provider_id: str | None) -> str:
+    """快讯 Evidence 的 `source` —— 按**实际供数方**拼，不写死主源。
+
+    🔴 这里曾经是 `"sina:7x24/zhibo152"` 的字面量。2026-09-26 财联社成为
+    PRIMARY 之后，那个字面量会让**每一条** Evidence 都指着一个已经不供数的源
+    —— 比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+    （板块那边踩过同一个坑，见 `sector_calc._board_source`。）
+
+    ⚠️ 前缀从注册表来（`source_prefix_of`），不在这里自己拼。
+    """
+    if provider_id is None:
+        return "sina:7x24/zhibo152"
+    prefix = source_prefix_of(provider_id)
+    return "cls:roll/telegraph" if prefix == "cls" else "sina:7x24/zhibo152"
 
 
 def build_fact_bundle(
@@ -183,8 +201,9 @@ def build_fact_bundle(
     # 与 risk 的 THRESHOLDS 同类，只是那边根本不进 evidence、这边要上卡给人看。
     add("window_min", window_min, "回看窗口(分钟)", "derived:config", kind="parameter")
 
-    src = "sina:7x24/zhibo152"
     feed = None
+    #: 实际供数方。`None` = 直连路径（不走数据层），那条路只有新浪。
+    served_by: str | None = None
     if "feed" in break_source:
         missing.append(MissingItem(
             "全部快讯 —— 数据源被人为中断（--break-source feed）",
@@ -192,15 +211,20 @@ def build_fact_bundle(
     else:
         try:
             if data_client is not None:
-                feed, frozen_hash = data_client.read_news(evidence_set_id)
+                feed, frozen_hash, served_by = data_client.read_news(evidence_set_id)
             else:
+                # 🔴 直连路径仍走新浪，**有意为之**：这条路是人手动跑 skill 时
+                #    用的，没有 EvidenceSet、没有降级链账本。让它也走降级链，
+                #    就会出现「谁供的数没人记」的取数 —— 而那正是冻结层存在的理由。
                 feed = fetch_feed(pages=FETCH_PAGES)
                 frozen_hash = None
+                served_by = "sina_news"
         except SourceError as e:
             missing.append(MissingItem(
                 f"全部快讯 —— 数据源不可用: {e}", "news.feed.unavailable"))
 
     if feed is not None:
+        src = _news_source(served_by)
         # 🔴 7x24 是**连续事件流**，它没有「收盘」这个概念。
         #
         # 原来是把最新一条的日期喂给 `as_of_for_trade_date()` —— 那个函数是
@@ -259,6 +283,27 @@ def build_fact_bundle(
         add("item_count", len(inwin), "窗口内条数", src, kind="derived")
         add("quote_count", sum(1 for i in inwin if i.is_quote),
             "其中机器行情播报", src, kind="derived")
+        # 🔴 源侧重要性档位。**只有财联社给**（`level in A/B/C`）。
+        #
+        #    新浪供数时这里是 `None`，会进 `missing[]` —— **不是 0**。
+        #    「0 条重要新闻」和「这个源不提供重要性」在人做决策时是两件事，
+        #    而降级发生的那一次恰恰最需要看清楚自己少了什么（R-3）。
+        #
+        #    ⚠️ 不要拿正则从正文里「补」一个重要性出来。那是判断性归类
+        #      （铁律 4），而且一旦补出来，下游分不清哪条是源说的、
+        #      哪条是我们猜的。
+        levels = [i.level for i in inwin if i.level]
+        if levels:
+            add("important_count", sum(1 for x in levels if x.upper() in ("A", "B")),
+                "其中源标重要(level A/B)", src, kind="derived",
+                inputs=("item_count",))
+            add("level_counts", dict(collections.Counter(levels)),
+                "源侧重要性档位分布", src, kind="derived")
+        else:
+            missing.append(MissingItem(
+                f"源侧重要性档位 —— 当前供数方（{served_by}）不提供 level。"
+                "这不等于「没有重要新闻」，只等于这个源没说",
+                "news.level.unavailable"))
 
         if inwin:
             newest = inwin[0].at
@@ -274,12 +319,29 @@ def build_fact_bundle(
             #    非盘中静默是常态（夜间实测间隔可达 1830s，周末只会更长），
             #    在那里设线只会得到又一个「周末必红」的灯。
             #    盘中实测最大间隔 235s，600s 留了 2.5 倍余量。
-            if live and stale > STALE_SEC:
+            # 🔴 阈值**按供数方查**，不是一个全局常量。
+            #    财联社那份是 `None` —— 手上只有非交易日样本，还没测出来。
+            #    `None` 时**不判**，而不是退回新浪那个 600：两个源速率差 4 倍，
+            #    拿新浪的线考核财联社会得到一盏正常也红的灯（R-3）。
+            threshold = STALE_SEC_BY_PROVIDER.get(served_by or "", STALE_SEC)
+            if live and threshold is not None and stale > threshold:
+                # 🔴 文案必须跟着**日历的三态**走，不能一律说「日历确认过了」。
+                #    `market_is_open` 查不到日历时会回退到纯 weekday 判据 ——
+                #    那时 `live=True` 只意味着「不是周末」，节假日照样 True。
+                #    它的 docstring 明写：调用方在日历没覆盖到时，
+                #    仍要把「也可能是休市日」一并说出来。
+                #    （2026-09-26 我一度把这句删成「交易日已由日历确认」——
+                #      日历覆盖不到那天时那就是一句假话。）
+                cal_note = (
+                    "今天是交易日已由 fact_trading_calendar 确认，"
+                    "所以这不能当成「今天休市」"
+                    if _cal_known is not None else
+                    "⚠️ 日历没覆盖到今天 ⇒ 此刻的「开市」只是「非周末」推出来的，"
+                    "**也可能今天是节假日**。两种情况都不能当成「没消息」")
                 missing.append(MissingItem(
                     f"最近 {stale // 60} 分钟的快讯 —— 连续竞价时段内静默超过 "
-                    f"{STALE_SEC // 60} 分钟（实测盘中最大间隔仅 4 分钟）。"
-                    "可能是源出了问题，**也可能今天是节假日** —— "
-                    "本系统尚无交易日历。两种情况都不能当成「没消息」",
+                    f"{threshold // 60} 分钟（{served_by} 的实测阈值）。"
+                    f"可能是源出了问题。{cal_note}",
                     "news.feed.stale"))
 
             tags = collections.Counter(t for i in inwin for t in i.tags)

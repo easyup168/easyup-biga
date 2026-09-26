@@ -244,10 +244,14 @@ DATASETS: tuple[DatasetDefinition, ...] = (
     ),
     DatasetDefinition(
         dataset_id="cn.news.flash",
-        title="决策时点新浪 7x24 快讯冻结",
-        schema_version=1,
-        primary_provider="sina_news",
-        fallback_providers=(), validation_providers=(),
+        title="决策时点财经快讯冻结（财联社电报，新浪 7x24 备用）",
+        # 🔴 schema 从 1 升到 2：行上多了 `level`（源侧重要性档位）。
+        #    不升版本的话，旧分区与新分区在同一个 dataset 下形状不同，
+        #    而读取方拿 `row["level"]` 会在旧分区上 KeyError —— 那是**运行时**才
+        #    暴露的，且只在回放旧快照时暴露。
+        schema_version=2,
+        primary_provider="cls_news",
+        fallback_providers=("sina_news",), validation_providers=(),
         partition_keys=("evidence_set_id",), storage_policy="parquet_evidence_bundle",
         quality_policy="cn-news-flash-v1", raw_table="raw_artifacts",
         consumers=("easyup_biga.data.decision_client:DecisionDataClient",),

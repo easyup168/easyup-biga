@@ -44,12 +44,25 @@ from easyup_biga.providers.eastmoney import (
     fetch_pool as _fetch_pool,
 )
 from easyup_biga.providers.http import SourceError
+from easyup_biga.providers.cls_news import (
+    STALE_SEC as CLS_STALE_SEC,
+    fetch_feed as _cls_fetch_feed,
+)
+from easyup_biga.providers.news_item import NewsFeed, NewsItem
 from easyup_biga.providers.sina_news import (
     STALE_SEC,
-    NewsFeed,
-    NewsItem,
     fetch_feed as _fetch_feed,
 )
+
+#: 各源的盘中静默阈值。**按 provider 查，不是一个全局常量。**
+#:
+#: 🔴 两个源的节奏差一个量级（同窗口实测：新浪 34 条/小时、财联社 8.6 条/小时），
+#:    共用一个阈值等于宣称它们一样。财联社那份是 `None` ——
+#:    手上只有非交易日样本，**还没测出来**（R-3：算不出来就说算不出来）。
+STALE_SEC_BY_PROVIDER: dict[str, int | None] = {
+    "sina_news": STALE_SEC,
+    "cls_news": CLS_STALE_SEC,
+}
 from easyup_biga.providers.tencent import (
     IndexQuote,
     fetch_index_quote as _fetch_index_quote,
@@ -78,6 +91,7 @@ __all__ = [
     "BOARD_PCT_LIMIT",
     "INDEX_PCT_LIMIT",
     "STALE_SEC",
+    "STALE_SEC_BY_PROVIDER",
     "IndexDaily",
     "IndexQuote",
     "BoardResult",
@@ -419,22 +433,41 @@ class DecisionDataClient:
             )
             return result
         if dataset_id == "cn.news.flash":
-            feed = _fetch_feed(pages=3)
+            # 🔴 走降级链，不是写死主源。2026-09-26 起财联社是 PRIMARY ——
+            #    它带 `level`（源侧重要性档位），而新浪那三个看起来像重要性的
+            #    字段实测恒 0。降级到新浪时 `level` 是 `None`，
+            #    **不是 0、不是 "C"** —— 消费方必须能区分「不重要」和「没说」。
+            attempts: list[ProviderExecutionAttempt] = []
+            outcome = execute_with_fallback(
+                dataset_id,
+                # 财联社一页 50 条 ≈ 6 小时，1 页就盖住 60 分钟窗口；
+                # 新浪要 3 页才到同一量级（100 条 ≈ 3 小时）。
+                {"cls_news": lambda: _cls_fetch_feed(pages=1),
+                 "sina_news": lambda: _fetch_feed(pages=3)},
+                on_attempt=attempts.append,
+            )
+            feed = outcome.value
             rows = [{
                 "id": item.id,
                 "at": item.at.isoformat(),
                 "text": item.text,
                 "tags_json": _json(item.tags),
                 "is_quote": item.is_quote,
+                "level": item.level,
             } for item in feed.items]
             if not rows:
                 raise SourceError("cn.news.flash 取回 0 条")
             return self.publisher.publish(
                 dataset_id=dataset_id, job_id="decision-freeze-news",
-                provider_id="sina_news", partition_key=key,
+                # 写**实际供数方** —— 写 primary 会让降级过的那次
+                # 在库里看起来像正常的一次。
+                provider_id=outcome.provider_id, partition_key=key,
                 raw_text=feed.raw_text or _json(feed.raw), rows=rows,
                 as_of=feed.items[0].at.isoformat(),
                 quality_metrics={"row_count": len(rows)},
+                failover_attempts=tuple(
+                    (a.provider_id, a.role.value, a.succeeded, a.error)
+                    for a in attempts),
             )
         raise ValueError(dataset_id)
 
@@ -527,7 +560,19 @@ class DecisionDataClient:
         )
         return result, frozen.raw_hash
 
-    def read_news(self, evidence_set_id: str) -> tuple[NewsFeed, str | None]:
+    def read_news(
+        self, evidence_set_id: str
+    ) -> tuple[NewsFeed, str | None, str | None]:
+        """返回 `(快讯, raw_hash, **实际供数方**)`。
+
+        ⚠️ 第三项是 2026-09-26 加的，与 `read_boards` 同一个理由：
+        在那之前消费方只能把 source 写死成主源字面量，于是降级过的那次
+        Evidence 的 source 指着一个没供过数的源。
+
+        🔴 这个源多一层：静默阈值也**按 provider 查**
+        （`STALE_SEC_BY_PROVIDER`）。不知道是谁供的数，就只能拿新浪的 600
+        去考核财联社 —— 而两者速率差 4 倍。
+        """
         frozen = self._frozen(evidence_set_id, "cn.news.flash")
         items = tuple(sorted((NewsItem(
             id=int(r["id"]),
@@ -535,7 +580,12 @@ class DecisionDataClient:
             text=str(r["text"]),
             tags=tuple(json.loads(str(r["tags_json"]))),
             is_quote=bool(r["is_quote"]),
+            # ⚠️ 用 `.get`：schema v1 的分区没有这一列。
+            #    回放一张 2026-09-26 之前的老卡时，`r["level"]` 会 KeyError ——
+            #    而那是**只在回放旧快照时**才暴露的崩溃。
+            level=(lambda v: str(v) if v else None)(r.get("level")),
         ) for r in frozen.rows), key=lambda x: x.at, reverse=True))
         if not items:
             raise SourceError("cn.news.flash 冻结分区为空")
-        return NewsFeed(items=items, raw={}, raw_text=None), frozen.raw_hash
+        return (NewsFeed(items=items, raw={}, raw_text=None),
+                frozen.raw_hash, frozen.provider_id)

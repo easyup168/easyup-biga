@@ -153,9 +153,16 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
     ),
     ProviderDefinition(
         provider_id="sina_news",
-        title="新浪 7x24 快讯适配器",
+        title="新浪 7x24 快讯 —— cn.news.flash 的 FALLBACK（2026-09-26 由 PRIMARY 降为备用）；"
+              "条数是财联社的 4 倍，但无重要性信号",
         source_prefix="sina",
         modules=("easyup_biga.providers.sina_news",),
+    ),
+    ProviderDefinition(
+        provider_id="cls_news",
+        title="财联社电报 —— cn.news.flash 的 PRIMARY；唯一带 level 重要性档位的快讯源",
+        source_prefix="cls",
+        modules=("easyup_biga.providers.cls_news",),
     ),
 )
 

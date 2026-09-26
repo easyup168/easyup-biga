@@ -69,9 +69,9 @@ python3 tools/verify/source_survey.py --markdown # 贴文档
 | 指数/日线 | 新浪 | `sina_kline` | `index.daily_bars`(主) | ✅ |
 | 交易日历 | 新浪 | `sina_calendar` | `trading_calendar`(主) | ✅ |
 | 交易日历 | 深交所官方 | `szse_calendar` | `trading_calendar`(备) | ❌ 连不通（本机）|
-| 快讯 | 新浪 | `sina_7x24` | `news.flash`(主) | ✅ |
-| 快讯 | 金十 | `jin10_flash` | `news.flash`（候选备胎）| ✅ |
-| 快讯 | 财联社 | `cls_roll` | `news.flash`（候选备胎）| ❌ 返回 `{errno,msg}`，需签名 |
+| 快讯 | **财联社** | `cls_roll` | `news.flash`(**主**) | ✅ 签名纯本地可算、零 key |
+| 快讯 | 新浪 | `sina_7x24` | `news.flash`(备) | ✅ |
+| 快讯 | 金十 | `jin10_flash` | `news.flash`（候选，口径未核）| ✅ |
 | 板块 | 东财 push2 | `em_boards` | `sector.board_snapshot`(主) | ❌ 502 |
 | 板块 | 同花顺 | `ths_hot` | `sector.board_snapshot`（候选备胎）| ✅ |
 | 对照组 | 东财 push2ex | `em_push2ex` | `limit_pool`(主) | ✅ |
@@ -119,16 +119,16 @@ python3 tools/verify/source_survey.py --markdown # 贴文档
 | `cn.market.breadth` | 东财 `ulist.np` | **新浪（自算）** | 主源**报数**、备用源**数数**；口径多北交所；「平盘」的定义变成我们定的 |
 | `cn.sector.board_snapshot` | 东财 `clist` | **新浪 `newFLJK`** | 概念 500→175；**不给主力净流入与板块涨跌家数** |
 | `cn.market.limit_pool` | 东财 `push2ex` | — | |
-| `cn.news.flash` | 新浪 7×24 | — | |
+| `cn.news.flash` | **财联社 `v1/roll`** | **新浪 7×24** | `level`（源侧重要性档位）**只有主源有** ⇒ 降级后进 `missing[]`，不补默认档；条数 8.6 → 34 条/小时 |
 
-### 3.1 🔴 五个盘中 dataset **一个备胎都没有**，而普查给出了候选
+### 3.1 🔴 盘中 dataset 的备胎进度（原文：**五个一个都没有**）
 
 | dataset | 现状 | 实测可用的候选 |
 |---|---|---|
 | ~~`cn.market.breadth`~~ | ✅ **2026-09-26 已配上**（`sina_breadth`）| 实测 涨 1120 / 跌 4305 / 平 137，8~12 秒。raw 是**算它所依据的那份快照**，不是算完的结果 |
 | ~~`cn.sector.board_snapshot`~~ | ✅ **2026-09-26 已配上**（`sina_boards`）| 同花顺热榜口径不对（那是热门**股**不是板块快照）。真正对口径的是新浪 `newFLJK.php` |
 | `cn.index.realtime_quote` | 正常 | 新浪 `hq.sinajs.cn` ✅ |
-| `cn.news.flash` | 正常 | 金十 ✅（财联社需签名，暂不可用）|
+| ~~`cn.news.flash`~~ | ✅ **2026-09-26 已配上**（财联社转正为主源、新浪降为备用）| 「财联社需签名暂不可用」是**错的**：死的是旧 `nodeapi`，`v1/roll` 一直在，签名 `md5(sha1(字典序 query))` 零 key |
 | `cn.market.limit_pool` | 正常 | 暂无（`push2ex` 与 `push2` 不同组，本次未受牵连）|
 
 ⚠️ **候选 ≠ 已登记。** 登记一个**没探活过**的备胎比没有备胎更糟 ——

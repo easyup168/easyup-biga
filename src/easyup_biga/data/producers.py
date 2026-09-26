@@ -34,7 +34,7 @@ PRODUCERS: tuple[ProducerDefinition, ...] = (
     ProducerDefinition("cn.market.breadth", "easyup_biga.data.decision_client:DecisionDataClient.freeze_required", "eastmoney"),
     ProducerDefinition("cn.sector.board_snapshot", "easyup_biga.data.decision_client:DecisionDataClient.freeze_required", "eastmoney"),
     ProducerDefinition("cn.market.limit_pool", "easyup_biga.data.decision_client:DecisionDataClient.freeze_required", "eastmoney"),
-    ProducerDefinition("cn.news.flash", "easyup_biga.data.decision_client:DecisionDataClient.freeze_required", "sina_news"),
+    ProducerDefinition("cn.news.flash", "easyup_biga.data.decision_client:DecisionDataClient.freeze_required", "cls_news"),
 )
 
 PRODUCER_REGISTRY: dict[str, ProducerDefinition] = {p.dataset_id: p for p in PRODUCERS}

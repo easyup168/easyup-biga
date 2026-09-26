@@ -33,7 +33,8 @@ def test_p36_direct_feeds_have_real_primary_bindings():
         "cn.market.breadth": "eastmoney",
         "cn.sector.board_snapshot": "eastmoney",
         "cn.market.limit_pool": "eastmoney",
-        "cn.news.flash": "sina_news",
+        # 2026-09-26：财联社接上来，新浪降为 FALLBACK。
+        "cn.news.flash": "cls_news",
     }
     assert DIRECT_DATASETS == frozenset(expected)
     for dataset_id, provider_id in expected.items():
