@@ -41,11 +41,13 @@ import json
 import pathlib
 import sys
 import time
+from datetime import datetime as _dt
 from typing import Any
 
 _HERE = pathlib.Path(__file__).resolve()
 _REPO = _HERE.parent.parent.parent.parent
 sys.path.insert(0, str(_REPO / "skills"))
+
 
 from _contract import (  # noqa: E402
     OriginRef,
@@ -294,10 +296,48 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
         add("upstream_trade_date",
             next(iter(set(dates.values()))) if consistent else sorted(set(dates.values())),
             "上游自报的交易日", kind=_derived_if(_td), origins=_td)
+    # 🔴 **谁参与了这条判据**必须看得见。
+    #
+    #    「3 个 agent 报的交易日一致」和「只有 1 个 agent 报了交易日」
+    #    在卡面上原来长得一模一样（都是 `trade_date_consistent=True`）——
+    #    而后者其实什么都没核对成。
+    #
+    #    ⚠️ 这条也是 2026-09-26 那次排查的直接教训：当时
+    #    `trade_date_inconsistent` 里印着 news，而 news 根本没有交易日
+    #    （它那个字段装的是「最新一条快讯发生在哪天」，同名不同义）。
+    #    **参与者名单印出来，这种误入一眼就能看见。**
+    add("trade_date_reporters", sorted(dates),
+        "报告了交易日的上游", kind=_derived_if(_td), origins=_td)
+    # 🔴 **跨度是事实，「算不算矛盾」是判断**（铁律 4）。
+    #
+    #    实测（历史 12 次出卡里 9 次报不一致）有两种完全不同的形状：
+    #
+    #      A. news 说今天、行情说上一交易日  ← **假冲突**，news 那个字段
+    #         装的根本不是交易日（已于 2026-09-26 改名 `newest_flash_date`）
+    #      B. 盘中 emotion 的股池 `qdate` 是**今天**，而日线还停在**上一交易日**
+    #         （今天没收盘）⇒ 相差 1 天，**两边都是对的**
+    #
+    #    B 每个盘中运行都会出现。把它和「跨了三天」当成同一件事报给 agent，
+    #    而判断表写着「交易日不一致 ⇒ 无法判定」⇒ **risk 在盘中永远无法判定**。
+    #
+    #    ⇒ skill 给出跨度与逐 agent 明细，**由 agent 判断这算不算矛盾**。
+    if len(dates) > 1:
+        _days = sorted({_dt.strptime(d, "%Y%m%d").date() for d in dates.values()})
+        span = (_days[-1] - _days[0]).days
+    else:
+        span = 0
+    add("trade_date_span_days", span, "上游交易日的最大跨度(天)",
+        kind=_derived_if(_td), origins=_td)
     if not consistent:
+        # 逐 agent 明细上卡 —— 没有它，agent 只看到一个 `False`，
+        # 分不清「news 混进来了」和「盘中日线未收」。
+        add("upstream_trade_date_by_agent", dict(sorted(dates.items())),
+            "各上游自报的交易日", kind=_derived_if(_td), origins=_td)
         missing.append(MissingItem(
-            f"风险判断的时间基准 —— 上游报告了不同的交易日 {dates}，"
-            f"不能当作同一天的事实一起审",
+            f"统一的时间基准 —— 上游报告了不同的交易日 {dates}，最大跨度 {span} 天。"
+            f"⚠️ 跨度 1 天且较新的那天是今天时，通常是**盘中**的正常分裂"
+            f"（实时类锚定今天、日线类锚定上一交易日，两边都对）；"
+            f"跨度更大才是真矛盾 —— 这个判断留给你",
             "risk.upstream.trade_date_inconsistent"))
 
     # --- 证据新鲜度 ---
@@ -450,7 +490,9 @@ def build_fact_bundle(*, verdict_ids: list[int], store: bool, task_id: str) -> F
 #: ⚠️ 手工维护、且**故意不截断到 1.0** —— 加字段忘了改这里，`data_completeness`
 #:    会算出 >1，被契约当场拒掉（批 R 加 `max_evidence_age_sec` 时就是这么发现的：
 #:    11/10 = 1.1 → ValueError）。刺耳但正确：截断会把「口径变了」悄悄抹平。
-_EXPECTED_FIELDS = 11
+# 2026-09-26：+1（`trade_date_reporters`）。
+# 2026-09-26：+1（`trade_date_span_days`）。
+_EXPECTED_FIELDS = 13
 
 
 def main(argv: list[str] | None = None) -> int:

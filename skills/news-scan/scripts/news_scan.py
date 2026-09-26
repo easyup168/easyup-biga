@@ -261,7 +261,22 @@ def build_fact_bundle(
                                   retrieved_at=retrieved.isoformat(),
                                   payload=feed.raw, raw_text=feed.raw_text)
         # source 改用真实表键（原来写的 `sina:7x24` 是泛化标签，解析不到指纹）。
-        add("trade_date", newest_day, "最新一条所属日期", f"derived:{src}", kind="derived")
+        # 🔴 **不叫 `trade_date`。** 7x24 是连续事件流，它没有「交易日」这个概念 ——
+        #    这个数是「最新一条快讯发生在哪天」，和 market/technical/sector/emotion
+        #    那个「这批行情属于哪个交易日」是**两件事**。
+        #
+        #    叫 `trade_date` 的代价是可量化的：risk 把所有上游的 `trade_date`
+        #    放进同一个一致性判据，于是**每一个非交易日**（以及每天日线更新之前）
+        #    都必然报「上游报告了不同的交易日，不能当作同一天的事实一起审」——
+        #    而 news 说 09-26、行情说 09-24 **两边都是对的**。
+        #
+        #    实测（BIGA-20260926-003）：这条假冲突直接把整张卡压成 WAIT。
+        #    risk 的判断表写着「交易日不一致 ⇒ 无法判定」，它照做了。
+        #
+        #    > 同名不同义不会报错，它只会让一个判据长期报一个假结论，
+        #    > 而读的人以为那是真的。
+        add("newest_flash_date", newest_day, "最新一条所属日期",
+            f"derived:{src}", kind="derived")
 
         cutoff = retrieved - timedelta(minutes=window_min)
         inwin = [i for i in feed.items if i.at >= cutoff]
@@ -374,7 +389,7 @@ def build_fact_bundle(
                 "本源实测凌晨仍有 21 条/小时，空窗口意味着取数或过滤出了问题",
                 "news.window.empty"))
 
-    core = {"trade_date", "item_count", "items"}
+    core = {"newest_flash_date", "item_count", "items"}
     if not missing:
         status, level = "completed", "PASS"
     elif core <= set(result):
