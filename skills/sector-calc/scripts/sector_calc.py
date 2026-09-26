@@ -107,7 +107,10 @@ BOTTOM_N = 3
 PCT_ABS_LIMIT = BOARD_PCT_LIMIT
 
 _YI = 1e8
-_EXPECTED_FIELDS = 9
+#: `data_completeness` 的分母 —— **加字段必须同步改它**，
+#: 否则要么 >1（契约当场拒绝，响亮）要么被稀释（静默，更糟）。
+#: 2026-09-26：+2（`industry_taxonomy` / `concept_taxonomy`）。
+_EXPECTED_FIELDS = 11
 
 
 def _brief(b) -> dict[str, Any]:
@@ -132,6 +135,36 @@ def _board_source(kind: str, provider_id: str | None) -> str:
         return f"em:clist/{kind}"
     prefix = source_prefix_of(provider_id)
     return f"{prefix}:clist/{kind}" if prefix == "em" else f"{prefix}:bankuai/{kind}"
+
+
+#: 各 provider 的**板块分类体系**。🔴 这不是「同一个榜的两个来源」。
+#:
+#: 2026-09-26 实测：
+#:
+#:     kind       东财                       新浪
+#:     industry   496 个申万式细分            **84 个证监会门类**
+#:                BK1456 其他家电Ⅲ / 棉纺      hangye_ZA02 林业 / 畜牧业
+#:     concept    500 个概念                  175 个概念
+#:                                           gn_hwqc 华为汽车 / gn_BCdc BC电池
+#:
+#: ⇒ **概念对概念可比，行业对行业不可比。**
+#:   行业降级到新浪之后，卡上会说「领涨板块 = 林业」——
+#:   那是证监会门类里的一个大类，对短线**基本无用**，
+#:   而它和主源那个「棉纺 +8%」根本不是同一个榜。
+#:
+#: 🔴 这个差异**必须显式声明**，不能只靠「少两个字段」那条 missing 兜着 ——
+#:    那条说的是「主力净流入没有」，而这里的问题是**整个榜换了一套**。
+#:    静默换口径正是本项目最优先防范的形状。
+_BOARD_TAXONOMY: dict[tuple[str, str], str] = {
+    ("industry", "eastmoney"): "em-sw-细分(496)",
+    ("industry", "sina_boards"): "csrc-门类(84)",
+    ("concept", "eastmoney"): "em-概念(500)",
+    ("concept", "sina_boards"): "sina-概念(175)",
+}
+
+#: 各 kind 的**基准**分类体系（dataset 的 primary 用的那套）。
+#: 实际供数方与它不同 ⇒ 声明出来。
+_BASELINE_TAXONOMY = {"industry": "em-sw-细分(496)", "concept": "em-概念(500)"}
 
 
 def _board_agg_source(providers) -> str:
@@ -211,7 +244,11 @@ class Collector:
             else:
                 r = fetch_boards(kind)
                 frozen_hash = None
-                served_by = None
+                # 直连路径没有降级链（provider 选择归冻结层）⇒ 只可能是东财。
+                # 🔴 写成 `None` 会让**分类体系那条事实产不出来** ——
+                #    而直连时口径其实是已知的（em-sw-细分 496）。
+                #    「不知道」和「知道但没填」在卡上长得一样，都是缺一条。
+                served_by = "eastmoney"
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                            "sector.board.unavailable"))
@@ -371,6 +408,26 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             c.warnings.append(as_of_warning)
         add("trade_date", trade_date, "交易日", f"sina:kline/{_DATE_SYMBOL}",
             kind="observed")
+
+        # 🔴 板块分类体系**逐 kind 声明**，与主源不同就进 missing。
+        #    不是警告 —— 警告会被读成「注意一下」，而这里的事实是
+        #    **这个榜和你以为的那个榜不是同一个**，不能拿来比。
+        for _kind in ("industry", "concept"):
+            if _kind not in c.boards:
+                continue
+            _tax = _BOARD_TAXONOMY.get((_kind, c.board_provider.get(_kind)))
+            if _tax is None:
+                continue
+            add_live(f"{_kind}_taxonomy", _tax, f"{_kind}榜的分类体系",
+                     _board_source(_kind, c.board_provider.get(_kind)),
+                     kind="observed")
+            if _tax != _BASELINE_TAXONOMY[_kind]:
+                c.missing.append(MissingItem(
+                    f"{_kind}榜与主源同口径的排名 —— 本次由备用源供数，"
+                    f"用的是 **{_tax}**，而主源是 {_BASELINE_TAXONOMY[_kind]}。"
+                    f"两者**不是同一个榜**，名次不能跨源比较，"
+                    f"也不能说「今天领涨的还是昨天那个板块」",
+                    f"sector.{_kind}.taxonomy_mismatch"))
 
         # ⏩ 这里原本有一条 `if c.boards:` 只为发一句警告：
         #    「板块榜不返回交易日字段，其 as_of 是按指数日线的交易日推断的」。

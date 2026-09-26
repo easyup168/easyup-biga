@@ -389,3 +389,76 @@ class TestFallbackServedSnapshot:
         ev = next(e for e in v.evidence if e.field == "board_counts")
         assert ev.source.startswith("mixed:"), ev.source
         assert "em:clist" in ev.source and "sina:bankuai" in ev.source
+
+
+class TestBoardTaxonomyDeclared:
+    """🔴 板块分类体系**逐 kind 声明**，降级换口径不许静默。
+
+    A 股板块数据是个课题：**行业、概念各家的分类都不一样**。
+    2026-09-26 实测：
+
+        kind       东财                    新浪
+        industry   496 个申万式细分         **84 个证监会门类**
+                   BK1456 棉纺             hangye_ZA02 林业
+        concept    500 个概念              175 个概念
+
+    ⇒ 备用源不是「同一个榜的另一个来源」，是**另一个榜**。
+      降级那天卡上会说「领涨板块 = 林业」—— 那是证监会门类里的一个大类，
+      对短线基本无用，而它和主源那个「棉纺 +8%」根本不是一回事。
+
+    **裁定（2026-09-26）：板块以东财为主源。** 各家分类不一致时，
+    跨天可比性比可用性更重要 —— 一个换了口径的「备用源」对这个事实
+    不构成真正的备用。备用仍然保留（有总比没有强），但必须**声明**。
+
+    ⚠️ 判据是 `missing[]` 而不是 `warnings[]`：警告会被读成「注意一下」，
+       而这里的事实是**这个榜和你以为的那个榜不是同一个**，不能拿来比。
+    """
+
+    @pytest.fixture()
+    def frozen_by(self, monkeypatch):
+        def _make(provider):
+            class FakeData:
+                def read_boards(self, _esid, kind):
+                    return result(kind), _h(kind), provider
+
+            class FakeCoord:
+                def read_index_daily(self, *a, **kw):
+                    return daily()
+
+                def frozen_content_sha256(self, *a, **kw):
+                    return _h("daily")
+
+            monkeypatch.setattr(sc, "DecisionDataClient", lambda *a, **kw: FakeData())
+            monkeypatch.setattr(sc, "SnapshotCoordinator", lambda *a, **kw: FakeCoord())
+            monkeypatch.setattr(sc, "now_cn",
+                                lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
+            return build(evidence_set_id="es-tax")
+        return _make
+
+    def test_主源供数时声明口径且不报不匹配(self, frozen_by):
+        v = frozen_by("eastmoney")
+        assert v.result["industry_taxonomy"] == "em-sw-细分(496)"
+        assert v.result["concept_taxonomy"] == "em-概念(500)"
+        assert not [m for m in v.missing if "taxonomy_mismatch" in m.code]
+
+    def test_备用源供数时必须报口径不匹配(self, frozen_by):
+        v = frozen_by("sina_boards")
+        codes = {m.code for m in v.missing}
+        assert "sector.industry.taxonomy_mismatch" in codes, codes
+        assert "sector.concept.taxonomy_mismatch" in codes, codes
+
+    def test_口径不匹配进missing而不是warnings(self, frozen_by):
+        """警告会被读成「注意一下」；这条是「不能拿来比」。"""
+        v = frozen_by("sina_boards")
+        assert not any("taxonomy" in w for w in v.warnings), v.warnings
+
+    def test_口径本身作为事实上卡(self, frozen_by):
+        """🔴 只发 missing 不够 —— 读卡的人要能看到**用的是哪一套**。
+
+        不上卡的话，「领涨板块 = 林业」旁边没有任何东西说明它出自 84 个
+        证监会门类，而那正是它看起来荒谬的原因。
+        """
+        v = frozen_by("sina_boards")
+        assert v.result["industry_taxonomy"] == "csrc-门类(84)"
+        ev = next(e for e in v.evidence if e.field == "industry_taxonomy")
+        assert ev.source == "sina:bankuai/industry", ev.source
