@@ -38,7 +38,7 @@ from easyup_biga.persistence import (
     load_dataset_snapshot,
     save_trading_calendar,
 )
-from easyup_biga.providers.eastmoney_eod import EodFetchResult
+from easyup_biga.providers.eod_bar import EodBar, EodFetchResult
 from easyup_biga.providers.eastmoney_security_master import parse_security_master_pages
 
 pytest.importorskip("duckdb", reason="Parquet 面读写走 duckdb")
@@ -57,16 +57,22 @@ MASTER_ROWS = [
 
 
 def _bar_row(code: str, close: float, *, suspended: bool = False):
-    """东财 clist 的一行。停牌票没有价格字段 —— 用 '-' 表示，和真实响应一致。"""
+    """一行 **provider 中立** 的日线（`EodBar`）。
+
+    ⚠️ 2026-09-26 起夹具不再造东财的字段名 —— 归一化层已经不认识它们了。
+    停牌票用 `'-'` 表示无价，与真实响应一致（东财就是这么给的；
+    新浪则是**根本不返回**那一行，见 `providers/sina_eod.py` 模块头）。
+    """
     if suspended:
-        return {"f12": code, "f14": "x", "f17": "-", "f15": "-", "f16": "-", "f2": "-",
-                "f5": "-", "f6": "-", "f3": "-", "f4": "-", "f18": "-"}
-    return {
-        "f12": code, "f14": "x",
-        "f17": close - 0.2, "f15": close + 0.3, "f16": close - 0.4, "f2": close,
-        "f18": close - 0.1, "f5": 1_000_000, "f6": 12_345_678.0,
-        "f4": 0.1, "f3": 0.9,
-    }
+        return EodBar(symbol=code, name="x", open="-", high="-", low="-", close="-",
+                      prev_close="-", volume="-", amount="-",
+                      change_amount="-", change_percent="-")
+    return EodBar(
+        symbol=code, name="x",
+        open=close - 0.2, high=close + 0.3, low=close - 0.4, close=close,
+        prev_close=close - 0.1, volume=1_000_000, amount=12_345_678.0,
+        change_amount=0.1, change_percent=0.9,
+    )
 
 
 def _seed_universe(db):
@@ -92,7 +98,8 @@ def _seed_universe(db):
 def _fetched(rows, *, declared=None):
     return EodFetchResult(
         rows=tuple(rows),
-        raw_text=json.dumps({"rc": 0, "data": {"diff": list(rows)}}, ensure_ascii=False),
+        raw_text=json.dumps(
+            {"rc": 0, "data": {"diff": [r.symbol for r in rows]}}, ensure_ascii=False),
         retrieved_at=RETRIEVED,
         declared_total=len(rows) if declared is None else declared,
     )

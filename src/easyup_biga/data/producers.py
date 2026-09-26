@@ -26,7 +26,7 @@ PRODUCERS: tuple[ProducerDefinition, ...] = (
     ProducerDefinition("cn.security_master", "easyup_biga.data.datasets.security_master:SecurityMasterService.sync", "eastmoney_security_master"),
     ProducerDefinition("cn.trading_calendar", "easyup_biga.data.client:refresh_trading_calendar", None),
     ProducerDefinition("cn.index.daily_bars", "easyup_biga.data.datasets.index_daily:IndexDailyDatasetBridge.publish", None),
-    ProducerDefinition("cn.equity.daily_bars", "easyup_biga.data.eod_pipeline:run_eod_bundle", "eastmoney_eod"),
+    ProducerDefinition("cn.equity.daily_bars", "easyup_biga.data.eod_pipeline:run_eod_bundle", "sina_eod"),
     ProducerDefinition("cn.security.tradability", "easyup_biga.data.eod_pipeline:run_eod_bundle", "derived_biga"),
     ProducerDefinition("cn.equity.adjustment_factors", "easyup_biga.data.datasets.adjustment_factors:run", "csv_adjustment"),
     ProducerDefinition("cn.market.emotion_close", "easyup_biga.data.datasets.emotion_close:run", "derived_biga"),

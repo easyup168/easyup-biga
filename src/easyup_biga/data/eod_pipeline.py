@@ -69,7 +69,7 @@ def run_eod_bundle(
     db_path=None,
     data_root="data",
     new_revision: bool = False,
-    fetcher=fetch_eod_snapshot,
+    fetcher=None,
 ) -> EodBundleResult:
     """Run P3-4/P3-5 against the same Provider response.
 
@@ -78,7 +78,12 @@ def run_eod_bundle(
     tradability from the EOD response itself would defeat P3-3's identity SSOT.
     """
     date.fromisoformat(f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}")
-    fetched: EodFetchResult = fetcher()
+    # 🔴 默认走**降级链**，不是写死主源。注入 fetcher 时退回单源（测试桩没有
+    #    provider 身份可言），attempts 留空 ⇒ 发布侧按「一次 PRIMARY 成功」记。
+    if fetcher is not None:
+        fetched, served_by, attempts = fetcher(), eod_daily_bars.PROVIDER_ID, ()
+    else:
+        fetched, served_by, attempts = eod_daily_bars.fetch_with_fallback()
     _verify_eod_date(trade_date, fetched, db_path=db_path)
     universe = security_universe_at(fetched.retrieved_at, path=db_path)
     if not universe:
@@ -87,7 +92,8 @@ def run_eod_bundle(
             f"{fetched.retrieved_at}; run security-master-sync first"
         )
 
-    bars = eod_daily_bars.normalize(fetched.rows, trade_date, fetched.retrieved_at)
+    bars = eod_daily_bars.normalize(
+        fetched.rows, trade_date, fetched.retrieved_at, provider_id=served_by)
     records = tradability.derive(
         universe,
         [bar.to_dict() for bar in bars],
@@ -107,6 +113,8 @@ def run_eod_bundle(
         data_root=data_root,
         new_revision=new_revision,
         expected_open=open_or_unknown,
+        served_by=served_by,
+        failover_attempts=attempts,
     )
     if bars_result.status is DatasetStatus.COMPLETE:
         # 🔴 把**日线那次发布的 raw 血缘**传下去。可交易性是从同一份行情源

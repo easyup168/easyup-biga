@@ -1,10 +1,12 @@
 from easyup_biga.data.datasets.eod_daily_bars import normalize, quality
+from easyup_biga.providers.eod_bar import EodBar
 from easyup_biga.data.records import TradabilityStatus
 from easyup_biga.data.datasets.tradability import derive
 from easyup_biga.data.review_outcomes import calculate
 
 def test_eod_normalize_and_quality():
-    rows=[{'f12':'600000','f17':10,'f15':11,'f16':9,'f2':10.5,'f18':10,'f5':100,'f6':1000,'f4':.5,'f3':5}]
+    rows=[EodBar(symbol='600000',open=10,high=11,low=9,close=10.5,prev_close=10,
+                 volume=100,amount=1000,change_amount=.5,change_percent=5)]
     bars=normalize(rows,'20260925','2026-09-25T15:10:00+08:00'); st,m,issues=quality(bars,1)
     assert bars[0].instrument_id=='600000.SH' and st.value=='COMPLETE' and not issues
 

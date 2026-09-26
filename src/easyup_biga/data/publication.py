@@ -81,6 +81,9 @@ class DatasetRowPublisher:
         as_of: str,
         raw_text: str | None = None,
         upstream_artifact_ids: tuple[str, ...] = (),
+        #: 真实的取数尝试链（含失败的）。不给就按「一个 artifact = 一次
+        #: PRIMARY 成功」记 —— 见 `SnapshotPublishRequest.failover_attempts`。
+        failover_attempts: tuple[tuple[str, str, bool, str | None], ...] = (),
         quality_status: DatasetStatus = DatasetStatus.COMPLETE,
         quality_metrics: Mapping[str, Any] | None = None,
         quality_issues: tuple[DataIssue, ...] = (),
@@ -178,6 +181,7 @@ class DatasetRowPublisher:
                     dataset_id=dataset_id, job_id=job_id, partition_key=key,
                     trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=raws,
                     upstream_artifact_ids=tuple(upstream_artifact_ids),
+                    failover_attempts=tuple(failover_attempts),
                     storage_format="parquet", storage_uri=str(staged.target),
                     content_sha256=staged.sha256, row_count=staged.row_count,
                     as_of=as_of, knowledge_cutoff=now,

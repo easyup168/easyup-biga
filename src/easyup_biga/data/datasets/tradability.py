@@ -13,8 +13,8 @@ PROVIDER_ID = "derived_biga"
 JOB_ID = "tradability-sync"
 
 
-def _provider_iid(row: Mapping[str, Any]) -> str | None:
-    raw = row.get("f12")
+def _provider_iid(row: Any) -> str | None:
+    raw = getattr(row, "symbol", None)
     if raw in (None, "", "-"):
         return None
     code = str(raw).zfill(6)
@@ -25,8 +25,9 @@ def _provider_iid(row: Mapping[str, Any]) -> str | None:
     return code + ".SZ"
 
 
-def _has_trade_price(row: Mapping[str, Any]) -> bool:
-    return all(row.get(key) not in (None, "", "-") for key in ("f17", "f15", "f16", "f2"))
+def _has_trade_price(row: Any) -> bool:
+    return all(value not in (None, "", "-") for value in
+               (row.open, row.high, row.low, row.close))
 
 
 def derive(

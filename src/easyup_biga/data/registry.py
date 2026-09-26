@@ -103,10 +103,18 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         dataset_id="cn.equity.daily_bars",
         title="全市场 A 股 EOD 日线（不复权原始 OHLCV）",
         schema_version=1,
-        primary_provider="eastmoney_eod",
-        fallback_providers=(),
-        # 🔴 留空的理由和 security_master 那条一样：登记一个没探活过的备胎，
-        #    等于承诺一条降级路径而它可能也是断的。
+        # 🔴 **主备在 2026-09-26 对调了。**
+        #    依据不是「东财那天挂了」，是两条长期证据：
+        #    ① 同机另一套长期运行的实例，每天的全市场日线走的就是新浪
+        #       这个端点 —— 不是「听说能用」，是每天在跑；
+        #    ② 公开的 A 股数据源目录把东财标为「接口共用同一套风控，
+        #       IP 被封会成片失联」，并建议优先用不封 IP 的源。
+        #    我们这次撞上的正是成片失联。
+        #
+        #    ⚠️ 两者口径**不等价**（自报总数 / 成交量单位 / 停牌股是否返回），
+        #      差异写在 `providers/sina_eod.py` 的模块头里，不当等价替换。
+        primary_provider="sina_eod",
+        fallback_providers=("eastmoney_eod",),
         validation_providers=(),
         # 一天一个分区。修订（盘后更正）走同分区的新 data_version，
         # 不改写已经落盘的那份 —— 物理路径里带 data_version=N。
