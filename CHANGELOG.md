@@ -13,6 +13,49 @@
 
 ---
 
+## [0.9.20] - 2026-09-26
+
+### 🔴 运行时契约里不许写 provider 名字
+
+`AGENTS.md` 是**运行时**加载的，`CLAUDE.md` 不是（那只有开发时的工具链读）：
+
+```
+飞书 → gateway → main（读 根 AGENTS.md + SOUL.md + IDENTITY.md）
+                  ↓ spawn
+                specialist（只读各自 agents/<id>/AGENTS.md）
+```
+
+写进契约的东西 agent **会当真，而且不会去核对**。
+
+[0.9.14] 给 `agents/news/AGENTS.md` 加 `level` 说明时写了一句
+「**主源（财联社）**给每条电报一个档位」—— 就是这个形状：
+换源、降级都不经过 agent，而那个名字会在某次换源之后**悄悄变成假话**。
+
+⇒ 改成「**有的快讯源**会给…，有的不给」，判据指向
+`missing[]` 里的 `news.level.unavailable` —— **那是每次运行都新鲜的**。
+
+⚠️ 这也是 P3-6 的边界：specialist 不许碰 provider 模块，
+自然也不该在契约里认识 provider 的名字。
+
+### 新增守卫 · `test_runtime_contract_hygiene.py`
+
+扫全部运行时契约（8 个 `AGENTS.md` + `SOUL.md` + `IDENTITY.md`），
+里面不得出现任何 provider 名字。探针验过：写回「财联社」当场红。
+
+清单用 glob 不手写 —— 手写会在下一个 agent 出现时静默漏掉它。
+
+⚠️ 顺带把它从 `test_trade_date_field_semantics.py` 里**拆出来**：
+那个文件名说的是字段语义，塞进契约检查之后**名字和内容对不上**。
+文件名也是一种断言。
+
+### 变更 · 契约只放不变的东西
+
+本次运行的具体参数（`evidence_set_id` / `run_id` / `required_datasets` /
+算好的风险事实）由编排器在**任务消息**里注入，不进契约。
+这条分工写进了新守卫的模块头，免得下次又往契约里塞易变的事实。
+
+---
+
 ## [0.9.19] - 2026-09-26
 
 ### 新增 · 素材库放仓库外：`~/.openclaw-biga/notes/`
