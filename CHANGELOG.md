@@ -13,7 +13,10 @@
 
 ---
 
-## [未发布]
+## [0.8.0] - 2026-09-26
+
+> **Phase 3 代码面闸门第一次退 0。** `--code-only` 退 0、完整模式退 2 ——
+> 三态第一次真正分开说话：代码面过了，证据一条都没有。
 
 ### 新增 · Phase 3 代码面闸门第一次退 0 —— 合并 P4-G0 增量包（P3-4…P3-7 收口）
 
@@ -9371,6 +9374,7 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
+[0.8.0]: https://github.com/easyup168/easyup-biga/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/easyup168/easyup-biga/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/easyup168/easyup-biga/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/easyup168/easyup-biga/compare/v0.5.1...v0.6.0
