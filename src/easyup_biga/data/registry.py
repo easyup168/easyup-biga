@@ -54,10 +54,17 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         title="沪深北全市场 A 股名单（point-in-time universe）",
         schema_version=1,
         primary_provider="eastmoney_security_master",
-        fallback_providers=(),
-        # 🔴 故意留空。参考实现 `a-stock-data` 给「股票列表」记了备胎
-        #    （datacenter-web + 腾讯批量），但那条路本仓库一次都没探活过 ——
-        #    登记一个没验过的备胎，等于承诺一条降级路径而它可能也是断的。
+        # 🔴 备胎是 2026-09-26 **被一次真故障逼出来的**，不是预防性设计。
+        #    那天 `push2*.eastmoney.com` 整组 502（同一时刻 `push2ex` /
+        #    `push2his` / `datacenter-web` 全 200 ⇒ 不是限流、不是请求头），
+        #    而这个数据集是全市场 EOD 的第一步 —— 它取不到，当天整条链就停。
+        #
+        #    原来这里写着「故意留空：登记一个没验过的备胎等于承诺一条
+        #    可能也是断的降级路径」。那句话**仍然成立**，所以这次登记的这个
+        #    是**真跑通过**的：5568 只、三个交易所齐全、耗时 111s。
+        #
+        #    ⚠️ 口径与主源**不等价**（没有上市日），差异写在适配器模块头里。
+        fallback_providers=("sina_security_master",),
         validation_providers=(),
         # 一次同步一个分区：这份名单描述的是**取回那一刻**的在册状态。
         partition_keys=("as_of_date",),

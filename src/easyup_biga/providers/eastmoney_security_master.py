@@ -43,12 +43,14 @@ from __future__ import annotations
 import json
 import math
 import urllib.parse
-from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from easyup_biga.domain import now_cn
 
 from .http import SourceError, get_json_and_text, throttle
+# ⚠️ 结果类型搬到了中立契约里 —— 本适配器与新浪那个共用同一份，
+#    否则「一次名单抓取的结果长什么样」会有两个定义（L-3）。
+from .security_listing import SecurityListing, SecurityMasterFetchResult
 
 __all__ = [
     "EASTMONEY_SECURITY_MASTER_URL",
@@ -72,24 +74,6 @@ _SECURITY_FS = "m:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048"
 _FIELDS = "f12,f14,f13,f26"
 _PAGE_SIZE = 100
 _MAX_PAGES = 80
-
-
-@dataclass(frozen=True, slots=True)
-class SecurityMasterFetchResult:
-    total: int
-    rows: tuple[Mapping[str, Any], ...]
-    raw: Mapping[str, Any]
-    raw_text: str
-    retrieved_at: str
-    #: 🔴 是 `em` 不是 `eastmoney` —— 库里既有的东财 raw 行前缀就是 `em:`
-    #:    （`em:push2ex/limit_up` 等）。写 `eastmoney` 会让同一个源在
-    #:    源码、库、注册表里有**第三套**名字。
-    provider_id: str = "em"
-    adapter_version: str = "1"
-
-    @property
-    def source(self) -> str:
-        return f"{self.provider_id}:security_master/current"
 
 
 def _page_rows(payload: Mapping[str, Any], *, page_no: int) -> tuple[list[dict[str, Any]], int]:
@@ -157,7 +141,17 @@ def parse_security_master_pages(
 
     return SecurityMasterFetchResult(
         total=declared_total or len(rows),
-        rows=tuple(rows),
+        # 🔴 翻译成 **provider 中立行** 就在这里做。
+        #    归一化层不再认识 `f12` 这些名字 —— 见 `security_listing.py` 模块头。
+        rows=tuple(
+            SecurityListing(
+                symbol=item.get("f12"),
+                name=item.get("f14"),
+                market_hint=item.get("f13"),
+                list_date=item.get("f26"),
+            )
+            for item in rows
+        ),
         raw={"pages": [dict(item) for item in payloads]},
         # Each element is the exact response text of one page.  Encoding the
         # outer list does not rewrite the contents of any page string.

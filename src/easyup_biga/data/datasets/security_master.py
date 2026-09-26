@@ -43,6 +43,10 @@ from easyup_biga.data.contracts import (
     new_raw_artifact_id,
 )
 from easyup_biga.domain import now_cn
+from easyup_biga.providers.security_listing import (
+    SecurityListing,
+    SecurityMasterFetchResult,
+)
 from easyup_biga.persistence import (
     find_dataset_snapshot,
     load_security_master_records,
@@ -53,11 +57,13 @@ from easyup_biga.persistence import (
     save_security_master_records,
     transition_data_run,
 )
-from easyup_biga.providers.eastmoney_security_master import (
-    SecurityMasterFetchResult,
-    fetch_security_master,
-)
+from easyup_biga.providers.eastmoney_security_master import fetch_security_master
 from easyup_biga.providers.http import SourceError
+from easyup_biga.providers.sina_security_master import (
+    fetch_security_master as sina_fetch_security_master,
+)
+
+from ..failover import ProviderExecutionAttempt, execute_with_fallback
 from ..snapshots import DatasetSnapshotService, SnapshotPublishRequest
 
 DATASET_ID = "cn.security_master"
@@ -67,6 +73,8 @@ JOB_ID = "security-master-sync"
 #:    `provider_for_source()` 负责在它们之间换算。写 `"eastmoney"` 更糟：
 #:    那会是同一个源的第三套名字。
 PROVIDER_ID = "eastmoney_security_master"
+#: 备用源。⚠️ 口径与主源**不等价**（没有上市日）—— 见适配器模块头。
+FALLBACK_PROVIDER_ID = "sina_security_master"
 
 
 class Exchange(StrEnum):
@@ -187,7 +195,12 @@ def _exchange_and_board(symbol: str, provider_market: Any) -> tuple[Exchange, Se
         return Exchange.SSE, SecurityBoard.STAR
     if symbol.startswith(("600", "601", "603", "605")):
         return Exchange.SSE, SecurityBoard.SSE_MAIN
-    if symbol.startswith(("300", "301")):
+    # 🔴 `302` 是 2026-09-26 第一次拿真实名单跑时才补上的。
+    #    创业板早期只有 300/301，后来多出 302 段（换股吸收合并上市等）。
+    #    实测：全市场 5568 只里恰好 1 只（`302132 中航成飞`），成交活跃。
+    #    ⇒ 在此之前，**这个数据集的第一次真实同步必然整体失败** ——
+    #      主源走这条路也一样，只是它从没跑到过这一步。
+    if symbol.startswith(("300", "301", "302")):
         return Exchange.SZSE, SecurityBoard.CHINEXT
     if symbol.startswith(("000", "001", "002", "003")):
         return Exchange.SZSE, SecurityBoard.SZSE_MAIN
@@ -212,22 +225,38 @@ def _list_date(value: Any) -> str | None:
 
 
 def normalize_security_master_rows(
-    rows: Iterable[Mapping[str, Any]],
+    rows: Iterable[SecurityListing],
     *,
     provider_id: str,
     raw_artifact_id: str,
     retrieved_at: str,
 ) -> tuple[SecurityMasterRecord, ...]:
-    """Normalize Provider rows into stable BigA security identities."""
+    """把 **provider 中立行** 归一成稳定的 BigA 证券身份。
+
+    🔴 入参从「东财的字段名 dict」改成了 `SecurityListing`（2026-09-26）。
+    原来这里直接读 `f12` / `f14` / `f13` / `f26` —— 只有一个源时看不出问题，
+    **加第二个源的那一刻就咬人**：要么让新 provider 把字段伪装成 `f12`
+    （读的人会以为它是东财），要么在这里加一个「这是哪家」的分支
+    （同一个判断两份实现）。两条都错 ⇒ 翻译交给各自的适配器。
+    """
     # Validate timestamp once.  ISO text is also used for lexical cutoff queries.
     datetime.fromisoformat(retrieved_at)
     records: list[SecurityMasterRecord] = []
+    # 🔴 不认识的前缀**攒起来一次报全**，不是撞上第一个就死。
+    #    死在第一个的代价不是「慢」：全市场名单一年可能新增几个代码段，
+    #    一次只暴露一个 ⇒ 要重跑 N 次、每次等一分多钟才能知道全貌。
+    #    而 fail-closed 本身不放松 —— 有一个不认识就整体不发布。
+    unsupported: list[str] = []
     for row in rows:
-        symbol = _symbol(row.get("f12"))
-        name = str(row.get("f14") or "").strip()
+        symbol = _symbol(row.symbol)
+        name = str(row.name or "").strip()
         if not name or name == "-":
             raise ValueError(f"security {symbol} has no name")
-        exchange, board = _exchange_and_board(symbol, row.get("f13"))
+        try:
+            exchange, board = _exchange_and_board(symbol, row.market_hint)
+        except ValueError:
+            unsupported.append(symbol)
+            continue
         suffix = {
             Exchange.SSE: "SH",
             Exchange.SZSE: "SZ",
@@ -241,7 +270,7 @@ def normalize_security_master_rows(
                 name=name,
                 security_type=SecurityType.STOCK,
                 board=board,
-                list_date=_list_date(row.get("f26")),
+                list_date=_list_date(row.list_date),
                 delist_date=None,
                 status=SecurityStatus.LISTED,
                 available_at=retrieved_at,
@@ -250,6 +279,14 @@ def normalize_security_master_rows(
                 raw_artifact_id=raw_artifact_id,
             )
         )
+    if unsupported:
+        raise ValueError(
+            f"unsupported stock-code prefixes ({len(unsupported)} 只)："
+            f"{sorted(unsupported)[:20]}"
+            + ("…" if len(unsupported) > 20 else "")
+            + " —— 代码前缀是身份规则的唯一依据，不认识就**整体不发布**，"
+              "免得基金/债券被静默混进股票 universe。"
+              "确认是新代码段后加进 `_exchange_and_board`。")
     return tuple(sorted(records, key=lambda item: item.instrument_id))
 
 
@@ -368,9 +405,38 @@ class SecurityMasterService:
         quality_policy: SecurityMasterQualityPolicy | None = None,
     ) -> None:
         self._path = path
-        self._fetch = fetcher or fetch_security_master
+        #: 🔴 默认取数走**降级链**，不是写死主源。
+        #:    2026-09-26 起 `cn.security_master` 有了真跑通过的 FALLBACK ——
+        #:    而一条「注册表里声明了、代码里写死单源」的降级路径比没有更糟
+        #:    （第 67 章日历那条踩过一次）。
+        self._fetch = fetcher or self._fetch_with_fallback
         self._live_current_only = fetcher is None
+        #: 本次真正供数的那家（注册表 id）。注入 fetcher 时退回主源 id ——
+        #: 测试桩没有 provider 身份可言。
+        self._served_by = PROVIDER_ID
+        self._attempts: tuple[ProviderExecutionAttempt, ...] = ()
         self._quality = quality_policy or SecurityMasterQualityPolicy()
+
+    def _fetch_with_fallback(self) -> SecurityMasterFetchResult:
+        """按注册表顺序取数，并记下**真正供数的那家**。
+
+        🔴 溯源必须写实际供数方，不能写 dataset 的 primary ——
+        「降级过的那天」会因此在库里**看起来像正常的一天**：
+        数据来自备用源，`provider_id` 却指着主源。
+        （`execute_with_fallback` 的 docstring 里写着同一句话。）
+        """
+        attempts: list[ProviderExecutionAttempt] = []
+        result = execute_with_fallback(
+            DATASET_ID,
+            {
+                PROVIDER_ID: fetch_security_master,
+                FALLBACK_PROVIDER_ID: sina_fetch_security_master,
+            },
+            on_attempt=attempts.append,
+        )
+        self._served_by = result.provider_id
+        self._attempts = tuple(attempts)
+        return result.value
 
     def sync(
         self,
@@ -453,9 +519,9 @@ class SecurityMasterService:
         artifact = RawArtifact(
             artifact_id=new_raw_artifact_id(),
             dataset_id=DATASET_ID,
-            provider_id=PROVIDER_ID,
+            provider_id=self._served_by,
             request_fingerprint=_sha256({
-                "dataset_id": DATASET_ID, "provider_id": PROVIDER_ID,
+                "dataset_id": DATASET_ID, "provider_id": self._served_by,
                 "adapter_version": fetched.adapter_version,
                 "as_of_date": requested_date,
             }),
@@ -467,7 +533,7 @@ class SecurityMasterService:
         )
 
         records = normalize_security_master_rows(
-            fetched.rows, provider_id=PROVIDER_ID,
+            fetched.rows, provider_id=self._served_by,
             raw_artifact_id=artifact.artifact_id, retrieved_at=retrieved_at)
         quality_result = self._quality.evaluate(
             records, declared_total=fetched.total, as_of_date=requested_date)
@@ -488,8 +554,15 @@ class SecurityMasterService:
                 job_id=JOB_ID,
                 partition_key=partition_key,
                 trigger_id=trigger_id or f"{JOB_ID}:{requested_date}:{uuid.uuid4().hex}",
-                provider_id=PROVIDER_ID,
+                # 🔴 写**实际供数方**，不是 dataset 的 primary。
+                #    写 primary 会让降级过的那天看起来像正常的一天。
+                provider_id=self._served_by,
                 raw_artifacts=(artifact,),
+                # 真实取数链（含主源失败）⇒ `provider_attempts` 里能查到
+                # 「主源挂了、备用源接上」这件事真的发生过。
+                failover_attempts=tuple(
+                    (a.provider_id, a.role.value, a.succeeded, a.error)
+                    for a in self._attempts),
                 storage_format="sqlite_fact",
                 storage_uri=f"biga+sqlite://fact_security_master/{partition_id}",
                 content_sha256=normalized_hash,

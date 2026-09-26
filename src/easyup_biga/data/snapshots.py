@@ -97,6 +97,16 @@ class SnapshotPublishRequest:
     #: 分区 id（如 `biga+sqlite://fact_security_master/<pid>`）⇒ 调用方得先知道
     #: id 才拼得出 `storage_uri`。不给就由服务生成。
     partition_id: str | None = None
+    #: 🔴 **这次取数真实走过的 provider 链**（含失败的那几次）。
+    #:
+    #: 不给就按「一个 raw artifact = 一次 PRIMARY 成功」记 —— 那对单源数据集
+    #: 是对的，对**降级过的那次就是假的**：库里只会留下备用源的一条
+    #: `PRIMARY SUCCEEDED`，而主源失败那一半**根本不存在**。
+    #:
+    #: ⚠️ 后果不只是日志少一行：`drills.provider_fallback_drill()` 读的正是
+    #:    `provider_attempts`，要求「PRIMARY 失败过 **且** FALLBACK 在同一次
+    #:    run 里成功」。失败那一半不落表 ⇒ 这项演练结构上永远取不到证据。
+    failover_attempts: tuple[tuple[str, str, bool, str | None], ...] = ()
     #: 🔴 **派生数据集的上游血缘**：已经存在的 RawArtifact id，不再造第二份。
     #:
     #: 与 `raw_artifacts` **二选一**。派生数据集（可交易性、情绪收盘…）没有
@@ -269,22 +279,51 @@ class DatasetSnapshotService:
             #    没有取数动作 ⇒ 没有 RawArtifact 要存、也没有 ProviderAttempt。
             #    状态机仍然一格格走完 —— 那是所有 Data Run 共用的一条线，
             #    为派生型另开一条会立刻变成第二套口径（L-3）。
-            for attempt_no, artifact in enumerate(request.raw_artifacts, start=1):
+            for artifact in request.raw_artifacts:
                 save_raw_artifact(artifact, path=self._path)
-                record_provider_attempt(
-                    ProviderAttempt(
-                        data_run_id=data_run_id,
-                        provider_id=request.provider_id,
-                        role=ProviderRole.PRIMARY,
-                        attempt_no=attempt_no,
-                        status=ProviderAttemptStatus.SUCCEEDED,
-                        started_at=artifact.retrieved_at,
-                        finished_at=artifact.retrieved_at,
-                        elapsed_ms=0,
-                        artifact_id=artifact.artifact_id,
-                    ),
-                    path=self._path,
-                )
+            attempt_no = 0
+            if request.failover_attempts:
+                # 真实链：主源失败那几次也要落表，否则降级过的那天在库里
+                # 看起来和正常的一天一模一样。
+                stamp = (request.raw_artifacts[0].retrieved_at
+                         if request.raw_artifacts else now)
+                for provider_id, role, succeeded, error in request.failover_attempts:
+                    attempt_no += 1
+                    record_provider_attempt(
+                        ProviderAttempt(
+                            data_run_id=data_run_id,
+                            provider_id=provider_id,
+                            role=ProviderRole(role),
+                            attempt_no=attempt_no,
+                            status=(ProviderAttemptStatus.SUCCEEDED if succeeded
+                                    else ProviderAttemptStatus.FAILED_RETRYABLE),
+                            started_at=stamp,
+                            finished_at=stamp,
+                            elapsed_ms=0,
+                            error_detail=error,
+                            artifact_id=(
+                                request.raw_artifacts[0].artifact_id
+                                if succeeded and request.raw_artifacts else None),
+                        ),
+                        path=self._path,
+                    )
+            else:
+                for artifact in request.raw_artifacts:
+                    attempt_no += 1
+                    record_provider_attempt(
+                        ProviderAttempt(
+                            data_run_id=data_run_id,
+                            provider_id=request.provider_id,
+                            role=ProviderRole.PRIMARY,
+                            attempt_no=attempt_no,
+                            status=ProviderAttemptStatus.SUCCEEDED,
+                            started_at=artifact.retrieved_at,
+                            finished_at=artifact.retrieved_at,
+                            elapsed_ms=0,
+                            artifact_id=artifact.artifact_id,
+                        ),
+                        path=self._path,
+                    )
             transition_data_run(data_run_id, state, "RAW_STORED", path=self._path)
             state = "RAW_STORED"
 

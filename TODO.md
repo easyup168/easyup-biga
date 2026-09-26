@@ -1736,14 +1736,15 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 | # | 事项 | 卡在什么上 | 解除条件 |
 |---|---|---|---|
 | E-1 | **Phase 3 上线验收** | 连续 5 个交易日 EOD（9/28、9/29、9/30、10/8、10/9，跨国庆）+ 演练 **3/6**（2026-09-26 跑通 `SOURCE_ZIP_REPLAY`）| 真跑。定时器已装（`eod-daily-bars-biga.timer`），需要连续 5 天开机 |
-| E-1a | `PRIMARY_FALLBACK` 演练 | 🔴 **在这台机器上结构上拿不到**：全注册表只有 `cn.trading_calendar` 有 fallback，而它的 primary（`sina_calendar`）在本机**是好的**、fallback（`szse`）**连不通**（WSL 到深交所站点，TCP 握手后挂死）。主源失败那一半永远不出现 | 需要一个决定：给某个 primary 会真失败的 dataset 配备用源（今天 eastmoney 三个盘中 dataset 的 `fallback_providers` 全是空的），或者换一个连得通深交所的运行环境 |
+| ~~E-1a~~ | ~~`PRIMARY_FALLBACK` 演练~~ | ✅ **2026-09-26 已解除**，而且是**真实故障**换来的、不是制造的：`push2*.eastmoney.com` 整组 502 ⇒ 给 `cn.security_master` 配了真跑通过的备用源 `sina_security_master` ⇒ 同一次 run 里留下 `PRIMARY FAILED_RETRYABLE + FALLBACK SUCCEEDED` | — |
 | E-1b | `QUARANTINED` 演练 | 需要一次**终态落在 QUARANTINED** 的 run。今天 eastmoney 502 给出的是 `FAILED`，不是 QUARANTINED；而 QUARANTINED 要的是「源之间对不上」或「质量裁定不通过」| 需要一个决定：照 `RAW_TAMPER` 的先例**主动制造**（它是六项里唯一被允许制造证据的，理由是那种条件在生产里不会自然发生），还是继续等一次真实的源冲突 |
 | E-1c | `REVISION_V2` 演练 | 需要一个 `data_version ≥ 2` 的真实分区。唯一合适的载体是 `cn.equity.daily_bars`（按 `trade_date` 分区），而它一条数据都还没有 —— 卡在 E-4 | 随 E-1 的五天 EOD 一起做：某一天跑完后用 `--new-revision` 再发一版 |
 | E-2 | ~~P3-6/P3-7 的**行为**验收~~ | ✅ **2026-09-26 11:10 已解除** —— 飞书触发的 `BIGA-20260926-001` 跑通（COMPLETED，132s），realtime_quote 与 news.flash 真的冻进了 EvidenceSet。**并当场暴露一个离线测不出的缺陷**（冻结失败不留痕，见 CHANGELOG）| — |
 | E-2b | P3-6 在**provider 正常**时的行为 | 这次三个 eastmoney 全挂 ⇒ 走的全是降级分支，**正常路径一次都没被真机跑过** | 等 eastmoney 不限流时再触发一次 |
 | E-2c | 冻结进关键路径后的延迟 | P3-6 把冻结挪到 Stage 1 之前 ⇒ provider 重试时间直接进关键路径。这次 82s / 总 132s（预算 180s）| 攒第二次真机数据再判是否要给冻结加超时 |
 | E-3 | ~~`cn.security.tradability` 进册~~ | ✅ 已解除 —— P4-G0 给它写了真的读取方（`analytics:query_tradability`，解析快照 → 取分区 → 读 Parquet）| — |
-| E-4 | `cn.security_master` 上游探活 | 东财**整体限流**，三个 host 全 502 | 挑一个没被限流的时段重跑 `security_master_probe.py`（退出码 2=UNKNOWN 不是 1）|
+| E-4 | `cn.security_master` 上游探活 | 🔴 **诊断更正**：不是「东财整体限流」，是 `push2*` 这一组 host 的上游故障 —— 同一时刻 `push2ex`/`push2his`/`datacenter-web` 全 200。数据集本身已不再被它阻塞（走备用源同步成功，5568 只）| 主源恢复即自动回到 PRIMARY；`security_master_probe.py` 仍是判据 |
+| E-4b | 🔴 **`cn.equity.daily_bars` 取数用的是同一组挂掉的 host** | `eastmoney_eod` 的 `_HOSTS` 是 `82.push2` / `push2`，实测同样全失败 ⇒ **周一 17:30 的 EOD 定时器会在取数这一步失败**（security_master 已经不再是瓶颈）| 要么等 push2 恢复，要么给日线也配备用源（新浪同一个 `hs_a` 节点给 open/high/low/trade/volume/amount，形状对得上）|
 | E-5 | 批 C-II 的 P5：`cancel()` 同序映射 | 需要**真实运行时** N=5 + 至少一个 spawn 已离场 | 一次 Stage 1 部分启动失败的真实场景 |
 | E-6 | 解除 `.biga-card-stop` | **人的决定**，不自动做 | 你说解除 |
 | E-7 | ⓪-c 残留：Parquet 崩在写文件与进账本之间 | 需要 staging→commit 的两阶段**再往前挪一层** | 已大幅收窄（见 v0.7.0），剩余窗口是一条语句宽；真要归零得改 `write_parquet_rows` 的 API |

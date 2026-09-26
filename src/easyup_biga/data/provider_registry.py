@@ -66,8 +66,14 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina_calendar",),
     ),
     ProviderDefinition(
+        provider_id="sina_security_master",
+        title="新浪全市场 A 股名单 —— cn.security_master 的 FALLBACK（不含上市日）",
+        source_prefix="sina",
+        modules=("easyup_biga.providers.sina_security_master",),
+    ),
+    ProviderDefinition(
         provider_id="eastmoney_security_master",
-        title="东财全市场 A 股名单 —— ⚠️ 本机尚未探活成功，见适配器模块头",
+        title="东财全市场 A 股名单 —— cn.security_master 的 PRIMARY；2026-09-26 起有 FALLBACK",
         source_prefix="em",
         modules=("easyup_biga.providers.eastmoney_security_master",),
     ),

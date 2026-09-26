@@ -24,7 +24,7 @@ EasyUp for BigA 2.0：基于 OpenClaw 的 Multi-Agent A 股短线**决策辅助*
 
 当前状态：Phase 2 代码收口完成，出口条件 7/8（只差条件 3）；Phase 3 数据平台
 在 `phase3` 分支进行中。7 个 Agent（Supervisor + Stage 1 五个 + Stage 2 一个），
-2128 条测试，SQLite schema v27。
+2139 条测试，SQLite schema v27。
 
 ## 🔴 先读这个警告，它是本次评审最重要的一条
 
