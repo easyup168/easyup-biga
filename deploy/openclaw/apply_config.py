@@ -96,6 +96,11 @@ def built_pipeline_agents(repo_root: pathlib.Path = _REPO_ROOT) -> list[str]:
             if (repo_root / "agents" / a / "AGENTS.md").exists()]
 
 
+#: 仓库外的 skill 根目录。用 `~` 而不是真实家目录 —— 公开仓库纪律。
+#: OpenClaw 的 `resolveUserPath()` 会展开它。
+_LOCAL_SKILLS_DIR = "~/.openclaw-biga/local-skills"
+
+
 def render_patch(
     deploy_root: pathlib.Path = _DEPLOY_ROOT,
     repo_root: pathlib.Path = _REPO_ROOT,
@@ -135,6 +140,21 @@ def render_patch(
         # schema 校验拒绝过一次布尔值写法（`must be object`）；bool 是旧版
         # OpenClaw 的写法，现在只在 `openclaw doctor --fix` 的迁移路径里认。
         "channels": {"feishu": {"streaming": {"mode": "off"}}},
+        # 🔴 仓库外的 skill 根目录（2026-09-26）。
+        #
+        # **这个仓库是 Public 的，而有些 skill 带 API Key。**
+        # 它们不能放进 `workspace/skills/` —— 那是 git 跟踪的目录，
+        # push 即发布，撤不回来。
+        #
+        # `skills.load.extraDirs` 是 OpenClaw 官方支持的机制
+        #（「额外的共享 skill 根目录」），所以这条路不依赖软链、
+        # 也不依赖任何人记得某条 `.gitignore` 规则 ——
+        # **那个目录根本不在 git 的视野里，`git add` 够不着它。**
+        #
+        # ⚠️ 进仓库的只有**路径与机制**，内容留在仓库外 ——
+        #    与凭据那条纪律同一个形状（可迁移的工程结论进仓库，
+        #    本机的特殊情况不进）。
+        "skills": {"load": {"extraDirs": [_LOCAL_SKILLS_DIR]}},
     }
 
 

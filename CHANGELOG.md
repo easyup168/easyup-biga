@@ -13,6 +13,62 @@
 
 ---
 
+## [0.9.10] - 2026-09-26
+
+### 新增 · 带密钥的 skill 放仓库之外，靠机制不靠记性
+
+**这个仓库是 Public 的 —— push 即发布。** 带 API Key 的 skill 不能放
+`workspace/skills/`。
+
+不用 `.gitignore`：那是一条**需要人记得**的规则（`git add -f` 绕得过、
+整理时会没、脚手架复制不跟着走）。
+
+> 一条只在「所有人都记得」时才成立的防线，不是防线。
+
+⇒ 用 OpenClaw 原生的 `skills.load.extraDirs`，skill 放
+`~/.openclaw-biga/local-skills/` —— **`git add` 根本够不着它**。
+进仓库的只有路径与机制（`apply_config.py` 的 `_LOCAL_SKILLS_DIR`），
+内容留在外面。与凭据那条纪律同一个形状。
+
+守卫判的是「它解析出来**不在仓库里**」，不是「字符串里有没有 local-skills」——
+后者在有人把它改成 `workspace/local-skills`（看起来很像）时照样绿，
+而那一刻密钥就进了跟踪范围。
+
+新增 `docs/guide/private-skills.md` 记操作步骤与两个坑。
+
+### 🔴 坑 · 旧格式的 SKILL.md 不报错，只是看不见
+
+从别处搬来的 skill 用的是旧格式（直接 `# 标题` 开头，没有 YAML frontmatter）。
+装好之后 `skills list` 里**什么都没有**，**也没有任何错误信息**。
+补上 frontmatter 后立刻出现（`Source: openclaw-extra`，总数 68 → 69）。
+
+### 🔴 坑 · 位置约定型的路径计算，换个位置不报错，只指向别处
+
+搬过来的脚本里是：
+
+```python
+_WORKSPACE = Path(__file__).resolve().parent.parent.parent
+```
+
+它依赖「脚本在 `<workspace>/skills/<name>/scripts/` 下」。搬到
+`local-skills/` 之后层数**恰好还是三层**，所以它不报错 ——
+只是悄悄指向了另一个不存在的目录。改成显式，状态跟着 skill 走。
+
+### 修复（搬过来的那份）· `--usage` 明明只读本地库却要求密钥
+
+原实现在构造函数里无条件要求 API Key，于是「查我还剩多少配额」
+在没配密钥时会崩（带 traceback 的 `ValueError`）——
+
+> 而那正是你想知道这个 skill 有没有配好的时刻。
+
+改成只读路径不要求密钥，并在输出里加 `key_configured`。
+
+⚠️ 顺带记一条：共用一把 key 时配额是**共享**的，而各自的本地用量库
+**互不知情** ⇒ 两边都会低报。这不会报错，只会在某天提前耗尽配额，
+而 `--usage` 说还剩很多。
+
+---
+
 ## [0.9.9] - 2026-09-26
 
 > `cn.sector.board_snapshot` 配上备用源。三个在真机出卡时同时失败的
