@@ -15,6 +15,72 @@
 
 ## [未发布]
 
+### 新增 · P3-6a：provider 选择进数据层，交易日历的降级路径第一次真的存在
+
+`cn.trading_calendar` 的注册表里一直写着 `fallback_providers=("szse",)`，
+而 `bin/biga-calendar` **写死了 sina 一个源** —— 主源挂掉就整条失败。
+
+> 🔴 **一条声明了却没有实现的降级路径，比没声明更糟**：
+> 读注册表的人会以为这件事已经有人管了。
+
+同时 `failover` 模块（上一版合进来的）**零生产消费方** —— 又一个 L-1，
+只有测试在用它。
+
+⇒ 新增 `src/easyup_biga/data/client.py`：按注册表的 PRIMARY → FALLBACK 链路
+取数，`bin/biga-calendar` 改为走它，不再 import 任何 provider（AST 判据钉住）。
+
+#### ⚠️ 降级**不等价**，这件事必须说出来
+
+新浪那个端点一次返回全量，**含交易所已公布的未来排期**（实测到次年年末）；
+深交所那个按月取，只覆盖**已公布的月份**。所以降级之后
+「下个月某天开不开市」可能答不出，落回 `market_is_open` 的兜底层。
+
+⇒ `CalendarRefresh.degraded` 把这件事摆到台面上，CLI 降级时打黄字说明。
+只看「成没成」的话，读的人会以为这天和平常一样。
+
+#### 顺带：一处观察不到生效的排序
+
+`provider_chain()` 里有一行 `sort` —— 探针实测把它删掉**没有任何测试会红**，
+因为 `bindings_for_dataset()` 返回的已经是那个顺序。
+
+> 一个永远观察不到生效的排序，和一个永远不会红的守卫是同一种东西：
+> 它让读的人以为顺序在这里被保证，于是不再去看真正保证它的地方。
+
+⇒ 删掉，顺序契约收到 `bindings_for_dataset` 一处，并由
+`test_provider绑定的顺序是确定的` 钉住。
+⚠️ 那条测试的夹具第一版用了**两个** fallback —— 而 `sorted` 与 `reversed`
+对两个元素可能给出同一结果，于是「把排序换成逆序」这个破坏变成了恒等操作，
+探针照样绿。**夹具本身要让「顺序错了」表现得出来。**
+
+### 新增 · EOD 的 systemd 定时器（调度命令的字面量）
+
+`bin/biga-data run-eod-bundle` 之前全仓 grep 不到任何调度方 ——
+CLAUDE.md 那条「新增写数据模块必须有被证明的读取方，**判据是调度命令的
+字面量**」在这里落了空。
+
+外部实现包给过一份单元，**三处都不对，一处比一处安静**：
+
+1. `WorkingDirectory=%h/easyup-biga` —— 路径不存在，装上起不来（最响）
+2. `ExecStart=… python -m …` —— 本机只有 `python3`
+3. 🔴 单元名 `biga-eod-daily-bars`（`biga-` **前缀**）而非 `-biga` 后缀 ——
+   `isolation.py` 的判据是「引用 BigA 路径的单元名以 `-biga.*` 结尾」，
+   前缀式的名字它**根本不算 BigA 的单元**，一声不吭地放行。
+   **比报红更糟**：报红会被修，静默漏检不会。
+
+⇒ 三处都没合，按仓库既有形制重写（`deploy/openclaw/eod-daily-bars-biga.{service,timer}`
++ `install_eod_timer.py`，与既有两个定时器同构）。
+
+⚠️ 定时器**不判交易日**，周末/节假日照跑。把交易日判断塞进 `OnCalendar`
+等于日历口径多一份实现（L-3），而 `OnCalendar` 根本表达不了 A 股的调休。
+跑空的那天由 `run-eod-bundle` 自己 fail-closed。
+
+### 已知问题 · `cn.security_master` 上游仍未探活成功（2026-09-26 再试一次）
+
+三个 host 全部 502。`security_master_probe.py` 退出码 **2（UNKNOWN）**，
+不是 1 —— 东财会整体限流，被限流时连已知可用的端点也返回 502。
+
+> 🔴 **「不可用」和「我没验成」是两件事，而屏幕上长得一样。**
+
 ### 变更 · Parquet 两阶段提交（TODO ⓪-c）—— 崩在中间只许「不可见」或「炸响」
 
 发布是「写文件」+「进账本」两件事，中间总有窗口。问题不是消灭窗口，是

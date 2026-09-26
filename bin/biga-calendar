@@ -30,17 +30,28 @@ import sys, pathlib
 _ROOT = pathlib.Path.cwd()
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "skills"))
-from easyup_biga.providers.http import SourceError
-from easyup_biga.providers.sina_calendar import refresh_trading_calendar
+# 🔴 不直接 import 某个 provider —— 用哪个源是**数据层**的决定。
+#    这里原本写死 sina，而注册表里 szse 一直被声明为 fallback，
+#    于是那条降级路径从来没被走过（声明了却不存在，比没声明更糟）。
+from easyup_biga.data.client import refresh_trading_calendar
+from easyup_biga.data.failover import ProviderChainExhausted
 
 try:
-    n, start, end = refresh_trading_calendar(back_days=int(sys.argv[1]))
-except SourceError as e:
-    print(f"🔴 交易日历刷新失败：{e}", file=sys.stderr)
+    result = refresh_trading_calendar(back_days=int(sys.argv[1]))
+except ProviderChainExhausted as e:
+    print(f"🔴 交易日历刷新失败（主源与备用源都没顶住）：{e}", file=sys.stderr)
     print("   日历表保持原样，market_is_open 退回兜底表 / weekday —— "
           "方向是安全的（宁可多报 missing），但节假日可能判不出来。", file=sys.stderr)
     raise SystemExit(2)
-print(f"✅ 交易日历已刷新：{n} 行，覆盖 {start} … {end}")
+n, start, end = result.rows_written, result.coverage_start, result.coverage_end
+if result.degraded:
+    print(f"🔶 主源没顶住，本次由 {result.provider_id} 接手：", file=sys.stderr)
+    for a in result.attempts:
+        if not a.succeeded:
+            print(f"   · {a.provider_id}（{a.role.value}）{a.error}", file=sys.stderr)
+    print("   ⚠️ 备用源按月取、只覆盖已公布的月份 ⇒ **未来排期可能缺**，"
+          "「下个月某天开不开市」会落回兜底层。", file=sys.stderr)
+print(f"✅ 交易日历已刷新：{n} 行，覆盖 {start} … {end}（源：{result.provider_id}）")
 print(f"   核对一天：python3 -c \"import sys;sys.path.insert(0,'skills');"
       f"from _store import is_trading_day;print(is_trading_day('20260925'))\"")
 PY

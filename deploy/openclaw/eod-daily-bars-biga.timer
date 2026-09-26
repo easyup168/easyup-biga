@@ -1,0 +1,19 @@
+[Unit]
+Description=每个交易日收盘后跑一次 BigA EOD 日线（profile: biga）
+
+[Timer]
+# 17:30 —— 收盘 15:00 之后两个半小时。
+# 🔴 不贴着 15:00 跑：行情源的收盘数据要一段时间才稳定，太早取会拿到
+#    尚在变动的快照，而那种错误不会报错，只会让某天的收盘价和别处对不上。
+#
+# ⚠️ 这里**不判交易日**。周末/节假日照跑，由 `run-eod-bundle` 自己
+#    fail-closed：Security Master 解析不到当日 universe 就 RuntimeError，
+#    取不到行情就 Data Run FAILED —— 两种情况都不发布快照。
+#    把交易日判断塞进 timer 意味着日历口径出现第二份实现（L-3），
+#    而 systemd 的 OnCalendar 根本表达不了 A 股的调休。
+OnCalendar=Mon..Fri 17:30
+Persistent=true
+Unit=eod-daily-bars-biga.service
+
+[Install]
+WantedBy=timers.target

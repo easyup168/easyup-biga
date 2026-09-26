@@ -53,10 +53,23 @@ class ProviderChainExhausted(RuntimeError):
 
 
 def provider_chain(dataset_id: str) -> tuple[tuple[str, ProviderRole], ...]:
-    """确定性的 PRIMARY → FALLBACK 顺序。"""
-    items = [b for b in bindings_for_dataset(dataset_id) if b.role in _SUBSTITUTABLE_ORDER]
-    items.sort(key=lambda b: (_SUBSTITUTABLE_ORDER[b.role], b.provider_id))
-    return tuple((b.provider_id, b.role) for b in items)
+    """PRIMARY → FALLBACK，只做**过滤**。
+
+    🔴 这里不再排序。`bindings_for_dataset()` 返回的就已经是
+    「PRIMARY → 按 id 排的 FALLBACK → 按 id 排的 VALIDATOR」，再排一次是
+    **恒等操作** —— 探针实测：把那行 sort 删掉，没有任何测试会红。
+
+    > 一个永远观察不到生效的排序，和一个永远不会红的守卫是同一种东西：
+    > 它让读的人以为顺序在这里被保证，于是不再去看真正保证它的地方。
+
+    ⇒ 顺序的契约只有一处（`bindings_for_dataset`），并由
+      `test_data_registry.py::test_provider绑定的顺序是确定的` 钉住。
+    """
+    return tuple(
+        (b.provider_id, b.role)
+        for b in bindings_for_dataset(dataset_id)
+        if b.role in _SUBSTITUTABLE_ORDER
+    )
 
 
 def execute_with_fallback(

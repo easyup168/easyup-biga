@@ -1635,15 +1635,16 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 ### ⬜ 余留（不阻塞，但别忘）
 
-- [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`，
-      挑一个没被限流的时候跑。过了就删掉 provider title 与 `data/quality.py`
+- [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`
+      **2026-09-26 再试一次：三个 host 仍全部 502**，退出码 2（UNKNOWN）不是 1。
+      东财整体限流时连已知可用的端点也 502 ⇒ 这是「没验成」不是「不可用」。
+      挑一个没被限流的时候再跑。过了就删掉 provider title 与 `data/quality.py`
       的 `not_checked` 里那两处「尚未探活成功」的说明。
-      ⚠️ 上次探活失败是**我自己把自己限流了**（连控制组端点都 502）⇒
-      当时记的是「未验证」，不是「不可用」——**这两个不是一回事**。
 
-- [ ] deploy / CLI 面三件（外部包给的那份**没合**，因为它从没在本机跑过）：
-      systemd 单元名必须 `-biga` **后缀**（R-2；前缀式的 `biga-xxx` 守卫根本不认，**比报红更糟**）、
-      `WorkingDirectory` 指向本仓库、可执行文件用 `python3`（本机没有 `python`）。
+- [x] deploy / CLI 面三件（2026-09-26 完成）
+      `deploy/openclaw/eod-daily-bars-biga.{service,timer}` + `install_eod_timer.py`，
+      与既有两个定时器同构。外部实现包那份三处都不对：路径不存在、写 `python`、
+      单元名是 `biga-` **前缀**而非 `-biga` 后缀（守卫根本不认它 —— 比报红更糟）。
 
 ---
 

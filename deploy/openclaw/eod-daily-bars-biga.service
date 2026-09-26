@@ -1,0 +1,10 @@
+[Unit]
+Description=BigA EOD 日线 —— 收盘后把全市场 OHLCV 落成不可变 Parquet 分区（profile: biga）
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw-biga/workspace
+# 🔴 `run-eod-bundle` 不是 `run-eod`：前者一次取数同时喂给日线归一化与
+#    可交易性推导，后者只发日线、覆盖率的分母会退回 provider 自报的 total。
+#    两者的差别在休市/停牌多的日子才显出来，而那正是最需要判准的日子。
+ExecStart=%h/.openclaw-biga/workspace/bin/biga-data run-eod-bundle

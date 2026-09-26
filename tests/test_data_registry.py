@@ -351,3 +351,42 @@ def test_provider_for_source按登记求交集而不是取前缀():
 
     with pytest.raises(ProviderNotRegistered, match="必须恰好一个"):
         provider_for_source("cn.index.daily_bars", "em:push2ex/limit_up")
+
+
+# ── provider 绑定的顺序契约（2026-09-26）──────────────────────────────────
+def test_provider绑定的顺序是确定的():
+    """🔴 降级链的顺序**只在这里**被保证 —— `provider_chain()` 只做过滤。
+
+    契约：PRIMARY → 按 id 排序的 FALLBACK → 按 id 排序的 VALIDATOR。
+    用合成定义测三个角色都有的情形（真实注册表里今天没有这种 dataset，
+    而「今天碰巧没有」不该让这条契约无人看守）。
+    """
+    from easyup_biga.data.contracts import DatasetDefinition, ProviderRole
+    from easyup_biga.data import provider_registry as pr
+
+    synthetic = DatasetDefinition(
+        dataset_id="cn.test.ordering", title="合成", schema_version=1,
+        primary_provider="p_primary",
+        # 🔴 **三个**不是两个：两个元素时 `sorted` 与 `reversed` 对
+        #    ("z","a") 给出同一个结果 ⇒ 把排序换成逆序的破坏会变成恒等操作，
+        #    探针照样绿。夹具本身要让「顺序错了」表现得出来。
+        fallback_providers=("m_fb", "z_fb", "a_fb"),
+        validation_providers=("z_val", "a_val"),
+        partition_keys=("d",), storage_policy="s", quality_policy="q",
+        raw_table="raw_artifacts", consumers=("easyup_biga.data.registry:get_dataset",),
+    )
+    original = pr.DATASET_REGISTRY
+    pr.DATASET_REGISTRY = dict(original, **{synthetic.dataset_id: synthetic})
+    try:
+        got = pr.bindings_for_dataset("cn.test.ordering")
+    finally:
+        pr.DATASET_REGISTRY = original
+
+    assert [(b.provider_id, b.role) for b in got] == [
+        ("p_primary", ProviderRole.PRIMARY),
+        ("a_fb", ProviderRole.FALLBACK),
+        ("m_fb", ProviderRole.FALLBACK),
+        ("z_fb", ProviderRole.FALLBACK),
+        ("a_val", ProviderRole.VALIDATOR),
+        ("z_val", ProviderRole.VALIDATOR),
+    ]
