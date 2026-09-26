@@ -278,3 +278,105 @@ class TestBoardPaginationIsConcurrent:
         monkeypatch.setattr(em, "get_json_and_text", counting)
         assert len(em.fetch_boards("industry").boards) == 42
         assert len(n) == 1, f"只有 42 行却发了 {len(n)} 次请求"
+
+
+def _h(seed: str) -> str:
+    """契约要求 `derived_from` 的 ref 是 **64 位十六进制内容哈希**。
+
+    ⚠️ 假数据也必须是**真形状** —— 拿 `"hash-industry"` 当哈希会让这个用例
+    在契约层红掉，而红的原因与它要测的东西无关（那种红最浪费时间）。
+    """
+    import hashlib
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+class TestFallbackServedSnapshot:
+    """🔴 备用源供数时**整个 skill 会崩** —— 2026-09-26 真出卡时踩到。
+
+    `board_counts` 那一行写死了 `source="em:clist"` 和
+    `origins=raw_origins(c.hashes.get(f"em:clist/{k}"))`。备用源供数时
+    `c.hashes` 的键是 `sina:bankuai/*`，两处都查不到 ⇒
+    `raw_hash` 与 `derived_from` **同时为空** ⇒ 契约铁律当场
+    `ValueError` ⇒ 脚本在写任何证据之前崩掉 ⇒ **sector 这一支彻底缺席**。
+
+    > 它**只在降级那天炸**。主源正常时两边的字面量碰巧相等，
+    > 所以既有测试与此前每一次真实出卡都是绿的。
+
+    实测代价：BIGA-20260926-003 的卡上 `已建成 roster 缺席：sector`，
+    而冻结层其实**成功**冻到了板块快照 —— 数据在，是 skill 自己没用上。
+    """
+
+    @pytest.fixture()
+    def frozen(self, monkeypatch, request):
+        """让 skill 走冻结路径，并声明由哪个 provider 供数。"""
+        served_by = getattr(request, "param", "sina_boards")
+
+        class FakeData:
+            def read_boards(self, _esid, kind):
+                return result(kind), _h(kind), served_by
+
+        class FakeCoord:
+            def read_index_daily(self, *a, **kw):
+                return daily()
+
+            def frozen_content_sha256(self, *a, **kw):
+                return _h("daily")
+
+        monkeypatch.setattr(sc, "DecisionDataClient", lambda *a, **kw: FakeData())
+        monkeypatch.setattr(sc, "SnapshotCoordinator", lambda *a, **kw: FakeCoord())
+        monkeypatch.setattr(sc, "now_cn",
+                            lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
+        return served_by
+
+    @pytest.mark.parametrize("frozen", ["sina_boards", "eastmoney"], indirect=True)
+    def test_不论谁供数都不许崩(self, frozen):
+        v = build(evidence_set_id="es-probe")
+        assert v.status in ("completed", "partial"), v.status
+        assert "board_counts" in v.result
+
+    @pytest.mark.parametrize("frozen", ["sina_boards", "eastmoney"], indirect=True)
+    def test_board_counts的血缘指回实际供数方那两份raw(self, frozen):
+        """🔴 判据打在 `derived_from` **非空**上。
+
+        空的 `derived_from` 就是当初那个崩溃的直接原因 ——
+        而如果哪天有人为了「让它别崩」把契约那条放松，
+        这条断言会接着红：**这个数出自什么，必须答得上来。**
+        """
+        v = build(evidence_set_id="es-probe")
+        ev = next(e for e in v.evidence if e.field == "board_counts")
+        assert ev.derived_from, "board_counts 的血缘不能为空"
+        assert len(ev.derived_from) == 2, "行业榜 + 概念榜两份 raw"
+
+    @pytest.mark.parametrize("frozen", ["sina_boards"], indirect=True)
+    def test_board_counts的source不许指着没供过数的源(self, frozen):
+        v = build(evidence_set_id="es-probe")
+        ev = next(e for e in v.evidence if e.field == "board_counts")
+        assert ev.source == "sina:bankuai", ev.source
+        assert "em:" not in ev.source
+
+    def test_两个榜由不同provider供数时如实说混合(self, monkeypatch):
+        """⚠️ `read_boards` 是按 kind 各走一次降级链的 ⇒ 理论上可能分裂。
+
+        这时不许挑一个当代表 —— 那会让卡面宣称一个它只说对了一半的来源。
+        """
+        providers = {"industry": "eastmoney", "concept": "sina_boards"}
+
+        class FakeData:
+            def read_boards(self, _esid, kind):
+                return result(kind), _h(kind), providers[kind]
+
+        class FakeCoord:
+            def read_index_daily(self, *a, **kw):
+                return daily()
+
+            def frozen_content_sha256(self, *a, **kw):
+                return _h("daily")
+
+        monkeypatch.setattr(sc, "DecisionDataClient", lambda *a, **kw: FakeData())
+        monkeypatch.setattr(sc, "SnapshotCoordinator", lambda *a, **kw: FakeCoord())
+        monkeypatch.setattr(sc, "now_cn",
+                            lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
+        v = build(evidence_set_id="es-probe")
+        ev = next(e for e in v.evidence if e.field == "board_counts")
+        assert ev.source.startswith("mixed:"), ev.source
+        assert "em:clist" in ev.source and "sina:bankuai" in ev.source

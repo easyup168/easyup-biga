@@ -3,7 +3,7 @@ import json, math, urllib.parse
 from typing import Any, Mapping
 from easyup_biga.domain import now_cn
 from .eod_bar import EodBar, EodFetchResult
-from .http import SourceError, get_json_and_text
+from .http import SourceError, get_json_and_text, throttle
 
 _HOSTS=('82.push2.eastmoney.com','push2.eastmoney.com'); _PATH='/api/qt/clist/get'; _REF='https://quote.eastmoney.com/'
 _FS='m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23'; _FIELDS='f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18'
@@ -12,6 +12,9 @@ def _page(pn:int,pz:int)->tuple[Mapping[str,Any],str]:
     errors=[]
     for h in _HOSTS:
         try:
+            # 🔴 这个源单次最多翻 80 页 —— 不限流的话它自己就能触发东财的
+            #    「1 分钟 ≥200 次」风控，然后把**所有**东财 dataset 一起带下水。
+            throttle("eastmoney")
             obj,text=get_json_and_text(f'https://{h}{_PATH}?{q}',referer=_REF)
             if not isinstance(obj,Mapping): raise SourceError('EOD response is not object')
             return obj,text

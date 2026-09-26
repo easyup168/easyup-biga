@@ -513,7 +513,21 @@ class DecisionDataClient:
             out[q.code] = q
         return out, frozen.raw_hash
 
-    def read_breadth(self, evidence_set_id: str) -> tuple[BreadthResult, str | None]:
+    def read_breadth(
+        self, evidence_set_id: str
+    ) -> tuple[BreadthResult, str | None, str | None]:
+        """返回 `(涨跌家数, raw_hash, **实际供数方**)`。
+
+        ⚠️ 第三项是 2026-09-26 补的。在那之前 `market_calc` 只能把 source 写死成
+        `"em:push2delay/ulist.np"` —— 而当天东财 push2 系整组 502、
+        实际由 `sina_breadth` 供数，卡上那五条涨跌家数证据**全部指着一个
+        没供过数的端点**。
+
+        🔴 这和 `read_boards` 是同一个洞。板块那次（v0.9.9）修了，
+        涨跌家数**漏了** —— 因为当时的判据是「板块的 source 对不对」，
+        而不是「所有 read_* 有没有交出供数方」。
+        判据跟着症状走，就只会修到症状那一个。
+        """
         frozen = self._frozen(evidence_set_id, "cn.market.breadth")
         if len(frozen.rows) != 1:
             raise SourceError("cn.market.breadth 冻结分区应恰好一行")
@@ -522,7 +536,7 @@ class DecisionDataClient:
             advance=int(row["advance"]), decline=int(row["decline"]), flat=int(row["flat"]),
             per_market=list(json.loads(str(row["per_market_json"]))), raw={}, raw_text=None,
         )
-        return result, frozen.raw_hash
+        return result, frozen.raw_hash, frozen.provider_id
 
     def read_boards(
         self, evidence_set_id: str, kind: str

@@ -132,6 +132,32 @@ def _board_source(kind: str, provider_id: str | None) -> str:
     return f"{prefix}:clist/{kind}" if prefix == "em" else f"{prefix}:bankuai/{kind}"
 
 
+def _board_agg_source(providers) -> str:
+    """跨两个榜聚合出来的值（如 `board_counts`）该署哪个 source。
+
+    🔴 这里曾经是写死的 `"em:clist"`。它有两个后果，第二个是致命的：
+
+    1. 降级到备用源时，卡面上的 source 指着一个**没供过数**的源（说谎）
+    2. `raw_hash_for("em:clist")` 查不到 ⇒ `raw_hash` 是 `None`；
+       而同一行的 `origins=` 也按写死的 `em:clist/<kind>` 查 ⇒ `derived_from` 也空
+       ⇒ **契约铁律当场拒绝，整个 skill 崩掉，sector 这一支彻底缺席**
+
+    实测（BIGA-20260926-003，2026-09-26）：东财主源挂了、`sina_boards` 供数，
+    于是 `c.hashes` 的键是 `sina:bankuai/*`，而这里按 `em:clist/*` 查 ——
+    `ValueError: 既没有 raw_hash 也没有 derived_from`，卡上少了一整个 agent。
+
+    > 它**只在降级那天炸**，而降级那天恰恰最需要它。
+    > 主源正常时两边的字面量碰巧相等，所以它在所有既有测试与真实出卡里都是绿的。
+
+    两个榜理论上可能由不同 provider 供数（`read_boards` 是按 kind 各走一次
+    降级链的）⇒ 前缀不唯一时**如实说「混合」**，不挑一个当代表。
+    """
+    prefixes = {_board_source(k, p).rsplit("/", 1)[0] for k, p in providers}
+    if len(prefixes) == 1:
+        return next(iter(prefixes))
+    return "mixed:" + "+".join(sorted(prefixes))
+
+
 class Collector:
     def __init__(self, break_source: set[str], store: bool,
                  evidence_set_id: str | None = None):
@@ -378,9 +404,15 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
 
         if counts:
             # 行业榜 + 概念榜两份响应的合计 —— 跨源聚合，用 raw_origins 指回那两份。
-            add_live("board_counts", counts, "各榜板块数", "em:clist", kind="derived",
-                     origins=raw_origins(c.hashes.get(f"em:clist/{k}")
-                                         for k in ("industry", "concept")))
+            # 🔴 两处都必须按**实际供数方**算，不能写死主源的字面量：
+            #    `source` 写死会说谎，`origins` 写死会让 derived_from 空掉
+            #    ⇒ 契约拒绝 ⇒ 整个 skill 崩。见 `_board_agg_source` 的说明。
+            kinds = [(k, c.board_provider.get(k)) for k in ("industry", "concept")
+                     if k in c.boards]
+            add_live("board_counts", counts, "各榜板块数",
+                     _board_agg_source(kinds), kind="derived",
+                     origins=raw_origins(c.hashes.get(_board_source(k, p))
+                                         for k, p in kinds))
         else:
             c.missing.append(MissingItem(
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))
