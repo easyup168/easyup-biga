@@ -55,6 +55,11 @@ class PublishResult:
     snapshot_id: str | None
     partition_id: str | None
     reused: bool = False
+    #: 这次发布落下的 RawArtifact id。**派生数据集要靠它接上游血缘** ——
+    #: 没有它，下游只能自己再造一份 raw，而那份 raw 与真正的来源无关。
+    #: ⚠️ 复用既有快照时也填：值取自既有分区的 `raw_artifact_id`，
+    #:    否则「今天重跑」与「今天第一次跑」给下游的东西不一样。
+    raw_artifact_ids: tuple[str, ...] = ()
 
 
 class DatasetRowPublisher:
@@ -72,9 +77,10 @@ class DatasetRowPublisher:
         job_id: str,
         provider_id: str,
         partition_key: Mapping[str, str],
-        raw_text: str,
         rows: Sequence[Mapping[str, Any]],
         as_of: str,
+        raw_text: str | None = None,
+        upstream_artifact_ids: tuple[str, ...] = (),
         quality_status: DatasetStatus = DatasetStatus.COMPLETE,
         quality_metrics: Mapping[str, Any] | None = None,
         quality_issues: tuple[DataIssue, ...] = (),
@@ -100,9 +106,14 @@ class DatasetRowPublisher:
             uri = str(part["storage_uri"])
             if not uri.startswith("biga+sqlite://"):
                 self.fs.verify_file_hash(uri, str(part["content_sha256"]))
+            # ⚠️ 复用也要把血缘带出去：下游（派生数据集）靠这个 id 接上游。
+            #    不带的话，「今天重跑」会让下游拿到空的 upstream ——
+            #    而那条路会静默退化成「自己造一份 raw」。
+            reused_raw = str(part["raw_artifact_id"]) if part["raw_artifact_id"] else None
             return PublishResult(
                 DatasetStatus.COMPLETE, "", str(existing["snapshot_id"]),
-                partition_ids[0], reused=True)
+                partition_ids[0], reused=True,
+                raw_artifact_ids=(reused_raw,) if reused_raw else ())
 
         version = int(existing["data_version"]) + 1 if existing else 1
         now = now_cn().isoformat()
@@ -110,16 +121,34 @@ class DatasetRowPublisher:
         trigger_id = f"{job_id}:{date_key}"
 
         # ── raw 归档（内容寻址，与账本无关，先落盘）──────────────────────
-        raw_id = new_raw_artifact_id()
-        uri, stored_sha, size = self.fs.write_raw_text(
-            dataset_id, provider_id, date_key, raw_id, raw_text)
-        raw = RawArtifact(
-            artifact_id=raw_id, dataset_id=dataset_id, provider_id=provider_id,
-            request_fingerprint=hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
-            body_uri=uri, body_sha256=stored_sha, size_bytes=size,
-            retrieved_at=now, content_type="application/json", compression="gzip",
-            as_of=as_of, available_at=now,
-        )
+        #
+        # 🔴 **派生数据集走另一条**：它没有采集动作，raw 是**上游那一条**。
+        #    自己再造一份只有两种造法，两种都是错的 —— 见
+        #    `SnapshotPublishRequest.upstream_artifact_ids` 的注释。
+        if upstream_artifact_ids:
+            if raw_text is not None:
+                raise ValueError(
+                    "派生发布（给了 upstream_artifact_ids）不该再传 raw_text —— "
+                    "两者同时给意味着既声称引用上游、又要落一份自己的 raw，"
+                    "而分区上只有一条 raw_artifact_id 外键，必然有一个是摆设。")
+            raws: tuple[RawArtifact, ...] = ()
+            out_artifact_ids = tuple(upstream_artifact_ids)
+        else:
+            if raw_text is None:
+                raise ValueError(
+                    "采集型发布必须带 raw_text（原始响应）；"
+                    "派生型请改用 upstream_artifact_ids 指向上游那一条。")
+            raw_id = new_raw_artifact_id()
+            uri, stored_sha, size = self.fs.write_raw_text(
+                dataset_id, provider_id, date_key, raw_id, raw_text)
+            raws = (RawArtifact(
+                artifact_id=raw_id, dataset_id=dataset_id, provider_id=provider_id,
+                request_fingerprint=hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+                body_uri=uri, body_sha256=stored_sha, size_bytes=size,
+                retrieved_at=now, content_type="application/json", compression="gzip",
+                as_of=as_of, available_at=now,
+            ),)
+            out_artifact_ids = (raw_id,)
 
         # ── 一行都没有：发不出分区，但**必须留痕**（见服务里那条 docstring）──
         if not rows:
@@ -128,11 +157,12 @@ class DatasetRowPublisher:
             } else DatasetStatus.PARTIAL)
             run_id = self._service.record_unpublishable(
                 dataset_id=dataset_id, job_id=job_id, partition_key=key,
-                trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=(raw,),
+                trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=raws,
                 status=terminal, quality_metrics=quality_metrics or {"row_count": 0},
                 quality_issues=quality_issues, data_version=version,
             )
-            return PublishResult(terminal, run_id, None, None)
+            return PublishResult(terminal, run_id, None, None,
+                                 raw_artifact_ids=out_artifact_ids)
 
         # ── Parquet 分区：先写**暂存区**，进账本之后才放进 lake ─────────────
         #
@@ -146,7 +176,8 @@ class DatasetRowPublisher:
             result = self._service.publish(
                 SnapshotPublishRequest(
                     dataset_id=dataset_id, job_id=job_id, partition_key=key,
-                    trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=(raw,),
+                    trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=raws,
+                    upstream_artifact_ids=tuple(upstream_artifact_ids),
                     storage_format="parquet", storage_uri=str(staged.target),
                     content_sha256=staged.sha256, row_count=staged.row_count,
                     as_of=as_of, knowledge_cutoff=now,
@@ -173,4 +204,5 @@ class DatasetRowPublisher:
         _ = role      # 角色已在 role_of 里 fail-closed 校验过；账本里由服务记录
         return PublishResult(
             quality_status, result.data_run_id,
-            result.snapshot_id or None, result.partition_id or None)
+            result.snapshot_id or None, result.partition_id or None,
+            raw_artifact_ids=out_artifact_ids)

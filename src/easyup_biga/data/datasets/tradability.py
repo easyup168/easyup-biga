@@ -1,7 +1,6 @@
 """P3-5 daily tradability derived from Security Master + full-market EOD response."""
 from __future__ import annotations
 
-import json
 from typing import Any, Iterable, Mapping
 
 from easyup_biga.data.contracts import DataIssue, DatasetStatus
@@ -106,18 +105,36 @@ def publish(
     records: tuple[TradabilityRecord, ...],
     trade_date: str,
     *,
+    upstream_artifact_ids: tuple[str, ...],
     db_path=None,
     data_root="data",
     new_revision: bool = False,
 ) -> PublishResult:
+    """发布可交易性。**必须**带上游 raw 血缘 —— 它是派生数据集。
+
+    🔴 这里曾经把自己的输出重新序列化当 raw：
+
+        raw = json.dumps([item.to_dict() for item in records])
+
+    那让 `content_sha256` 变成对**输出**算的哈希 ⇒ 回放校验它等于自己证明
+    自己，与真正的来源（行情源那次 EOD 响应）毫无关系。
+    而日线走的是真响应 —— 同一次取数，两个数据集两套口径。
+
+    ⚠️ 也不复制上游的字节到自己名下：那份 raw 的 `provider_id` 会写成
+    `derived_biga`，读的人会以为这个 provider 返回过这些东西。
+    **引用，不复制。**
+    """
+    if not upstream_artifact_ids:
+        raise ValueError(
+            "可交易性是派生数据集，必须声明它派生自哪份原始响应。"
+            "调用方（eod_pipeline）应把日线那次发布的 raw_artifact_ids 传进来。")
     status, metrics, issues = quality(records)
-    raw = json.dumps([item.to_dict() for item in records], ensure_ascii=False, sort_keys=True)
     return DatasetRowPublisher(db_path=db_path, data_root=data_root).publish(
         dataset_id=DATASET_ID,
         job_id=JOB_ID,
         provider_id=PROVIDER_ID,
         partition_key={"trade_date": trade_date},
-        raw_text=raw,
+        upstream_artifact_ids=upstream_artifact_ids,
         rows=[item.to_dict() for item in records],
         as_of=trade_date,
         quality_status=status,

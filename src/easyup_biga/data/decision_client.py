@@ -358,7 +358,11 @@ class DecisionDataClient:
                     "advance_count": None,
                     "decline_count": None,
                 }),
-                trade_date, db_path=self.db_path, data_root=self.data_root,
+                trade_date,
+                # 🔴 收盘情绪派生自**同一次冻结的股池** ⇒ 引用股池那条 raw 血缘。
+                #    它曾经把自己算出来的计数重新序列化当 raw —— 自证。
+                upstream_artifact_ids=result.raw_artifact_ids,
+                db_path=self.db_path, data_root=self.data_root,
             )
             return result
         if dataset_id == "cn.news.flash":

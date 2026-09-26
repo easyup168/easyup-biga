@@ -30,6 +30,7 @@ from easyup_biga.persistence import (
     DataStoreConflict,
     find_dataset_partition,
     find_dataset_snapshot,
+    load_raw_artifact,
     open_data_run,
     record_provider_attempt,
     save_dataset_partition,
@@ -56,6 +57,17 @@ from .contracts import (
     new_quality_report_id,
 )
 from .registry import get_dataset
+
+
+def _single_lineage_artifact(request: "SnapshotPublishRequest") -> str | None:
+    """分区那条 `raw_artifact_id` 外键该指向谁 —— 只在**恰好一条**时才填。
+
+    多条时留 `None`：一对多的血缘边是 `ProviderAttempt`，
+    拿其中任意一个当外键就是在撒谎。
+    """
+    ids = ([a.artifact_id for a in request.raw_artifacts]
+           or list(request.upstream_artifact_ids))
+    return ids[0] if len(ids) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +97,23 @@ class SnapshotPublishRequest:
     #: 分区 id（如 `biga+sqlite://fact_security_master/<pid>`）⇒ 调用方得先知道
     #: id 才拼得出 `storage_uri`。不给就由服务生成。
     partition_id: str | None = None
+    #: 🔴 **派生数据集的上游血缘**：已经存在的 RawArtifact id，不再造第二份。
+    #:
+    #: 与 `raw_artifacts` **二选一**。派生数据集（可交易性、情绪收盘…）没有
+    #: 自己的采集动作 —— 它的输入是别人取回来的那份响应。让它自己造一份
+    #: RawArtifact 只有两种造法，两种都是错的：
+    #:
+    #: 1. 把**自己的输出**重新序列化当 raw ⇒ `content_sha256` 是对输出算的，
+    #:    回放校验它等于自己证明自己，与上游那份响应毫无关系
+    #: 2. 把上游的字节**复制一份**写到自己名下 ⇒ 那份 raw 的 `provider_id`
+    #:    会写成派生方（如 `derived_biga`），而字节其实是行情源给的 ——
+    #:    读的人会以为 `derived_biga` 返回过这些东西
+    #:
+    #: ⇒ 引用，不复制。分区的 `raw_artifact_id` 直接指向上游那一条。
+    #:
+    #: ⚠️ 服务会核实每个 id **真的存在**（fail closed）。指向空气的血缘
+    #:    比没有血缘更糟 —— 它会让人以为查得到。
+    upstream_artifact_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,12 +177,22 @@ class DatasetSnapshotService:
         definition = get_dataset(request.dataset_id)
         if request.row_count < 0:
             raise ValueError("row_count must be >= 0")
-        if not request.raw_artifacts:
-            raise ValueError("at least one verified raw artifact is required")
+        if bool(request.raw_artifacts) == bool(request.upstream_artifact_ids):
+            raise ValueError(
+                "raw_artifacts 与 upstream_artifact_ids 必须**二选一**："
+                "采集型数据集给前者（自己取回来的字节），"
+                "派生型数据集给后者（指向上游已有的那条）。"
+                f"收到 raw_artifacts={len(request.raw_artifacts)} 条、"
+                f"upstream_artifact_ids={len(request.upstream_artifact_ids)} 条。")
         if any(a.dataset_id != request.dataset_id for a in request.raw_artifacts):
             raise ValueError("all raw artifacts must belong to the published dataset")
         if any(a.provider_id != request.provider_id for a in request.raw_artifacts):
             raise ValueError("P3-2 bundle requires one provider_id; mixed-provider publish is later work")
+        for artifact_id in request.upstream_artifact_ids:
+            if load_raw_artifact(artifact_id, path=self._path) is None:
+                raise ValueError(
+                    f"{request.dataset_id} 声称派生自 RawArtifact {artifact_id!r}，"
+                    "而库里没有这一条 —— 指向空气的血缘比没有血缘更糟。")
 
         # 幂等键是「逻辑分区 + 请求的 data_version」。P3-2 在插 EvidenceSet 行之前
         # 调它，所以重试桥接本身是安全的。
@@ -226,6 +265,10 @@ class DatasetSnapshotService:
         try:
             transition_data_run(data_run_id, state, "FETCHING", path=self._path)
             state = "FETCHING"
+            # ⚠️ 派生型（`upstream_artifact_ids`）走到这里**什么都不做**：
+            #    没有取数动作 ⇒ 没有 RawArtifact 要存、也没有 ProviderAttempt。
+            #    状态机仍然一格格走完 —— 那是所有 Data Run 共用的一条线，
+            #    为派生型另开一条会立刻变成第二套口径（L-3）。
             for attempt_no, artifact in enumerate(request.raw_artifacts, start=1):
                 save_raw_artifact(artifact, path=self._path)
                 record_provider_attempt(
@@ -289,8 +332,8 @@ class DatasetSnapshotService:
                         provider_id=request.provider_id,
                         # 一个 bundle 可能有多个 RawArtifact。一对多那条血缘边是
                         # ProviderAttempt —— 不要拿其中任意一个当外键去撒谎。
-                        raw_artifact_id=(request.raw_artifacts[0].artifact_id
-                                         if len(request.raw_artifacts) == 1 else None),
+                        # 派生型没有自己的 raw，指向**上游那一条**。
+                        raw_artifact_id=_single_lineage_artifact(request),
                         supersedes_partition_id=request.supersedes_partition_id,
                     ),
                     path=self._path,

@@ -109,8 +109,13 @@ def run_eod_bundle(
         expected_open=open_or_unknown,
     )
     if bars_result.status is DatasetStatus.COMPLETE:
+        # 🔴 把**日线那次发布的 raw 血缘**传下去。可交易性是从同一份行情源
+        #    响应推出来的，它没有自己的采集动作 ⇒ 引用上游那条，不另造一份。
+        #    （曾经它把自己的输出重新序列化当 raw —— 那让哈希变成自己证明自己。）
         tradability_result = tradability.publish(
-            records, trade_date, db_path=db_path, data_root=data_root,
+            records, trade_date,
+            upstream_artifact_ids=bars_result.raw_artifact_ids,
+            db_path=db_path, data_root=data_root,
             new_revision=new_revision,
         )
     else:
