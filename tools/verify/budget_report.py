@@ -47,8 +47,34 @@ from budget import (  # noqa: E402
 COST_LO, COST_HI = 1.20, 1.37
 
 
+def _parse_day(argv: list[str]) -> str:
+    """取要看哪一天。位置参数与 `--day` 都收，不合法的当场说清楚。
+
+    🔴 原来是 `argv[0]`，于是 `--day 20260922` 会把 `"--day"` 这个字符串当日期，
+    一路走到 `strptime` 抛一屏 traceback（2026-09-23 评审顺手撞到）。
+    那不是「参数写错了」的报错 —— 读的人看到的是 `_strptime.py` 的调用栈，
+    **第一反应会去查这个工具是不是坏了**。
+
+    > 报错要指路：说清楚是谁错了、正确写法是什么。
+    """
+    rest = list(argv)
+    if rest and rest[0] in {"--day", "-d"}:
+        if len(rest) < 2:
+            raise SystemExit("用法：budget_report.py [YYYYMMDD] 或 --day YYYYMMDD")
+        rest = rest[1:]
+    if not rest:
+        return now_cn().strftime("%Y%m%d")
+    day = rest[0]
+    if len(day) != 8 or not day.isdigit():
+        raise SystemExit(
+            f"日期要写成 YYYYMMDD，收到 {day!r}。\n"
+            f"  用法：budget_report.py [YYYYMMDD]    —— 位置参数\n"
+            f"        budget_report.py --day YYYYMMDD")
+    return day
+
+
 def main(argv: list[str] | None = None) -> int:
-    day = (argv or sys.argv[1:] or [now_cn().strftime("%Y%m%d")])[0]
+    day = _parse_day(list(argv if argv is not None else sys.argv[1:]))
     with db.connect(readonly=True) as conn:
         res = conn.execute(
             "SELECT decision_id, reserved_at, reserved_by FROM decision_ids"
@@ -77,6 +103,13 @@ def main(argv: list[str] | None = None) -> int:
     if orphans is None:
         print("🔶 孤儿 spawn 判不了 —— 读不到运行时库")
     elif orphans:
+        # ⚠️ 2026-09-23 评审建议过「按来源分组显示（生产 / 验证 spike）」，
+        #    2026-09-26 核实后**没做** —— 判据在真实数据上不存在，详见 TODO.md。
+        #    一句话：孤儿行的 `requester_session_key` 是 specialist **自己的**
+        #    子会话，不是编排会话；往上接要靠 `subagent_runs`，而验证日
+        #    20260922 的覆盖率是 **0/5**。
+        #    分不出来就不分 —— 一个大部分落在「判不出」的分组，
+        #    看起来像信息，其实不是。
         print(f"🔴 孤儿 spawn {len(orphans)} 个 —— 跑了但进不了任何卡"
               f"（约 ${len(orphans) * 0.10:.2f}~${len(orphans) * 0.15:.2f}）")
         for when, agent, why in orphans[-6:]:
