@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from easyup_biga.providers.http import SourceError
+
 from .contracts import ProviderRole
 from .provider_registry import bindings_for_dataset
 
@@ -97,11 +99,14 @@ def execute_with_fallback(
     for provider_id, role in chain:
         fetcher = fetchers.get(provider_id)
         if fetcher is None:
-            _record(ProviderExecutionAttempt(provider_id, role, False, "没有配置取数函数"))
-            continue
+            raise RuntimeError(
+                f"{dataset_id} 的 provider {provider_id!r} 已注册但没有配置取数函数")
         try:
             value = fetcher()
-        except Exception as exc:
+        except SourceError as exc:
+            # Only an explicitly classified provider/source failure may trigger
+            # fallback.  Programming errors (TypeError/KeyError/AssertionError/...)
+            # must escape immediately instead of being hidden by a healthy backup.
             _record(ProviderExecutionAttempt(
                 provider_id, role, False, f"{type(exc).__name__}: {exc}"))
             continue

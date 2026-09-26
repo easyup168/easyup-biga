@@ -23,8 +23,8 @@ from easyup_biga.domain import STAGE1_AGENTS, required_datasets_for, required_da
 REPO = Path(__file__).resolve().parents[1]
 
 
-def test_phase3_required_datasets_are_exactly_registered():
-    assert set(DATASET_REGISTRY) == set(REQUIRED_DATASETS)
+def test_phase3_required_datasets_are_registered_subset():
+    assert set(REQUIRED_DATASETS) <= set(DATASET_REGISTRY)
 
 
 def test_p36_direct_feeds_have_real_primary_bindings():

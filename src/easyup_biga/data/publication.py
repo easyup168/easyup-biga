@@ -40,7 +40,7 @@ from easyup_biga.data.contracts import (
 from easyup_biga.data.provider_registry import role_of
 from easyup_biga.data.registry import get_dataset
 from easyup_biga.domain import now_cn
-from easyup_biga.persistence import find_dataset_snapshot
+from easyup_biga.persistence import find_dataset_snapshot, load_dataset_partition
 
 from .file_store import FileStore
 from .snapshots import DatasetSnapshotService, SnapshotPublishRequest
@@ -87,10 +87,22 @@ class DatasetRowPublisher:
         existing = find_dataset_snapshot(
             dataset_id, key, status=DatasetStatus.COMPLETE, path=self.db_path)
         if existing is not None and not new_revision:
-            # 普通重跑：已有 COMPLETE 的同分区 ⇒ 复用，不重复发布。
+            # 普通重跑：已有 COMPLETE 的同分区 ⇒ 只有在物理对象仍然存在且
+            # 哈希一致时才允许复用。否则这是一个“控制面说完成、数据面却坏了”
+            # 的腐化快照，必须响亮失败，绝不能把 reused=True 当成成功。
+            partition_ids = tuple(str(x) for x in existing["manifest"].get("partition_ids") or ())
+            if len(partition_ids) != 1:
+                raise RuntimeError(
+                    f"existing COMPLETE snapshot {existing['snapshot_id']} has invalid partition lineage")
+            part = load_dataset_partition(partition_ids[0], path=self.db_path)
+            if part is None:
+                raise RuntimeError(f"existing COMPLETE snapshot references missing partition {partition_ids[0]}")
+            uri = str(part["storage_uri"])
+            if not uri.startswith("biga+sqlite://"):
+                self.fs.verify_file_hash(uri, str(part["content_sha256"]))
             return PublishResult(
                 DatasetStatus.COMPLETE, "", str(existing["snapshot_id"]),
-                str(existing["manifest"]["partition_ids"][0]), reused=True)
+                partition_ids[0], reused=True)
 
         version = int(existing["data_version"]) + 1 if existing else 1
         now = now_cn().isoformat()
@@ -147,10 +159,11 @@ class DatasetRowPublisher:
                     supersedes_snapshot_id=(
                         str(existing["snapshot_id"]) if existing else None),
                 ),
-                # 落进 lake 是**最后一步**（快照之后）—— lake 还有「扫盘」这条
-                # 不看快照的读取路径，所以文件必须最后写。详见发布服务的 docstring。
+                # P3-R2：所有分析读取都改为“控制面先选 COMPLETE Snapshot，再读
+                # 其 URI”，因此 lake 里即使出现一个崩溃遗留的孤儿文件也不可见。
+                # 物理文件必须在快照之前完成并校验；commit 失败就**绝不出快照**。
                 materialize=lambda _pid: staged.commit(),
-                materialize_after_snapshot=True,
+                materialize_after_snapshot=False,
             )
         finally:
             # 质量没过 / 中途抛了 ⇒ 暂存文件丢弃，lake 里什么都不会多出来。

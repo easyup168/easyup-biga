@@ -55,6 +55,14 @@ USAGE = """用法：
                                           修订链审计
   bin/biga-data drill-raw-tamper          篡改检测演练
   bin/biga-data drill-duckdb              DuckDB 运行时演练
+  bin/biga-data drill-fallback <data_run_id>
+                                          PRIMARY→FALLBACK 真实账本演练
+  bin/biga-data drill-quarantine <data_run_id>
+                                          QUARANTINED 真实终态演练
+  bin/biga-data drill-revision <dataset_id> <partition_key_json>
+                                          Revision v2 演练
+  bin/biga-data drill-replay <evidence_set_id>
+                                          Source ZIP / Offline Replay 演练
   bin/biga-data acceptance-record <事件类型>
                                           往验收账本记一条
   bin/biga-data acceptance-status         看验收闸门状态
@@ -80,7 +88,8 @@ def build_parser() -> tuple[argparse.ArgumentParser, frozenset[str]]:
         names.append(name)
         return sub.add_parser(name)
 
-    add("drill-duckdb")
+    item = add("drill-duckdb")
+    item.add_argument("--ledger")
     for name in ("list", "providers"):
         # 🔴 `--json` 在顶层和子命令上**各挂一次**，因为历史用法是
         #    `biga-data list --json`（标志在子命令之后），而 argparse 不把
@@ -124,6 +133,20 @@ def build_parser() -> tuple[argparse.ArgumentParser, frozenset[str]]:
     item.add_argument("partition_key_json")
     item = add("drill-raw-tamper")
     item.add_argument("--work-root", default="data/acceptance-drill")
+    item.add_argument("--ledger")
+    item = add("drill-fallback")
+    item.add_argument("data_run_id")
+    item.add_argument("--ledger")
+    item = add("drill-quarantine")
+    item.add_argument("data_run_id")
+    item.add_argument("--ledger")
+    item = add("drill-revision")
+    item.add_argument("dataset_id")
+    item.add_argument("partition_key_json")
+    item.add_argument("--ledger")
+    item = add("drill-replay")
+    item.add_argument("evidence_set_id")
+    item.add_argument("--ledger")
     item = add("acceptance-record")
     item.add_argument("event_type")
     item.add_argument("--ledger", default="data/phase3_acceptance.jsonl")
@@ -253,11 +276,15 @@ def _dispatch(args: argparse.Namespace) -> Any:
             "partition_key": dict(item.partition_key),
         }
     if cmd == "run-eod":
-        from .datasets.eod_daily_bars import run
+        # P3-R2: keep the legacy command name, but route it through the same
+        # trading-day/effective-date and tradability publication boundary as the
+        # production EOD bundle.  A CLI shortcut must not be able to mint a bar
+        # snapshot that the systemd production path would reject.
+        from .eod_pipeline import run_eod_bundle
         trade_date = args.trade_date or now_cn().strftime("%Y%m%d")
-        return _publish_result(run(
+        return _publish_result(run_eod_bundle(
             trade_date, db_path=args.db, data_root=args.data_root,
-            new_revision=args.new_revision))
+            new_revision=args.new_revision).daily_bars)
     if cmd == "run-eod-bundle":
         from .eod_pipeline import run_eod_bundle
         trade_date = args.trade_date or now_cn().strftime("%Y%m%d")
@@ -268,9 +295,9 @@ def _dispatch(args: argparse.Namespace) -> Any:
             "status": result.status.value,
             "trade_date": result.trade_date,
             "daily_bars": _publish_result(result.daily_bars),
+            "tradability": _publish_result(result.tradability),
             "universe_count": result.universe_count,
             "normalized_bar_count": result.normalized_bar_count,
-            # 未发布成数据集，只是覆盖率的分母 —— 见 eod_pipeline 的模块头
             "tradability_counts": dict(result.tradability_counts),
         }
     if cmd == "run-adjustment-factors":
@@ -283,7 +310,8 @@ def _dispatch(args: argparse.Namespace) -> Any:
     if cmd == "query-eod":
         from .analytics import query_eod_between
         return query_eod_between(
-            data_root=args.data_root, start_date=args.start_date, end_date=args.end_date,
+            db_path=args.db, data_root=args.data_root,
+            start_date=args.start_date, end_date=args.end_date,
             instrument_ids=args.instrument or None)
     if cmd == "query-eod-asof":
         from .analytics import query_eod_as_of
@@ -320,11 +348,32 @@ def _dispatch(args: argparse.Namespace) -> Any:
         audit = audit_revision_chain(
             args.dataset_id, json.loads(args.partition_key_json), path=args.db)
         return {"ok": audit.ok, "checks": list(audit.checks), "errors": list(audit.errors)}
-    if cmd in {"drill-raw-tamper", "drill-duckdb"}:
-        from .drills import duckdb_runtime_drill, raw_tamper_drill
-        result = (raw_tamper_drill(work_root=args.work_root) if cmd == "drill-raw-tamper"
-                  else duckdb_runtime_drill())
-        return {"passed": result.passed, "name": result.name, "detail": result.detail}
+    if cmd in {"drill-raw-tamper", "drill-duckdb", "drill-fallback",
+               "drill-quarantine", "drill-revision", "drill-replay"}:
+        from .acceptance import record_drill_result
+        from .drills import (
+            duckdb_runtime_drill, provider_fallback_drill, quarantine_drill,
+            raw_tamper_drill, revision_v2_drill, source_zip_replay_drill,
+        )
+        if cmd == "drill-raw-tamper":
+            result = raw_tamper_drill(work_root=args.work_root)
+        elif cmd == "drill-duckdb":
+            result = duckdb_runtime_drill()
+        elif cmd == "drill-fallback":
+            result = provider_fallback_drill(args.data_run_id, path=args.db)
+        elif cmd == "drill-quarantine":
+            result = quarantine_drill(args.data_run_id, path=args.db)
+        elif cmd == "drill-revision":
+            result = revision_v2_drill(
+                args.dataset_id, json.loads(args.partition_key_json), path=args.db)
+        else:
+            result = source_zip_replay_drill(
+                args.evidence_set_id, path=args.db, data_root=args.data_root)
+        event_hash = None
+        if args.ledger:
+            event_hash = record_drill_result(args.ledger, result).event_hash
+        return {"passed": result.passed, "name": result.name, "detail": result.detail,
+                "acceptance_event_hash": event_hash}
     if cmd == "acceptance-record":
         from .acceptance import record_acceptance_event
         event = record_acceptance_event(

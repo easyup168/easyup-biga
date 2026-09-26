@@ -1,6 +1,6 @@
 # Phase 3 设计 —— 数据平台地基 + 第一条调度
 
-> 📄 **阶段 · 进行中**（P3-0…P3-3 ✅🔶 / P3-4 🔶 / P3-5 🔶 / P3-6 ⬜ / P3-7 ⬜）
+> 📄 **阶段 · 代码面已闭环，Live Acceptance 进行中**（P3-0…P3-7 ✅；P3-3 上游探活仍为外部条件；P3-R2 Runtime Gate ✅）
 > **覆盖**：Phase 3 的设计基线、范围、里程碑、出口条件，以及本仓库对外部设计的适配裁定 ｜ **不覆盖**：契约字段与表结构（见 [`architecture.md`](architecture.md)）、施工过程（见 [`../tutorial/`](../tutorial/README.md)）、勾选状态（见 [`../../TODO.md`](../../TODO.md)）
 
 > Phase 3 的**设计 SSOT**。结构性问题（存储平面选型、失败模式清单、表结构）
@@ -229,11 +229,11 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 | P3-0 | 契约 + Dataset/Provider Registry + `bin/biga-data` | — | ✅ |
 | P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ✅ |
 | P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ✅ |
-| P3-3 | Security Master（point-in-time universe） | **v27** | 🔶 **链路建成，上游未探活** |
-| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ✅ `cn.equity.daily_bars` 进册 + `eod-daily-bars-biga.timer` |
-| P3-5 | Tradability + Adjustment Factors | — | ⬜ **三个 dataset 都没有读取方** —— 见 §3.5 |
-| P3-6 | 迁移 §2.2 那五条 direct feed | — | 🔶 **6a 完成**（provider 选择进数据层），主体待真实端到端验收 |
-| P3-7 | SnapshotResolver + `required_datasets` + EvidenceSet v2 | — | ⬜ |
+| P3-3 | Security Master（point-in-time universe） | **v27** | 🔶 **链路建成，上游探活仍是外部条件** |
+| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ✅ EOD Bundle + control-plane visibility + 交易日/effective-date fail-closed |
+| P3-5 | Tradability + Adjustment Factors + Emotion Close | — | ✅ canonical provider id + production publisher/consumer 链闭合 |
+| P3-6 | 迁移 §2.2 那五条 direct feed | — | ✅ 生产路径已迁 DataClient；真实正常源行为继续作为 Live Acceptance |
+| P3-7 | SnapshotResolver + `required_datasets` + EvidenceSet v2 | — | ✅ Agent Registry SSOT → freeze_required → SnapshotResolver/EvidenceSet |
 | P3-11 | 确定性离线回放 | — | ✅ |
 | P3-12 | point-in-time / 修订链审计 | — | ✅ |
 | P3-13 | PIT 安全的 DuckDB 查询（`query_eod_as_of`） | — | ✅ |
@@ -241,6 +241,7 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 | P3-15 | 演练框架 + 集中式 Primary→Fallback | — | ✅ |
 | P3-16 | 哈希链式上线验收账本 | — | ✅ |
 | P3-17 | 发布闸门 `tools/verify/phase3_acceptance.py` | — | ✅ |
+| P3-R2 | Runtime Reconciliation：Producer Gate / 发布原子性 / EOD 真实性 / 可验证 Failover | — | ✅ `phase3_runtime.py` code gate PASS；installed DuckDB 需目标环境 |
 
 🔴 **每个里程碑的出口都是「旧行为回归全绿 + 新红灯测试全绿」**，
 Data Platform 不允许破坏 Decision Kernel。
@@ -480,6 +481,24 @@ raw hash 语义不变
 `duckdb` 运行时依赖、Raw 文件归档、Parquet 数据面、EOD job。
 🔴 **到这一步才加依赖**，不提前 —— `pyarrow`/`duckdb` 进来之前，
 「clone 下来就能跑」这个事实还成立一天算一天。
+
+#### ✅ P3-R2 Runtime Reconciliation（2026-09-26）
+
+在 v0.8.2.dev0 统一 Phase 1–3 基线上重新做运行时评审后，Code Gate 虽为绿，
+仍发现「注册存在但 Producer 不可执行」「COMPLETE 先于物理文件」「Provider ID 漂移」
+和「真实 fallback 无法形成验收证据」等假绿形状。P3-R2 不扩功能，只把这些运行时
+不变量收回同一条链：
+
+- ACTIVE Dataset 必须有可解析 Producer，固定 Provider 必须与 Registry binding 一致；
+- Parquet 物理对象先成功落地，再创建 COMPLETE Snapshot；所有受支持查询只认控制面；
+- EOD 发布前证明请求日是交易日，并证明 provider effective date 与请求日一致；
+- `cn.security.tradability` 随 EOD Bundle 正式发布；
+- 只有明确的 `SourceError` 可以触发 fallback，程序错误直接冒泡；
+- trading-calendar PRIMARY→FALLBACK 尝试写入 `provider_attempts`，演练 PASS 必须来自真实 `DrillResult`；
+- source ZIP 无 `.git` 时的 AST/packaging 扫描不再错误排除 `src/easyup_biga/data/`。
+
+`tools/verify/phase3_runtime.py` 是新增的运行时代码闸门；`--installed` 还会执行 DuckDB
+runtime drill。Code Gate PASS 不替代连续 5 个交易日等 Live Acceptance。
 
 #### ⏩ P3-11..P3-17 落地（2026-09-26）：外部完整包深度评审后**选择性**合并
 

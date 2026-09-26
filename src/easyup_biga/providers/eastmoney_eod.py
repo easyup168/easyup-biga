@@ -9,7 +9,14 @@ _HOSTS=('82.push2.eastmoney.com','push2.eastmoney.com'); _PATH='/api/qt/clist/ge
 _FS='m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23'; _FIELDS='f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18'
 @dataclass(frozen=True, slots=True)
 class EodFetchResult:
-    rows:tuple[dict[str,Any],...]; raw_text:str; retrieved_at:str; declared_total:int
+    rows:tuple[dict[str,Any],...]
+    raw_text:str
+    retrieved_at:str
+    declared_total:int
+    # Provider endpoint itself does not expose a business date.  Offline/historical
+    # adapters may set this explicitly; live EOD otherwise may publish only for the
+    # same CN date after market close.
+    effective_trade_date:str|None=None
 
 def _page(pn:int,pz:int)->tuple[Mapping[str,Any],str]:
     q=urllib.parse.urlencode({'pn':pn,'pz':pz,'po':1,'np':1,'fltt':2,'invt':2,'fid':'f12','fs':_FS,'fields':_FIELDS},safe='+:')

@@ -31,6 +31,7 @@ from easyup_biga.domain import STAGE1_AGENTS, required_datasets_for_agents
 
 from .integrity import audit_specialist_provider_boundary
 from .provider_registry import PROVIDER_REGISTRY, all_bindings
+from .producers import PRODUCER_REGISTRY, resolve_producer, validate_producer_binding
 from .registry import DATASET_REGISTRY
 
 RELEASE_TAG = "v1-data-platform-foundation"
@@ -121,6 +122,22 @@ def _code_checks(repo: Path) -> tuple[list[str], list[str]]:
             errors.append(f"{milestone} 尚未落地 ⇒ 注册表里没有：{items}")
     else:
         checks.append(f"Dataset Registry 齐了：{len(REQUIRED_DATASETS)} 个")
+
+    missing_producers = sorted(set(REQUIRED_DATASETS) - set(PRODUCER_REGISTRY))
+    if missing_producers:
+        errors.append(f"ACTIVE dataset 没有 production producer：{missing_producers}")
+    else:
+        producer_errors: list[str] = []
+        for dataset_id in REQUIRED_DATASETS:
+            try:
+                resolve_producer(dataset_id)
+                validate_producer_binding(dataset_id)
+            except Exception as exc:
+                producer_errors.append(f"{dataset_id}: {type(exc).__name__}: {exc}")
+        if producer_errors:
+            errors.append("Producer Runtime Gate 失败：" + "; ".join(producer_errors))
+        else:
+            checks.append(f"Producer Runtime Gate：{len(REQUIRED_DATASETS)} 个 ACTIVE dataset 均可解析")
 
     bindings = all_bindings()
     bound = {b.dataset_id for b in bindings}

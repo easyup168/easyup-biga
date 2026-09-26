@@ -51,7 +51,7 @@ from _store.runtime import AgentTurn, RuntimeProbe  # noqa: E402
 _WIRED = ["isolation.py", "latency_report.py", "agent_trace.py",
           "missing_ledger.py", "phase1_acceptance.py", "spawn_check.py",
           "readback_check.py", "exit_conditions.py", "budget_report.py",
-          "security_master_probe.py", "phase3_acceptance.py"]
+          "security_master_probe.py", "phase3_acceptance.py", "phase3_runtime.py"]
 #: ⚠️ 最后两个是 **2026-09-25 补进来的**，它们从第一天起就 `import _verdict`、
 #:    也真的返回三态，却一直不在这张表里 —— 于是下面那两条守卫**从没查过它们**。
 #:

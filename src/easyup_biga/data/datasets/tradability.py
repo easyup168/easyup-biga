@@ -10,7 +10,7 @@ from ..records import TradabilityRecord, TradabilityStatus
 from ..publication import DatasetRowPublisher, PublishResult
 
 DATASET_ID = "cn.security.tradability"
-PROVIDER_ID = "derived-biga"
+PROVIDER_ID = "derived_biga"
 JOB_ID = "tradability-sync"
 
 

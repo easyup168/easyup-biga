@@ -124,16 +124,16 @@ def load_acceptance_events(path: Path | str) -> list[AcceptanceEvent]:
     return events
 
 
-def record_acceptance_event(
+def _append_acceptance_event(
     path: Path | str,
     event_type: str,
     *,
-    status: str = "PASS",
+    status: str,
     trade_date: str | None = None,
     detail: dict[str, Any] | None = None,
     at: str | None = None,
 ) -> AcceptanceEvent:
-    """追加一条验收事件。写之前先验整条链 —— 链坏了就不让再往上加。"""
+    """Internal append primitive. Public callers must go through a proof-aware API."""
     if event_type not in ACCEPTANCE_EVENT_TYPES:
         raise ValueError(
             f"未知的验收事件类型 {event_type!r}，可用：{sorted(ACCEPTANCE_EVENT_TYPES)}")
@@ -166,6 +166,47 @@ def record_acceptance_event(
         if tmp.exists():
             tmp.unlink()
     return AcceptanceEvent(**payload, event_hash=row["event_hash"])
+
+
+def record_acceptance_event(
+    path: Path | str,
+    event_type: str,
+    *,
+    status: str = "PASS",
+    trade_date: str | None = None,
+    detail: dict[str, Any] | None = None,
+    at: str | None = None,
+) -> AcceptanceEvent:
+    """Append a non-drill event (or a drill FAIL). Drill PASS requires proof.
+
+    There is deliberately no public ``verified=True`` escape hatch: the only supported
+    way to append a drill PASS is :func:`record_drill_result`, which receives an actual
+    ``DrillResult`` produced by ``data.drills``.
+    """
+    if event_type in DRILL_TYPES and status == "PASS":
+        raise ValueError(
+            "演练 PASS 不能手工记账；请先运行 data.drills 的真实判据，再用 record_drill_result() 记录")
+    return _append_acceptance_event(
+        path, event_type, status=status, trade_date=trade_date, detail=detail, at=at
+    )
+
+def record_drill_result(
+    path: Path | str,
+    result: Any,
+    *,
+    at: str | None = None,
+) -> AcceptanceEvent:
+    """Record a real ``DrillResult``; PASS cannot be manufactured by CLI flags."""
+    name = str(getattr(result, "name", ""))
+    if name not in DRILL_TYPES:
+        raise ValueError(f"未知演练 {name!r}")
+    passed = bool(getattr(result, "passed", False))
+    detail = dict(getattr(result, "detail", {}) or {})
+    detail["verified_by"] = "easyup_biga.data.drills"
+    detail["drill_name"] = name
+    return _append_acceptance_event(
+        path, name, status="PASS" if passed else "FAIL", detail=detail, at=at
+    )
 
 
 def _has_consecutive_trading_days(

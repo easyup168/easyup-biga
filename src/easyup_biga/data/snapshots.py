@@ -28,6 +28,7 @@ from typing import Callable, Mapping, Sequence
 from easyup_biga.domain import now_cn
 from easyup_biga.persistence import (
     DataStoreConflict,
+    find_dataset_partition,
     find_dataset_snapshot,
     open_data_run,
     record_provider_attempt,
@@ -246,9 +247,34 @@ class DatasetSnapshotService:
 
             transition_data_run(data_run_id, state, "NORMALIZING", path=self._path)
             state = "NORMALIZING"
-            partition_id = request.partition_id or new_partition_id()
+            # 🔴 **崩溃重试的收养**：上一次跑到一半（分区行 + 物理文件都落了，
+            #    快照没落）留下的那个分区，这次要认领它，而不是撞唯一约束。
+            #
+            #    不认领的后果不是「重试失败」那么轻：`UNIQUE(dataset_id,
+            #    partition_key_json, data_version)` 抛出来的 `DataStoreConflict`
+            #    读起来像「这份数据已经发布过了」，而真实含义是「上次跑到一半」。
+            #    分不清这两者，运维就只剩「手工删库」一条路。
+            #
+            #    ⚠️ 认领的前提是**内容一致**：哈希对不上说明这次算出来的东西
+            #    和上次不是同一份 ⇒ 那是真冲突，必须响亮失败。
+            orphan = find_dataset_partition(
+                request.dataset_id, dict(request.partition_key),
+                request.data_version, path=self._path)
+            adopted = False
+            if orphan is not None:
+                if str(orphan["content_sha256"]) != str(request.content_sha256):
+                    raise DataStoreConflict(
+                        f"{request.dataset_id} 的 v{request.data_version} 分区已存在，"
+                        f"但内容不同（已存 {str(orphan['content_sha256'])[:12]}… / "
+                        f"本次 {str(request.content_sha256)[:12]}…）—— "
+                        f"这不是「上次跑到一半」，是同一个版本算出了两份数据。")
+                adopted = True
+            partition_id = (str(orphan["partition_id"]) if adopted
+                            else (request.partition_id or new_partition_id()))
 
             def _register_partition() -> None:
+                if adopted:
+                    return            # 认领上一次留下的那一行，不重复插入
                 save_dataset_partition(
                     DatasetPartition(
                         partition_id=partition_id,
@@ -309,7 +335,7 @@ class DatasetSnapshotService:
             state = "PUBLISHING"
             if deferred:
                 _register_partition()
-                if not materialize_after_snapshot:
+                if not materialize_after_snapshot and not adopted:
                     # 🔴 先登记分区、再写行：materialize 抛了的话，整个 run 走
                     #    FAILED，而快照还没落 ⇒ 下游看不到它。分区行留着是痕迹。
                     materialize(partition_id)
@@ -328,7 +354,7 @@ class DatasetSnapshotService:
                 supersedes_snapshot_id=request.supersedes_snapshot_id,
             )
             save_dataset_snapshot(snapshot, path=self._path)
-            if deferred and materialize_after_snapshot:
+            if deferred and materialize_after_snapshot and not adopted:
                 # 🔴 物理数据最后写。它抛了 ⇒ run 走 FAILED，而快照已经落了 ——
                 #    这是**有意的**：留下一条指向缺失文件的账本行，回放与完整性
                 #    审计重算哈希时当场炸响。响的失败好过静默地可见。

@@ -36,14 +36,15 @@ from easyup_biga.persistence import (
     data_run_state,
     init_schema,
     load_dataset_snapshot,
+    save_trading_calendar,
 )
 from easyup_biga.providers.eastmoney_eod import EodFetchResult
 from easyup_biga.providers.eastmoney_security_master import parse_security_master_pages
 
 pytest.importorskip("duckdb", reason="Parquet 面读写走 duckdb")
 
-RETRIEVED = "2026-09-25T16:00:00+08:00"
-TRADE_DATE = "20260925"
+RETRIEVED = "2026-09-24T16:00:00+08:00"
+TRADE_DATE = "20260924"
 
 #: 与 Security Master 同一批票 —— 两者对不上的话 coverage_ratio 就没有意义。
 MASTER_ROWS = [
@@ -82,6 +83,10 @@ def _seed_universe(db):
         path=db, fetcher=_fetch,
         quality_policy=SecurityMasterQualityPolicy(minimum_rows=5),
     ).sync(as_of_date=TRADE_DATE, trigger_id="test-eod")
+    save_trading_calendar(
+        source="test:calendar", as_of=RETRIEVED, retrieved_at=RETRIEVED,
+        days=[(TRADE_DATE, True)], path=db,
+    )
 
 
 def _fetched(rows, *, declared=None):
@@ -111,6 +116,8 @@ def test_一次取数跑到底_快照与Parquet都真的落了(tmp_path):
     assert result.normalized_bar_count == 5
     assert result.universe_count == 5
     assert data_run_state(result.daily_bars.data_run_id, path=db) == "COMPLETED"
+    assert result.tradability.status == DatasetStatus.COMPLETE
+    assert data_run_state(result.tradability.data_run_id, path=db) == "COMPLETED"
 
     snap = load_dataset_snapshot(result.daily_bars.snapshot_id, path=db)
     assert snap is not None
@@ -136,7 +143,7 @@ def test_落下去的Parquet能被查回来且内容对得上(tmp_path):
     _run(db, tmp_path, rows)
 
     got = query_eod_between(
-        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)
+        db_path=db, data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)
     assert len(got) == 5
     closes = {r["instrument_id"]: r["close"] for r in got}
     assert closes["600000.SH"] == pytest.approx(10.0)
@@ -213,7 +220,7 @@ def test_修订走新版本且不改写旧分区(tmp_path):
 
     # 跨日查询取最新修订
     got = query_eod_between(
-        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)
+        db_path=db, data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)
     assert {r["close"] for r in got} == {99.0, 100.0, 101.0, 102.0, 103.0}
 
 
@@ -224,8 +231,8 @@ def test_修订后两条查询必须给同一个答案(tmp_path):
     请求 v2 也原样退回 v1。而调用方是**先写 Parquet、再进账本**的 ⇒
     v2 的文件落了盘、控制面只认 v1。两条查询走不同的路：
 
-    · `query_eod_between` 扫盘取最高 data_version → v2
-    · `query_eod_as_of`   走控制面               → v1
+    · 旧 `query_eod_between` 曾经扫盘取最高 data_version → v2
+    · `query_eod_as_of` 始终走控制面                         → v1
 
     实测同一个交易日拿到两套价格，**两边都不报错**。
     ⇒ 判据必须是「两条路的答案相等」，不是「各自能跑通」。
@@ -236,17 +243,18 @@ def test_修订后两条查询必须给同一个答案(tmp_path):
     _run(db, tmp_path, [_bar_row(r["f12"], 99.0 + i) for i, r in enumerate(MASTER_ROWS)],
          new_revision=True)
 
-    scanned = {r["instrument_id"]: r["close"] for r in query_eod_between(
-        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)}
+    latest = {r["instrument_id"]: r["close"] for r in query_eod_between(
+        db_path=db, data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)}
     controlled = {r["instrument_id"]: r["close"] for r in query_eod_as_of(
         db_path=db, knowledge_cutoff="2099-01-01T00:00:00+08:00",
         start_date=TRADE_DATE, end_date=TRADE_DATE)}
-    assert scanned == controlled, "扫盘与控制面给出了两套数"
-    assert set(scanned.values()) == {99.0, 100.0, 101.0, 102.0, 103.0}
+    assert latest == controlled, "latest view 与 PIT control-plane 给出了两套数"
+    assert set(latest.values()) == {99.0, 100.0, 101.0, 102.0, 103.0}
 
     # 盘上确实有两个版本（旧的没被删），只是两条路都选了 v2
     versions = sorted(
-        p.parent.name for p in (tmp_path / "data" / "lake").rglob("*.parquet"))
+        p.parent.name for p in
+        (tmp_path / "data" / "lake" / "cn_equity_daily_bars").rglob("*.parquet"))
     assert versions == ["data_version=000001", "data_version=000002"]
 
 
@@ -289,7 +297,7 @@ def test_停牌票不产生假的OHLC行(tmp_path):
 
     assert result.normalized_bar_count == 4
     got = query_eod_between(
-        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)
+        db_path=db, data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)
     assert "600000.SH" not in {r["instrument_id"] for r in got}
     # 停牌数进了汇总，读日志的人看得见分母为什么小了
     assert result.tradability_counts.get("SUSPENDED") == 1
@@ -299,34 +307,39 @@ def test_没有Security_Master就拒绝跑(tmp_path):
     """🔴 空 universe 不许静默用 EOD 响应顶替 —— 那会让身份 SSOT 失效。"""
     db = tmp_path / "biga.db"
     init_schema(db)
+    # 先证明日期本身是交易日，确保失败原因确实来自身份 SSOT，而不是
+    # P3-R2 新增的 EOD 日期真实性门禁。
+    save_trading_calendar(source="test:calendar", as_of=RETRIEVED,
+                          retrieved_at=RETRIEVED, days=[(TRADE_DATE, True)], path=db)
     with pytest.raises(RuntimeError, match="Security Master"):
         _run(db, tmp_path, [_bar_row("600000", 10.0)])
 
 
 # ── 两阶段提交（⓪-c）────────────────────────────────────────────────────────
-def test_账本写不进去时_lake里什么都不会多出来(tmp_path, monkeypatch):
-    """🔴 「先账本、后落 lake」的全部意义。
-
-    先文件后账本的话，崩在中间会在 lake 里留一个**控制面不认、而扫盘查询
-    读得到**的孤儿分区 —— 同一交易日两套数，都不报错（哑的）。
-    反过来崩，留下的是一条指向不存在文件的账本行 —— 回放与完整性审计
-    当场抛（响的）。这条钉住前者不会发生。
-    """
+def test_快照账本写失败时_孤儿文件对受支持查询不可见且重试可收养(tmp_path, monkeypatch):
+    """P3-R2：物理文件先落，快照后落；控制面是所有查询的可见性边界。"""
     import easyup_biga.data.snapshots as snap_mod
 
     db = tmp_path / "biga.db"
     _seed_universe(db)
+    rows = [_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)]
     real = snap_mod.save_dataset_snapshot
     monkeypatch.setattr(snap_mod, "save_dataset_snapshot",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger down")))
     with pytest.raises(RuntimeError, match="ledger down"):
-        _run(db, tmp_path, [_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)])
+        _run(db, tmp_path, rows)
 
-    lake = tmp_path / "data" / "lake"
-    assert list(lake.rglob("*.parquet")) == [], "lake 里留下了孤儿分区"
-    staging = tmp_path / "data" / "_staging"
-    assert list(staging.glob("*")) == [], "暂存区没清干净"
-    assert real is not None     # 引用留着，monkeypatch 退出时会自动还原
+    daily_files = list((tmp_path / "data" / "lake" / "cn_equity_daily_bars").rglob("*.parquet"))
+    assert len(daily_files) == 1, "允许留下 crash orphan，但只能是已完整 fsync 的不可变文件"
+    assert query_eod_between(
+        db_path=db, data_root=str(tmp_path / "data"),
+        start_date=TRADE_DATE, end_date=TRADE_DATE) == [], "孤儿文件不许绕过控制面可见"
+
+    monkeypatch.setattr(snap_mod, "save_dataset_snapshot", real)
+    retry = _run(db, tmp_path, rows)
+    assert retry.daily_bars.status is DatasetStatus.COMPLETE
+    assert len(list((tmp_path / "data" / "lake" / "cn_equity_daily_bars").rglob("*.parquet"))) == 1
+
 
 
 def test_质量不过时不落lake也不登记分区(tmp_path):
@@ -358,10 +371,12 @@ def test_质量不过时不落lake也不登记分区(tmp_path):
             "WHERE dataset_id='cn.equity.daily_bars'").fetchone()["status"] != "COMPLETE"
 
 
-def test_暂存区不在lake里_扫盘查询绝对看不到(tmp_path):
-    """判据打在**路径关系**上，不是文件名前缀 —— 后者是拿 glob 恰好不匹配当不变量。"""
+def test_暂存区与未登记文件对控制面查询都不可见(tmp_path):
+    """物理存在性不是可见性；只有 COMPLETE Snapshot 才是读侧入口。"""
     from easyup_biga.data.file_store import FileStore
 
+    db = tmp_path / "biga.db"
+    init_schema(db)
     fs = FileStore(tmp_path / "data")
     staged = fs.stage_parquet_rows(
         "cn.equity.daily_bars", {"trade_date": TRADE_DATE},
@@ -372,12 +387,13 @@ def test_暂存区不在lake里_扫盘查询绝对看不到(tmp_path):
     assert staged.target.resolve().is_relative_to(lake)
     assert not staged.target.exists(), "还没 commit 就已经在 lake 里了"
     assert query_eod_between(
-        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE) == []
+        db_path=db, data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE) == []
 
     staged.commit()
     assert staged.target.exists()
-    assert len(query_eod_between(
-        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)) == 1
+    assert query_eod_between(
+        db_path=db, data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE) == [], \
+        "没有 COMPLETE Snapshot 的物理文件始终不可见"
 
 
 def test_commit与abort都是幂等的(tmp_path):
@@ -393,19 +409,8 @@ def test_commit与abort都是幂等的(tmp_path):
     assert staged.target.exists()
 
 
-def test_落lake失败_留下的是响的失败而不是静默可见(tmp_path, monkeypatch):
-    """🔴 两阶段的另一半：最后一步失败时，后果必须**吵**。
-
-    文件没落进 lake，而快照已经落了 ⇒ 这是有意的：
-    · 扫盘查询看不到它（lake 里没有）
-    · 走控制面的查询会去读那个不存在的文件 —— **炸响**
-    · 完整性审计重算哈希 —— **炸响**
-
-    对照组是没有两阶段时的样子：文件在 lake、快照没落 ⇒ 扫盘读得到、
-    控制面读不到，**两边都不报错**。那才是要消灭的东西。
-    """
+def test_落lake失败_绝不创建COMPLETE快照(tmp_path, monkeypatch):
     from easyup_biga.data.file_store import StagedParquet
-    from easyup_biga.data.integrity import audit_snapshot_integrity
 
     db = tmp_path / "biga.db"
     _seed_universe(db)
@@ -413,20 +418,43 @@ def test_落lake失败_留下的是响的失败而不是静默可见(tmp_path, m
                         lambda self: (_ for _ in ()).throw(RuntimeError("disk full")))
     with pytest.raises(RuntimeError, match="disk full"):
         _run(db, tmp_path, [_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)])
-    monkeypatch.undo()
 
     assert list((tmp_path / "data" / "lake").rglob("*.parquet")) == []
-    snap_id = _latest_snapshot_id(db)
-
-    # 完整性审计当场抓到
-    report = audit_snapshot_integrity(snap_id, path=db, data_root=str(tmp_path / "data"))
-    assert not report.ok
-    assert any("unreadable" in e for e in report.errors), report.errors
-
-    # run 的终态是 FAILED —— 不是悄悄 COMPLETED
     with connect(db, readonly=True) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dataset_snapshots WHERE dataset_id='cn.equity.daily_bars'"
+        ).fetchone()[0] == 0
         last = conn.execute(
             "SELECT to_state FROM data_run_events e JOIN data_job_runs r "
             "USING(data_run_id) WHERE r.dataset_id='cn.equity.daily_bars' "
             "ORDER BY e.seq DESC LIMIT 1").fetchone()[0]
     assert last == "FAILED"
+
+
+def test_EOD拒绝已知休市日(tmp_path):
+    db = tmp_path / "biga.db"
+    _seed_universe(db)
+    from easyup_biga.persistence import save_trading_calendar
+    save_trading_calendar(
+        source="test:calendar", as_of="2026-09-25T16:00:00+08:00",
+        retrieved_at="2026-09-25T16:00:00+08:00", days=[("20260925", False)], path=db)
+    fetched = EodFetchResult(
+        rows=tuple(_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)),
+        raw_text="{}", retrieved_at="2026-09-25T16:00:00+08:00", declared_total=5)
+    with pytest.raises(RuntimeError, match="known closed"):
+        run_eod_bundle("20260925", db_path=db, data_root=str(tmp_path / "data"),
+                       fetcher=lambda: fetched)
+
+
+def test_EOD拒绝把当前快照冒充历史日期(tmp_path):
+    db = tmp_path / "biga.db"
+    _seed_universe(db)
+    fetched = _fetched([_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)])
+    # Explicitly ask for another verified trading day while response says 20260924.
+    from easyup_biga.persistence import save_trading_calendar
+    save_trading_calendar(
+        source="test:calendar", as_of=RETRIEVED, retrieved_at=RETRIEVED,
+        days=[("20260923", True)], path=db)
+    with pytest.raises(RuntimeError, match="effective date cannot be proven"):
+        run_eod_bundle("20260923", db_path=db, data_root=str(tmp_path / "data"),
+                       fetcher=lambda: fetched)
