@@ -1693,6 +1693,66 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 ---
 
+## ⏸ 卡在外部条件的事项（登记台账，2026-09-26）
+
+🔴 **这里每一条都不是「没写代码」，是「写了也验不了」。**
+分开登记是因为它们的**解除条件各不相同**，混在待办里会让人误以为是排期问题。
+
+| # | 事项 | 卡在什么上 | 解除条件 |
+|---|---|---|---|
+| E-1 | **P3-6b** 五条盘中 direct feed 迁进 Dataset 层 | 改**生产决策路径**，验收要真实端到端 | 开新会话跑一次真实出卡并等结算（开发流程第 6 条）|
+| E-2 | **P3-7** `required_datasets` resolver | 依赖 E-1 | 同上 |
+| E-3 | `cn.security.tradability` 进册 | **没有读取方**（契约：答不出谁读它就不该进册）| 筛选/复盘真的需要区分「停牌」与「数据缺失」那一刻 |
+| E-4 | `cn.security_master` 上游探活 | 东财**整体限流**，三个 host 全 502 | 挑一个没被限流的时段重跑 `security_master_probe.py`（退出码 2=UNKNOWN 不是 1）|
+| E-5 | 批 C-II 的 P5：`cancel()` 同序映射 | 需要**真实运行时** N=5 + 至少一个 spawn 已离场 | 一次 Stage 1 部分启动失败的真实场景 |
+| E-6 | 解除 `.biga-card-stop` | **人的决定**，不自动做 | 你说解除 |
+| E-7 | ⓪-c 残留：Parquet 崩在写文件与进账本之间 | 需要 staging→commit 的两阶段**再往前挪一层** | 已大幅收窄（见 v0.7.0），剩余窗口是一条语句宽；真要归零得改 `write_parquet_rows` 的 API |
+
+### 🔴 关于「外部提供的 P3 代码有没有实现这些」—— 核实结论
+
+**E-1 / E-2 的代码是有的，我此前的说法不准确，这里更正。**
+
+`biga-phase3-p3-0-p3-17-code-complete` 包里：
+- `registry.py` 有 **12 个** dataset（那 5 条 direct feed 走 `_decision_snapshot()`
+  工厂传**位置参数** —— 我第一次用 `grep 'dataset_id="..."'` 数漏了）
+- `domain/registry.py` 有 per-agent 的 `required_datasets`（P3-7）
+- 5 个 skill 都 import 了 `easyup_biga.data.client.DecisionDataClient`
+- `orchestrator.py` 接了 `DecisionDataBridge`
+
+⚠️ **但它建在它自己那套 `DatasetDefinition` 上** —— 有 `freshness_policy` /
+`point_in_time`，**没有 `consumers`**。合它 = 把契约换回他们那版，连带丢掉：
+
+| 丢掉什么 | 本轮哪件事靠它 |
+|---|---|
+| `consumers` + 零消费方守卫 | ⓪ 的全部判据（「答得出谁读它吗」）|
+| `primary_provider` / `fallback_providers` + 绑定派生 | ②a 的降级链 |
+| `raw_table` + 表存在性守卫 | P7 |
+
+⇒ **能合的是它的做法**（`DecisionDataClient` 读冻结快照、`required_datasets`、
+decision-snapshot 分区键），**不是它的文件**。
+
+### 🆕 `easyup-biga-p4-g0-phase3-closed-delta-20260926` —— 这个不一样
+
+它的基线是**本仓库自己**（registry 的 docstring 是我们的原文，契约字段是
+`consumers=` / `primary_provider=`，还引用了 `tests/test_phase3_gate.py` 与
+`tools/verify/phase3_acceptance.py` —— 都是本轮写的）。它宣称把
+P3-4…P3-7 在**我们的契约上**补齐，Phase 3 Code Gate 变 PASS。
+
+🔴 **但基线是 v0.6.0**，在我这 5 个提交之前：
+- 它加的 provider 是 `eastmoney-eod`（连字符），而 ⓪ 里已经是 `eastmoney_eod`
+- 它「激活 `cn.equity.daily_bars`」，而 ⓪ 已经激活了
+- 它改的 18 个文件里 **6 个与本轮重叠**：`cli.py` / `provider_registry.py` /
+  `quality.py` / `registry.py` / `data/analytics.py` / `test_data_platform_foundation.py`
+
+⇒ 它是**待评审的候选**，不是可直接 apply 的补丁。而且它的边界写着
+「不包含 Live Acceptance 结果」—— 所以合了它，**E-1 的解除条件一条都没变**：
+代码换成谁写的都一样，闸门要的是真实跑一次。
+
+> 🔴 **「代码有了」和「可以合了」和「验收过了」是三件事。**
+> 这三件在这几个包上恰好分别卡住，很容易被读成同一件。
+
+---
+
 ## 路线图（Phase 3+ 不要提前做）
 
 | Phase | 内容 | 出口条件 |
