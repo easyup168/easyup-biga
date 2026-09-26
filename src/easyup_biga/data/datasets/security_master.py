@@ -43,6 +43,7 @@ from easyup_biga.data.contracts import (
     new_raw_artifact_id,
 )
 from easyup_biga.domain import now_cn
+from easyup_biga.providers.instrument_segments import a_share_segment
 from easyup_biga.providers.security_listing import (
     SecurityListing,
     SecurityMasterFetchResult,
@@ -188,30 +189,24 @@ def _symbol(value: Any) -> str:
 
 
 def _exchange_and_board(symbol: str, provider_market: Any) -> tuple[Exchange, SecurityBoard]:
-    # Beijing listings historically use 43/83/87/88 and the newer 92 prefix.
-    if symbol.startswith(("43", "83", "87", "88", "92")):
-        return Exchange.BSE, SecurityBoard.BSE
-    if symbol.startswith(("688", "689")):
-        return Exchange.SSE, SecurityBoard.STAR
-    if symbol.startswith(("600", "601", "603", "605")):
-        return Exchange.SSE, SecurityBoard.SSE_MAIN
-    # 🔴 `302` 是 2026-09-26 第一次拿真实名单跑时才补上的。
-    #    创业板早期只有 300/301，后来多出 302 段（换股吸收合并上市等）。
-    #    实测：全市场 5568 只里恰好 1 只（`302132 中航成飞`），成交活跃。
-    #    ⇒ 在此之前，**这个数据集的第一次真实同步必然整体失败** ——
-    #      主源走这条路也一样，只是它从没跑到过这一步。
-    if symbol.startswith(("300", "301", "302")):
-        return Exchange.SZSE, SecurityBoard.CHINEXT
-    if symbol.startswith(("000", "001", "002", "003")):
-        return Exchange.SZSE, SecurityBoard.SZSE_MAIN
+    """🔴 判据来自**唯一**那份号段表（`providers/instrument_segments.py`）。
 
-    # Provider market is a final diagnostic fallback, not the primary identity
-    # rule.  Unknown prefixes fail closed so funds/bonds are not silently mixed
-    # into the equity universe when the Provider filter changes.
-    market = str(provider_market).strip() if provider_market is not None else ""
-    raise ValueError(
-        f"unsupported stock-code prefix: symbol={symbol}, provider_market={market!r}"
-    )
+    这里曾经自己写一遍，而同样的判断在日线那边还有两份 ——
+    2026-09-26 一起收口。逼出这次收口的是通达信盘后包：它按市场分文件，
+    同一份数据里 **840 个代码在两个市场都存在**（`000001` 既是上证指数
+    也是平安银行）。
+
+    ⚠️ 认不出**仍然 fail closed**（抛 `ValueError`），不返回默认值 ——
+    这是 universe 的入口，混进基金/债券不会报错，只会让全市场筛选多出
+    一堆不该有的标的。
+    """
+    segment = a_share_segment(symbol, market=provider_market)
+    if segment is None:
+        market = str(provider_market).strip() if provider_market is not None else ""
+        raise ValueError(
+            f"unsupported stock-code prefix: symbol={symbol}, provider_market={market!r}"
+        )
+    return Exchange(segment.exchange), SecurityBoard(segment.board)
 
 
 def _list_date(value: Any) -> str | None:

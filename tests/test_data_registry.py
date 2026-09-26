@@ -357,7 +357,16 @@ def test_provider_for_source按登记求交集而不是取前缀():
 def test_provider绑定的顺序是确定的():
     """🔴 降级链的顺序**只在这里**被保证 —— `provider_chain()` 只做过滤。
 
-    契约：PRIMARY → 按 id 排序的 FALLBACK → 按 id 排序的 VALIDATOR。
+    契约：PRIMARY → **按声明顺序**的 FALLBACK → 按 id 排序的 VALIDATOR。
+
+    🔴 FALLBACK 那半在 2026-09-26 从「按 id 排」改成「按声明顺序」。
+    元组本身已经确定，排序买不到额外确定性，却吃掉了声明里的优先级信息。
+    真实场景：日线有两个备用源，一个快且能补历史、一个当时正在故障，
+    按 id 排会让故障那个每次先白等三次重试。
+
+    ⚠️ VALIDATOR 仍按 id 排 —— 那里顺序**没有含义**（校验源是全部都要问的）。
+    在没有含义的地方排序让输出稳定；在有含义的地方排序是把含义丢掉。
+
     用合成定义测三个角色都有的情形（真实注册表里今天没有这种 dataset，
     而「今天碰巧没有」不该让这条契约无人看守）。
     """
@@ -370,6 +379,10 @@ def test_provider绑定的顺序是确定的():
         # 🔴 **三个**不是两个：两个元素时 `sorted` 与 `reversed` 对
         #    ("z","a") 给出同一个结果 ⇒ 把排序换成逆序的破坏会变成恒等操作，
         #    探针照样绿。夹具本身要让「顺序错了」表现得出来。
+        #
+        # 🔴 而且这三个**故意不是已排序的**：若写成 ("a_fb","m_fb","z_fb")，
+        #    「按声明顺序」与「按 id 排」会给出同一个结果 ⇒ 这条测试
+        #    分不出它们，等于没测。
         fallback_providers=("m_fb", "z_fb", "a_fb"),
         validation_providers=("z_val", "a_val"),
         partition_keys=("d",), storage_policy="s", quality_policy="q",
@@ -384,9 +397,10 @@ def test_provider绑定的顺序是确定的():
 
     assert [(b.provider_id, b.role) for b in got] == [
         ("p_primary", ProviderRole.PRIMARY),
-        ("a_fb", ProviderRole.FALLBACK),
+        # 声明顺序，不是字母序
         ("m_fb", ProviderRole.FALLBACK),
         ("z_fb", ProviderRole.FALLBACK),
+        ("a_fb", ProviderRole.FALLBACK),
         ("a_val", ProviderRole.VALIDATOR),
         ("z_val", ProviderRole.VALIDATOR),
     ]

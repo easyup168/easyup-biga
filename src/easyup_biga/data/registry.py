@@ -114,7 +114,16 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         #    ⚠️ 两者口径**不等价**（自报总数 / 成交量单位 / 停牌股是否返回），
         #      差异写在 `providers/sina_eod.py` 的模块头里，不当等价替换。
         primary_provider="sina_eod",
-        fallback_providers=("eastmoney_eod",),
+        # 🔴 顺序有讲究：
+        #    1. 新浪 —— 收盘即可取，最快（12 页 / 28 秒）
+        #    2. 通达信盘后包 —— **第三个风控面**，且是唯一能按指定交易日
+        #       取的源（⇒ 补历史）。代价是它「收盘后数小时」才发布，
+        #       17:30 的定时器可能赶不上 ⇒ 排在新浪之后
+        #    3. 东财 —— 与 push2 同组，2026-09-26 起整组故障
+        #
+        #    ⚠️ 2026-09-26 用 09-24 的数据逐只对拍过新浪与盘后包：
+        #      5556 只的收盘价与开盘价**零处不一致**。
+        fallback_providers=("tdx_daily_package", "eastmoney_eod"),
         validation_providers=(),
         # 一天一个分区。修订（盘后更正）走同分区的新 data_version，
         # 不改写已经落盘的那份 —— 物理路径里带 data_version=N。

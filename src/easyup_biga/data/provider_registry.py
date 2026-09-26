@@ -66,6 +66,12 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina_calendar",),
     ),
     ProviderDefinition(
+        provider_id="tdx_daily_package",
+        title="通达信官网盘后包 —— cn.equity.daily_bars 的 FALLBACK；唯一能按指定交易日补历史",
+        source_prefix="tdx",
+        modules=("easyup_biga.providers.tdx_daily_package",),
+    ),
+    ProviderDefinition(
         provider_id="sina_eod",
         title="新浪全市场日线 —— cn.equity.daily_bars 的 PRIMARY（2026-09-26 与东财对调）",
         source_prefix="sina",
@@ -259,7 +265,22 @@ def bindings_for_dataset(dataset_id: str) -> tuple["DatasetProviderBinding", ...
     清单走、而 `role_of()` 按另一份答题，两者各自自洽。
     ⇒ 这里只从唯一手写处（`registry.DATASETS`）算出来。
 
-    顺序是确定性的：PRIMARY → FALLBACK（按 id 排）→ VALIDATOR（按 id 排）。
+    顺序：PRIMARY → FALLBACK（**按声明顺序**）→ VALIDATOR（按 id 排）。
+
+    🔴 **FALLBACK 从「按 id 排」改成「按声明顺序」（2026-09-26）。**
+
+    原来两者都按 id 排，理由是「确定性」。但元组本身已经是确定的 ——
+    排序买不到额外的确定性，却**吃掉了声明里的信息**：
+    `fallback_providers` 是个**有序元组**，写的人自然会按优先级排，
+    而它被静默重排了。那是「看起来能控制某件事、实际不能」的配置。
+
+    逼出这次改动的是一个真实场景：`cn.equity.daily_bars` 有两个备用源，
+    一个快（盘后包，且是唯一能补历史的），一个慢且当时正在故障（东财）。
+    按 id 排 ⇒ 故障那个排在前面，每次都要先白等它三次重试。
+
+    ⚠️ **VALIDATOR 仍然按 id 排**，因为那里顺序**没有含义** ——
+    校验源是全部都要问的，不存在「先问谁」。在没有含义的地方保留排序，
+    是为了让输出稳定；在有含义的地方保留排序，是把含义丢掉。
     """
     from .contracts import DatasetProviderBinding, ProviderRole
     ds = DATASET_REGISTRY.get(dataset_id)
@@ -267,7 +288,7 @@ def bindings_for_dataset(dataset_id: str) -> tuple["DatasetProviderBinding", ...
         raise KeyError(f"未注册的数据集 {dataset_id!r}")
     out = [DatasetProviderBinding(dataset_id, ds.primary_provider, ProviderRole.PRIMARY)]
     out += [DatasetProviderBinding(dataset_id, pid, ProviderRole.FALLBACK)
-            for pid in sorted(ds.fallback_providers)]
+            for pid in ds.fallback_providers]
     out += [DatasetProviderBinding(dataset_id, pid, ProviderRole.VALIDATOR)
             for pid in sorted(ds.validation_providers)]
     return tuple(out)

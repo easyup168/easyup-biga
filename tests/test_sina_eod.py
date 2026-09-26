@@ -52,8 +52,10 @@ def test_日线主源是新浪备用是东财():
 
     assert PROVIDER_ID == "sina_eod"
     assert FALLBACK_PROVIDER_ID == "eastmoney_eod"
+    # 🔴 备用源按**声明顺序**：盘后包在东财之前。
+    #    盘后包是第三个风控面、且是唯一能补历史的；东财与 push2 同组。
     assert [p for p, _ in provider_chain("cn.equity.daily_bars")] == [
-        "sina_eod", "eastmoney_eod"]
+        "sina_eod", "tdx_daily_package", "eastmoney_eod"]
 
 
 # ── 解析层 ─────────────────────────────────────────────────────────────────

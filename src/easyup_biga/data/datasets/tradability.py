@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from easyup_biga.data.contracts import DataIssue, DatasetStatus
+from easyup_biga.providers.instrument_segments import a_share_segment
 
 from ..records import TradabilityRecord, TradabilityStatus
 from ..publication import DatasetRowPublisher, PublishResult
@@ -14,15 +15,17 @@ JOB_ID = "tradability-sync"
 
 
 def _provider_iid(row: Any) -> str | None:
-    raw = getattr(row, "symbol", None)
-    if raw in (None, "", "-"):
+    """🔴 判据来自**唯一**那份号段表，不在这里再抄一遍。
+
+    这里曾经和 `eod_daily_bars._inst` 逐字相同 —— 那不是「两处各有理由」，
+    是同一份抄了两遍。
+    """
+    segment = a_share_segment(getattr(row, "symbol", None),
+                              market=getattr(row, "market_hint", None))
+    if segment is None:
         return None
-    code = str(raw).zfill(6)
-    if code.startswith(("43", "83", "87", "88", "92")):
-        return code + ".BJ"
-    if code.startswith(("6", "68")):
-        return code + ".SH"
-    return code + ".SZ"
+    suffix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}[segment.exchange]
+    return f"{str(row.symbol).strip().zfill(6)}.{suffix}"
 
 
 def _has_trade_price(row: Any) -> bool:

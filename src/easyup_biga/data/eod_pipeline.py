@@ -83,13 +83,28 @@ def run_eod_bundle(
     if fetcher is not None:
         fetched, served_by, attempts = fetcher(), eod_daily_bars.PROVIDER_ID, ()
     else:
-        fetched, served_by, attempts = eod_daily_bars.fetch_with_fallback()
+        fetched, served_by, attempts = eod_daily_bars.fetch_with_fallback(trade_date)
     _verify_eod_date(trade_date, fetched, db_path=db_path)
-    universe = security_universe_at(fetched.retrieved_at, path=db_path)
+    # 🔴 universe 按**交易日**解析，不按取回时刻。
+    #
+    #    这两者在当日跑时几乎一样，**补历史时天差地别**：盘后包能取到
+    #    2023-01-03 的日线，而那次取回发生在今天 ⇒ 用 `retrieved_at` 会把
+    #    2023 年的行情配上**今天的**在册名单。那是 point-in-time 的静默违反：
+    #    不会报错，只会让回测里出现一批当时还没上市的票（幸存者偏差）。
+    #
+    #    改成交易日当日 23:59:59 之后，补历史会**fail closed** ——
+    #    因为我们没有那天的 Security Master 快照，而我们本来就
+    #    「只宣称从第一次成功同步那天起」（见 datasets/security_master.py 模块头）。
+    #    那是诚实的红，不是坏掉的守卫。
+    universe_cutoff = (
+        f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T23:59:59+08:00")
+    universe = security_universe_at(universe_cutoff, path=db_path)
     if not universe:
         raise RuntimeError(
             "P3 EOD bundle requires a COMPLETE Security Master snapshot visible at "
-            f"{fetched.retrieved_at}; run security-master-sync first"
+            f"{universe_cutoff}; run security-master-sync first"
+            "（补历史时这条几乎必然触发：我们没有那天的名单快照 —— "
+            "那是诚实的 fail-closed，不是缺陷）"
         )
 
     bars = eod_daily_bars.normalize(
