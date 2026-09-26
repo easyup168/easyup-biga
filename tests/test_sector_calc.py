@@ -158,7 +158,16 @@ class TestGuards:
         assert "sh000001" in src and "fetch_index_daily" in src
 
     def test_板块榜无日期必须发警告(self, wired):
-        assert any("不返回交易日字段" in w for w in build().warnings)
+        """无日期端点**必须**发一条说明 as_of 从哪来的警告。
+
+        ⏩ 2026-09-26：原断言钉的是文案「不返回交易日字段」，而那句话描述的
+        行为（as_of 按**指数日线的交易日**推断）已经不存在 ——
+        现在由 `as_of_for_undated_snapshot()` 按**日历**三态判。
+
+        🔴 断言改成钉**意图**：必须有一条警告提到 `as_of`。
+           钉文案会在每次措辞微调时红一次，而那种红不含信息。
+        """
+        assert any("as_of" in w for w in build().warnings), build().warnings
 
     def test_领涨股缺失只是警告不是缺失(self, wired):
         wired["industry"] = result("industry", [board("无领涨", 3.0, leader=None),

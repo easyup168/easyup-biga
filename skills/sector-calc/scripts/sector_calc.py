@@ -76,6 +76,8 @@ from _data import (  # noqa: E402
     IndexDaily,
     SourceError,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
+    latest_trading_day,
     fetch_boards,
     fetch_index_daily,
     source_prefix_of,
@@ -326,14 +328,32 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
+    #
+    #    ⏩ **2026-09-26 再更正：只用「取回时刻」也不对，它是同一个错的另一半。**
+    #
+    #    周六 18:11 实测：这个端点给的其实是 **09-24 收盘**的 1120/4305/137
+    #    （它自己不会说），而 as_of 标成 09-26 18:11 ——
+    #    **一个上周四的数，挂着周六的时间戳。**
+    #    后果不是难看：risk 因此判「上游报告了不同的交易日，不能当作同一天的
+    #    事实一起审」，整张卡降级成 WAIT —— 而那个「不一致」是我们自己标的。
+    #
+    #    ⇒ 判据搬到 `tradetime.as_of_for_undated_snapshot()`（三态、靠日历），
+    #      market 与 sector **共用同一份**（各写一份就是 L-3）。
+    _live_as_of, _live_warn = as_of_for_undated_snapshot(
+        retrieved_at=retrieved,
+        latest_trade_date=latest_trading_day(
+            retrieved.strftime("%Y%m%d")))
+    if _live_warn:
+        c.warnings.append(_live_warn)
+
     def add_live(field: str, value: Any, label: str, source: str, *,
             kind: str | None, inputs: tuple[str, ...] = (),
             origins: tuple = ()) -> None:
-        """实时快照类证据：as_of = 取回时刻。"""
+        """不带日期的快照类证据。**as_of 由日历三态判出**，见上面那段。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
-            as_of=retrieved, retrieved_at=retrieved,
+            as_of=_live_as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=raw_hash_for(source),
             evidence_set_id=es_id_for(source),
@@ -352,10 +372,11 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
         add("trade_date", trade_date, "交易日", f"sina:kline/{_DATE_SYMBOL}",
             kind="observed")
 
-        if c.boards:
-            c.warnings.append(
-                "板块榜不返回交易日字段，其 as_of 是按指数日线的交易日推断的")
-
+        # ⏩ 这里原本有一条 `if c.boards:` 只为发一句警告：
+        #    「板块榜不返回交易日字段，其 as_of 是按指数日线的交易日推断的」。
+        #    2026-09-26 起 as_of 由 `as_of_for_undated_snapshot()` 按**日历**判，
+        #    那句话描述的是一个已经不存在的行为 ⇒ 连同空壳 if 一起删掉。
+        #    （警告由那个函数自己发，三态各说各的话。）
         counts: dict[str, int] = {}
         for kind, label, tag in (("industry", "行业", "industry"),
                                  ("concept", "概念", "concept")):

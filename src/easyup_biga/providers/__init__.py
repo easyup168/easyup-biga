@@ -55,6 +55,7 @@ from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import (
     MARKET_CLOSE,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
     market_is_open,
     session_in_progress,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "SourceError",
     "TradingCalendar",
     "as_of_for_trade_date",
+    "as_of_for_undated_snapshot",
     "fetch_boards",
     "fetch_breadth",
     "fetch_index_daily",

@@ -87,6 +87,8 @@ from _data import (  # noqa: E402
     IndexQuote,
     SourceError,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
+    latest_trading_day,
     fetch_breadth,
     fetch_index_daily,
     fetch_index_quote,
@@ -422,14 +424,32 @@ def build_fact_bundle(
     #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
+    #
+    #    ⏩ **2026-09-26 再更正：只用「取回时刻」也不对，它是同一个错的另一半。**
+    #
+    #    周六 18:11 实测：这个端点给的其实是 **09-24 收盘**的 1120/4305/137
+    #    （它自己不会说），而 as_of 标成 09-26 18:11 ——
+    #    **一个上周四的数，挂着周六的时间戳。**
+    #    后果不是难看：risk 因此判「上游报告了不同的交易日，不能当作同一天的
+    #    事实一起审」，整张卡降级成 WAIT —— 而那个「不一致」是我们自己标的。
+    #
+    #    ⇒ 判据搬到 `tradetime.as_of_for_undated_snapshot()`（三态、靠日历），
+    #      market 与 sector **共用同一份**（各写一份就是 L-3）。
+    _live_as_of, _live_warn = as_of_for_undated_snapshot(
+        retrieved_at=retrieved,
+        latest_trade_date=latest_trading_day(
+            retrieved.strftime("%Y%m%d")))
+    if _live_warn:
+        c.warnings.append(_live_warn)
+
     def add_live(field: str, value: Any, label: str, source: str, *,
             kind: str | None, inputs: tuple[str, ...] = (),
             origins: tuple = ()) -> None:
-        """实时快照类证据：as_of = 取回时刻。`kind` 同 `add`，无默认值。"""
+        """不带日期的快照类证据。**as_of 由日历三态判出**，见上面那段。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
-            as_of=retrieved, retrieved_at=retrieved,
+            as_of=_live_as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
             evidence_set_id=_es_id_for(source),
@@ -555,8 +575,6 @@ def build_fact_bundle(
         if c.breadth:
             b = c.breadth
             bsrc = c.breadth_source
-            c.warnings.append(
-                "涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的")
             add_live("advance_count", b.advance, "上涨家数", bsrc, kind="observed")
             add_live("decline_count", b.decline, "下跌家数", bsrc, kind="observed")
             add_live("flat_count", b.flat, "平盘家数", bsrc, kind="observed")

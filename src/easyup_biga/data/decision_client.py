@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping
 
 from easyup_biga.domain import now_cn
 from easyup_biga.persistence import (
+    latest_trading_day,
     link_evidence_set_dataset,
     load_dataset_partition,
     load_dataset_snapshot,
@@ -29,6 +30,7 @@ from easyup_biga.providers import (
     INDEX_PCT_LIMIT,
     IndexDaily,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
     fetch_index_daily as _fetch_index_daily,
     implausible_bars,
     market_is_open,
@@ -99,6 +101,11 @@ __all__ = [
     "PoolResult",
     "NewsFeed",
     "as_of_for_trade_date",
+    # 🔴 不带日期的端点（涨跌家数 / 板块榜）算 as_of 的**唯一**判据。
+    #    market 与 sector 共用 —— 各写一份就是 L-3，而那份差异
+    #    的表现是「两个 agent 报了不同的交易日」，不报错。
+    "as_of_for_undated_snapshot",
+    "latest_trading_day",
     # 🔴 消费 skill 要靠它把 Evidence 的 source 写成**实际供数方**。
     #    ⚠️ 走 `_data` 这层薄壳导出，而不是让 skill 直接 import
     #      `data.provider_registry` —— specialist 不许碰 provider 模块

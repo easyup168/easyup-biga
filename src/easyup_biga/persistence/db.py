@@ -1823,6 +1823,42 @@ def save_trading_calendar(
     return len(rows)
 
 
+def latest_trading_day(
+    on_or_before: str, *, path: pathlib.Path | str | None = None
+) -> str | None:
+    """`on_or_before`（含）之前最近的一个交易日（``YYYYMMDD``）。
+
+    用途：**不带日期的实时端点**（涨跌家数、板块榜）在非交易日返回的其实是
+    上一个交易日的收盘值，而它自己不会说。调用方要把 `as_of` 对齐到那一天，
+    否则卡面上会出现「一个上周四的数，挂着周六的时间戳」。
+
+    Returns:
+        `None` = **日历没覆盖到**（还没抓、或超出已抓范围）——
+        与 `is_trading_day` 同一个约定：`None` ≠ 「没有交易日」（R-3）。
+        调用方必须自己决定回退，不许把它当成某个具体日期。
+
+    ⚠️ 只在**已抓到的日历范围内**回溯，不做任何推算。
+       「往前找到第一个非周末」那种推算会在长假里给出错误答案，
+       而错误答案和正确答案长得一模一样。
+    """
+    if len(on_or_before) != 8 or not on_or_before.isdigit():
+        raise ValueError(f"日期必须是 YYYYMMDD，收到 {on_or_before!r}")
+    try:
+        with connect(path, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT trade_date FROM fact_trading_calendar "
+                "WHERE trade_date <= ? AND is_open = 1 "
+                "ORDER BY trade_date DESC, retrieved_at DESC LIMIT 1",
+                (on_or_before,),
+            ).fetchone()
+    except Exception:
+        # 库/表不存在 ⇒ 视作「没覆盖到」，与 is_trading_day 同一个处理。
+        return None
+    if row is None:
+        return None
+    return str(row["trade_date"])
+
+
 def is_trading_day(
     trade_date: str, *, path: pathlib.Path | str | None = None
 ) -> bool | None:

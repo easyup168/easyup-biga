@@ -43,8 +43,8 @@ from datetime import date, datetime, time as dtime
 #    删掉的那行**，不需要判断。留着它只会留下一条指向已不存在的机制的注释。
 from easyup_biga.domain import CN_TZ
 
-__all__ = ["MARKET_CLOSE", "as_of_for_trade_date", "market_is_open",
-           "session_in_progress"]
+__all__ = ["MARKET_CLOSE", "as_of_for_trade_date", "as_of_for_undated_snapshot",
+           "market_is_open", "session_in_progress"]
 
 #: A 股收盘时刻。收盘后，当日数据描述的是「全天结果」。
 MARKET_CLOSE = dtime(15, 0, 0)
@@ -149,6 +149,67 @@ def as_of_for_trade_date(
         f"{trade_date} 尚未收盘（现在 {retrieved_at:%H:%M}），"
         "这是**盘中快照**而不是全天结果"
     )
+
+
+def as_of_for_undated_snapshot(
+    *,
+    retrieved_at: datetime,
+    latest_trade_date: str | None,
+) -> tuple[datetime, str | None]:
+    """**不带日期的实时端点**（涨跌家数、板块榜）这份数据真正描述的时刻。
+
+    为什么不能直接用「取回时刻」，也不能直接用「日线的交易日」
+    ---------------------------------------------------------
+    两个方向都踩过：
+
+    1. **用日线的交易日** —— F4 实测（`BIGA-20260921-017`，周一 12:41 午休）：
+       涨跌家数取回的是**今天此刻**的 4385/1100/145，而日线还停在上周五
+       ⇒ 卡面写着 `as_of 09-18 15:00`。**一个今天的数，挂着上周五的时间戳。**
+
+    2. **用取回时刻** —— 2026-09-26 周六实测：这个端点返回的其实是
+       **09-24 收盘**的 1120/4305/137（它自己不会说），而 `as_of` 标成
+       `09-26 18:11`。**一个上周四的数，挂着周六的时间戳。**
+       后果是 risk 判「上游报告了不同的交易日，不能当作同一天的事实一起审」，
+       整张卡降级成 WAIT —— 而那个「不一致」是我们自己标出来的。
+
+    > 两次都不是取错了数，是**给对的数配了错的时刻**。而它不报错。
+
+    判据（三态，靠日历不靠推算）
+    ----------------------------
+    ====================  ================================  ==================
+    此刻                   端点给的是什么                      `as_of`
+    ====================  ================================  ==================
+    交易日 & 收盘前         今天的盘中快照（午休也算）           取回时刻 + 盘中警告
+    交易日 & 收盘后         今天的收盘                         今天 15:00
+    **非交易日**            **最近交易日的收盘**（不再变化）      **那天 15:00** + 警告
+    ====================  ================================  ==================
+
+    Args:
+        retrieved_at: 取回这份数据的时刻（带时区）。
+        latest_trade_date: 最近一个交易日（``YYYYMMDD``），由
+            `persistence.latest_trading_day` 查日历得到。
+            **`None` = 日历没覆盖到** ⇒ 退回取回时刻并如实说出来（R-3）。
+
+    Returns:
+        ``(as_of, warning)``。`warning` 非空时调用方**必须**放进 warnings。
+    """
+    if latest_trade_date is None:
+        # 🔴 不推算。「往前找第一个非周末」在长假里会给出错误答案，
+        #    而错误答案和正确答案长得一模一样。
+        return retrieved_at, (
+            "交易日历没覆盖到今天 ⇒ 无法判断这份快照属于哪个交易日，"
+            "as_of 退回取回时刻。**非交易日时它会偏晚**"
+        )
+
+    as_of, warning = as_of_for_trade_date(
+        latest_trade_date, retrieved_at=retrieved_at)
+    today = retrieved_at.astimezone(CN_TZ).strftime("%Y%m%d")
+    if latest_trade_date < today:
+        return as_of, (
+            f"今天（{today}）不是交易日 ⇒ 这份不带日期的快照是 "
+            f"{latest_trade_date} 的收盘值，as_of 已对齐到那天"
+        )
+    return as_of, warning
 
 
 def session_in_progress(trade_date: str, *, retrieved_at: datetime) -> bool:
