@@ -179,3 +179,45 @@ def test_整条血缘走通_raw到证据集(tmp_path):
         DatasetLink(esid, run.dataset_id, snapshot.snapshot_id), path=db
     )
     assert list_evidence_set_datasets(esid, path=db)[0]["snapshot_id"] == snapshot.snapshot_id
+
+
+# ── L-3：账本流程只有一份实现 ──────────────────────────────────────────────
+def test_只有一处走完整的账本流程():
+    """🔴 `DataRun → RawArtifact → Partition → Quality → Snapshot` 只能有一份实现。
+
+    两份实现意味着给状态机加一个格子、或改幂等判据，要改两处 ——
+    而**漏改是静默的**：一个数据集用新规则发布、另一个用旧的，两边都不报错，
+    直到某天有人对着两个数据集问「为什么它俩的修订行为不一样」。
+
+    实测踩过两次：
+    · 外部 P3-4 的 `Phase3Publisher` 与既有服务逐项相同地各走一遍（2026-09-26 合并时消除）
+    · `datasets/security_master.py` 自己又走了**第三遍**（同日消除）——
+      它是我自己上一轮合进来的，当轮没看出来。
+      **L-3 最容易在 grep 共同调用时现形，不是在读 diff 时。**
+
+    判据是 AST：谁**真的调用**了那两个只该由发布服务调的写入函数。
+    不用字符串扫描 —— docstring 与注释里提到它们是正常的（本文件就提了）。
+    """
+    import ast
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    OWNER = "src/easyup_biga/data/snapshots.py"
+    LEDGER_ONLY = {"save_dataset_snapshot", "save_dataset_partition", "save_quality_report"}
+    offenders: list[str] = []
+    for path in sorted((repo / "src").rglob("*.py")) + sorted((repo / "skills").rglob("*.py")):
+        rel = str(path.relative_to(repo))
+        if rel == OWNER or rel.startswith("src/easyup_biga/persistence/"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (node.func.id if isinstance(node.func, ast.Name)
+                    else getattr(node.func, "attr", None))
+            if name in LEDGER_ONLY:
+                offenders.append(f"{rel}:{node.lineno} 调用了 {name}()")
+    assert not offenders, (
+        "账本写入只该由 `data/snapshots.py::DatasetSnapshotService` 做，这些地方自己走了一遍：\n"
+        + "".join(f"  · {o}\n" for o in offenders)
+        + "  要发布数据就调那个服务；它写不进你要的物理落点 ⇒ 给它传 `materialize` 回调。")

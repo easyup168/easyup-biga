@@ -1619,14 +1619,11 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
       探针：在账本写入前抛异常，`lake/` 下不许多出目录。
       ⚠️ `query_eod_as_of` 走控制面，不受影响 —— 这是它存在的理由之一。
 
-- [ ] **① `security_master` 的账本收口** —— `src/easyup_biga/data/datasets/security_master.py`
-      里还有**第三处**账本流程（它在流程中段直接写 `fact_security_master` 行）。
-      **验收**：`DatasetSnapshotService` 加一个 `materialize` 回调，三处账本流程收敛成一处；
-      探针：把回调删掉，`tests/test_security_master.py` 必须红。
-      **为什么排第一**：范围最小、不碰生产决策路径，且它是 L-3 的活实例 ——
-      留着它，后面每加一个 dataset 都会有人照着它再抄一遍。
-      ⚠️ 它是**我自己上一轮合进来的**，当轮没看出来。
-      **L-3 最容易在 grep 共同调用时现形，不是在读 diff 时。**
+- [x] **① `security_master` 的账本收口**（2026-09-26 完成）
+      给 `DatasetSnapshotService.publish()` 加 `materialize` 回调，三处账本流程收敛成一处。
+      新增 AST 守卫 `test_只有一处走完整的账本流程` 钉住它；探针 4/4 验证能真的红。
+      顺带：修订线性不变量收进服务（跳号被拒）、取数失败也留 run、
+      质量不过时 fact 表不登记分区。
 
 - [ ] **② P3-6：五条 direct feed 迁进 Dataset 层** —— 重写 6 个 skill + `orchestrator.py`。
       **验收**：设计自己的规矩 —— 「旧行为回归全绿 + 新红灯测试全绿」，**逐个里程碑收**，
