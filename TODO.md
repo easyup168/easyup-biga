@@ -1716,7 +1716,10 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 | # | 事项 | 卡在什么上 | 解除条件 |
 |---|---|---|---|
-| E-1 | **Phase 3 上线验收** | 连续 5 个交易日 EOD（9/28、9/29、9/30、10/8、10/9，跨国庆）+ 四项演练。**P3-R2 之后演练变成可跑的了**：`bin/biga-data drill-*` 读真实痕迹，手工记 PASS 已被堵死 | 真跑。定时器已装（`eod-daily-bars-biga.timer`），需要连续 5 天开机 |
+| E-1 | **Phase 3 上线验收** | 连续 5 个交易日 EOD（9/28、9/29、9/30、10/8、10/9，跨国庆）+ 演练 **3/6**（2026-09-26 跑通 `SOURCE_ZIP_REPLAY`）| 真跑。定时器已装（`eod-daily-bars-biga.timer`），需要连续 5 天开机 |
+| E-1a | `PRIMARY_FALLBACK` 演练 | 🔴 **在这台机器上结构上拿不到**：全注册表只有 `cn.trading_calendar` 有 fallback，而它的 primary（`sina_calendar`）在本机**是好的**、fallback（`szse`）**连不通**（WSL 到深交所站点，TCP 握手后挂死）。主源失败那一半永远不出现 | 需要一个决定：给某个 primary 会真失败的 dataset 配备用源（今天 eastmoney 三个盘中 dataset 的 `fallback_providers` 全是空的），或者换一个连得通深交所的运行环境 |
+| E-1b | `QUARANTINED` 演练 | 需要一次**终态落在 QUARANTINED** 的 run。今天 eastmoney 502 给出的是 `FAILED`，不是 QUARANTINED；而 QUARANTINED 要的是「源之间对不上」或「质量裁定不通过」| 需要一个决定：照 `RAW_TAMPER` 的先例**主动制造**（它是六项里唯一被允许制造证据的，理由是那种条件在生产里不会自然发生），还是继续等一次真实的源冲突 |
+| E-1c | `REVISION_V2` 演练 | 需要一个 `data_version ≥ 2` 的真实分区。唯一合适的载体是 `cn.equity.daily_bars`（按 `trade_date` 分区），而它一条数据都还没有 —— 卡在 E-4 | 随 E-1 的五天 EOD 一起做：某一天跑完后用 `--new-revision` 再发一版 |
 | E-2 | ~~P3-6/P3-7 的**行为**验收~~ | ✅ **2026-09-26 11:10 已解除** —— 飞书触发的 `BIGA-20260926-001` 跑通（COMPLETED，132s），realtime_quote 与 news.flash 真的冻进了 EvidenceSet。**并当场暴露一个离线测不出的缺陷**（冻结失败不留痕，见 CHANGELOG）| — |
 | E-2b | P3-6 在**provider 正常**时的行为 | 这次三个 eastmoney 全挂 ⇒ 走的全是降级分支，**正常路径一次都没被真机跑过** | 等 eastmoney 不限流时再触发一次 |
 | E-2c | 冻结进关键路径后的延迟 | P3-6 把冻结挪到 Stage 1 之前 ⇒ provider 重试时间直接进关键路径。这次 82s / 总 132s（预算 180s）| 攒第二次真机数据再判是否要给冻结加超时 |
@@ -1768,6 +1771,21 @@ P3-4…P3-7 在**我们的契约上**补齐，Phase 3 Code Gate 变 PASS。
 
 > 🔴 **「代码有了」和「可以合了」和「验收过了」是三件事。**
 > 这三件在这几个包上恰好分别卡住，很容易被读成同一件。
+
+### ✅ `SOURCE_ZIP_REPLAY` —— 六项演练里第一项真跑过的（2026-09-26）
+
+用的是真实决策 `BIGA-20260926-001` 的 EvidenceSet：导出成包 → 摊回一棵干净的树 →
+在**那棵树上**跑 `drill-replay`。记进账本之前先证明它会红（改一个字节 / 删掉文件
+都红，还原后绿）。
+
+🔴 **它此前卡住的原因不是「难」，是缺那几步操作的工具** ——
+判据三个月前就写好了，而「把字节打包、摊回去、站对工作目录」每次都要重新想一遍。
+⇒ `tools/verify/source_bundle.py`。
+
+顺带撞出两处：
+1. `biga-data --db <值> <子命令>` 一直报「未知子命令 \<值\>」—— 而 `--db` 正是
+   把 CLI 指向恢复树的唯一方式
+2. 恢复树上用 `bin/biga-data` 跑回放会**假绿**（那个壳 `cd` 回仓库根，读的是原树）
 
 ### 🆕 `easyup-biga-p3-r2-runtime-reconciliation-delta-20260926` —— 已合（v0.9.0）
 

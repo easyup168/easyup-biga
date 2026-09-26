@@ -70,16 +70,28 @@ USAGE = """用法：
   加 --json 输出机器可读格式（list / providers）"""
 
 
-def build_parser() -> tuple[argparse.ArgumentParser, frozenset[str]]:
-    """返回 parser **与它认识的子命令名**。
+#: 顶层（子命令**之前**）的带值选项：`(标志, 默认值)`。
+#:
+#: 🔴 这份表**就是**注册到 parser 上的那一份，不是抄件。
+#:    `main()` 判「哪个词是子命令」时要跳过这些标志的**值**，
+#:    而一旦两处各写一份，漏改的那次不会报错 —— 只会把某个值
+#:    当成子命令名，报出一句指向完全错误方向的「未知子命令」。
+_GLOBAL_VALUE_OPTIONS: tuple[tuple[str, Any], ...] = (
+    ("--db", None),
+    ("--data-root", "data"),
+)
 
-    两个一起返回，是为了让 `main()` 不用去翻 argparse 的私有属性拿 choices，
+
+def build_parser() -> tuple[argparse.ArgumentParser, frozenset[str], frozenset[str]]:
+    """返回 parser、**它认识的子命令名**、以及**顶层带值选项**。
+
+    三个一起返回，是为了让 `main()` 不用去翻 argparse 的私有属性拿 choices，
     也不用另维护一份子命令清单 —— 那份清单漏更新时，新子命令会被自己的
     「未知子命令」分支挡掉，而 parser 明明认识它。
     """
     parser = argparse.ArgumentParser(prog="biga-data", add_help=True)
-    parser.add_argument("--db", default=None)
-    parser.add_argument("--data-root", default="data")
+    for _flag, _default in _GLOBAL_VALUE_OPTIONS:
+        parser.add_argument(_flag, default=_default)
     parser.add_argument("--json", action="store_true", help="list / providers 输出 JSON")
     sub = parser.add_subparsers(dest="cmd", required=True)
     names: list[str] = []
@@ -159,7 +171,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, frozenset[str]]:
     item.add_argument("--ledger", default="data/phase3_acceptance.jsonl")
     item.add_argument("--repo", default=".")
     item.add_argument("--write-marker")
-    return parser, frozenset(names)
+    return parser, frozenset(names), frozenset(flag for flag, _ in _GLOBAL_VALUE_OPTIONS)
 
 
 # ── 注册表两条：保持 heredoc 时代的输出格式 ────────────────────────────────
@@ -414,13 +426,40 @@ def _dispatch(args: argparse.Namespace) -> Any:
     raise AssertionError(cmd)
 
 
+def _positional_tokens(argv: list[str], value_flags: frozenset[str]) -> list[str]:
+    """挑出真正的位置参数 —— 跳过顶层带值选项的**值**。
+
+    🔴 「不以 `-` 开头」不等于「是位置参数」。
+    `--db data/biga.db snapshots ...` 里 `data/biga.db` 不以 `-` 开头，
+    于是旧实现把它当成子命令，报 `未知子命令 'data/biga.db'` ——
+    一句把人引向完全错误方向的错误信息（读起来像是子命令拼错了，
+    实际上子命令是对的、只是它前面有个带值的全局标志）。
+
+    ⚠️ 只需要跳**顶层**的：这里只用 `positional[0]`，而子命令自己的
+    带值标志（`--ledger` / `--trade-date` …）一定出现在子命令**之后**。
+    """
+    out: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in value_flags:      # `--db=path` 这种写法自带值，不用跳
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        out.append(token)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    parser, known = build_parser()
+    parser, known, value_flags = build_parser()
     # 🔴 未知子命令自己拦，不交给 argparse：P10b 钉的是「未知子命令」这个措辞
     #    与非零退出码。argparse 的默认文案是英文的 invalid choice，
     #    换成它等于悄悄改掉一条被测过的对外行为。
-    positional = [a for a in argv if not a.startswith("-")]
+    positional = _positional_tokens(argv, value_flags)
     if positional and positional[0] not in known:
         print(f"未知子命令 {positional[0]!r}\n\n{USAGE}", file=sys.stderr)
         return 1

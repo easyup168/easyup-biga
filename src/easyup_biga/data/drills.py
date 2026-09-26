@@ -136,16 +136,35 @@ def source_zip_replay_drill(
 
     ⚠️ 解压 / 拷库 / 拷数据面那几步是**操作**，不在这里；
     这个函数是操作做完之后的那道判据。
+
+    🔴 `detail` 里记 `cwd` 与 `db_path`，因为**这两个值才决定读的是哪棵树**。
+    分区的 `storage_uri` 是相对路径（`data/lake/...`），由
+    `FileStore.verify_file_hash` 按 `Path(uri)` 解析 —— 也就是相对**进程的
+    工作目录**，与 `data_root` 无关（`FileStore.root` 只用于写）。
+
+    于是「库指着恢复树、工作目录却在仓库根」会读到**原树**的字节并报 PASS。
+    实测过（2026-09-26）：把恢复树里的一个 Parquet 删掉，
+    经 `bin/biga-data`（它启动时 `cd` 回仓库根）跑出来仍然是 `passed=True`。
+    那个 PASS 与恢复这件事毫无关系。
+
+    ⚠️ 这里**不自动判定**两者算不算「同一棵树」—— 目录布局不止一种，
+    猜错会把合法调用判红。记下来，让账本能回答「当初读的是哪棵树」。
     """
     try:
         bundle = offline_replay_bundle(evidence_set_id, path=path, data_root=data_root)
     except Exception as exc:
-        return DrillResult(False, "SOURCE_ZIP_REPLAY", {"error": str(exc)})
+        return DrillResult(False, "SOURCE_ZIP_REPLAY", {
+            "error": str(exc),
+            "cwd": str(Path.cwd()),
+            "db_path": str(Path(path).resolve()) if path else None,
+        })
     return DrillResult(
         True,
         "SOURCE_ZIP_REPLAY",
         {
             "evidence_set_id": evidence_set_id,
+            "cwd": str(Path.cwd()),
+            "db_path": str(Path(path).resolve()) if path else None,
             "manifest_version": bundle.manifest_version,
             "dataset_snapshot_ids": {
                 key: value.snapshot_id for key, value in sorted(bundle.datasets.items())
