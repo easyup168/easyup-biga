@@ -59,10 +59,14 @@ from .contracts import DatasetLink, DatasetStatus
 from .failover import ProviderExecutionAttempt, execute_with_fallback
 from .file_store import FileStore
 from .datasets import emotion_close
+from easyup_biga.providers.sina_boards import (
+    fetch_boards as _sina_fetch_boards,
+)
 from easyup_biga.providers.sina_breadth import (
     fetch_breadth as _sina_fetch_breadth,
 )
 from .publication import DatasetRowPublisher, PublishResult
+from .provider_registry import source_prefix_of
 from .registry import get_dataset
 from .snapshot_resolver import resolve_evidence_set_snapshot
 
@@ -81,6 +85,11 @@ __all__ = [
     "PoolResult",
     "NewsFeed",
     "as_of_for_trade_date",
+    # 🔴 消费 skill 要靠它把 Evidence 的 source 写成**实际供数方**。
+    #    ⚠️ 走 `_data` 这层薄壳导出，而不是让 skill 直接 import
+    #      `data.provider_registry` —— specialist 不许碰 provider 模块
+    #      （P3-6 的边界，由 AST 判据钉着）。
+    "source_prefix_of",
     "implausible_bars",
     "market_is_open",
     "session_in_progress",
@@ -107,6 +116,13 @@ class FrozenDataset:
     snapshot_id: str
     raw_hash: str | None
     rows: tuple[dict[str, Any], ...]
+    #: 🔴 **实际供数方**（不是 dataset 的 primary）。
+    #:
+    #: 没有它，消费 skill 只能把 source 写死成主源的字面量
+    #: （`sector-calc` 里就写着 `f"em:clist/{kind}"`）。于是降级过的那天，
+    #: **Evidence 的 source 会说谎** —— 数据来自新浪，溯源指着东财。
+    #: 那比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+    provider_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,7 +337,22 @@ class DecisionDataClient:
                     for a in attempts),
             )
         if dataset_id == "cn.sector.board_snapshot":
-            results = [_fetch_boards("industry"), _fetch_boards("concept")]
+            # 🔴 走降级链。同机另一套长期运行的实例把新浪放**主源**、东财放备胎，
+            #    理由写着「东财部分环境被拒」—— 我们 2026-09-26 撞上的正是被拒。
+            #    本仓库暂时保持东财为主（口径更全：含主力净流入与涨跌家数），
+            #    但不再是唯一一条路。
+            attempts: list[ProviderExecutionAttempt] = []
+            outcome = execute_with_fallback(
+                dataset_id,
+                {
+                    "eastmoney": lambda: [_fetch_boards("industry"),
+                                          _fetch_boards("concept")],
+                    "sina_boards": lambda: [_sina_fetch_boards("industry"),
+                                            _sina_fetch_boards("concept")],
+                },
+                on_attempt=attempts.append,
+            )
+            results = outcome.value
             rows = []
             for result in results:
                 for b in result.boards:
@@ -338,9 +369,12 @@ class DecisionDataClient:
             raw_text = _json({r.kind: r.raw_text or _json(r.raw) for r in results})
             return self.publisher.publish(
                 dataset_id=dataset_id, job_id="decision-freeze-sector-boards",
-                provider_id="eastmoney", partition_key=key, raw_text=raw_text,
+                provider_id=outcome.provider_id, partition_key=key, raw_text=raw_text,
                 rows=rows, as_of=now_cn().isoformat(),
                 quality_metrics={"row_count": len(rows), "trade_date": trade_date},
+                failover_attempts=tuple(
+                    (a.provider_id, a.role.value, a.succeeded, a.error)
+                    for a in attempts),
             )
         if dataset_id == "cn.market.limit_pool":
             pools = [_fetch_pool(name, trade_date) for name in
@@ -429,7 +463,9 @@ class DecisionDataClient:
                 # DatasetRowPublisher stores sha256(raw_text) here.  That is the same
                 # raw_hash convention used by Phase 2 Evidence.
                 raw_hash = str(raw["request_fingerprint"])
-        return FrozenDataset(dataset_id, resolved.snapshot_id, raw_hash, rows)
+        return FrozenDataset(
+            dataset_id, resolved.snapshot_id, raw_hash, rows,
+            provider_id=(str(part["provider_id"]) if part.get("provider_id") else None))
 
     def read_index_quote(self, evidence_set_id: str) -> tuple[dict[str, IndexQuote], str | None]:
         frozen = self._frozen(evidence_set_id, "cn.index.realtime_quote")
@@ -455,7 +491,14 @@ class DecisionDataClient:
         )
         return result, frozen.raw_hash
 
-    def read_boards(self, evidence_set_id: str, kind: str) -> tuple[BoardResult, str | None]:
+    def read_boards(
+        self, evidence_set_id: str, kind: str
+    ) -> tuple[BoardResult, str | None, str | None]:
+        """返回 `(板块快照, raw_hash, **实际供数方**)`。
+
+        ⚠️ 第三项是 2026-09-26 加的。在那之前消费方只能把 source 写死成
+        主源字面量，于是降级过的那天 Evidence 的 source 指着一个没供过数的源。
+        """
         frozen = self._frozen(evidence_set_id, "cn.sector.board_snapshot")
         rows = [r for r in frozen.rows if str(r["kind"]) == kind]
         boards = [Board(
@@ -467,7 +510,8 @@ class DecisionDataClient:
         ) for r in rows]
         if not boards:
             raise SourceError(f"cn.sector.board_snapshot 没有 kind={kind}")
-        return BoardResult(kind, len(boards), boards, raw={}, raw_text=None), frozen.raw_hash
+        return (BoardResult(kind, len(boards), boards, raw={}, raw_text=None),
+                frozen.raw_hash, frozen.provider_id)
 
     def read_pool(self, evidence_set_id: str, pool: str) -> tuple[PoolResult, str | None]:
         frozen = self._frozen(evidence_set_id, "cn.market.limit_pool")

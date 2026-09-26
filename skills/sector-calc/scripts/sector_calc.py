@@ -78,6 +78,7 @@ from _data import (  # noqa: E402
     as_of_for_trade_date,
     fetch_boards,
     fetch_index_daily,
+    source_prefix_of,
 )
 from _store import (  # noqa: E402
     init_schema,
@@ -114,6 +115,23 @@ def _brief(b) -> dict[str, Any]:
             "leader": b.leader}
 
 
+def _board_source(kind: str, provider_id: str | None) -> str:
+    """板块 Evidence 的 `source` —— 按**实际供数方**拼，不写死主源。
+
+    🔴 这里曾经是 `f"em:clist/{kind}"` 的字面量。板块有了备用源之后，
+    降级过的那天 Evidence 会指着一个**没供过数的源** ——
+    那比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+
+    ⚠️ 前缀从注册表来（`source_prefix_of`），不在这里自己拼 ——
+    `sina` / `sina_boards` 的前缀都是 `sina`，猜不得。
+    `provider_id is None` = 没走数据层的直连路径，那条路只有东财。
+    """
+    if provider_id is None:
+        return f"em:clist/{kind}"
+    prefix = source_prefix_of(provider_id)
+    return f"{prefix}:clist/{kind}" if prefix == "em" else f"{prefix}:bankuai/{kind}"
+
+
 class Collector:
     def __init__(self, break_source: set[str], store: bool,
                  evidence_set_id: str | None = None):
@@ -125,6 +143,8 @@ class Collector:
         self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
         self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.boards: dict[str, BoardResult] = {}
+        #: kind → **实际供数方**（降级时与 dataset 的 primary 不同）。
+        self.board_provider: dict[str, str | None] = {}
         self.daily: IndexDaily | None = None
         self.missing: list[MissingItem] = []
         self.warnings: list[str] = []
@@ -158,10 +178,12 @@ class Collector:
             return
         try:
             if self._data is not None:
-                r, frozen_hash = self._data.read_boards(self.evidence_set_id, kind)
+                r, frozen_hash, served_by = self._data.read_boards(
+                    self.evidence_set_id, kind)
             else:
                 r = fetch_boards(kind)
                 frozen_hash = None
+                served_by = None
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                            "sector.board.unavailable"))
@@ -186,7 +208,8 @@ class Collector:
 
         with self._lock:
             self.boards[kind] = r
-        source = f"em:clist/{kind}"
+            self.board_provider[kind] = served_by
+        source = _board_source(kind, served_by)
         if self._data is not None:
             with self._lock:
                 if frozen_hash:
@@ -313,7 +336,10 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
             r = c.boards.get(kind)
             if r is None:
                 continue
-            src = f"em:clist/{kind}"
+            # 🔴 source 必须写**实际供数方**。写死 `em:` 会让降级过的那天
+            #    Evidence 指着一个没供过数的源 —— 那比缺字段更糟：
+            #    缺字段会进 missing[]，说谎不会。
+            src = _board_source(kind, c.board_provider.get(kind))
             ranked = sorted(r.boards, key=lambda b: b.pct, reverse=True)
             counts[tag] = len(ranked)
             add_live(f"{tag}_top", [_brief(b) for b in ranked[:TOP_N]],

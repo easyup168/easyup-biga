@@ -223,7 +223,11 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         title="决策时点行业/概念板块快照",
         schema_version=1,
         primary_provider="eastmoney",
-        fallback_providers=(), validation_providers=(),
+        # 🔴 备用源**少两个字段**（主力净流入、板块内涨跌家数），
+        #    而消费方 `sector-calc` 已经为此写好了一条 missing：
+        #    「接口未给该字段，排名不成立」（外部评审 F6 逼出来的）。
+        #    ⇒ 降级会被**看见**，不会被吞掉。差异见适配器模块头。
+        fallback_providers=("sina_boards",), validation_providers=(),
         partition_keys=("evidence_set_id",), storage_policy="parquet_evidence_bundle",
         quality_policy="cn-sector-board-v1", raw_table="raw_artifacts",
         consumers=("easyup_biga.data.decision_client:DecisionDataClient",),

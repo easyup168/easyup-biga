@@ -66,6 +66,12 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina_calendar",),
     ),
     ProviderDefinition(
+        provider_id="sina_boards",
+        title="新浪板块排行 —— cn.sector.board_snapshot 的 FALLBACK；无主力净流入与涨跌家数",
+        source_prefix="sina",
+        modules=("easyup_biga.providers.sina_boards",),
+    ),
+    ProviderDefinition(
         provider_id="sina_breadth",
         title="新浪涨跌家数 —— cn.market.breadth 的 FALLBACK；从全市场快照自算，含北交所",
         source_prefix="sina",
@@ -234,6 +240,24 @@ def provider_for_source(dataset_id: str, source: str) -> str:
             f"  前缀不是 provider_id：sina 与 sina_calendar 都写 'sina:'，"
             f"所以要按「本 dataset 登记了谁」求交集，不能直接取前缀。")
     return hits[0]
+
+
+def source_prefix_of(provider_id: str) -> str:
+    """provider_id → raw 层 `source` 的**站点前缀**（`provider_for_source` 的反向）。
+
+    ⚠️ 不是一一对应：`sina` / `sina_calendar` / `sina_eod` 的前缀都是 `sina`。
+    所以这个方向是**确定的**（一个 provider 只属于一个站点），
+    而反过来不是（一个站点有多个适配器）—— 那才需要按 dataset 求交集。
+
+    🔴 有了它，消费 skill 才能把 Evidence 的 `source` 写成**实际供数方**。
+    在这之前它们只能写死主源的字面量，于是降级过的那天 source 会说谎。
+    """
+    try:
+        return PROVIDER_REGISTRY[provider_id].source_prefix
+    except KeyError:
+        raise ProviderNotRegistered(
+            f"未注册的 provider_id {provider_id!r} —— "
+            "source 前缀必须来自注册表，不能由调用方自己拼") from None
 
 
 def role_of(dataset_id: str, provider_id: str) -> "ProviderRole":
