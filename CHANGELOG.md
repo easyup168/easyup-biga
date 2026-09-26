@@ -13,6 +13,90 @@
 
 ---
 
+## [未发布]
+
+### 新增 · Phase 3 代码面闸门第一次退 0 —— 合并 P4-G0 增量包（P3-4…P3-7 收口）
+
+外部交付 `easyup-biga-p4-g0-phase3-closed-delta`。与前三个包不同的是：
+**它的基线是本仓库自己**（v0.6.0），用的是**我们的**契约
+（`consumers=` / `primary_provider=`），registry 的 docstring 是我们的原文，
+还引用了本轮写的 `tests/test_phase3_gate.py` 与 `tools/verify/phase3_acceptance.py`。
+
+⇒ 它不是「另一套实现」，是**接着我们往下写的那一段**。
+
+#### 合法：三方合并，不手工拼
+
+23 个文件、5 个与本轮改动重叠 ⇒ 在 v0.6.0 上落 delta，再 `git merge phase3`，
+让 git 做调和。**只产生 1 个冲突**，其余自动合上。
+
+#### 🔴 自动合并产生了重复，而守卫当场抓到
+
+`cn.equity.daily_bars` 被定义了**两次**（我的 + 他们的），
+`eastmoney_eod` 与 `eastmoney-eod` 两个 provider 并存。
+
+`test_dataset_registry_is_single_source` —— P3-0 立的那条
+「手写元组与派生 dict 的**长度差**才是重复留下的唯一痕迹」——
+报 `13 == 12` 当场拦下。
+
+> 那条守卫当初是探针逼出来的（第一版断言打在 `dict.values()` 上，
+> 而 dict 推导已经把重复**静默吃掉了**）。今天它抓到的正是它设计来抓的东西。
+
+顺带统一 provider_id 为下划线（`derived_biga` / `csv_adjustment` / `eastmoney_eod`），
+与既有的 `sina_calendar` / `eastmoney_security_master` 同形。
+
+#### 唯一的冲突：不接受把守卫改成「互相印证」
+
+他们把「哪些 dataset 已激活」这条守卫从**显式手写清单**改成
+`set(DATASET_REGISTRY) == set(REQUIRED_DATASETS)`。
+
+> 🔴 那让两张表互相解释 —— 而这条守卫的全部价值在于它是**独立**的一份。
+> 派生之后，「注册表多了一个」与「闸门要求多了一个」会互相印证，
+> **没有任何一处还在逼人做那个明确的动作**。
+
+⇒ 保留显式清单，更新到 12 个，按里程碑分段注释。
+
+#### 评审改掉的两处
+
+1. 🔴 **`_code_checks` 用字符串扫描判「编排器按名册冻结」**：
+   `"required_datasets_for_agents" not in orch_text` —— 一句注释、一段 docstring、
+   甚至一条「TODO: 以后接上 `freeze_required()`」都能让它变绿。
+   守卫声称守的是行为，实际守的是「源码里出现过这两个词」。⇒ 换成 AST。
+   探针实测：把调用改成注释 + 别的函数名，**AST 版当场红**。
+2. **被删掉的 `test_缺的dataset按里程碑报而不是一坨id`** —— 理由是注册表齐了
+   之后它必然红。但那等于连同「红灯该长什么样」一起丢了，而红灯迟早会再出现。
+   ⇒ 用**合成缺口**保留它。写完发现它还级联触发了 P3-7
+   （`news` 的 `required_datasets` 指着 `cn.news.flash`）——
+   那条级联顺带证明了两个检查是**接上的**，一并断言。
+
+#### 迁移的两条测试：打桩点跟着边界走
+
+`test_market自检涨跌家数0_0_0` / `test_sector自检盘前板块榜无数据` 原本
+monkeypatch `market.fetch_breadth`。P3-6 之后给了 `evidence_set_id` 就读冻结快照
+⇒ **那个桩打不中任何东西了**。
+
+被测的判断本身没变（0/0/0 ⇒ `not_yet_formed`，判断在 skill 里），变的是数据从哪来。
+
+> 🔴 L-12「只替换最外层出网边界，不 mock 被测逻辑本身」——
+> P3-6 把那条边界从 skill 挪到了 Data 层，**桩跟着挪**，不是把测试删掉。
+
+#### 现在的状态
+
+```text
+python3 tools/verify/phase3_acceptance.py --code-only   →  退出码 0
+  ✅ Dataset Registry 齐了：12 个
+  ✅ P3-6 Specialist Provider 边界已收口：5 个
+  ✅ P3-7 Agent required_datasets 可解析：6 个
+  ✅ P3-7 AgentRegistry → freeze_required → SnapshotResolver 链路在位
+```
+
+⚠️ **代码面 ≠ 验收。** `live_ready` 仍是 False，发布闸门整体仍不放行 ——
+连续 5 个交易日 EOD、真实降级/隔离/修订演练一条都没有。
+P4-G0 自己的边界也写着「不包含 Live Acceptance 结果」。
+
+> 🔴 「代码有了」和「可以合了」和「验收过了」是三件事。这一轮关掉的是第二件。
+
+---
+
 ## [0.7.1] - 2026-09-26
 
 > 清掉评审余留的小欠账。三条**修的都是「报错形状」**：

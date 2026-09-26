@@ -1667,16 +1667,16 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
       `data/client.py` 按注册表链路取数；`bin/biga-calendar` 不再 import 任何 provider。
       `cn.trading_calendar` 声明很久的降级路径第一次真的存在；`failover` 有了生产消费方。
 
-- [ ] **②b P3-6b：五条盘中 direct feed 迁进 Dataset 层** —— 重写 5 个 skill + `orchestrator.py`。
-      🔴 **不能无人值守做完**，理由不是工作量是**验收方式**：开发流程第 6 条要求
-      端到端开新会话且等结算。它改的是**生产决策路径** —— 改坏了不报错，
-      只是某天 Card 上的数不对，而那只有真实跑一次才发现得了。
-      **验收**：每个 milestone「旧行为回归全绿 + 新红灯测试全绿」+ 一次真实端到端。
-      详见 `docs/design/phase-3-data-platform.md` §3.6。
+- [x] **②b P3-6b：五条盘中 direct feed 迁进 Dataset 层**（2026-09-26，合 P4-G0 增量包）
+      编排器在 Stage 1 之前按 `required_datasets_for_agents()` 冻结，specialist 经
+      `skills/_data`（薄壳 → `data.decision_client`）读冻结快照。
+      五个 skill 零直连采数模块（AST 判据）；`evidence_set_id is None` 的手工路径保留。
+      ⚠️ **代码面收口 ≠ 验收** —— 见下方 E-1。
 
-- [ ] **③ P3-7：`required_datasets` resolver** —— 依赖 ②b 完成。
-      它引用的 `cn.sector.board_snapshot` / `cn.news.flash` / `cn.market.limit_pool`
-      **在 ② 之前根本不存在** ⇒ 提前做等于引用不存在的 dataset id。
+- [x] **③ P3-7：`required_datasets` resolver**（2026-09-26，同上）
+      `domain/registry.py` 的 `AgentRegistry` 是 `required_datasets` 的唯一源；
+      闸门用 **AST** 判据核「编排器真的调用了 `required_datasets_for_agents` 与
+      `freeze_required`」—— 原交付用的是字符串扫描，注释里提一句就能骗过。
 
 ### ⬜ 余留（不阻塞，但别忘）
 
@@ -1700,9 +1700,9 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 | # | 事项 | 卡在什么上 | 解除条件 |
 |---|---|---|---|
-| E-1 | **P3-6b** 五条盘中 direct feed 迁进 Dataset 层 | 改**生产决策路径**，验收要真实端到端 | 开新会话跑一次真实出卡并等结算（开发流程第 6 条）|
-| E-2 | **P3-7** `required_datasets` resolver | 依赖 E-1 | 同上 |
-| E-3 | `cn.security.tradability` 进册 | **没有读取方**（契约：答不出谁读它就不该进册）| 筛选/复盘真的需要区分「停牌」与「数据缺失」那一刻 |
+| E-1 | **Phase 3 上线验收** | 代码面已闭环（闸门退 0），但连续 5 个交易日 EOD + 五项真实演练**一条都没有** | 真跑。P4-G0 自己的边界也写着「不包含 Live Acceptance 结果」|
+| E-2 | P3-6/P3-7 的**行为**验收 | 改了生产决策路径，离线回归全绿但没在真实出卡里跑过 | 开新会话跑一次真实出卡并等结算（开发流程第 6 条）|
+| E-3 | ~~`cn.security.tradability` 进册~~ | ✅ 已解除 —— P4-G0 给它写了真的读取方（`analytics:query_tradability`，解析快照 → 取分区 → 读 Parquet）| — |
 | E-4 | `cn.security_master` 上游探活 | 东财**整体限流**，三个 host 全 502 | 挑一个没被限流的时段重跑 `security_master_probe.py`（退出码 2=UNKNOWN 不是 1）|
 | E-5 | 批 C-II 的 P5：`cancel()` 同序映射 | 需要**真实运行时** N=5 + 至少一个 spawn 已离场 | 一次 Stage 1 部分启动失败的真实场景 |
 | E-6 | 解除 `.biga-card-stop` | **人的决定**，不自动做 | 你说解除 |
