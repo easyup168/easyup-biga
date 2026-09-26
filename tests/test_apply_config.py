@@ -100,3 +100,44 @@ class TestR2Guard:
     def test_P4_任意非biga名字都被拒(self):
         with pytest.raises(ac.R2Violation):
             ac.check_r2({"OPENCLAW_SYSTEMD_UNIT": "whatever.service"})
+
+
+class Test仓库外的skill根目录:
+    """🔴 有些 skill 带 API Key，而这个仓库是 Public 的。
+
+    它们不能放进 `workspace/skills/` —— 那是 git 跟踪的目录，push 即发布，
+    撤不回来。`skills.load.extraDirs` 是 OpenClaw 官方支持的机制，
+    所以这条路**不依赖软链、也不依赖任何人记得某条 `.gitignore` 规则**：
+    那个目录根本不在 git 的视野里，`git add` 够不着它。
+    """
+
+    def test_patch_里登记了仓库外的skill根目录(self):
+        import deploy.openclaw.apply_config as ac  # noqa: PLC0415
+
+        dirs = ac.render_patch()["skills"]["load"]["extraDirs"]
+        assert dirs == ["~/.openclaw-biga/local-skills"]
+
+    def test_路径必须在仓库之外(self):
+        """⚠️ 判据是「它解析出来不在仓库里」，不是「字符串里有没有 local-skills」。
+
+        写成后者的话，哪天有人把它改成 `workspace/local-skills`
+        （看起来很像、也确实叫这个名字）这条守卫照样绿 ——
+        而那一刻 API Key 就进了 Public 仓库的跟踪范围。
+        """
+        import pathlib  # noqa: PLC0415
+
+        import deploy.openclaw.apply_config as ac  # noqa: PLC0415
+
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        for raw in ac.render_patch()["skills"]["load"]["extraDirs"]:
+            resolved = pathlib.Path(raw).expanduser().resolve()
+            assert not resolved.is_relative_to(repo), (
+                f"{raw} 解析成 {resolved}，它在仓库里 —— "
+                "带密钥的 skill 会因此进入 git 跟踪范围")
+
+    def test_路径不写真实家目录(self):
+        """公开仓库纪律：用 `~`，不写真实家目录。"""
+        import deploy.openclaw.apply_config as ac  # noqa: PLC0415
+
+        for raw in ac.render_patch()["skills"]["load"]["extraDirs"]:
+            assert raw.startswith("~/"), raw

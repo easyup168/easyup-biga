@@ -60,6 +60,8 @@ from .registry import (
     STAGE1_AGENTS,
     STAGE2_AGENTS,
     AgentDefinition,
+    required_datasets_for,
+    required_datasets_for_agents,
 )
 from .verdict_ref import CONTRACT_VERSION, VerdictRef
 from .verdict import (
@@ -138,6 +140,8 @@ __all__ = [
     "RISK_AGENT",
     "SNAPSHOT_INDEX_AGENTS",
     "EXPECTED_ROSTER",
+    "required_datasets_for",
+    "required_datasets_for_agents",
     "SYNTHESIZER_AGENT",
     "STANCE_VOCAB",
     "VETO_STANCE",

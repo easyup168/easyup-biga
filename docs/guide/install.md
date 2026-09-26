@@ -390,3 +390,47 @@ systemctl --user show -p MainPID --value openclaw-gateway.service
 | BigA openclaw | 2026.9.5 (ec9c1a1) |
 | 生产 node | v24.18.0 |
 | 生产 openclaw | 2026.7.1-2 (0790d9f) |
+
+---
+
+## 运行时依赖：duckdb（Phase 3 P3-4 起）
+
+本仓库**曾经零运行时依赖**，从 P3-4（Parquet 历史数据面）起多了一个：
+
+```toml
+dependencies = ["duckdb>=1.0,<2"]
+```
+
+🔴 **它不是「pip install 一下」就完事的**，因为本仓库的生产执行模型是
+`bin/*` 直接用**系统 `python3`** + `sys.path` 挂载 —— 不装包、不进 venv。
+所以 duckdb 必须让**系统解释器**能 import 到。
+
+而较新的发行版（本机即是）把系统 Python 标成 PEP 668 *externally-managed*，
+`pip install duckdb` 与 `pip install --user duckdb` **都会被拒**。
+
+### 两条路，按你愿意付的代价选
+
+```bash
+# ① 最省事：装进系统 site-packages（与现有执行模型直接兼容）
+pip install --break-system-packages 'duckdb>=1.0,<2'
+
+# ② 干净但要改执行模型：建项目 venv，并把 bin/* 指向它的解释器
+python3 -m venv ~/.openclaw-biga/venv
+~/.openclaw-biga/venv/bin/pip install -e '.'
+#   ⚠️ 走这条就必须同时改 bin/biga-card / biga-calendar / biga-notify / biga-reap
+#      里的 `python3`，以及 systemd 单元的 ExecStart —— 那是一次独立的改造。
+```
+
+⚠️ `--break-system-packages` 这个名字是认真的：它确实往发行版管理的目录里写。
+duckdb 是自带二进制的独立 wheel、不依赖系统库，实践中风险低；
+但**如果这台机器还跑着别的要紧东西**，选 ②。
+
+### 验证
+
+```bash
+python3 -c "import duckdb; print(duckdb.__version__)"
+python3 -m pytest --run-installed tests/test_eod_pipeline.py -q
+```
+
+第二条会真的写一份 Parquet 再读回来 —— 那是 P3-4 唯一的**行为**判据。
+不跑它，「Parquet 能用」这件事就只有源码里的字符串支持着。

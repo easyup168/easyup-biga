@@ -417,7 +417,10 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
       而那正是前两次改预算时反复强调的必答问题。
 
 
-- [ ] 🔴 **换掉共享的 anthropic 凭据**（裁定 11 的退出条件，Phase 3 前必须做）
+- [ ] 🔴 **换掉共享的 anthropic 凭据**（裁定 11 的退出条件）
+      ⚠️ **原文写的是「Phase 3 前必须做」，而 Phase 3 已经做了大半** ——
+      2026-09-26 核对时发现的。这条没有被推翻，是**被漏过去了**；
+      写在这里免得下次核对又读成「还没到时候」
       当前 BigA 与邻居共享同一份凭据 ——
       **它失效时两套一起停，且排查方向天生指向 BigA（错的那边）**。
       触发条件任一成立即换：① 能够申请到独立凭据
@@ -898,21 +901,36 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `--run-id` 无关的副作用，`FactBundle` 的契约校验按设计正常拦截，未落库。）
         成本 $0.097（123 input / 200 output tokens）。批 J-I 至此没有未决项。
 
-### 🔶 孤儿告警分组显示（2026-09-23 回合二评审建议，未做）
+### ❌ 孤儿告警分组显示 —— 2026-09-26 核实后**不做**（判据在真实数据上不存在）
 
-`orphan_spawns()` 接上 `task_runs` 之后，信号里混进了刻意的验证/spike spawn
-（09-22 那 15 条全是 `只回复两个字：收到` / `取消测试` 这类）。它们**按定义
-确实是孤儿**（钱花了、没进卡），但会把生产那一条淹掉。
+建议是：孤儿里混进了验证/spike 的 spawn，**分组显示、不过滤**，
+按「生产会话是 `agent:main:orchestrator-<32 位裸 hex>`，spike 自己带标签」分。
+写完实现之后去真实数据上验，**前提不成立**：
 
-⇒ **分组显示，不要过滤**：生产会话是 `agent:main:orchestrator-<32 位裸 hex>`，
-spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` / `-capture-…`）。
-全库统计：裸 hex 2 个、带标签 12 个。区分是**按次的，不是按天的** ——
-不需要「验证日」这种新口径。约 5 行。
+| 查的东西 | 实测 |
+|---|---|
+| 孤儿行的 `child_session_key` | 是**子**会话 `agent:emotion:subagent:<uuid>`，每次都不同，分不出来源 |
+| 孤儿行的 `requester_session_key` | 是 **specialist 自己的**子会话（这些行是 skill 调用，不是 specialist spawn 本身） |
+| `parent_task_id` / `parent_flow_id` | 那批行上**全是 `None`**，链断了 |
+| 经 `subagent_runs` 往上接 | 全库覆盖 **18/57**；而**验证日 20260922 是 0/5** |
+| spike 标签本身 | `spike-p1`/`spike-cancel`/`capture`/`cap2`/`cancel`/`tn`/`osf`/`ostest`/`p2-l14` —— 人手起的，认不全 |
+| 09-21 的编排会话 | 是 `agent:main:card-171535` / `e2e-104025`，**不是裸 hex** —— 裸 hex 从 09-22 才出现 |
 
-🔴 为什么不过滤：过滤是个静音开关，而**验证日恰恰是最容易跑出真孤儿的那天**。
-分组不丢任何东西，只是让生产那一条浮出来。
-⚠️ 它依赖 spike 会话继续自觉带标签，是**约定不是强制** —— 所以更要分组而非过滤：
-约定失效时分组最多归错组（仍看得见），过滤则是直接消失。
+⇒ 第一版实现把 09-21 19:31:52 那批（docstring 里点名的**生产缺陷招牌例子**，
+L-11 身份晚于证据）归进了「非生产」。**分组因此是误导性的，比不分组更糟。**
+
+🔴 教训两条：
+
+1. **TODO 里写的统计与要分类的那批行不是同一个总体。**
+   「全库裸 hex 2 个、带标签 12 个」数的是**不同的编排会话**，
+   而要分类的是**孤儿行**，两者之间那条边正好是断的。
+2. 判据先挂在了约定上（人手起的 spike 标签），改成挂结构（机器生成的 hex）
+   之后仍然不成立 —— 因为**结构信号根本不在那些行上**。
+   > 判据要挂在结构上，不要挂在约定上；但先得确认**那个结构在被判的对象上存在**。
+
+⇒ 真要做，前提是运行时把「这次 spawn 属于哪次编排」记进 `task_runs`
+（今天 `parent_task_id` 为空）。那是运行时的事，不是本仓库能补的。
+在那之前**不分组** —— 一个大部分落在「判不出」的分组，看起来像信息，其实不是。
 
 ### 🔶 spawn 核验的两条余留（2026-09-23 评审，不阻塞）
 
@@ -922,22 +940,40 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
    agent 自己可控的文本里。今天打不中（扫了全库，「一行里出现 2 个以上决策号」
    **0 行**，交叉污染不存在），且批 J-II 的强绑定对新行已接管这条路径。
    哪天有个提示词引用了上一张卡的号，那行就会记到那张卡头上。
-2. **`tools/verify/budget_report.py --day 20260922` 会崩** —— `--day` 不是 flag
-   （位置参数）。与 spawn 核验无关，评审顺手撞到的。
+2. ✅ **`tools/verify/budget_report.py --day 20260922` 会崩** —— 2026-09-26 已修。
+   原来是 `argv[0]`，于是 `"--day"` 这个字符串被当成日期，一路走到 `strptime`
+   抛一屏调用栈。**那不是「参数写错了」的报错** —— 读的人看到的是
+   `_strptime.py` 的栈，第一反应会去查这个工具是不是坏了。
+   现在位置参数与 `--day` 都收，非法值当场指路（`tests/test_budget_report_args.py`）。
 
 ### 🔴 两条 enforce 欠账（都归「引入同 decision_id 重试」的那一批）
 
 两条的根因都在**分发提示词**，不在实现 —— 两批都严格照提示词做了。记在这里
 免得随 commit 沉下去。
 
-1. **`runtime_run_id` 的强绑定是 per-agent、按数据有无启用的**（批 J-II）。
-   `NULL` 今天的含义是「迁移前的老行」，等六个 agent 都走上新路径之后会悄悄
-   变成「也可能是漏填的新行」，而没有任何东西会注意到这个转变。
-   ⇒ 加 **per-decision 一致性检查**：同一个 decision 里只要有一行带
-   `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理（R-3，
-   不是退回弱判据）。
+1. ✅ **`runtime_run_id` 的强绑定是 per-agent、按数据有无启用的**（批 J-II）——
+   **2026-09-26 已加 per-decision 一致性检查。**
 
-2. 🔴 **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）。它是 Agent 从命令行
+   ⚠️ 落地时发现原设想需要修正：逐行判据**本来就已经 fail-closed**
+   （缺 `runtime_run_id` → `UNKNOWN/missing_runtime_run_id`），
+   所以要补的不是「判得更严」，是**把两种含义分开**——
+
+   | 形状 | 含义 | 该去查什么 |
+   |---|---|---|
+   | 整次 run 一行都没有 | 可能是迁移前的旧路径 | 这次 run 是怎么起的 |
+   | 有的有、有的没有 | 兄弟行证明走的是新路径 ⇒ **映射漏了这个 agent** | orchestrator 收集 `runtime_run_ids` 的地方 |
+
+   两种都仍然是 UNKNOWN（R-3）。**判据不变，指的路变了** ——
+   新原因码 `runtime_run_id_partially_missing`，附人话说明。
+   对照测试钉住「整次都没有时不许被新原因码盖掉」（否则等于丢掉旧诊断）。
+
+2. ✅ **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）—— **已在批 P1-1 修掉**
+   （2026-09-26 核实：`_assert_run_owns_decision()` 在同一写事务里断言
+   「run 在 `decision_runs` 里存在、且属于这个 decision」，与下面设想的修法
+   逐字一致；`save_card_with_notifications` / `save_evidence_set` 同样接了）。
+   原始分析保留如下作台账。
+
+   ~~🔴 **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）~~。它是 Agent 从命令行
    抄下来的字符串，直接进 INSERT —— 那条 INSERT 里其余每个字段都经过
    `FactBundle` 构造 + 规范序列化 + 严格重建，唯独它是挂在旁边的裸参数，
    **绕过了批 A-I 立的「写边界重校验」原则（A3）**。
@@ -1570,14 +1606,220 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 `3d9ce90` 已经把预算闸门接进 `bin/biga-card`（在第一个花钱的动作之前）。
 ⇒ 条件形式上满足，**但解除是人的决定，不自动做**。
 
-### 🔶 `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback
+### ✅ `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback（2026-09-26 已修）
 
-批 A-II 测试 F-4 时在沙盒里发现：`BEFORE=$(_sql "SELECT MAX(decision_id)...")`
-那一行用 `readonly=True` 打开一个还不存在的 `data/biga.db`，
-`connect()` 按设计会抛 `StoreNotInitialised`——但这里没接住，
-异常信息进了 stderr，`BEFORE` 拿到空字符串（恰好是语义正确的兜底值），
-**不影响功能**。真实机器上 `data/biga.db` 建库之后就不会再触发。
-不在这一批修（与 A1/A2/A5/A6/A7/A8/F-4 都无关）——留着当下一次顺手活。
+`connect(readonly=True)` 按设计会抛 `StoreNotInitialised`（读一个不存在的库
+该报错），但 `_sql()` 的调用点全是 `BEFORE=$(_sql "SELECT MAX(...)")` 这种
+取基线值的用法，空字符串本来就是语义正确的兜底。
+
+不接住的后果不是功能坏了，是**一屏 Python 调用栈进了 stderr** ——
+而那会让第一次跑这条命令的人以为出卡失败了。
+
+> 报错要指路。**一个不影响结果的异常打出完整调用栈，指的是错的路。**
+
+⇒ 只咽 `StoreNotInitialised`，不咽别的（库存在但 SQL 写错了要照样炸，
+由探针钉住）。判据是**跑一遍看 stderr**，不是「源码里有没有 try」
+（`tests/test_cli_error_shapes.py`）。
+
+---
+
+## Phase 3 · 数据平台地基（当前阶段，分支 `phase3`）
+
+设计 SSOT：[`docs/design/phase-3-data-platform.md`](docs/design/phase-3-data-platform.md)（含 14 条适配裁定）。
+
+### 已落地（`phase3` 分支）
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| P3-0 | ✅ | 契约 + Dataset/Provider Registry（`src/easyup_biga/data/`）|
+| P3-1 | ✅ | schema v23–v26 元数据地基，与外部实现包**合并**而非覆盖 |
+| P3-2 | ✅ | 已在生产的 index_daily 冻结接进通用血缘 |
+| P3-3 | ✅ | Security Master（schema v27）—— 链路建成，**上游仍未探活成功** |
+| P3-4 / P3-5 | 🔶 | 部分落地：Parquet 面 + EOD 管线 + 四个 dataset。Parquet 已有行为判据 |
+| P3-6 / P3-7 | ⬜ | **未合**，见下 |
+
+### ⬜ 下一轮的顺序（2026-09-26 定）
+
+🔴 **按这个顺序做，理由是风险递增、且后一件依赖前一件。**
+
+- [x] **⓪ 把 P3-4/P3-5 的 dataset 注册进 `data/registry.py`**（2026-09-26 完成）
+      结论与原设想不同：四个里**只有 `cn.equity.daily_bars` 够格**。
+      `DatasetDefinition` 的判据是「答得出谁读它吗」，另外三个答不出 ——
+      `tradability` 算出来当场用掉（日线覆盖率的分母）、`adjustment_factors`
+      与 `emotion_close` 连写入方都没人调。**它们不是漏注册，是真的还没有读取方。**
+      进册后第一条端到端测试挖出修订功能一次都没成功过（见 CHANGELOG）。
+
+- [x] **⓪-b 可交易性进册**（2026-09-26 完成，两个条件都满足了）
+      触发条件早在 P4-G0 就满足了（`analytics:query_tradability` 是真读取方），
+      但**第二个条件一直没做**：raw 必须指向同一份 provider 响应。
+      2026-09-26 补上 —— 发布请求新增 `upstream_artifact_ids`，
+      分区的 `raw_artifact_id` 直接指向日线那一条。
+
+      🔴 旧实现是 `raw = json.dumps([item.to_dict() for item in records])` ——
+      **把自己的输出重新序列化当 raw**。于是 `content_sha256` 是对输出算的，
+      回放去校验它，校验的是「我写下的等于我写下的」。
+      而日线走的是真响应：**同一次取数，两个数据集两套口径**。
+
+      ⚠️ 修法不是「复制上游的字节到自己名下」——那样那份 raw 的 `provider_id`
+      会写成 `derived_biga`，读的人会以为这个 provider 返回过这些东西。
+      **引用，不复制。**
+
+      顺带发现 `cn.market.emotion_close` 是同一个毛病，而且更明显：
+      喂给它的那个 dict 是 `decision_client` 自己从股池算出来的计数
+      （`up.total` / `broken.total / denom` / `max(streaks)`）——
+      raw 存的是我们的中间结果。一并改成引用股池那条血缘。
+
+- [x] **⓪-c Parquet 两阶段提交**（2026-09-26 完成）
+      暂存区在 `lake/` 之外，落 lake 交给 `materialize` 回调。
+      🔴 发现 `materialize` 的位置对两类存储是**相反**的：`fact_*` 只经快照
+      ⇒ 快照最后写；Parquet lake 还有扫盘这条路 ⇒ 文件最后写。
+      不变量是「最后写的那一样，必须是它不在就整体不可见的那一样」。
+      探针 4/4。
+
+- [x] **① `security_master` 的账本收口**（2026-09-26 完成）
+      给 `DatasetSnapshotService.publish()` 加 `materialize` 回调，三处账本流程收敛成一处。
+      新增 AST 守卫 `test_只有一处走完整的账本流程` 钉住它；探针 4/4 验证能真的红。
+      顺带：修订线性不变量收进服务（跳号被拒）、取数失败也留 run、
+      质量不过时 fact 表不登记分区。
+
+- [x] **②a P3-6a：provider 选择进数据层**（2026-09-26 完成）
+      `data/client.py` 按注册表链路取数；`bin/biga-calendar` 不再 import 任何 provider。
+      `cn.trading_calendar` 声明很久的降级路径第一次真的存在；`failover` 有了生产消费方。
+
+- [x] **②b P3-6b：五条盘中 direct feed 迁进 Dataset 层**（2026-09-26，合 P4-G0 增量包）
+      编排器在 Stage 1 之前按 `required_datasets_for_agents()` 冻结，specialist 经
+      `skills/_data`（薄壳 → `data.decision_client`）读冻结快照。
+      五个 skill 零直连采数模块（AST 判据）；`evidence_set_id is None` 的手工路径保留。
+      ⚠️ **代码面收口 ≠ 验收** —— 见下方 E-1。
+
+- [x] **③ P3-7：`required_datasets` resolver**（2026-09-26，同上）
+      `domain/registry.py` 的 `AgentRegistry` 是 `required_datasets` 的唯一源；
+      闸门用 **AST** 判据核「编排器真的调用了 `required_datasets_for_agents` 与
+      `freeze_required`」—— 原交付用的是字符串扫描，注释里提一句就能骗过。
+
+- [x] **④ P3-R2：Runtime Reconciliation**（2026-09-26，合外部评审增量包）
+      新增 `data/producers.py`（12 个 ACTIVE dataset 各自声明谁在生产它）
+      + `tools/verify/phase3_runtime.py`（三态闸门）；四项演练从「手工记账」
+      改成「读真实痕迹」，并堵死 `record_acceptance_event()` 手工写 PASS 这条路。
+      所有分析读取改走控制面 ⇒ 崩溃遗留的孤儿 Parquet 对任何读取路径都不可见；
+      两阶段提交顺序因此翻转（文件先、快照后）。
+
+      🔴 **合并方法记一笔**：交付方自报 `93 passed`、两道闸门 exit 0。
+      跑**全量回归**多出 4 条红的，其中第 4 条是那道新闸门自己的 L-13 ——
+      它比的是自己那份 provider id 抄件，而运行时用的是 dataset 模块里的常量。
+      改坏常量 ⇒ `emotion_close.run()` 必抛，而闸门全程报绿。
+      修法不是加第四份清单，是扫模块自报的 `(DATASET_ID, PROVIDER_ID)` 配对。
+
+      > 外部交付的验证口径是「我跑的那些测试」，不是「这棵树的全部测试」。
+      > **合包的第一件事是全量回归，不是读 diff。**
+
+### ⬜ 余留（不阻塞，但别忘）
+
+- [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`
+      **2026-09-26 再试一次：三个 host 仍全部 502**，退出码 2（UNKNOWN）不是 1。
+      东财整体限流时连已知可用的端点也 502 ⇒ 这是「没验成」不是「不可用」。
+      挑一个没被限流的时候再跑。过了就删掉 provider title 与 `data/quality.py`
+      的 `not_checked` 里那两处「尚未探活成功」的说明。
+
+- [x] deploy / CLI 面三件（2026-09-26 完成）
+      `deploy/openclaw/eod-daily-bars-biga.{service,timer}` + `install_eod_timer.py`，
+      与既有两个定时器同构。外部实现包那份三处都不对：路径不存在、写 `python`、
+      单元名是 `biga-` **前缀**而非 `-biga` 后缀（守卫根本不认它 —— 比报红更糟）。
+
+---
+
+## ⏸ 卡在外部条件的事项（登记台账，2026-09-26）
+
+🔴 **这里每一条都不是「没写代码」，是「写了也验不了」。**
+分开登记是因为它们的**解除条件各不相同**，混在待办里会让人误以为是排期问题。
+
+| # | 事项 | 卡在什么上 | 解除条件 |
+|---|---|---|---|
+| E-1 | **Phase 3 上线验收** | 连续 5 个交易日 EOD（9/28、9/29、9/30、10/8、10/9，跨国庆）+ 演练 **3/6**（2026-09-26 跑通 `SOURCE_ZIP_REPLAY`）| 真跑。定时器已装（`eod-daily-bars-biga.timer`），需要连续 5 天开机 |
+| ~~E-1a~~ | ~~`PRIMARY_FALLBACK` 演练~~ | ✅ **2026-09-26 已解除**，而且是**真实故障**换来的、不是制造的：`push2*.eastmoney.com` 整组 502 ⇒ 给 `cn.security_master` 配了真跑通过的备用源 `sina_security_master` ⇒ 同一次 run 里留下 `PRIMARY FAILED_RETRYABLE + FALLBACK SUCCEEDED` | — |
+| E-1b | `QUARANTINED` 演练 | 需要一次**终态落在 QUARANTINED** 的 run。今天 eastmoney 502 给出的是 `FAILED`，不是 QUARANTINED；而 QUARANTINED 要的是「源之间对不上」或「质量裁定不通过」| 需要一个决定：照 `RAW_TAMPER` 的先例**主动制造**（它是六项里唯一被允许制造证据的，理由是那种条件在生产里不会自然发生），还是继续等一次真实的源冲突 |
+| E-1c | `REVISION_V2` 演练 | 需要一个 `data_version ≥ 2` 的真实分区。唯一合适的载体是 `cn.equity.daily_bars`（按 `trade_date` 分区），而它一条数据都还没有 —— 卡在 E-4 | 随 E-1 的五天 EOD 一起做：某一天跑完后用 `--new-revision` 再发一版 |
+| E-2 | ~~P3-6/P3-7 的**行为**验收~~ | ✅ **2026-09-26 11:10 已解除** —— 飞书触发的 `BIGA-20260926-001` 跑通（COMPLETED，132s），realtime_quote 与 news.flash 真的冻进了 EvidenceSet。**并当场暴露一个离线测不出的缺陷**（冻结失败不留痕，见 CHANGELOG）| — |
+| E-2b | P3-6 在**provider 正常**时的行为 | 这次三个 eastmoney 全挂 ⇒ 走的全是降级分支，**正常路径一次都没被真机跑过** | 等 eastmoney 不限流时再触发一次 |
+| E-2c | 冻结进关键路径后的延迟 | P3-6 把冻结挪到 Stage 1 之前 ⇒ provider 重试时间直接进关键路径。这次 82s / 总 132s（预算 180s）| 攒第二次真机数据再判是否要给冻结加超时 |
+| E-3 | ~~`cn.security.tradability` 进册~~ | ✅ 已解除 —— P4-G0 给它写了真的读取方（`analytics:query_tradability`，解析快照 → 取分区 → 读 Parquet）| — |
+| E-4 | `cn.security_master` 上游探活 | 🔴 **诊断更正**：不是「东财整体限流」，是 `push2*` 这一组 host 的上游故障 —— 同一时刻 `push2ex`/`push2his`/`datacenter-web` 全 200。数据集本身已不再被它阻塞（走备用源同步成功，5568 只）| 主源恢复即自动回到 PRIMARY；`security_master_probe.py` 仍是判据 |
+| E-4b | 🔴 **`cn.equity.daily_bars` 取数用的是同一组挂掉的 host** | `eastmoney_eod` 的 `_HOSTS` 是 `82.push2` / `push2`，实测同样全失败 ⇒ **周一 17:30 的 EOD 定时器会在取数这一步失败**（security_master 已经不再是瓶颈）| 要么等 push2 恢复，要么给日线也配备用源（新浪同一个 `hs_a` 节点给 open/high/low/trade/volume/amount，形状对得上）|
+| E-5 | 批 C-II 的 P5：`cancel()` 同序映射 | 需要**真实运行时** N=5 + 至少一个 spawn 已离场 | 一次 Stage 1 部分启动失败的真实场景 |
+| E-6 | 解除 `.biga-card-stop` | **人的决定**，不自动做 | 你说解除 |
+| E-7 | ⓪-c 残留：Parquet 崩在写文件与进账本之间 | 需要 staging→commit 的两阶段**再往前挪一层** | 已大幅收窄（见 v0.7.0），剩余窗口是一条语句宽；真要归零得改 `write_parquet_rows` 的 API |
+
+### 🔴 关于「外部提供的 P3 代码有没有实现这些」—— 核实结论
+
+**E-1 / E-2 的代码是有的，我此前的说法不准确，这里更正。**
+
+`biga-phase3-p3-0-p3-17-code-complete` 包里：
+- `registry.py` 有 **12 个** dataset（那 5 条 direct feed 走 `_decision_snapshot()`
+  工厂传**位置参数** —— 我第一次用 `grep 'dataset_id="..."'` 数漏了）
+- `domain/registry.py` 有 per-agent 的 `required_datasets`（P3-7）
+- 5 个 skill 都 import 了 `easyup_biga.data.client.DecisionDataClient`
+- `orchestrator.py` 接了 `DecisionDataBridge`
+
+⚠️ **但它建在它自己那套 `DatasetDefinition` 上** —— 有 `freshness_policy` /
+`point_in_time`，**没有 `consumers`**。合它 = 把契约换回他们那版，连带丢掉：
+
+| 丢掉什么 | 本轮哪件事靠它 |
+|---|---|
+| `consumers` + 零消费方守卫 | ⓪ 的全部判据（「答得出谁读它吗」）|
+| `primary_provider` / `fallback_providers` + 绑定派生 | ②a 的降级链 |
+| `raw_table` + 表存在性守卫 | P7 |
+
+⇒ **能合的是它的做法**（`DecisionDataClient` 读冻结快照、`required_datasets`、
+decision-snapshot 分区键），**不是它的文件**。
+
+### 🆕 `easyup-biga-p4-g0-phase3-closed-delta-20260926` —— 这个不一样
+
+它的基线是**本仓库自己**（registry 的 docstring 是我们的原文，契约字段是
+`consumers=` / `primary_provider=`，还引用了 `tests/test_phase3_gate.py` 与
+`tools/verify/phase3_acceptance.py` —— 都是本轮写的）。它宣称把
+P3-4…P3-7 在**我们的契约上**补齐，Phase 3 Code Gate 变 PASS。
+
+🔴 **但基线是 v0.6.0**，在我这 5 个提交之前：
+- 它加的 provider 是 `eastmoney-eod`（连字符），而 ⓪ 里已经是 `eastmoney_eod`
+- 它「激活 `cn.equity.daily_bars`」，而 ⓪ 已经激活了
+- 它改的 18 个文件里 **6 个与本轮重叠**：`cli.py` / `provider_registry.py` /
+  `quality.py` / `registry.py` / `data/analytics.py` / `test_data_platform_foundation.py`
+
+⇒ 它是**待评审的候选**，不是可直接 apply 的补丁。而且它的边界写着
+「不包含 Live Acceptance 结果」—— 所以合了它，**E-1 的解除条件一条都没变**：
+代码换成谁写的都一样，闸门要的是真实跑一次。
+
+> 🔴 **「代码有了」和「可以合了」和「验收过了」是三件事。**
+> 这三件在这几个包上恰好分别卡住，很容易被读成同一件。
+
+### ✅ `SOURCE_ZIP_REPLAY` —— 六项演练里第一项真跑过的（2026-09-26）
+
+用的是真实决策 `BIGA-20260926-001` 的 EvidenceSet：导出成包 → 摊回一棵干净的树 →
+在**那棵树上**跑 `drill-replay`。记进账本之前先证明它会红（改一个字节 / 删掉文件
+都红，还原后绿）。
+
+🔴 **它此前卡住的原因不是「难」，是缺那几步操作的工具** ——
+判据三个月前就写好了，而「把字节打包、摊回去、站对工作目录」每次都要重新想一遍。
+⇒ `tools/verify/source_bundle.py`。
+
+顺带撞出两处：
+1. `biga-data --db <值> <子命令>` 一直报「未知子命令 \<值\>」—— 而 `--db` 正是
+   把 CLI 指向恢复树的唯一方式
+2. 恢复树上用 `bin/biga-data` 跑回放会**假绿**（那个壳 `cd` 回仓库根，读的是原树）
+
+### 🆕 `easyup-biga-p3-r2-runtime-reconciliation-delta-20260926` —— 已合（v0.9.0）
+
+基线是**本仓库自己的 HEAD**（`0.8.2.dev0`），不是某个更早的版本 ⇒ 可以走
+三方合并而不是手工缝。自报 `93 passed / 1 skipped`、两道闸门 exit 0，
+边界写明「**没有运行全量回归和真实多交易日 Live Acceptance**」—— 这句是真的。
+
+合并后全量回归抓出 4 条（见 CHANGELOG v0.9.0），已全部修掉。
+
+🔴 **它改变了 E-1 的形状，但没有解除 E-1**：
+四项演练**从「结构上做不到」变成「跑一次就行」**——
+`PRIMARY_FALLBACK` 以前查不到证据是因为 `refresh_trading_calendar` 的 attempts
+只活在返回值里、进程一退就没了；现在真的落 `provider_attempts` 了。
+但「可跑」不等于「跑过」，账本里仍然是零条。
 
 ---
 
@@ -1586,6 +1828,7 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 | Phase | 内容 | 出口条件 |
 |---|---|---|
 | 2 | 补齐到 **7** 个 agent（不含 `discipline`）+ Stage1/2 并行 + 完整 Card | `missing[]` 在真实缺数据时非空 ≥5 次；延迟预算按实测重推（**不照抄 105s**） |
-| 3 | 数据层加厚 + `discipline`（含它的输入源）+ 独立飞书应用 + 第一条 cron | 每条 cron 都有**被证明的**消费方 |
+| 3 | **数据平台地基 + 第一条 cron**（设计与 14 条适配裁定见 [`docs/design/phase-3-data-platform.md`](docs/design/phase-3-data-platform.md)）| `python3 tools/verify/exit_conditions.py` 全绿 —— 含「每条 cron 都有**被证明的**消费方」 |
+| 3b | `discipline`（含它的输入源）+ 独立飞书应用 | 🔴 **2026-09-25 从 Phase 3 拆出**。`discipline` 推迟的原始理由（输入源不存在，硬建只能编）至今成立；独立飞书与数据平台无耦合 |
 | 4 | 测量层：安慰剂基准 + Card 状态的区分力检验 | `BLOCK/WARNING` 与 T+5 结果按日聚类 t 有区分力 |
 | 5 | （很久以后）自动下单 | **硬前提：Phase 4 通过**。在 Card 的 BLOCK 被证明有区分力之前接下单 = 新增一道空转门 |

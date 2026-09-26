@@ -236,8 +236,12 @@ class TestGuard4UnitCrossCheck:
 
 
 class TestGuard5BreadthHasNoDate:
-    def test_必须发警告说明as_of是推断的(self, wired):
-        assert any("不返回交易日字段" in w for w in build().warnings)
+    def test_必须发警告说明as_of从哪来(self, wired):
+        """同 `test_sector_calc` 的那条 —— 两个 skill 共用同一个判据函数。
+
+        ⏩ 原断言钉文案「不返回交易日字段」，那句话已随实现失效（见 sector 那条）。
+        """
+        assert any("as_of" in w for w in build().warnings), build().warnings
 
     def test_涨跌平全为零是尚未形成不是事实(self, wired):
         """🔴 三项全为 0 在任何真实交易时段都不可能。

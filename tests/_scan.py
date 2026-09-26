@@ -62,9 +62,8 @@ def is_external_reference(p: pathlib.Path) -> bool:
 #: 降级遍历时跳过的目录。
 #: ⚠️ 这份黑名单**只在没有 git 的时候**才生效 —— 正常路径仍然用
 #:    `git ls-files`，所以它不会重新变成「只挡得住想到过的目录」那个坑。
-_FALLBACK_SKIP = {
-    ".git", ".claude", "__pycache__", ".pytest_cache", ".ruff_cache",
-    "node_modules", "data", "logs", ".venv", "venv",
+_FALLBACK_SKIP_ANY = {
+    ".git", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv", "venv",
     # 🔴 批 U-II：`build/` 与 `dist/` 是 setuptools 的构建产物。在此之前它们
     #    在本仓库**没有理由存在**；U-II 之后 `pip install -e .` 是一条被写进
     #    文档的常规操作，而它会在 build/lib/ 下留下**每个模块的第二份拷贝**。
@@ -74,12 +73,33 @@ _FALLBACK_SKIP = {
     #    ⚠️ 正常 git 路径不受影响（.gitignore 挡着），所以这个坑**只在降级模式下
     #    出现**，而降级模式正是为「发布 tarball / 容器 COPY / sdist」准备的 ——
     #    从开发机 `COPY . .` 进容器恰好就会把 build/ 带进去。
-    "build", "dist",
 }
+
+#: 这些名字只在仓库根下是运行时/构建产物。不能按任意层级排除 ——
+#: `src/easyup_biga/data/` 正是生产包，曾因此在发布 ZIP 模式下完全漏扫。
+_FALLBACK_SKIP_ROOT = {"data", "memory", "logs", ".claude", "build", "dist"}
 
 #: 后缀型的构建产物（`easyup_biga.egg-info/`）。`_FALLBACK_SKIP` 比的是**整段
 #: 路径名**，匹配不了这种带可变前缀的目录，所以单列一条。
 _FALLBACK_SKIP_SUFFIX = (".egg-info",)
+
+#: 仓库根下的**路径前缀**（不是单段名字）。
+#:
+#: 🔴 这一条要解决的是「两个模式扫的文件集合不一样」。
+#:    git 模式走 `git ls-files -co --exclude-standard` ⇒ `.gitignore` 挡掉的
+#:    一律不扫；降级模式是自己 walk，什么都看得见。
+#:    `docs/external/` 是本地留存的外部参考资料（`.gitignore:/docs/external/*`），
+#:    里面躺着别人交付包里的**源码副本** —— 降级模式会把那些副本当成本仓库的
+#:    业务代码来判。
+#:
+#:    实测（2026-09-26）：外部交付包里有一处 `import_module(...)`，
+#:    于是「业务代码不许间接 import」这条守卫在**降级模式下**红了，
+#:    而 git 模式一直绿。同一条守卫、同一棵树、两个答案。
+#:
+#: ⚠️ 这不是「再加一个名字」就完了的那类修补 —— 它是那条原则的实例：
+#:    **降级模式必须逼近 git 模式的文件集合**，两者分叉多少，守卫的结论就
+#:    不可信多少。往这里加东西之前先问：git 模式看得见它吗。
+_FALLBACK_SKIP_PATHS = ("docs/external",)
 
 
 def _git_files() -> list[str] | None:
@@ -100,8 +120,12 @@ def _walk_files() -> list[str]:
         if not p.is_file():
             continue
         rel = p.relative_to(REPO)
-        if any(part in _FALLBACK_SKIP
+        if any(part in _FALLBACK_SKIP_ANY
                or part.endswith(_FALLBACK_SKIP_SUFFIX) for part in rel.parts):
+            continue
+        if rel.parts and rel.parts[0] in _FALLBACK_SKIP_ROOT:
+            continue
+        if rel.as_posix().startswith(_FALLBACK_SKIP_PATHS):
             continue
         out.append(rel.as_posix())
     return out
@@ -136,3 +160,42 @@ def repo_files(*suffixes: str) -> list[pathlib.Path]:
         if p.is_file():
             files.append(p)
     return sorted(files)
+
+
+def sandbox_ignore(repo_root: pathlib.Path):
+    """造沙盒副本时的排除规则 —— **两处沙盒共用的唯一实现**。
+
+    🔴 为什么不能直接用 `shutil.ignore_patterns("data", ...)`
+    -------------------------------------------------------
+    `ignore_patterns` 的 glob 对**每一层目录**生效。写 `"data"` 本意是排掉仓库
+    根下那个装 SQLite 库的 `data/`，实际连 `src/easyup_biga/data/`（Phase 3 的
+    数据平台包）一起丢掉了 —— 而且是**静默**丢：copytree 不报错，沙盒照常建起来，
+    只是少了一个包。
+
+    实测后果（2026-09-25，评审外部 P3-1 实现时发现）：只要有任何生产路径
+    `import easyup_biga.data`，`test_spawn_proof.py` 的 11 条出卡路径测试就会
+    集体 `ModuleNotFoundError`，而报错指向的是沙盒里的临时目录，看不出是
+    排除规则干的。
+
+    ⚠️ 这是同一个坑的**第三个实例**。`test_scan_fallback.py` 的注释里已经记着
+    前两个：`.biga-card-stop`（运行时总闸被复制进沙盒）与 `build/`（构建产物
+    没被排除）。那条注释的原话是「这份硬编码名单没跟上」—— 现在它连名单**形状**
+    都不对：按名字匹配任意层级，而它想表达的是「仓库根下的那一个」。
+
+    ⇒ 改成按**相对仓库根的路径**判断，并且两处沙盒共用这一份。
+    """
+    root = repo_root.resolve()
+    #: 只在仓库根下排除（按路径判，不按名字判）
+    ROOT_ONLY = {"data", "memory", ".claude", ".pytest_cache", "build", "dist"}
+    #: 任意层级都排除（它们在任何目录下都是同一类东西）
+    ANY_LEVEL = {".git", "__pycache__", ".biga-card-stop", ".biga-card.lock"}
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        here = pathlib.Path(directory).resolve()
+        drop = {n for n in names if n in ANY_LEVEL}
+        if here == root:
+            drop |= {n for n in names if n in ROOT_ONLY}
+        drop |= {n for n in names if n.endswith(".egg-info")}
+        return drop
+
+    return _ignore

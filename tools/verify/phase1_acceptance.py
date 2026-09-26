@@ -568,10 +568,16 @@ _UNPROVEN_HINT: dict[str, str] = {
         "同一次 run 同一个 agent 既有 online 行又有 legacy 行 —— "
         "分不清哪一行代表这次执行。**legacy 行的 runtime_run_id 不许替 online 行作证**；"
         "查是谁写了第二行",
+    "runtime_run_id_partially_missing":
+        "这次 run 里**有的在线行带了** runtime_run_id、这一行没带 —— "
+        "兄弟行证明了这次 run 走的是新路径，所以这是**映射漏了这个 agent**，"
+        "不是「整次走旧路径」。⇒ 去看 orchestrator 收集 runtime_run_ids 的地方，"
+        "**按 agent 逐个对**，不用怀疑这次 run 起得对不对",
     "missing_runtime_run_id":
-        "在线行但没记下 runtime_run_id —— spawn 多半真的发生过，"
-        "是编排器没把 SpawnResult.handle.runtime_run_id 收回来；"
-        "查 orchestrator 的 runtime_run_ids 映射",
+        "在线行但没记下 runtime_run_id，且**这次 run 一行都没有** —— "
+        "两种可能：迁移前的旧路径 / 编排器一个都没收回来。"
+        "先确认这次 run 是怎么起的，再查 runtime_run_ids 映射"
+        "（有的有、有的没有是另一个原因码：runtime_run_id_partially_missing）",
 }
 
 #: FAIL 的原因码 → 给人看的一句话。与上面分开，因为**排查方向完全不同**：
@@ -801,6 +807,28 @@ def spawn_proof_for_run(run_id: str) -> SpawnProof:
     #    但这次它真的被 spawn 了、也真的有账本行，而核验完全跳过了它。
     #    ⇒ 计划里的**必须**证明得了（缺席即 FAIL）；计划外但有行的**也要**过三元组。
     extra = sorted(set(rows_by_agent) - set(plan))
+
+    # 🔴 per-decision 一致性：同一次 run 里，只要有**一行**在线账本带了
+    #    `runtime_run_id`，其余在线行也必须带。
+    #
+    #    为什么单独看这件事：`missing_runtime_run_id` 今天有两种含义，
+    #    而它们的排查方向相反 ——
+    #      · 整次 run 一个都没有 ⇒ 这次走的是**迁移前的旧路径**（去看这次是
+    #        怎么起的）
+    #      · 有的有、有的没有 ⇒ 编排器的 `runtime_run_ids` 映射**漏了这个
+    #        agent**（去看 orchestrator 那张映射表）
+    #
+    #    强绑定是 per-agent、按数据有无启用的（批 J-II）⇒ `NULL` 的含义会
+    #    随着六个 agent 陆续走上新路径**悄悄从前者变成后者**，而没有任何
+    #    东西会注意到这个转变。这条检查就是那个「注意到」。
+    #    ⚠️ 两种都仍然是 UNKNOWN（R-3：证不了就是证不了），差别只在 reason ——
+    #    判据不变，**指的路变了**。
+    _online_all = [r for rs in rows_by_agent.values() for r in rs
+                   if r.get("provenance_mode") == "online"]
+    partial_runtime_ids = (
+        any(r.get("runtime_run_id") for r in _online_all)
+        and not all(r.get("runtime_run_id") for r in _online_all))
+
     for agent in list(plan) + extra:
         st, reason = verify_agent_rows(
             rows_by_agent.get(agent, []),
@@ -821,6 +849,8 @@ def spawn_proof_for_run(run_id: str) -> SpawnProof:
         #      那些是**观察到的**矛盾，与「当时期望谁」无关。
         if plan_warning and (st == "PASS" or reason == "expected_agent_missing"):
             st, reason = "UNKNOWN", plan_warning
+        if partial_runtime_ids and reason == "missing_runtime_run_id":
+            reason = "runtime_run_id_partially_missing"
         status[agent] = (st, reason)
         # 三个旧视图从同一份判据派生 —— 不各算一遍（L-3）。
         out[agent] = {"ABSENT": (False, False),

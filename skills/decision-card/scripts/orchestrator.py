@@ -47,6 +47,8 @@ from _contract import (
     RISK_AGENT,
     SNAPSHOT_INDEX_AGENTS,
     STAGE1_AGENTS,
+    required_datasets_for,
+    required_datasets_for_agents,
     SYNTHESIZER_AGENT,
     MissingItem,
     absent_agent_missing,
@@ -57,6 +59,7 @@ from _contract import (
 )
 from _runtime import OpenClawRuntimeAdapter, SpawnHandle, SpawnStatus  # noqa: E402
 from _snapshot import SnapshotCoordinator  # noqa: E402
+from _data import DecisionDataClient  # noqa: E402
 from _store import (  # noqa: E402
     enqueue_run_failed,
     load_verdict_ids_for_run,
@@ -132,6 +135,7 @@ class DecisionOrchestrator:
         *,
         attach=None,
         snapshot: SnapshotCoordinator | None = None,
+        decision_data: DecisionDataClient | None = None,
         model_ref: str = "anthropic/claude-sonnet-5",
         deadline_sec: int | None = None,
         stage1_sec: int | None = None,
@@ -143,6 +147,13 @@ class DecisionOrchestrator:
         # snapshot 同理：默认真实 coordinator（真联网抓一次并冻结），测试传一个
         # 装了假 fetcher 的，freeze 就不出网。
         self._snapshot = snapshot or SnapshotCoordinator()
+        # Production freezes every Stage-1 required dataset before spawn. Existing
+        # tests inject SnapshotCoordinator with a fake fetcher; unless they explicitly
+        # inject decision_data too, keep that seam network-free.
+        self._decision_data = (
+            decision_data if decision_data is not None
+            else (None if snapshot is not None else DecisionDataClient())
+        )
         self._model_ref = model_ref
         self.deadline_sec = deadline_sec or int(os.environ.get("BIGA_CARD_DEADLINE_SEC", "780"))
         self.stage1_sec = stage1_sec or int(os.environ.get("BIGA_ORCH_STAGE1_SEC", "300"))
@@ -197,10 +208,20 @@ class DecisionOrchestrator:
                 # 这一批第一次真的填它（in-memory；decision_runs 是只追加、RECEIVED
                 # 时已写入 None，所以持久记录落在这次转移的 detail + evidence_sets 表）。
                 ctx = dataclasses.replace(ctx, evidence_set_id=esid)
+                required = required_datasets_for_agents(STAGE1_AGENTS)
+                data_errors = {}
+                frozen_datasets = {"cn.index.daily_bars": "legacy+dataset-bridge"}
+                if self._decision_data is not None:
+                    frozen = self._decision_data.freeze_required(esid, required)
+                    frozen_datasets = dict(frozen.frozen)
+                    data_errors = dict(frozen.errors)
                 state = self._to(ctx.run_id, state, RunState.SNAPSHOT_FROZEN,
                                  detail={"evidence_set_id": esid,
                                          "symbols": list(SNAPSHOT_SYMBOLS),
-                                         "bars": SNAPSHOT_BARS})
+                                         "bars": SNAPSHOT_BARS,
+                                         "required_datasets": list(required),
+                                         "frozen_datasets": frozen_datasets,
+                                         "dataset_errors": data_errors})
 
                 # ── Stage 1：并行 fan-out ──
                 state = self._to(ctx.run_id, state, RunState.STAGE1_RUNNING)
@@ -472,14 +493,16 @@ class DecisionOrchestrator:
             f"不要指定日期，走宽松模式，取数据源给出的最近一个交易日，"
             f"并在回答里明确写出那是哪一天。\n"
             f"跑你的 skill 时必须加 --task-id {did} --run-id {run_id}。")
-        # 🔴 读冻结日线的三个 Specialist 必须再带 --evidence-set-id —— 与 --task-id
-        #    同一种机制（提示词说要做什么，跑完靠代码/探针核实真做了）。emotion/news
-        #    的 skill 没有这个参数，不加（加了它们也不认）。
-        if agent in SNAPSHOT_INDEX_AGENTS:
+        # P3-7: required_datasets lives in Agent Registry. Every Stage-1 specialist
+        # receives the EvidenceSet id and reads its exact frozen datasets through the
+        # data layer; no specialist selects a provider.
+        required = required_datasets_for(agent)
+        if required:
             base += (
-                f"\n本次决策的指数日线已冻结（evidence_set_id={evidence_set_id}）。"
-                f"跑 skill 时必须再加 --evidence-set-id {evidence_set_id} —— "
-                f"读这份冻结快照，不要自己联网抓日线，这样所有 Specialist 看的是同一份。")
+                f"\n本次决策数据已冻结到 evidence_set_id={evidence_set_id}。"
+                f"跑 skill 时必须再加 --evidence-set-id {evidence_set_id}，"
+                f"只读冻结数据，不要自己选择或直连 Provider。"
+                f"该 Agent 的 required_datasets={list(required)}。")
         return base + self._run_marker(run_id)
 
     def _risk_task(self, did: str, risk_ref: int, fb, run_id: str) -> str:

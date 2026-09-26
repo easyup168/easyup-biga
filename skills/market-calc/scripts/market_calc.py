@@ -79,16 +79,20 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
     INDEX_PCT_LIMIT,
     BreadthResult,
     IndexDaily,
     IndexQuote,
     SourceError,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
+    latest_trading_day,
     fetch_breadth,
     fetch_index_daily,
     fetch_index_quote,
+    source_prefix_of,
 )
 from _store import (  # noqa: E402
     init_schema,
@@ -131,6 +135,23 @@ _WAN_TO_YI = 1e4   # 万元 → 亿元
 _EXPECTED_FIELDS = 15
 
 
+def _breadth_source(provider_id: str | None) -> str:
+    """涨跌家数 Evidence 的 `source` —— 按**实际供数方**拼，不写死主源。
+
+    🔴 这里曾经是 `"em:push2delay/ulist.np"` 的字面量，**写死在 7 处**。
+    2026-09-26 东财 push2 系整组 502、实际由 `sina_breadth` 供数，
+    于是卡上五条涨跌家数证据全部指着一个**没供过数**的端点 ——
+    比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+
+    ⚠️ 备用源是**自算**的（从全市场快照数出来），不是报数 ——
+    所以它的 source 形状也不一样，不能只换前缀。
+    """
+    if provider_id is None or provider_id == "eastmoney":
+        return "em:push2delay/ulist.np"
+    prefix = source_prefix_of(provider_id)
+    return f"{prefix}:hs_a/breadth"
+
+
 class Collector:
     """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
 
@@ -143,9 +164,12 @@ class Collector:
         # 给了就读冻结快照（不联网、不重复落盘），没给自己抓（手工调试路径）。
         self.evidence_set_id = evidence_set_id
         self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
+        self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.daily: dict[str, IndexDaily] = {}
         self.quotes: dict[str, IndexQuote] = {}
         self.breadth: BreadthResult | None = None
+        #: 涨跌家数的**实际供数方**拼出来的 source（见 `_breadth_source`）。
+        self.breadth_source: str = "em:push2delay/ulist.np"
         self.missing: list[str] = []
         self.warnings: list[str] = []
         #: (source, 解析后 payload, 该源自己的 as_of, 原始响应文本)。批 I：原文一并累积。
@@ -236,19 +260,30 @@ class Collector:
                                           "market.turnover.source_broken"))
             return
         try:
-            q, quote_body = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+            if self._data is not None:
+                q, frozen_hash = self._data.read_index_quote(self.evidence_set_id)
+                quote_body = None
+            else:
+                q, quote_body = fetch_index_quote([sym for sym, _ in MARKETS.values()])
+                frozen_hash = None
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"成交额 —— 数据源不可用: {e}",
                                           "market.turnover.unavailable"))
             return
         with self._lock:
             self.quotes = q
-        # 腾讯行情**自己带时间戳** —— 这是本源存在的主要理由，别再丢掉它。
-        # raw_text 用整段响应体 `quote_body`（批 I）：raw 层里那份 {code: 片段} 是从
-        # body 抠出来重排的派生物，content_sha256 要证明源字节只能用 body 本身。
-        self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
-                       max(v.server_as_of or now_cn() for v in q.values()),
-                       quote_body)
+        if self._data is not None:
+            # P3-6/P3-7: Provider 已由 Orchestrator 在 Data 层冻结；Specialist
+            # 只声明这份 EvidenceSet 的溯源，不重复联网/落 raw。
+            with self._lock:
+                if frozen_hash:
+                    self.hashes["tencent:quote"] = frozen_hash
+                self.es_ids["tencent:quote"] = self.evidence_set_id
+        else:
+            # 手工单跑仍允许 DataClient 的 live helper 取数。
+            self._keep_raw("tencent:quote", {k: v.raw for k, v in q.items()},
+                           max(v.server_as_of or now_cn() for v in q.values()),
+                           quote_body)
 
     def collect_breadth(self) -> None:
         if "breadth" in self.break_source:
@@ -256,17 +291,30 @@ class Collector:
                                           "market.breadth.source_broken"))
             return
         try:
-            b = fetch_breadth()
+            if self._data is not None:
+                b, frozen_hash, served_by = self._data.read_breadth(
+                    self.evidence_set_id)
+            else:
+                b = fetch_breadth()
+                frozen_hash = None
+                # 直连路径没有降级链（provider 选择归冻结层）⇒ 只可能是东财。
+                served_by = "eastmoney"
         except SourceError as e:
             self._note(missing=MissingItem(f"涨跌家数 —— 数据源不可用: {e}",
                                           "market.breadth.unavailable"))
             return
+        src = _breadth_source(served_by)
         with self._lock:
             self.breadth = b
-        # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
-        # 套上日线的交易日，就是把实时数写成上一个交易日的事实。
-        self._keep_raw("em:push2delay/ulist.np", b.raw,
-                       b.server_as_of or now_cn(), b.raw_text)
+            self.breadth_source = src
+        if self._data is not None:
+            with self._lock:
+                if frozen_hash:
+                    self.hashes[src] = frozen_hash
+                self.es_ids[src] = self.evidence_set_id
+        else:
+            # `server_as_of is None` ⇒ 这个端点不带日期，它说的就是「此刻」。
+            self._keep_raw(src, b.raw, b.server_as_of or now_cn(), b.raw_text)
         # ⚠️ 不在这里发 as_of 警告：它依赖交易日，而交易日要等日线回来才知道。
         #    并行采集下在这里读是竞态，统一放到全部完成后做。
 
@@ -376,14 +424,32 @@ def build_fact_bundle(
     #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
+    #
+    #    ⏩ **2026-09-26 再更正：只用「取回时刻」也不对，它是同一个错的另一半。**
+    #
+    #    周六 18:11 实测：这个端点给的其实是 **09-24 收盘**的 1120/4305/137
+    #    （它自己不会说），而 as_of 标成 09-26 18:11 ——
+    #    **一个上周四的数，挂着周六的时间戳。**
+    #    后果不是难看：risk 因此判「上游报告了不同的交易日，不能当作同一天的
+    #    事实一起审」，整张卡降级成 WAIT —— 而那个「不一致」是我们自己标的。
+    #
+    #    ⇒ 判据搬到 `tradetime.as_of_for_undated_snapshot()`（三态、靠日历），
+    #      market 与 sector **共用同一份**（各写一份就是 L-3）。
+    _live_as_of, _live_warn = as_of_for_undated_snapshot(
+        retrieved_at=retrieved,
+        latest_trade_date=latest_trading_day(
+            retrieved.strftime("%Y%m%d")))
+    if _live_warn:
+        c.warnings.append(_live_warn)
+
     def add_live(field: str, value: Any, label: str, source: str, *,
             kind: str | None, inputs: tuple[str, ...] = (),
             origins: tuple = ()) -> None:
-        """实时快照类证据：as_of = 取回时刻。`kind` 同 `add`，无默认值。"""
+        """不带日期的快照类证据。**as_of 由日历三态判出**，见上面那段。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
-            as_of=retrieved, retrieved_at=retrieved,
+            as_of=_live_as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
             evidence_set_id=_es_id_for(source),
@@ -508,20 +574,16 @@ def build_fact_bundle(
 
         if c.breadth:
             b = c.breadth
-            c.warnings.append(
-                "涨跌家数接口不返回交易日字段，其 as_of 是按日线的交易日推断的")
-            add_live("advance_count", b.advance, "上涨家数", "em:push2delay/ulist.np",
-                     kind="observed")
-            add_live("decline_count", b.decline, "下跌家数", "em:push2delay/ulist.np",
-                     kind="observed")
-            add_live("flat_count", b.flat, "平盘家数", "em:push2delay/ulist.np",
-                     kind="observed")
+            bsrc = c.breadth_source
+            add_live("advance_count", b.advance, "上涨家数", bsrc, kind="observed")
+            add_live("decline_count", b.decline, "下跌家数", bsrc, kind="observed")
+            add_live("flat_count", b.flat, "平盘家数", bsrc, kind="observed")
             # 分母不可能为 0 —— 上面的 not_yet_formed 守卫已经把那种情况挡掉了。
             # 🔴 原来这里有个 `else: 分母为零` 分支，加了守卫之后它**永远走不到** ——
             #    恒假分支就是 L-7，留着只会让人以为还有一条路。
             total = b.advance + b.decline + b.flat
             add_live("advance_ratio", round(b.advance / total, 4), "上涨家数占比",
-                     "derived:em:push2delay/ulist.np", kind="derived",
+                     f"derived:{bsrc}", kind="derived",
                      inputs=("advance_count", "decline_count", "flat_count"))
 
     if store:

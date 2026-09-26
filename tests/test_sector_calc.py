@@ -158,7 +158,16 @@ class TestGuards:
         assert "sh000001" in src and "fetch_index_daily" in src
 
     def test_板块榜无日期必须发警告(self, wired):
-        assert any("不返回交易日字段" in w for w in build().warnings)
+        """无日期端点**必须**发一条说明 as_of 从哪来的警告。
+
+        ⏩ 2026-09-26：原断言钉的是文案「不返回交易日字段」，而那句话描述的
+        行为（as_of 按**指数日线的交易日**推断）已经不存在 ——
+        现在由 `as_of_for_undated_snapshot()` 按**日历**三态判。
+
+        🔴 断言改成钉**意图**：必须有一条警告提到 `as_of`。
+           钉文案会在每次措辞微调时红一次，而那种红不含信息。
+        """
+        assert any("as_of" in w for w in build().warnings), build().warnings
 
     def test_领涨股缺失只是警告不是缺失(self, wired):
         wired["industry"] = result("industry", [board("无领涨", 3.0, leader=None),
@@ -278,3 +287,178 @@ class TestBoardPaginationIsConcurrent:
         monkeypatch.setattr(em, "get_json_and_text", counting)
         assert len(em.fetch_boards("industry").boards) == 42
         assert len(n) == 1, f"只有 42 行却发了 {len(n)} 次请求"
+
+
+def _h(seed: str) -> str:
+    """契约要求 `derived_from` 的 ref 是 **64 位十六进制内容哈希**。
+
+    ⚠️ 假数据也必须是**真形状** —— 拿 `"hash-industry"` 当哈希会让这个用例
+    在契约层红掉，而红的原因与它要测的东西无关（那种红最浪费时间）。
+    """
+    import hashlib
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+class TestFallbackServedSnapshot:
+    """🔴 备用源供数时**整个 skill 会崩** —— 2026-09-26 真出卡时踩到。
+
+    `board_counts` 那一行写死了 `source="em:clist"` 和
+    `origins=raw_origins(c.hashes.get(f"em:clist/{k}"))`。备用源供数时
+    `c.hashes` 的键是 `sina:bankuai/*`，两处都查不到 ⇒
+    `raw_hash` 与 `derived_from` **同时为空** ⇒ 契约铁律当场
+    `ValueError` ⇒ 脚本在写任何证据之前崩掉 ⇒ **sector 这一支彻底缺席**。
+
+    > 它**只在降级那天炸**。主源正常时两边的字面量碰巧相等，
+    > 所以既有测试与此前每一次真实出卡都是绿的。
+
+    实测代价：BIGA-20260926-003 的卡上 `已建成 roster 缺席：sector`，
+    而冻结层其实**成功**冻到了板块快照 —— 数据在，是 skill 自己没用上。
+    """
+
+    @pytest.fixture()
+    def frozen(self, monkeypatch, request):
+        """让 skill 走冻结路径，并声明由哪个 provider 供数。"""
+        served_by = getattr(request, "param", "sina_boards")
+
+        class FakeData:
+            def read_boards(self, _esid, kind):
+                return result(kind), _h(kind), served_by
+
+        class FakeCoord:
+            def read_index_daily(self, *a, **kw):
+                return daily()
+
+            def frozen_content_sha256(self, *a, **kw):
+                return _h("daily")
+
+        monkeypatch.setattr(sc, "DecisionDataClient", lambda *a, **kw: FakeData())
+        monkeypatch.setattr(sc, "SnapshotCoordinator", lambda *a, **kw: FakeCoord())
+        monkeypatch.setattr(sc, "now_cn",
+                            lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
+        return served_by
+
+    @pytest.mark.parametrize("frozen", ["sina_boards", "eastmoney"], indirect=True)
+    def test_不论谁供数都不许崩(self, frozen):
+        v = build(evidence_set_id="es-probe")
+        assert v.status in ("completed", "partial"), v.status
+        assert "board_counts" in v.result
+
+    @pytest.mark.parametrize("frozen", ["sina_boards", "eastmoney"], indirect=True)
+    def test_board_counts的血缘指回实际供数方那两份raw(self, frozen):
+        """🔴 判据打在 `derived_from` **非空**上。
+
+        空的 `derived_from` 就是当初那个崩溃的直接原因 ——
+        而如果哪天有人为了「让它别崩」把契约那条放松，
+        这条断言会接着红：**这个数出自什么，必须答得上来。**
+        """
+        v = build(evidence_set_id="es-probe")
+        ev = next(e for e in v.evidence if e.field == "board_counts")
+        assert ev.derived_from, "board_counts 的血缘不能为空"
+        assert len(ev.derived_from) == 2, "行业榜 + 概念榜两份 raw"
+
+    @pytest.mark.parametrize("frozen", ["sina_boards"], indirect=True)
+    def test_board_counts的source不许指着没供过数的源(self, frozen):
+        v = build(evidence_set_id="es-probe")
+        ev = next(e for e in v.evidence if e.field == "board_counts")
+        assert ev.source == "sina:bankuai", ev.source
+        assert "em:" not in ev.source
+
+    def test_两个榜由不同provider供数时如实说混合(self, monkeypatch):
+        """⚠️ `read_boards` 是按 kind 各走一次降级链的 ⇒ 理论上可能分裂。
+
+        这时不许挑一个当代表 —— 那会让卡面宣称一个它只说对了一半的来源。
+        """
+        providers = {"industry": "eastmoney", "concept": "sina_boards"}
+
+        class FakeData:
+            def read_boards(self, _esid, kind):
+                return result(kind), _h(kind), providers[kind]
+
+        class FakeCoord:
+            def read_index_daily(self, *a, **kw):
+                return daily()
+
+            def frozen_content_sha256(self, *a, **kw):
+                return _h("daily")
+
+        monkeypatch.setattr(sc, "DecisionDataClient", lambda *a, **kw: FakeData())
+        monkeypatch.setattr(sc, "SnapshotCoordinator", lambda *a, **kw: FakeCoord())
+        monkeypatch.setattr(sc, "now_cn",
+                            lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
+        v = build(evidence_set_id="es-probe")
+        ev = next(e for e in v.evidence if e.field == "board_counts")
+        assert ev.source.startswith("mixed:"), ev.source
+        assert "em:clist" in ev.source and "sina:bankuai" in ev.source
+
+
+class TestBoardTaxonomyDeclared:
+    """🔴 板块分类体系**逐 kind 声明**，降级换口径不许静默。
+
+    A 股板块数据是个课题：**行业、概念各家的分类都不一样**。
+    2026-09-26 实测：
+
+        kind       东财                    新浪
+        industry   496 个申万式细分         **84 个证监会门类**
+                   BK1456 棉纺             hangye_ZA02 林业
+        concept    500 个概念              175 个概念
+
+    ⇒ 备用源不是「同一个榜的另一个来源」，是**另一个榜**。
+      降级那天卡上会说「领涨板块 = 林业」—— 那是证监会门类里的一个大类，
+      对短线基本无用，而它和主源那个「棉纺 +8%」根本不是一回事。
+
+    **裁定（2026-09-26）：板块以东财为主源。** 各家分类不一致时，
+    跨天可比性比可用性更重要 —— 一个换了口径的「备用源」对这个事实
+    不构成真正的备用。备用仍然保留（有总比没有强），但必须**声明**。
+
+    ⚠️ 判据是 `missing[]` 而不是 `warnings[]`：警告会被读成「注意一下」，
+       而这里的事实是**这个榜和你以为的那个榜不是同一个**，不能拿来比。
+    """
+
+    @pytest.fixture()
+    def frozen_by(self, monkeypatch):
+        def _make(provider):
+            class FakeData:
+                def read_boards(self, _esid, kind):
+                    return result(kind), _h(kind), provider
+
+            class FakeCoord:
+                def read_index_daily(self, *a, **kw):
+                    return daily()
+
+                def frozen_content_sha256(self, *a, **kw):
+                    return _h("daily")
+
+            monkeypatch.setattr(sc, "DecisionDataClient", lambda *a, **kw: FakeData())
+            monkeypatch.setattr(sc, "SnapshotCoordinator", lambda *a, **kw: FakeCoord())
+            monkeypatch.setattr(sc, "now_cn",
+                                lambda: datetime(2026, 9, 18, 18, 0, tzinfo=CN_TZ))
+            return build(evidence_set_id="es-tax")
+        return _make
+
+    def test_主源供数时声明口径且不报不匹配(self, frozen_by):
+        v = frozen_by("eastmoney")
+        assert v.result["industry_taxonomy"] == "em-sw-细分(496)"
+        assert v.result["concept_taxonomy"] == "em-概念(500)"
+        assert not [m for m in v.missing if "taxonomy_mismatch" in m.code]
+
+    def test_备用源供数时必须报口径不匹配(self, frozen_by):
+        v = frozen_by("sina_boards")
+        codes = {m.code for m in v.missing}
+        assert "sector.industry.taxonomy_mismatch" in codes, codes
+        assert "sector.concept.taxonomy_mismatch" in codes, codes
+
+    def test_口径不匹配进missing而不是warnings(self, frozen_by):
+        """警告会被读成「注意一下」；这条是「不能拿来比」。"""
+        v = frozen_by("sina_boards")
+        assert not any("taxonomy" in w for w in v.warnings), v.warnings
+
+    def test_口径本身作为事实上卡(self, frozen_by):
+        """🔴 只发 missing 不够 —— 读卡的人要能看到**用的是哪一套**。
+
+        不上卡的话，「领涨板块 = 林业」旁边没有任何东西说明它出自 84 个
+        证监会门类，而那正是它看起来荒谬的原因。
+        """
+        v = frozen_by("sina_boards")
+        assert v.result["industry_taxonomy"] == "csrc-门类(84)"
+        ev = next(e for e in v.evidence if e.field == "industry_taxonomy")
+        assert ev.source == "sina:bankuai/industry", ev.source

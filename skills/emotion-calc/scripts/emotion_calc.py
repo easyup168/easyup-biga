@@ -80,11 +80,13 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
     PoolResult,
     SourceError,
     as_of_for_trade_date,
     fetch_pool,
+    source_prefix_of,
     session_in_progress,
 )
 from _store import (  # noqa: E402
@@ -118,17 +120,24 @@ _EXPECTED_FIELDS = 10
 class Collector:
     """采集 + 记账。把「取到了什么 / 哪里失败了」分别攒起来。"""
 
-    def __init__(self, date: str | None, break_source: set[str], store: bool):
+    def __init__(self, date: str | None, break_source: set[str], store: bool,
+                 evidence_set_id: str | None = None):
         self._lock = threading.Lock()
         self.date = date
         self.break_source = break_source
         self.store = store
+        self.evidence_set_id = evidence_set_id
+        self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.pools: dict[str, PoolResult] = {}
+        #: pool → **实际供数方**（降级时与 dataset 的 primary 不同）。
+        self.pool_provider: dict[str, str | None] = {}
         self.missing: list[str] = []
         self.warnings: list[str] = []
         self.raw_ids: list[int] = []
         #: source → 原始响应的哈希。Evidence.raw_hash 用它指回 raw 层。
         self.hashes: dict[str, str] = {}
+        #: source → 本次决策冻结的 EvidenceSet id。
+        self.es_ids: dict[str, str] = {}
 
     def _note(self, *, missing: MissingItem | None = None,
               warning: str | None = None) -> None:
@@ -157,7 +166,14 @@ class Collector:
                                           "emotion.pool.source_broken"))
             return
         try:
-            r = fetch_pool(pool, self._target_date())
+            if self._data is not None:
+                r, frozen_hash, served_by = self._data.read_pool(
+                    self.evidence_set_id, pool)
+            else:
+                r = fetch_pool(pool, self._target_date())
+                frozen_hash = None
+                # 直连路径没有降级链（provider 选择归冻结层）⇒ 只可能是东财。
+                served_by = "eastmoney"
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                           "emotion.pool.unavailable"))
@@ -185,18 +201,27 @@ class Collector:
         #    数据，可追溯性却取决于一个与追溯无关的开关。
         #    市场/板块/快讯三个 skill 本来就是先算哈希再判 store，这里是唯一的例外。
         with self._lock:
-            # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
-            self.hashes[f"em:push2ex/{pool}"] = raw_text_sha256(r.raw_text)
-        if self.store:
-            got = now_cn()
-            snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
-            self._keep_raw(save_raw_snapshot(
-                source=f"em:push2ex/{pool}",
-                as_of=snap_as_of.isoformat(),
-                retrieved_at=got.isoformat(),
-                payload=r.raw,
-                raw_text=r.raw_text,
-            ))
+            self.pool_provider[pool] = served_by
+        source = _pool_source(pool, served_by)
+        if self._data is not None:
+            with self._lock:
+                if frozen_hash:
+                    self.hashes[source] = frozen_hash
+                self.es_ids[source] = self.evidence_set_id
+        else:
+            with self._lock:
+                # 批 I：hash 基于原始响应文本，与 save_raw_snapshot 的 content_sha256 同口径。
+                self.hashes[source] = raw_text_sha256(r.raw_text)
+            if self.store:
+                got = now_cn()
+                snap_as_of, _ = as_of_for_trade_date(r.qdate, retrieved_at=got)
+                self._keep_raw(save_raw_snapshot(
+                    source=source,
+                    as_of=snap_as_of.isoformat(),
+                    retrieved_at=got.isoformat(),
+                    payload=r.raw,
+                    raw_text=r.raw_text,
+                ))
 
     # -- 派生 --------------------------------------------------------------
 
@@ -209,6 +234,23 @@ class Collector:
         if len(dates) > 1:
             return None
         return dates.pop()
+
+
+def _pool_source(pool: str, provider_id: str | None) -> str:
+    """股池 Evidence 的 `source` —— 按**实际供数方**拼，不写死主源。
+
+    🔴 这里曾经是 `f"em:push2ex/{pool}"` 的字面量，**写死在 8 处**。
+    股池有了备用源之后，降级过的那天 Evidence 会指着一个**没供过数的源** ——
+    比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+    （板块与涨跌家数都踩过同一个坑，这是第三处。）
+
+    ⚠️ 备用源是**自算**的（从全市场快照数出来），不是报数 ⇒
+    它的 source 形状也不一样，不能只换前缀。
+    """
+    if provider_id is None or provider_id == "eastmoney":
+        return f"em:push2ex/{pool}"
+    prefix = source_prefix_of(provider_id)
+    return f"{prefix}:hs_a/{pool}"
 
 
 def _ladder(rows: list[dict[str, Any]]) -> dict[int, int]:
@@ -226,9 +268,10 @@ def build_fact_bundle(
     break_source: set[str],
     store: bool,
     task_id: str,
+    evidence_set_id: str | None = None,
 ) -> FactBundle:
     t_start = time.monotonic()
-    c = Collector(date, break_source, store)
+    c = Collector(date, break_source, store, evidence_set_id)
 
     # 三个请求互不依赖，并行拿。串行约 20s，并行约 8s ——
     # 端到端预算卡在 90s，这一步不是调优，是能不能用的问题。
@@ -279,6 +322,7 @@ def build_fact_bundle(
             as_of=as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=_raw_hash_for(source),
+            evidence_set_id=resolve_provenance(source, c.es_ids),
             kind=kind,
             derived_from=evidence_origins(evidence, inputs, of=field) + tuple(origins),
         ))
@@ -303,25 +347,45 @@ def build_fact_bundle(
         dt = c.pools.get("limit_down")
 
         if zt:
-            add("limit_up_count", zt.total, "涨停家数", "em:push2ex/limit_up",
+            add("limit_up_count", zt.total, "涨停家数", _pool_source("limit_up", c.pool_provider.get("limit_up")),
                 kind="observed")
-            ladder = _ladder(zt.rows)
-            add("max_streak", max(ladder) if ladder else 0, "最高板",
-                "em:push2ex/limit_up", kind="derived")
-            add("streak_2plus_count", sum(v for k, v in ladder.items() if k >= 2),
-                "连板家数(≥2)", "em:push2ex/limit_up", kind="derived")
-            add("streak_ladder", {str(k): v for k, v in ladder.items()},
-                "连板梯队分布", "em:push2ex/limit_up", kind="derived")
-            never_broken = sum(1 for r in zt.rows if int(r.get("zbc") or 0) == 0)
-            add("seal_never_broken_rate",
-                round(never_broken / zt.total, 4) if zt.total else None,
-                "全天未炸板占比", "em:push2ex/limit_up", kind="derived")
+            # 🔴 逐项按**源自己声明的明细字段**决定算不算，不看 rows 空不空。
+            #
+            #    `rows=()` 是**合法状态**（东财盘前 tc=0 + pool=[]，真的 0 家），
+            #    而「这个源不给明细」是另一回事 —— 两者在数据上长得一样。
+            #    照着空列表硬算，得到的是**三条不报错的假事实**：
+            #      `max_streak=1`（`lbc` 缺失默认 1 ⇒ 宣称一个连板都没有）
+            #      `seal_never_broken_rate=1.0`（`zbc` 缺失默认 0 ⇒ 宣称全没炸过）
+            #      或 `=0.0`（rows 全空 ⇒ 宣称全炸了）
+            if "lbc" in zt.row_fields:
+                ladder = _ladder(zt.rows)
+                add("max_streak", max(ladder) if ladder else 0, "最高板",
+                    _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+                add("streak_2plus_count", sum(v for k, v in ladder.items() if k >= 2),
+                    "连板家数(≥2)", _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+                add("streak_ladder", {str(k): v for k, v in ladder.items()},
+                    "连板梯队分布", _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+            else:
+                c.missing.append(MissingItem(
+                    "连板梯队（最高板 / 连板家数 / 梯队分布）—— 本次供数方不提供"
+                    "每只票的连板次数。**这不等于「今天没有连板」**，"
+                    "只等于这个源没说",
+                    "emotion.streak.unavailable"))
+            if "zbc" in zt.row_fields:
+                never_broken = sum(1 for r in zt.rows if int(r.get("zbc") or 0) == 0)
+                add("seal_never_broken_rate",
+                    round(never_broken / zt.total, 4) if zt.total else None,
+                    "全天未炸板占比", _pool_source("limit_up", c.pool_provider.get("limit_up")), kind="derived")
+            else:
+                c.missing.append(MissingItem(
+                    "全天未炸板占比 —— 本次供数方不提供每只票的炸板次数",
+                    "emotion.seal_rate.unavailable"))
 
         if zb:
-            add("broken_board_count", zb.total, "炸板家数", "em:push2ex/broken_board",
+            add("broken_board_count", zb.total, "炸板家数", _pool_source("broken_board", c.pool_provider.get("broken_board")),
                 kind="observed")
         if dt:
-            add("limit_down_count", dt.total, "跌停家数", "em:push2ex/limit_down",
+            add("limit_down_count", dt.total, "跌停家数", _pool_source("limit_down", c.pool_provider.get("limit_down")),
                 kind="observed")
 
         # 炸板率需要两个池同时在场 —— 缺一个就不是「算出来是 0」，是「算不出来」。
@@ -358,8 +422,8 @@ def build_fact_bundle(
         # 🔴 三个股池各自报 qdate，取**共识**（不一致就是 None）⇒ 它出自那几份响应，
         # 不是任何单一一份。批 4 之前这里没有 raw_hash 也说不清为什么，
         # 曾被我错判成「表键对不上的 bug」—— 实际是跨源，用 raw_origins 指回全部。
-        add("trade_date", qdate, "交易日", "em:push2ex/qdate", kind="observed",
-            origins=raw_origins(c.hashes.get(f"em:push2ex/{name}")
+        add("trade_date", qdate, "交易日", _pool_source("qdate", next(iter(c.pool_provider.values()), None)), kind="observed",
+            origins=raw_origins(c.hashes.get(_pool_source(name, c.pool_provider.get(name)))
                                 for name in c.pools))
     else:
         c.missing.append(MissingItem("全部情绪指标 —— 没有任何股池返回可用的交易日",
@@ -400,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", default=None,
                     help="本次编排执行尝试的 run_id（RunContext.run_id），由 Supervisor "
                          "传下来落进 agent_verdicts.run_id。只 capture 不校验，缺省 None")
+    ap.add_argument("--evidence-set-id", default=None,
+                    help="编排器冻结的数据集 id；给了就只读冻结 DatasetSnapshot，不直连 Provider")
     ap.add_argument("--break-source", action="append", default=[],
                     metavar="NAME",
                     help="演练用：人为中断某个数据源 "
@@ -418,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         break_source=set(args.break_source),
         store=store,
         task_id=args.task_id or new_task_id(ADHOC_TASK_SEQ),
+        evidence_set_id=args.evidence_set_id,
     )
     # 🔴 事实原件直接落库（批 E-I：FactBundle，不含 stance），返回一个 id 供 agent 引用。
     #    在此之前契约要求 agent「把这份 JSON 原样带上」—— 实测它做不到原样：

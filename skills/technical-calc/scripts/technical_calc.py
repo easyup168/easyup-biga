@@ -61,7 +61,7 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
     implausible_bars,
     SourceError,
     as_of_for_trade_date,

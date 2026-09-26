@@ -1,15 +1,35 @@
-"""新浪财经 7x24 快讯 —— `news` 的唯一数据源。
+"""新浪财经 7x24 快讯 —— `cn.news.flash` 的 **FALLBACK**（2026-09-26 起）。
 
-为什么是它
-----------
-2.4 开工前探活了四个候选，两个当场出局：
+⏩ 2026-09-26 更正：这里原来写着「`news` 的唯一数据源」
+-------------------------------------------------------
+现在的 PRIMARY 是 `cls_news`（财联社电报）。本源降为备用，理由见那边的模块头。
 
-| 源 | 结果 |
+一句话：**财联社带 `level`（源侧重要性档位），而本源三个看起来像重要性的
+字段实测恒 0**（见下面第 1 条）。代价是条数 —— 本源是财联社的 4 倍。
+
+为什么当初选了它
+----------------
+2.4 开工前探活了四个候选：
+
+| 源 | 当时的结果 |
 |---|---|
 | **新浪 7x24 直播** | ✅ `create_time` 已是北京时间、id 单调、9 页 ~900 条覆盖 29 小时 |
 | 东财个股新闻搜索 | ✅ 可用，但形状是关键词检索，不适合做「最近发生了什么」 |
-| 财联社电报 | ❌ 404，接口已变 |
+| ~~财联社电报~~ | ~~❌ 404，接口已变~~ ← 🔴 **这条是错的，见下** |
 | 东财 7x24 快讯 | ❌ 每补一个参数就再要一个（`fastColumn` → `sortEnd` → …），形状不稳 |
+
+🔴 那张表里的「财联社 ❌」把一个可用的源挡了整整一个 Phase
+---------------------------------------------------------
+死掉的是**旧的 `nodeapi` 系**接口，不是财联社。官方
+`cls.cn/v1/roll/get_roll_list` 一直可用，签名纯本地可算、零 key。
+2026-09-26 重新探活：HTTP 200 / `errno=0` / 真实电报直出。
+
+> 教训不在「财联社能用」，在**探活结论会过期，而它不会自己重跑**。
+> 当时真正观察到的是「某个 URL 今天 404」，落进这张表却变成了
+> 「这个源不可用」—— 两者差一个量级。
+> 而一旦写成表格里的一个 ❌，**没人会回头质疑它**。
+
+⇒ 表里的 ❌ 要写**当时试了什么**，不要写成对这个源的终审判决。
 
 🔴 探活抓到的两个反直觉事实
 ---------------------------
@@ -51,7 +71,6 @@
 from __future__ import annotations
 
 import json
-import re
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,7 +79,11 @@ from typing import Any
 from easyup_biga.domain import CN_TZ
 
 from .http import SourceError, get_json_and_text
+from .news_item import NewsFeed, NewsItem, is_quote_text
 
+#: ⚠️ `NewsItem` / `NewsFeed` 现在住在 `news_item.py`（两个 provider 共用）。
+#:    这里**继续再导出**：下游一直从本模块 import，改 import 路径与本次
+#:    要解决的问题无关，多改一处就多一次漏改的机会。
 __all__ = ["NewsItem", "NewsFeed", "fetch_feed", "STALE_SEC", "PAGE_SIZE"]
 
 _BASE = "https://zhibo.sina.com.cn/api/zhibo/feed"
@@ -75,86 +98,6 @@ PAGE_SIZE = 100
 #: 盘中静默多久算「源出问题了」。见模块 docstring 的实测分布。
 STALE_SEC = 600
 
-#: 🔴 机器生成的行情播报。**只打标，不过滤。**
-#:
-#: 实测盘中 100 条里有 21 条是这种：
-#:
-#:     「深证成指涨1.00%，现报13777.470点；上证指数涨0.44%，现报3929.027点」
-#:     「中证500指数期货连续主力合约日内涨1%，现报7717.60点」
-#:
-#: 这些数字是 `market` / `sector` 已经权威产出的事实（裁定 15）。
-#: news 不得从文本里重新提取它们。
-#:
-#: 为什么打标而不是过滤：过滤是**判断性归类**（铁律 4），
-#: 而且一个正则误伤一条真消息，下游完全看不出来。
-#: 打标把这个判断留给 agent，同时让「有多少条是播报」变成一个可见的事实。
-_QUOTE_RE = re.compile(
-    r"现报|报\d+\.\d+点|指数(涨|跌)\d|主力合约|连续主力|涨幅居前|跌幅居前")
-#: 带【标题】的通常是编辑写的快讯，即使含数字也不是机器播报。
-#:
-#: ⚠️ **已知局限：这条豁免会漏标一部分真播报。** 实测见过：
-#:
-#:     【国债期货开盘】30年期主力合约涨0.16%，10年期主力合约涨0.01%…
-#:     【医药生物板块拉升 诺禾致源20%涨停】…
-#:
-#: 前者是机器播报，后者踩到了 sector / emotion 的事实。
-#:
-#: **不调正则去追它们** —— 那是拿一天的样本过拟合，而代价是误伤真消息。
-#: 关键在于这个标记的定位：**它是给 agent 的提示，不是防线。**
-#: 真正的防线写在 `agents/news/AGENTS.md`：
-#: 「不许从快讯里提取任何行情数字」—— 无论有没有这个标记。
-#:
-#: ⇒ 所以 `quote_count` 是**下界**，不是精确计数。用它感知量级，不要用它做判据。
-_HEADLINE_RE = re.compile(r"^【")
-
-
-@dataclass(frozen=True)
-class NewsItem:
-    """一条快讯。
-
-    Attributes:
-        id: 源的自增 id，**单调递减**（新的更大）。回放靠它定位原文。
-        at: 发布时刻（北京时间，源本来就给的北京时间）。
-        text: 正文原文，不做任何改写。
-        tags: 源自带的分类（公司 / 市场 / 焦点 / 宏观 …）。**是它的口径，不是我们的。**
-        is_quote: 是否为机器行情播报。见 `_QUOTE_RE`。
-    """
-
-    id: int
-    at: datetime
-    text: str
-    tags: tuple[str, ...]
-    is_quote: bool
-
-
-@dataclass(frozen=True)
-class NewsFeed:
-    items: tuple[NewsItem, ...]
-    #: 解析后的原始报文（`{"pages": [各页对象]}`），落 raw 层的 `payload_json`。
-    raw: dict[str, Any]
-    #: 🔴 各页**原始响应文本**的 JSON 数组（批 I）：这个源翻多页，每页一次请求；
-    #: 数组每个元素逐字节等于对应那页的响应体。`content_sha256` 基于它算。
-    raw_text: str | None = None
-
-    @property
-    def server_as_of(self) -> datetime | None:
-        """**服务端自己声明的时刻**；`None` = 这个端点不带日期。
-
-        统一接口的理由见 `_sources/__init__.py` 顶部的「F16」一节：
-        由端点自己声明，调用方就不必逐处判断「这个源有没有日期」——
-        而那个判断一旦分散，就必然有某一处判错（F4 就是这么来的）。
-        """
-        return self.newest_at
-
-    @property
-    def newest_at(self) -> datetime | None:
-        return self.items[0].at if self.items else None
-
-    @property
-    def quote_count(self) -> int:
-        return sum(1 for i in self.items if i.is_quote)
-
-
 def _parse_item(row: dict[str, Any]) -> NewsItem | None:
     """解析一行。**解析不出来就丢掉并让调用方发现数量对不上**，不猜。"""
     text = row.get("rich_text")
@@ -168,7 +111,8 @@ def _parse_item(row: dict[str, Any]) -> NewsItem | None:
         return None
     tags = tuple(str(t.get("name")) for t in (row.get("tag") or [])
                  if isinstance(t, dict) and t.get("name"))
-    is_quote = bool(_QUOTE_RE.search(text)) and not _HEADLINE_RE.match(text)
+    # 与财联社共用同一个文本判据 —— 一个源一套正则就是 L-3。
+    is_quote = is_quote_text(text)
     return NewsItem(id=int(rid or 0), at=at, text=text, tags=tags, is_quote=is_quote)
 
 

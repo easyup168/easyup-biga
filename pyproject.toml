@@ -20,19 +20,37 @@ name = "easyup-biga"
 #    开发版记号，明确表示「在 0.2.0 之后、尚未发布」。
 #    ⚠️ 这个数字现在有两个出处（这里 + CHANGELOG.md），正是 L-3 的形状 ——
 #    由 tests/test_packaging.py 钉住两者不矛盾。发版时两处一起改。
-version = "0.5.1.dev0"
+version = "0.9.23.dev0"
 description = "Multi-Agent A 股短线决策辅助系统：不自动下单，产出证据可追溯、可回放的 Decision Card"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
-# 🔴 零运行时依赖，这是**扫出来的不是抄来的**：AST 扫 src/ 与 skills/ 下全部
+# ⏩ **以下五行是历史**（v1 架构基线时的事实），保留是因为它解释了这个字段
+#    为什么值得被守卫钉住。当前状态见再下面那段。
+# 零运行时依赖，这是**扫出来的不是抄来的**：AST 扫 src/ 与 skills/ 下全部
 #    import，非 stdlib 的只有 easyup_biga 自己、以及 skills/*/scripts/ 里几个
 #    互相 import 的兄弟模块。网络采集走 stdlib 的 urllib.request，没有 requests。
 #    由 tests/test_packaging.py 的「声明零依赖 ⇔ 代码里真的没有第三方 import」
 #    双向钉住 —— 哪天有人 `import requests` 忘了声明，那条会红。
-dependencies = []
+# 🔴 **零依赖到 Phase 3 P3-4 为止。** 上面那段注释描述的是 v1 架构基线时的事实，
+#    留着是因为它解释了这个字段为什么值得被守卫钉住。现在它不再是零：
+#
+#    `duckdb` —— 历史数据面（Parquet）的**写与读都走它**。
+#    architecture.md §5.1 早就写死「全市场 EOD 第一次建的时候就该用 Parquet」，
+#    而 DuckDB 的 `COPY … TO … (FORMAT PARQUET)` 让**一个**依赖同时覆盖写入与
+#    跨日分析查询 —— 比 pyarrow + duckdb 两个少一个。
+#
+#    ⚠️ 代价是真的：本仓库的生产执行模型是 `bin/*` 直接用**系统 python3** +
+#    `sys.path` 挂载（不装包、无 venv），而 PEP 668 的 externally-managed 环境
+#    会挡住 `pip install`（`--user` 也挡）。⇒ 装法见
+#    `docs/guide/install.md`，不是「加一行就完事」。
+#
+#    这条守卫（`tests/test_packaging.py` 的「声明 ⇔ 代码双向一致」）在 duckdb
+#    第一次被 import 进来时**当场报红**了 —— 零依赖这个属性是被明写着交出去的，
+#    不是悄悄消失的。
+dependencies = ["duckdb>=1.0,<2"]
 
 classifiers = [
     "Programming Language :: Python :: 3.12",

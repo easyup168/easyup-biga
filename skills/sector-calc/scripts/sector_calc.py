@@ -69,14 +69,18 @@ from _contract import (  # noqa: E402
     new_task_id,
     now_cn,
 )
-from _sources import (  # noqa: E402
+from _data import (  # noqa: E402
+    DecisionDataClient,
     BOARD_PCT_LIMIT,
     BoardResult,
     IndexDaily,
     SourceError,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
+    latest_trading_day,
     fetch_boards,
     fetch_index_daily,
+    source_prefix_of,
 )
 from _store import (  # noqa: E402
     init_schema,
@@ -103,7 +107,10 @@ BOTTOM_N = 3
 PCT_ABS_LIMIT = BOARD_PCT_LIMIT
 
 _YI = 1e8
-_EXPECTED_FIELDS = 9
+#: `data_completeness` 的分母 —— **加字段必须同步改它**，
+#: 否则要么 >1（契约当场拒绝，响亮）要么被稀释（静默，更糟）。
+#: 2026-09-26：+2（`industry_taxonomy` / `concept_taxonomy`）。
+_EXPECTED_FIELDS = 11
 
 
 def _brief(b) -> dict[str, Any]:
@@ -111,6 +118,79 @@ def _brief(b) -> dict[str, Any]:
             "inflow_yi": (round(b.main_inflow / _YI, 2)
                           if b.main_inflow is not None else None),
             "leader": b.leader}
+
+
+def _board_source(kind: str, provider_id: str | None) -> str:
+    """板块 Evidence 的 `source` —— 按**实际供数方**拼，不写死主源。
+
+    🔴 这里曾经是 `f"em:clist/{kind}"` 的字面量。板块有了备用源之后，
+    降级过的那天 Evidence 会指着一个**没供过数的源** ——
+    那比缺字段更糟：缺字段会进 `missing[]`，说谎不会。
+
+    ⚠️ 前缀从注册表来（`source_prefix_of`），不在这里自己拼 ——
+    `sina` / `sina_boards` 的前缀都是 `sina`，猜不得。
+    `provider_id is None` = 没走数据层的直连路径，那条路只有东财。
+    """
+    if provider_id is None:
+        return f"em:clist/{kind}"
+    prefix = source_prefix_of(provider_id)
+    return f"{prefix}:clist/{kind}" if prefix == "em" else f"{prefix}:bankuai/{kind}"
+
+
+#: 各 provider 的**板块分类体系**。🔴 这不是「同一个榜的两个来源」。
+#:
+#: 2026-09-26 实测：
+#:
+#:     kind       东财                       新浪
+#:     industry   496 个申万式细分            **84 个证监会门类**
+#:                BK1456 其他家电Ⅲ / 棉纺      hangye_ZA02 林业 / 畜牧业
+#:     concept    500 个概念                  175 个概念
+#:                                           gn_hwqc 华为汽车 / gn_BCdc BC电池
+#:
+#: ⇒ **概念对概念可比，行业对行业不可比。**
+#:   行业降级到新浪之后，卡上会说「领涨板块 = 林业」——
+#:   那是证监会门类里的一个大类，对短线**基本无用**，
+#:   而它和主源那个「棉纺 +8%」根本不是同一个榜。
+#:
+#: 🔴 这个差异**必须显式声明**，不能只靠「少两个字段」那条 missing 兜着 ——
+#:    那条说的是「主力净流入没有」，而这里的问题是**整个榜换了一套**。
+#:    静默换口径正是本项目最优先防范的形状。
+_BOARD_TAXONOMY: dict[tuple[str, str], str] = {
+    ("industry", "eastmoney"): "em-sw-细分(496)",
+    ("industry", "sina_boards"): "csrc-门类(84)",
+    ("concept", "eastmoney"): "em-概念(500)",
+    ("concept", "sina_boards"): "sina-概念(175)",
+}
+
+#: 各 kind 的**基准**分类体系（dataset 的 primary 用的那套）。
+#: 实际供数方与它不同 ⇒ 声明出来。
+_BASELINE_TAXONOMY = {"industry": "em-sw-细分(496)", "concept": "em-概念(500)"}
+
+
+def _board_agg_source(providers) -> str:
+    """跨两个榜聚合出来的值（如 `board_counts`）该署哪个 source。
+
+    🔴 这里曾经是写死的 `"em:clist"`。它有两个后果，第二个是致命的：
+
+    1. 降级到备用源时，卡面上的 source 指着一个**没供过数**的源（说谎）
+    2. `raw_hash_for("em:clist")` 查不到 ⇒ `raw_hash` 是 `None`；
+       而同一行的 `origins=` 也按写死的 `em:clist/<kind>` 查 ⇒ `derived_from` 也空
+       ⇒ **契约铁律当场拒绝，整个 skill 崩掉，sector 这一支彻底缺席**
+
+    实测（BIGA-20260926-003，2026-09-26）：东财主源挂了、`sina_boards` 供数，
+    于是 `c.hashes` 的键是 `sina:bankuai/*`，而这里按 `em:clist/*` 查 ——
+    `ValueError: 既没有 raw_hash 也没有 derived_from`，卡上少了一整个 agent。
+
+    > 它**只在降级那天炸**，而降级那天恰恰最需要它。
+    > 主源正常时两边的字面量碰巧相等，所以它在所有既有测试与真实出卡里都是绿的。
+
+    两个榜理论上可能由不同 provider 供数（`read_boards` 是按 kind 各走一次
+    降级链的）⇒ 前缀不唯一时**如实说「混合」**，不挑一个当代表。
+    """
+    prefixes = {_board_source(k, p).rsplit("/", 1)[0] for k, p in providers}
+    if len(prefixes) == 1:
+        return next(iter(prefixes))
+    return "mixed:" + "+".join(sorted(prefixes))
 
 
 class Collector:
@@ -122,7 +202,10 @@ class Collector:
         # 给了就读冻结快照的日线（交易日），没给自己抓（手工调试路径）。
         self.evidence_set_id = evidence_set_id
         self._coord = SnapshotCoordinator() if evidence_set_id is not None else None
+        self._data = DecisionDataClient() if evidence_set_id is not None else None
         self.boards: dict[str, BoardResult] = {}
+        #: kind → **实际供数方**（降级时与 dataset 的 primary 不同）。
+        self.board_provider: dict[str, str | None] = {}
         self.daily: IndexDaily | None = None
         self.missing: list[MissingItem] = []
         self.warnings: list[str] = []
@@ -155,7 +238,17 @@ class Collector:
                 "sector.board.source_broken"))
             return
         try:
-            r = fetch_boards(kind)
+            if self._data is not None:
+                r, frozen_hash, served_by = self._data.read_boards(
+                    self.evidence_set_id, kind)
+            else:
+                r = fetch_boards(kind)
+                frozen_hash = None
+                # 直连路径没有降级链（provider 选择归冻结层）⇒ 只可能是东财。
+                # 🔴 写成 `None` 会让**分类体系那条事实产不出来** ——
+                #    而直连时口径其实是已知的（em-sw-细分 496）。
+                #    「不知道」和「知道但没填」在卡上长得一样，都是缺一条。
+                served_by = "eastmoney"
         except (SourceError, ValueError) as e:
             self._note(missing=MissingItem(f"{label} —— 数据源不可用: {e}",
                                            "sector.board.unavailable"))
@@ -180,9 +273,16 @@ class Collector:
 
         with self._lock:
             self.boards[kind] = r
-        # `server_as_of is None` ⇒ 板块榜不带日期，它说的就是「此刻」
-        self._keep_raw(f"em:clist/{kind}", r.raw,
-                       r.server_as_of or now_cn(), r.raw_text)
+            self.board_provider[kind] = served_by
+        source = _board_source(kind, served_by)
+        if self._data is not None:
+            with self._lock:
+                if frozen_hash:
+                    self.hashes[source] = frozen_hash
+                self.es_ids[source] = self.evidence_set_id
+        else:
+            # `server_as_of is None` ⇒ 板块榜不带日期，它说的就是「此刻」
+            self._keep_raw(source, r.raw, r.server_as_of or now_cn(), r.raw_text)
 
     def collect_date(self) -> None:
         if "date" in self.break_source:
@@ -265,14 +365,32 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
     #    ⚠️ 注意这里的不对称：带日期的源（腾讯行情）会被核对、不一致就报
     #    date_mismatch；**唯独没有日期的那个源反而被默认对齐** ——
     #    而它恰恰是最可能对不上的。
+    #
+    #    ⏩ **2026-09-26 再更正：只用「取回时刻」也不对，它是同一个错的另一半。**
+    #
+    #    周六 18:11 实测：这个端点给的其实是 **09-24 收盘**的 1120/4305/137
+    #    （它自己不会说），而 as_of 标成 09-26 18:11 ——
+    #    **一个上周四的数，挂着周六的时间戳。**
+    #    后果不是难看：risk 因此判「上游报告了不同的交易日，不能当作同一天的
+    #    事实一起审」，整张卡降级成 WAIT —— 而那个「不一致」是我们自己标的。
+    #
+    #    ⇒ 判据搬到 `tradetime.as_of_for_undated_snapshot()`（三态、靠日历），
+    #      market 与 sector **共用同一份**（各写一份就是 L-3）。
+    _live_as_of, _live_warn = as_of_for_undated_snapshot(
+        retrieved_at=retrieved,
+        latest_trade_date=latest_trading_day(
+            retrieved.strftime("%Y%m%d")))
+    if _live_warn:
+        c.warnings.append(_live_warn)
+
     def add_live(field: str, value: Any, label: str, source: str, *,
             kind: str | None, inputs: tuple[str, ...] = (),
             origins: tuple = ()) -> None:
-        """实时快照类证据：as_of = 取回时刻。"""
+        """不带日期的快照类证据。**as_of 由日历三态判出**，见上面那段。"""
         result[field] = value
         evidence.append(Evidence(
             field=field, source=source, value=value,
-            as_of=retrieved, retrieved_at=retrieved,
+            as_of=_live_as_of, retrieved_at=retrieved,
             calc_version=CALC_VERSION, label=label,
             raw_hash=raw_hash_for(source),
             evidence_set_id=es_id_for(source),
@@ -291,17 +409,41 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
         add("trade_date", trade_date, "交易日", f"sina:kline/{_DATE_SYMBOL}",
             kind="observed")
 
-        if c.boards:
-            c.warnings.append(
-                "板块榜不返回交易日字段，其 as_of 是按指数日线的交易日推断的")
+        # 🔴 板块分类体系**逐 kind 声明**，与主源不同就进 missing。
+        #    不是警告 —— 警告会被读成「注意一下」，而这里的事实是
+        #    **这个榜和你以为的那个榜不是同一个**，不能拿来比。
+        for _kind in ("industry", "concept"):
+            if _kind not in c.boards:
+                continue
+            _tax = _BOARD_TAXONOMY.get((_kind, c.board_provider.get(_kind)))
+            if _tax is None:
+                continue
+            add_live(f"{_kind}_taxonomy", _tax, f"{_kind}榜的分类体系",
+                     _board_source(_kind, c.board_provider.get(_kind)),
+                     kind="observed")
+            if _tax != _BASELINE_TAXONOMY[_kind]:
+                c.missing.append(MissingItem(
+                    f"{_kind}榜与主源同口径的排名 —— 本次由备用源供数，"
+                    f"用的是 **{_tax}**，而主源是 {_BASELINE_TAXONOMY[_kind]}。"
+                    f"两者**不是同一个榜**，名次不能跨源比较，"
+                    f"也不能说「今天领涨的还是昨天那个板块」",
+                    f"sector.{_kind}.taxonomy_mismatch"))
 
+        # ⏩ 这里原本有一条 `if c.boards:` 只为发一句警告：
+        #    「板块榜不返回交易日字段，其 as_of 是按指数日线的交易日推断的」。
+        #    2026-09-26 起 as_of 由 `as_of_for_undated_snapshot()` 按**日历**判，
+        #    那句话描述的是一个已经不存在的行为 ⇒ 连同空壳 if 一起删掉。
+        #    （警告由那个函数自己发，三态各说各的话。）
         counts: dict[str, int] = {}
         for kind, label, tag in (("industry", "行业", "industry"),
                                  ("concept", "概念", "concept")):
             r = c.boards.get(kind)
             if r is None:
                 continue
-            src = f"em:clist/{kind}"
+            # 🔴 source 必须写**实际供数方**。写死 `em:` 会让降级过的那天
+            #    Evidence 指着一个没供过数的源 —— 那比缺字段更糟：
+            #    缺字段会进 missing[]，说谎不会。
+            src = _board_source(kind, c.board_provider.get(kind))
             ranked = sorted(r.boards, key=lambda b: b.pct, reverse=True)
             counts[tag] = len(ranked)
             add_live(f"{tag}_top", [_brief(b) for b in ranked[:TOP_N]],
@@ -340,9 +482,15 @@ def build_fact_bundle(*, break_source: set[str], store: bool, task_id: str,
 
         if counts:
             # 行业榜 + 概念榜两份响应的合计 —— 跨源聚合，用 raw_origins 指回那两份。
-            add_live("board_counts", counts, "各榜板块数", "em:clist", kind="derived",
-                     origins=raw_origins(c.hashes.get(f"em:clist/{k}")
-                                         for k in ("industry", "concept")))
+            # 🔴 两处都必须按**实际供数方**算，不能写死主源的字面量：
+            #    `source` 写死会说谎，`origins` 写死会让 derived_from 空掉
+            #    ⇒ 契约拒绝 ⇒ 整个 skill 崩。见 `_board_agg_source` 的说明。
+            kinds = [(k, c.board_provider.get(k)) for k in ("industry", "concept")
+                     if k in c.boards]
+            add_live("board_counts", counts, "各榜板块数",
+                     _board_agg_source(kinds), kind="derived",
+                     origins=raw_origins(c.hashes.get(_board_source(k, p))
+                                         for k, p in kinds))
         else:
             c.missing.append(MissingItem(
                 "板块强度 —— 行业榜与概念榜都不可用", "sector.board.none"))

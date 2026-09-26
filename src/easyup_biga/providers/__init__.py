@@ -24,6 +24,12 @@
 存量调用方写的 `from _sources import ...` 经 skills/_sources 薄壳等价可用。
 """
 
+from .eastmoney_security_master import (
+    EASTMONEY_SECURITY_MASTER_URL,
+    SecurityMasterFetchResult,
+    fetch_security_master,
+    parse_security_master_pages,
+)
 from .eastmoney import (
     BOARD_KINDS,
     POOL_ENDPOINTS,
@@ -49,6 +55,7 @@ from .tencent import TENCENT_SYMBOLS, IndexQuote, fetch_index_quote
 from .tradetime import (
     MARKET_CLOSE,
     as_of_for_trade_date,
+    as_of_for_undated_snapshot,
     market_is_open,
     session_in_progress,
 )
@@ -62,6 +69,10 @@ from .sanity import (  # noqa: F401
 )
 
 __all__ = [
+    "parse_security_master_pages",
+    "fetch_security_master",
+    "SecurityMasterFetchResult",
+    "EASTMONEY_SECURITY_MASTER_URL",
     "BOARD_PCT_LIMIT",
     "HL_SANITY_FACTOR",
     "INDEX_PCT_LIMIT",
@@ -84,6 +95,7 @@ __all__ = [
     "SourceError",
     "TradingCalendar",
     "as_of_for_trade_date",
+    "as_of_for_undated_snapshot",
     "fetch_boards",
     "fetch_breadth",
     "fetch_index_daily",

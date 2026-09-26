@@ -4,6 +4,7 @@
 """
 
 from .db import (
+    assert_snapshot_linkable,
     DEFAULT_DB_PATH,
     AppendOnlyViolation,
     StoreNotInitialised,
@@ -11,6 +12,7 @@ from .db import (
     db_path,
     init_schema,
     is_trading_day,
+    latest_trading_day,
     list_agent_runs,
     load_card_by_record_id,
     load_evidence_set,
@@ -60,7 +62,64 @@ from .runs import (
 )
 from .schema import SCHEMA_VERSION
 
+
+# Phase 3 数据平台的元数据落库（P3-1）。走同一个 `connect()` 边界，
+# 不另起第二个库、不另开写路径 —— I-4「DB 唯一入口」对它同样成立。
+from .data import (
+    find_security_master_snapshot_at,
+    load_security_master_records,
+    save_security_master_records,
+    security_at,
+    security_universe_at,
+    DataRunTransitionError,
+    DataStoreConflict,
+    UnknownDataRun,
+    data_run_events,
+    data_run_state,
+    find_dataset_partition,
+    find_dataset_snapshot,
+    link_evidence_set_dataset,
+    list_evidence_set_datasets,
+    load_dataset_partition,
+    load_dataset_snapshot,
+    load_raw_artifact,
+    open_data_run,
+    partition_key_json,
+    record_provider_attempt,
+    save_dataset_partition,
+    save_dataset_snapshot,
+    save_quality_report,
+    save_raw_artifact,
+    transition_data_run,
+)
+
 __all__ = [
+    "find_security_master_snapshot_at",
+    "load_security_master_records",
+    "save_security_master_records",
+    "security_at",
+    "security_universe_at",
+    "assert_snapshot_linkable",
+    "DataRunTransitionError",
+    "DataStoreConflict",
+    "UnknownDataRun",
+    "data_run_events",
+    "data_run_state",
+    "find_dataset_partition",
+    "find_dataset_snapshot",
+    "link_evidence_set_dataset",
+    "list_evidence_set_datasets",
+    "load_dataset_partition",
+    "load_dataset_snapshot",
+    "load_raw_artifact",
+    "partition_key_json",
+    "open_data_run",
+    "record_provider_attempt",
+    "save_dataset_partition",
+    "save_dataset_snapshot",
+    "save_quality_report",
+    "save_raw_artifact",
+    "transition_data_run",
     "DEFAULT_DB_PATH",
     "SCHEMA_VERSION",
     "AppendOnlyViolation",
@@ -69,6 +128,7 @@ __all__ = [
     "db_path",
     "init_schema",
     "is_trading_day",
+    "latest_trading_day",
     "list_agent_runs",
     "load_card_by_record_id",
     "load_evidence_set",

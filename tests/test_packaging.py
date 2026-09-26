@@ -53,7 +53,12 @@ def _third_party_imports(files: list[pathlib.Path]) -> dict[str, list[str]]:
     返回 `{模块名: [出现位置, ...]}`。
     """
     siblings = _sibling_module_names()
-    own = {"easyup_biga", "_contract", "_store", "_sources", "_runtime", "_snapshot"}
+    # `skills/` 下的本地薄壳包。新增一个就要在这里登记一次 —— 那是**有意的**：
+    # 这条守卫真正防的是「`skills/` 里悄悄冒出一个没人声明得了的依赖」，
+    # 所以判据必须是白名单，而白名单只能靠人加。
+    # `_data`（P3-6）是第六个：决策数据边界，specialist 经它读冻结快照。
+    own = {"easyup_biga", "_contract", "_store", "_sources", "_runtime",
+           "_snapshot", "_data"}
     found: dict[str, list[str]] = {}
     for p in files:
         tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
@@ -88,7 +93,15 @@ def _version_tuple(v: str) -> tuple[int, int, int, int]:
     assert m, f"版本号 {v!r} 不是 X.Y.Z 或 X.Y.Z.devN 的形状"
     major, minor, patch, dev = m.groups()
     # dev 版排在同号正式版**之前**（PEP 440）：0.3.0.dev0 < 0.3.0
-    return (int(major), int(minor), int(patch), -1 if dev is None else int(dev))
+    #
+    # 🔴 2026-09-26 修：这一行原本是 `-1 if dev is None else int(dev)`，
+    #    把正式版排到了 dev 版**前面** —— 和上面那句注释字面相反。
+    #    它只在 X.Y.Z 三段全等时才显形，而那**正是这条守卫唯一要抓的场合**：
+    #    「CHANGELOG 已经发了 0.5.1，pyproject 却还写着 0.5.1.dev0（= 0.5.1 之前）」。
+    #    实测 v0.5.1 那次发版就漏了 bump（v0.4.0→0.4.1.dev0、v0.5.0→0.5.1.dev0
+    #    都对，唯独 v0.5.1→0.5.1.dev0），而守卫报绿。
+    #    ⇒ 一条在「正常情况」下恒真、只在出事那天才该红的判据，写反了不会有人发现。
+    return (int(major), int(minor), int(patch), int(dev) if dev is not None else 1 << 31)
 
 
 def _last_released() -> str:
@@ -206,6 +219,13 @@ def test_磁盘上的每个子包都真的会被打进去():
     )
 
 
+def _next_dev(released: str) -> str:
+    """最后一段 +1 再挂 `.dev0` —— 只用于把报错指向一个**真能让它变绿**的值。"""
+    parts = released.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts) + ".dev0"
+
+
 def test_版本号与CHANGELOG不矛盾():
     """🔴 版本号这个事实现在有两个出处（pyproject + CHANGELOG）= L-3 的形状。
 
@@ -218,7 +238,9 @@ def test_版本号与CHANGELOG不矛盾():
     assert _version_tuple(declared) > _version_tuple(released), (
         f"pyproject 写着 {declared}，而 CHANGELOG 最近的发布版是 {released}。\n"
         f"  {declared} <= {released} 等于宣称「这棵树就是那个发布版」。\n"
-        "  发版时：CHANGELOG 的 [未发布] 改成版本号 + 日期，这里去掉 .devN，两处一起改。"
+        "  发版时两处一起改：CHANGELOG 的 [未发布] → 版本号 + 日期，\n"
+        f"  这里 → **下一个** dev 版本（比 {released} 大，如 {_next_dev(released)}）。\n"
+        "  🔴 不是「去掉 .devN」—— 那会让两处相等，而相等就是这条断言要拦的。"
     )
 
 

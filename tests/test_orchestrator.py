@@ -512,12 +512,14 @@ class TestSnapshotFreeze:
         assert n_raw == 2, "两个指数代码 ⇒ 冻结只落 2 行 raw"
         assert n_es == 1
 
-    def test_specialist_task_只给日线三个agent带esid(self, db):
+    def test_specialist_task_所有有required_dataset的Stage1都带esid(self, db):
+        from _contract import STAGE1_AGENTS, required_datasets_for
         orch, _, _ = _make_orch(db, judgment=_GOOD_JUDGMENT)
-        for a in ("market", "sector", "technical"):
-            assert "--evidence-set-id" in orch._specialist_task(a, "BIGA-20260101-001", "es-x", "rid-x")
-        for a in ("emotion", "news"):
-            assert "--evidence-set-id" not in orch._specialist_task(a, "BIGA-20260101-001", "es-x", "rid-x")
+        for agent in STAGE1_AGENTS:
+            task = orch._specialist_task(agent, "BIGA-20260101-001", "es-x", "rid-x")
+            if required_datasets_for(agent):
+                assert "--evidence-set-id es-x" in task
+                assert "required_datasets=" in task
 
     def test_JI_evidence_set落库带本次run_id(self, db):
         """🔴 批 J-I item 4：编排器把 ctx.run_id 传进 freeze_index_daily ⇒

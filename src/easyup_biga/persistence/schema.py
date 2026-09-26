@@ -916,6 +916,184 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_online_runtime_run_id
 
 
 #: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
+# ───────────────────────────────────────────────────────────────
+# Phase 3 Data Platform Foundation (Data Architecture v1)
+# v1-v22 are frozen Phase 2 history. P3-1 starts at v23.
+# ───────────────────────────────────────────────────────────────
+_V23 = """
+CREATE TABLE IF NOT EXISTS data_job_runs (
+    data_run_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    partition_key_json TEXT NOT NULL,
+    requested_data_version INTEGER NOT NULL CHECK(requested_data_version >= 1),
+    trigger_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_data_job_dataset_partition
+    ON data_job_runs(dataset_id, partition_key_json, created_at);
+CREATE INDEX IF NOT EXISTS ix_data_job_trigger
+    ON data_job_runs(trigger_id, created_at);
+
+CREATE TABLE IF NOT EXISTS data_run_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data_run_id TEXT NOT NULL REFERENCES data_job_runs(data_run_id),
+    seq INTEGER NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    at TEXT NOT NULL,
+    detail_json TEXT,
+    UNIQUE(data_run_id, seq)
+);
+CREATE INDEX IF NOT EXISTS ix_data_events_run ON data_run_events(data_run_id, seq);
+""" + _append_only("data_job_runs", "Data Run identity is immutable") \
+    + _append_only("data_run_events", "Data Run history is immutable")
+
+
+_V24 = """
+CREATE TABLE IF NOT EXISTS raw_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    body_uri TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+    content_type TEXT,
+    compression TEXT,
+    as_of TEXT,
+    available_at TEXT,
+    retrieved_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_raw_artifacts_dataset_time
+    ON raw_artifacts(dataset_id, retrieved_at);
+CREATE INDEX IF NOT EXISTS ix_raw_artifacts_sha ON raw_artifacts(body_sha256);
+
+CREATE TABLE IF NOT EXISTS provider_attempts (
+    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data_run_id TEXT NOT NULL REFERENCES data_job_runs(data_run_id),
+    provider_id TEXT NOT NULL,
+    provider_role TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL CHECK(attempt_no >= 1),
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    elapsed_ms INTEGER CHECK(elapsed_ms IS NULL OR elapsed_ms >= 0),
+    artifact_id TEXT REFERENCES raw_artifacts(artifact_id),
+    error_code TEXT,
+    error_detail TEXT,
+    UNIQUE(data_run_id, provider_id, attempt_no)
+);
+CREATE INDEX IF NOT EXISTS ix_provider_attempts_run
+    ON provider_attempts(data_run_id, attempt_no);
+""" + _append_only("raw_artifacts", "Raw artifact metadata is immutable") \
+    + _append_only("provider_attempts", "Provider attempt history is immutable")
+
+
+_V25 = """
+CREATE TABLE IF NOT EXISTS dataset_partitions (
+    partition_id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    partition_key_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+    data_version INTEGER NOT NULL CHECK(data_version >= 1),
+    storage_format TEXT NOT NULL,
+    storage_uri TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    row_count INTEGER NOT NULL CHECK(row_count >= 0),
+    provider_id TEXT NOT NULL,
+    raw_artifact_id TEXT REFERENCES raw_artifacts(artifact_id),
+    supersedes_partition_id TEXT REFERENCES dataset_partitions(partition_id),
+    created_at TEXT NOT NULL,
+    UNIQUE(dataset_id, partition_key_json, data_version)
+);
+CREATE INDEX IF NOT EXISTS ix_dataset_partitions_lookup
+    ON dataset_partitions(dataset_id, partition_key_json, data_version);
+
+CREATE TABLE IF NOT EXISTS quality_reports (
+    quality_report_id TEXT PRIMARY KEY,
+    data_run_id TEXT NOT NULL REFERENCES data_job_runs(data_run_id),
+    dataset_id TEXT NOT NULL,
+    partition_id TEXT REFERENCES dataset_partitions(partition_id),
+    status TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    metrics_json TEXT NOT NULL,
+    issues_json TEXT NOT NULL,
+    checked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_quality_dataset ON quality_reports(dataset_id, checked_at);
+
+CREATE TABLE IF NOT EXISTS dataset_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    partition_key_json TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    knowledge_cutoff TEXT NOT NULL,
+    status TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+    data_version INTEGER NOT NULL CHECK(data_version >= 1),
+    manifest_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    quality_report_id TEXT NOT NULL REFERENCES quality_reports(quality_report_id),
+    supersedes_snapshot_id TEXT REFERENCES dataset_snapshots(snapshot_id),
+    created_at TEXT NOT NULL,
+    UNIQUE(dataset_id, partition_key_json, data_version)
+);
+CREATE INDEX IF NOT EXISTS ix_dataset_snapshots_lookup
+    ON dataset_snapshots(dataset_id, partition_key_json, status, data_version);
+""" + _append_only("dataset_partitions", "Partitions are versioned, never overwritten") \
+    + _append_only("quality_reports", "Quality evidence is immutable") \
+    + _append_only("dataset_snapshots", "Dataset snapshots are immutable")
+
+
+_V26 = """
+CREATE TABLE IF NOT EXISTS evidence_set_datasets (
+    link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evidence_set_id TEXT NOT NULL REFERENCES evidence_sets(evidence_set_id),
+    dataset_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL REFERENCES dataset_snapshots(snapshot_id),
+    created_at TEXT NOT NULL,
+    UNIQUE(evidence_set_id, dataset_id)
+);
+CREATE INDEX IF NOT EXISTS ix_evidence_dataset_snapshot
+    ON evidence_set_datasets(snapshot_id);
+""" + _append_only("evidence_set_datasets", "EvidenceSet dataset lineage is immutable")
+
+
+
+_V27 = """
+CREATE TABLE IF NOT EXISTS fact_security_master (
+    security_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    partition_id TEXT NOT NULL REFERENCES dataset_partitions(partition_id),
+    instrument_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    exchange TEXT NOT NULL CHECK(exchange IN ('SSE','SZSE','BSE')),
+    name TEXT NOT NULL,
+    security_type TEXT NOT NULL CHECK(security_type IN ('STOCK')),
+    board TEXT NOT NULL CHECK(board IN ('SSE_MAIN','STAR','SZSE_MAIN','CHINEXT','BSE')),
+    list_date TEXT,
+    delist_date TEXT,
+    status TEXT NOT NULL CHECK(status IN ('LISTED','DELISTED','UNKNOWN')),
+    available_at TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    raw_artifact_id TEXT NOT NULL REFERENCES raw_artifacts(artifact_id),
+    created_at TEXT NOT NULL,
+    UNIQUE(partition_id, instrument_id)
+);
+CREATE INDEX IF NOT EXISTS ix_security_master_partition_status
+    ON fact_security_master(partition_id, status, exchange);
+CREATE INDEX IF NOT EXISTS ix_security_master_instrument
+    ON fact_security_master(instrument_id, available_at);
+CREATE INDEX IF NOT EXISTS ix_security_master_symbol
+    ON fact_security_master(symbol, available_at);
+""" + _append_only("fact_security_master", "Security Master snapshots are immutable")
+
+
+#: (版本号, SQL)。只许在末尾追加，不许改动已发布的条目。
+
+
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _V1),
     (2, _V2),
@@ -939,6 +1117,11 @@ MIGRATIONS: list[tuple[int, str]] = [
     (20, _V20),
     (21, _V21),
     (22, _V22),
+    (23, _V23),
+    (24, _V24),
+    (25, _V25),
+    (26, _V26),
+    (27, _V27),
 ]
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

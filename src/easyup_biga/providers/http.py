@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import http.client
 import json
+import random
 import time
 import urllib.error
 import urllib.request
 from typing import Any
 
 __all__ = ["SourceError", "get_json", "get_json_and_text", "get_text",
-           "UA", "TIMEOUT", "RETRIES"]
+           "UA", "TIMEOUT", "RETRIES", "throttle"]
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124 Safari/537.36")
@@ -37,6 +38,20 @@ TIMEOUT = 15
 RETRIES = 3
 BACKOFF_SEC = (0.8, 2.0)
 
+#: 每个「限流域」上次请求的时刻。键是调用方自己给的字符串（如 `"eastmoney"`）。
+_LAST_CALL: dict[str, float] = {}
+
+#: 🔴 同一个域两次请求之间的最小间隔（秒）。
+#:
+#: 为什么需要它：重试/退避管的是「这一次失败了怎么办」，**管不了「请求太密」**。
+#: 东财这类端点对频率敏感 —— 实测（2026-09-26）连打十来个请求之后，
+#: 连**已知可用**的兄弟端点也一起返回 502，也就是说封的是来源而不是某个接口。
+#:
+#: 这个数字不是拍的：公开参考实现 `a-stock-data` 的东财统一入口用的就是
+#: 1.0 秒 + 0.1~0.5 秒抖动，并注明「所有 eastmoney.com 接口都应通过它请求，
+#: 避免高频被封 IP」。本仓库沿用同一个量级。
+THROTTLE_SEC: dict[str, float] = {"eastmoney": 1.0}
+
 
 class SourceError(RuntimeError):
     """数据源不可用或返回了无法解释的内容。
@@ -44,6 +59,26 @@ class SourceError(RuntimeError):
     🔴 采集层遇到问题一律抛这个，绝不返回一个「兜底值」。
     返回兜底值 = 让上层无法区分「真的是这个数」和「没取到」。
     """
+
+
+def throttle(domain: str) -> None:
+    """同一个限流域的两次请求之间等够 `THROTTLE_SEC[domain]`。**调用方主动调它。**
+
+    🔴 为什么不塞进 `get_text`/`get_json` 自动生效：那会让**每一个**数据源都被
+    同一个间隔拖慢，而只有东财这一类需要。判据放在调用方，是因为「这个 host
+    属于哪个限流域」只有它知道 —— 从 URL 猜 host 归属是按字符串形状写判据。
+
+    ⚠️ 进程内有效。多进程并发抓同一个源时它管不住 —— 那属于另一个问题
+    （真需要时用 `data/locks/` 下的文件锁，Phase 3 的存储布局里已经留了那个目录）。
+    """
+    gap = THROTTLE_SEC.get(domain)
+    if gap is None:
+        return
+    wait = gap - (time.monotonic() - _LAST_CALL.get(domain, 0.0))
+    if wait > 0:
+        # 抖动：整齐的 1.0 秒本身就是一种特征。
+        time.sleep(wait + random.uniform(0.1, 0.5))
+    _LAST_CALL[domain] = time.monotonic()
 
 
 def get_text(url: str, *, referer: str, encoding: str = "utf-8") -> str:

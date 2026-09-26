@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+from _scan import sandbox_ignore
+
 import os
 import pathlib
 import shutil
@@ -96,17 +98,12 @@ def test_把仓库剥掉git之后守卫仍然全绿(tmp_path):
        本项目已经八次踩到「守卫查的地方和它声称守的地方不是同一处」。
     """
     work = tmp_path / "repo"
-    shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(
-            # 🔴 运行时产物必须排除 —— 事故当天 `.biga-card-stop`（总闸）
-            #    被原样复制进沙盒，于是三条出卡路径测试全部拿到 rc=3。
-            #    沙盒要复制的是**代码**，不是这台机器此刻的运行状态。
-            ".biga-card-stop", ".biga-card.lock",
-            ".git", "__pycache__", ".pytest_cache", "data", ".claude", "memory",
-            # 🔴 2026-09-24：同一个坑的第二个实例。F 节打包工作开工后，
-            #    `build/`（setuptools 的构建产物）第一次出现在这台机器上，
-            #    这份硬编码名单没跟上——它比对的是 git ls-files 之外的东西，
-            #    不读 .gitignore，加了 .gitignore 条目救不了它。
-            "build", "dist", "*.egg-info"))
+    # 🔴 排除规则走 `_scan.sandbox_ignore()` —— 与 `test_spawn_proof.py` 共用
+    #    的唯一实现。原来两处各写一份 `shutil.ignore_patterns(...)`，而那个
+    #    glob 按名字匹配**任意层级**：本意排掉仓库根的 `data/`，实际连
+    #    `src/easyup_biga/data/` 一起静默丢掉。下面那段记录的两个历史实例
+    #    （运行时总闸、构建产物）与这个是同一个坑的前两次。
+    shutil.copytree(REPO, work, symlinks=True, ignore=sandbox_ignore(REPO))
     assert not (work / ".git").exists(), "副本里还有 .git，这条测试等于没测"
 
     r = subprocess.run(

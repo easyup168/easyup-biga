@@ -53,7 +53,7 @@ from typing import Any
 
 from easyup_biga.domain import now_cn
 
-from .http import SourceError, get_json_and_text
+from .http import SourceError, get_json_and_text, throttle
 from .tradetime import as_of_for_trade_date
 
 __all__ = [
@@ -76,6 +76,28 @@ POOL_ENDPOINTS: dict[str, str] = {
     "broken_board": "getTopicZBPool",  # 炸板池
     "limit_down": "getTopicDTPool",    # 跌停池
 }
+
+#: 🔴 排序字段。**三个池的行结构不一样，排序字段填错会返回 0 行、而 `rc=0`。**
+#:
+#: 这里原来写死 `fbt:asc`（首次封板时间）—— 那是**涨停池**的字段。
+#: 2026-09-26 实测（同一天、同一个 date 参数）：
+#:
+#:     池     sort=fbt:asc   sort=zdp:asc   sort=fund:asc
+#:     涨停    52/52 ✅        52/52 ✅        52/52 ✅
+#:     炸板    10/10 ✅        10/10 ✅         0/10 🔴
+#:     跌停     0/13 🔴        13/13 ✅        13/13 ✅
+#:
+#: ⇒ 跌停池从来就取不到。而它的表现是 `rc=0` + `tc=13` + `pool=[]` ——
+#:   **接口说成功、说有 13 条、然后一条不给**。
+#:
+#: 真实代价：2026-09-26 出卡时 `cn.market.limit_pool` 冻结失败 ⇒
+#: emotion 全部指标 UNKNOWN ⇒ Decision Card 少了一整个维度。
+#: 而排查方向被下面那条错误信息带偏了整整一轮（它说「分页可能截断」）。
+#:
+#: `zdp`（涨跌幅）是**唯一三个池的行里都有**的排序字段 —— 按这个排。
+#: ⚠️ 下游不依赖顺序（`_ladder` 按 `lbc` 建分布、炸板只做计数），
+#:    所以换排序不改变任何口径。
+_POOL_SORT = "zdp:asc"
 
 _POOL_BASE = "https://push2ex.eastmoney.com/"
 #: 涨跌家数端点。同一份数据有多个镜像主机，可用性随时间变化 ——
@@ -101,6 +123,29 @@ class PoolResult:
         raw: 解析后的完整响应对象（落 raw 层的 `payload_json`）。
         raw_text: 🔴 数据源发来的**原始响应文本**（`get_json_and_text` 交出的那段），
             带到 `save_raw_snapshot(raw_text=...)`；`content_sha256` 基于它算（批 I）。
+        row_fields: 🔴 **这个源的 `rows` 里真正带哪些明细字段**（显式声明，不靠猜）。
+
+            备用源给的明细往往比主源少，而**少掉的那些有默认值**：
+
+            ============================  =========================================
+            缺什么                          不声明的话会算出什么
+            ============================  =========================================
+            `lbc`（连板次数）                `_ladder` 里 ``int(r.get("lbc") or 1)``
+                                          ⇒ 每只都算首板 ⇒ ``max_streak=1``、
+                                          ``streak_ladder={1: N}``
+                                          —— **宣称今天一个连板都没有**
+            `zbc`（炸板次数）                ``int(r.get("zbc") or 0) == 0`` 恒真
+                                          ⇒ ``seal_never_broken_rate=1.0``
+                                          —— **宣称全都没炸过板**
+            整个 `rows`                     上面两条同时发生，外加
+                                          ``seal_never_broken_rate=0.0``
+            ============================  =========================================
+
+            **三种错法都不报错。** 而且 `rows=()` 本身是**合法状态** ——
+            东财盘前实测就是 `tc=0` + `pool=[]`，那是「今天真的 0 家」。
+            ⇒ 「有没有这个字段」不能从数据里推，只能由适配器**说出来**。
+
+            默认值是东财的（它两个都给）。备用源自己收窄。
     """
 
     pool: str
@@ -110,6 +155,7 @@ class PoolResult:
     rows: list[dict[str, Any]]
     raw: dict[str, Any]
     raw_text: str | None = None
+    row_fields: frozenset[str] = frozenset({"lbc", "zbc"})
 
     @property
     def server_as_of(self) -> datetime | None:
@@ -163,9 +209,10 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
         "dpt": "wz.ztzt",
         "Pageindex": 0,
         "pagesize": page_size,
-        "sort": "fbt:asc",
+        "sort": _POOL_SORT,
         "date": date,
     })
+    throttle("eastmoney")      # 🔴 见 http.THROTTLE_SEC：封的是来源，不是某个接口
     payload, raw_text = get_json_and_text(
         f"{_POOL_BASE}{POOL_ENDPOINTS[pool]}?{qs}", referer=_REFERER)
 
@@ -182,9 +229,15 @@ def fetch_pool(pool: str, date: str, *, page_size: int = 500) -> PoolResult:
     qdate = str(data["qdate"]) if data.get("qdate") is not None else None
 
     if total and len(rows) != total:
+        # 🔴 错误信息要按**实测过的可能性**排序，不能只说最先想到的那个。
+        #    原文只说「分页可能截断」，而实际踩到的是**排序字段不存在**
+        #    （见 `_POOL_SORT`）—— 那句话把排查带偏了整整一轮：
+        #    去查 page_size、查翻页，而真相是一个 query 参数填错了池。
+        hint = ("排序字段 sort=%s 在这个池里可能不存在（该情况返回 0 行且 rc=0）"
+                % _POOL_SORT) if not rows else (
+                "分页可能截断（page_size=%d）" % page_size)
         raise SourceError(
-            f"{pool}: 接口声称 tc={total} 但只返回 {len(rows)} 行 —— "
-            f"分页可能截断（page_size={page_size}）"
+            f"{pool}: 接口声称 tc={total} 但只返回 {len(rows)} 行 —— {hint}"
         )
 
     return PoolResult(pool=pool, requested_date=date, qdate=qdate,
@@ -209,6 +262,9 @@ def fetch_breadth() -> BreadthResult:
     raw_text: str | None = None
     for host in _BREADTH_HOSTS:
         try:
+            # 🔴 等在**每一次尝试**之前，换主机那次也算 —— 风控是按来源算的，
+            #    换个 host 继续打只会把封禁坐实（实测：兄弟端点一起 502）。
+            throttle("eastmoney")
             payload, raw_text = get_json_and_text(
                 f"https://{host}{_BREADTH_PATH}?{qs}", referer=_REFERER)
             break
@@ -381,6 +437,7 @@ def fetch_boards(kind: str) -> BoardResult:
         raw_text: str | None = None
         for host in _BREADTH_HOSTS:
             try:
+                throttle("eastmoney")     # 同上：板块榜要翻页，这里最容易打爆
                 payload, raw_text = get_json_and_text(
                     f"https://{host}{_CLIST_PATH}?{qs}", referer=_REFERER)
                 break

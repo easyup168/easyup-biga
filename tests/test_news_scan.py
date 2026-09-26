@@ -101,15 +101,34 @@ class TestStaleGuardOnlyDuringSession:
         v = _build(monkeypatch, SAT, feed)
         assert not self._stale_codes(v)
 
-    def test_报错文案要提到休市日(self, monkeypatch):
-        """本系统没有交易日历 ⇒ 节假日会误报。
+    def test_日历没覆盖时文案要提到休市日(self, monkeypatch):
+        """日历查不到这一天 ⇒ `market_is_open` 回退到纯 weekday 判据。
 
-        文案必须自曝这一点，否则读的人会去查一个不存在的故障。
+        那时「开市」只意味着「非周末」，节假日照样为真 ⇒ 文案必须自曝这一点，
+        否则读的人会去查一个不存在的故障。
+
+        ⚠️ 本用例原名「本系统没有交易日历」—— 那个前提在 schema v15
+        （`fact_trading_calendar` 落地）之后就不成立了，但断言本身仍然有效：
+        它要钉的从来不是「没有日历」，而是**日历没覆盖到时不许装作确认过**。
         """
+        monkeypatch.setattr(NS, "is_trading_day", lambda *a, **k: None)
         feed = _feed(MON_OPEN - timedelta(minutes=20), n=5)
         v = _build(monkeypatch, MON_OPEN, feed)
         txt = next(str(m) for m in v.missing if m.code == "news.feed.stale")
-        assert "节假日" in txt
+        assert "节假日" in txt, txt
+
+    def test_日历确认是交易日时不许再说可能休市(self, monkeypatch):
+        """🔴 反向那一半：日历说了话，就不能继续甩「也可能是休市日」。
+
+        不设这条，把文案写死成永远带免责声明也能让上一个用例绿 ——
+        而那句免责声明会在日历明确说「今天开市」时把人引向错误方向。
+        """
+        monkeypatch.setattr(NS, "is_trading_day", lambda *a, **k: True)
+        feed = _feed(MON_OPEN - timedelta(minutes=20), n=5)
+        v = _build(monkeypatch, MON_OPEN, feed)
+        txt = next(str(m) for m in v.missing if m.code == "news.feed.stale")
+        assert "节假日" not in txt, txt
+        assert "fact_trading_calendar" in txt, txt
 
 
 class TestTruncationIsMissingNotWarning:

@@ -483,3 +483,72 @@ class TestThresholdReachability:
             f"{owner} 不再产出 {field!r}（现有字面量字段 {len(names)} 个）——\n"
             f"  而 THRESHOLDS 仍在等它。这条阈值现在是死的，"
             f"且不会有任何东西报错。")
+
+
+class TestTradeDateSpanIsFactNotJudgement:
+    """🔴 「跨了几天」是事实，「算不算矛盾」是判断（铁律 4）。
+
+    历史 12 次出卡里 **9 次**报交易日不一致，而判断表原来写死
+    「不一致 ⇒ 无法判定」⇒ **risk 在盘中几乎永远无法判定**。
+
+    那 9 次里有两种完全不同的形状：
+
+      A. news 说今天、行情说上一交易日 —— **假冲突**。news 那个字段装的
+         根本不是交易日（2026-09-26 改名 `newest_flash_date`）
+      B. 盘中 emotion 的股池 `qdate` 是**今天**、日线还停在**上一交易日**
+         （今天没收盘）⇒ 相差 1 天，**两边都是对的**
+
+    B 每个盘中运行都会出现。skill 的职责是把**跨度**和**逐 agent 明细**
+    交出去，让 agent 自己判断 —— 而不是替它把「1 天」和「3 天」
+    压成同一个 `False`。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _wire(self, wired):
+        self._store = wired
+
+    #: ⚠️ stance 词表是**按 agent** 定的，不能一把通用词走天下。
+    _STANCE = {"market": "缩量调整", "technical": "震荡",
+               "emotion": "修复", "sector": "轮动分散", "news": "平静"}
+
+    def _fb(self, dates):
+        """按 `{agent: trade_date}` 喂几个上游，走与其它用例同一条装配路径。"""
+        ids = []
+        for i, (agent, td) in enumerate(sorted(dates.items()), start=1):
+            self._store[i] = up(agent=agent, result={"trade_date": td},
+                                stance=self._STANCE[agent])
+            ids.append(i)
+        return build(ids)
+
+    def test_一致时跨度为零(self):
+        fb = self._fb({"market": "20260924", "technical": "20260924"})
+        assert fb.result["trade_date_span_days"] == 0
+        assert fb.result["trade_date_consistent"] is True
+
+    def test_相邻一天报跨度一(self):
+        """盘中那种形状 —— 事实是 1，不是「矛盾」。"""
+        fb = self._fb({"market": "20260923", "emotion": "20260924"})
+        assert fb.result["trade_date_span_days"] == 1
+
+    def test_跨多日报真实跨度(self):
+        fb = self._fb({"market": "20260918", "emotion": "20260924"})
+        assert fb.result["trade_date_span_days"] == 6
+
+    def test_不一致时必须给出逐agent明细(self):
+        """🔴 只给一个 `False`，agent 分不清「谁混进来了」和「日线没收盘」。"""
+        fb = self._fb({"market": "20260923", "emotion": "20260924"})
+        detail = fb.result["upstream_trade_date_by_agent"]
+        assert detail == {"emotion": "20260924", "market": "20260923"}
+
+    def test_参与者名单一致时也要给(self):
+        """「3 个 agent 一致」和「只有 1 个报了」在卡上原来长得一样。"""
+        fb = self._fb({"market": "20260924", "technical": "20260924"})
+        assert tuple(fb.result["trade_date_reporters"]) == ("market", "technical")
+
+    def test_缺失项文案不许替agent下结论(self):
+        """⚠️ 它可以**提示**哪种形状通常正常，但不能直接说「这是矛盾」。"""
+        fb = self._fb({"market": "20260923", "emotion": "20260924"})
+        txt = next(str(m) for m in fb.missing
+                   if m.code == "risk.upstream.trade_date_inconsistent")
+        assert "跨度 1 天" in txt
+        assert "留给你" in txt, txt

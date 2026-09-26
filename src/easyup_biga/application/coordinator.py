@@ -29,12 +29,20 @@ market/sector/technical 仍各自调 `fetch_index_daily`，跟今天一模一样
 在旁边把机制建好、验实。真正让 Specialist 改口读冻结快照是 **D-II**，它会改变
 现有 skill 的实际行为，需要先有这层被验实的地基。
 
-⇒ 因此现在 `freeze_index_daily` **还没有生产调用方**（编排器没接它）。它的读取方
-  是 `read_index_daily` 本身 + 探针（`tests/test_snapshot.py`）。调度层的消费方
-  在 D-II 出现。这是分批施工里一段**显式登记**的空档（与批 B 建 `evidence_sets`
-  表时「只建表、无生产方」同形），不是零消费方死配置（L-1）——见
-  `TODO.md`「批 D 施工空档」。误删这层不会有测试变红，但会把一段被记录在案的
-  中间态变成「谁建的、干嘛的」都答不上来的孤儿。
+⇒ 当时（D-I）`freeze_index_daily` **还没有生产调用方**，读取方只有
+  `read_index_daily` 本身 + 探针。那是分批施工里一段**显式登记**的空档
+  （与批 B 建 `evidence_sets` 表时「只建表、无生产方」同形），不是零消费方
+  死配置（L-1）。
+
+⏩ **2026-09-25 更正：那段空档早就结束了。** 批 D-II 已把它接进生产 ——
+  `skills/decision-card/scripts/orchestrator.py` 在 Stage 1 之前调用它冻结
+  sh/sz@120 根，market/sector/technical 带 `--evidence-set-id` 读同一份。
+
+  🔴 本段此前一直写着「现在还没有生产调用方」，**而它已经不成立很久了**。
+  这类漂移的危害不是读者少知道一件事，是**读者据此做决定**：一份说自己
+  没有生产调用方的模块，看起来是可以随便改签名的。
+  （外部设计 `BigA Data Architecture v1` 独立重扫源码时也点出了这处，
+  列在它的 gap 表 `Docs | coordinator 注释有历史漂移 | CLEANUP`。）
 """
 
 from __future__ import annotations
@@ -43,6 +51,8 @@ import pathlib
 from collections.abc import Iterable
 from typing import Any, Callable
 
+from easyup_biga.data.datasets.index_daily import IndexDailyDatasetBridge
+from easyup_biga.data.provider_registry import ProviderNotRegistered
 from easyup_biga.domain import new_evidence_set_id, now_cn
 from easyup_biga.providers import IndexDaily, fetch_index_daily, parse_index_daily
 from easyup_biga.persistence import (
@@ -121,6 +131,7 @@ class SnapshotCoordinator:
         *,
         fetcher: Fetcher | None = None,
         path: pathlib.Path | str | None = None,
+        dataset_bridge: "IndexDailyDatasetBridge | None" = None,
     ) -> None:
         """
         Args:
@@ -132,9 +143,18 @@ class SnapshotCoordinator:
                 不 mock 掉被测逻辑本身，只替换最外层那个会出网的边界。
             path: 库路径，透传给所有 `_store` 调用（测试指向 tmp 库）。缺省走
                 `BIGA_DB_PATH` / 默认库。
+            dataset_bridge: P3-2 的 DatasetSnapshot 桥。可注入只为隔离测试，
+                **不是**一条「出问题就绕过」的退路 —— 冻结成功而血缘没登记，
+                是半发布状态，比没有血缘更难查。
         """
         self._fetch: Fetcher = fetcher or fetch_index_daily
         self._path = path
+        #: P3-2：把冻结结果桥接成通用 DatasetSnapshot。可注入，便于隔离测试。
+        self._dataset_bridge = dataset_bridge or IndexDailyDatasetBridge(path=path)
+        #: 注入 fetcher 是测试/调试缝。此时若它自报一个数据平台没登记的 provider，
+        #: 说明这次冻结不属于任何已注册 dataset ⇒ 跳过血缘登记而不是报错。
+        #: 生产（默认 fetcher）始终严格。
+        self._bridge_allows_unregistered = fetcher is not None and dataset_bridge is None
 
     # ── 冻结 ────────────────────────────────────────────────────────────────
 
@@ -204,18 +224,65 @@ class SnapshotCoordinator:
             }
 
         evidence_set_id = new_evidence_set_id()
+
+        # 🔴 P3-2：在**同一批不可变字节**上再发布一份通用 DatasetSnapshot 血缘。
+        #    现有读端仍然读下面的 `symbols`，Agent / Card 行为一个字节都不变；
+        #    新血缘是**追加**的，供将来的 SnapshotResolver / Replay / Review 用。
+        #
+        # ⚠️ 只有**注入了 fetcher**（测试/调试路径）且那个 provider 不在数据平台
+        #    名册里时，才跳过登记 —— 此时这次冻结根本不属于任何已注册 dataset，
+        #    没有可登记的血缘。默认（生产）fetcher 走严格路径，注册表查不到就抛。
+        #
+        # 🔴 捕获的是 `ProviderNotRegistered` 这个**专有异常**，不是裸 KeyError。
+        #    外部 P3-2 实现写的是 `except KeyError:` —— 而 `publish()` 里
+        #    `entry["snapshot_id"]` 之类的字段缺失**也抛 KeyError**，等于把
+        #    「这个源没登记」和「我的数据结构坏了」当成同一件事，后者被静默咽掉
+        #    （R-3：静默 fail-open，本项目最优先防范的形状）。
+        #
+        # ⚠️ 这条 seam 一度被我整个删掉，理由是「生产路径与测试路径应当是同一条」。
+        #    **那是错的** —— 批 E-20.2 的 `test_换个provider落库的source跟着变`
+        #    必须注入一个未注册的 provider 才能验「出处不会说谎」，删掉 seam
+        #    等于要求那条测试改用注册过的源，而那样它就测不到它要测的东西了。
+        dataset_snapshot = None
+        try:
+            dataset_snapshot = self._dataset_bridge.publish(
+                evidence_set_id=evidence_set_id,
+                decision_id=decision_id,
+                run_id=run_id,
+                entries=entries,
+            )
+        except ProviderNotRegistered:
+            if not self._bridge_allows_unregistered:
+                raise
+
         manifest = {
+            # 没登记血缘就不是 v2 —— 版本号描述的是 manifest 的**形状**，
+            # 有没有 `datasets` 键是那个形状的一部分。
+            "manifest_version": "2" if dataset_snapshot is not None else "1",
             "kind": MANIFEST_KIND,
             "frozen_bars": int(bars),
             # 🔴 每个 symbol 记 snapshot_id —— manifest 必须能被**反向走通**回
             #    raw 层（探针 P5），不是一段只用于展示的自由文本。
             "symbols": entries,
+            # v2 的两个新键（knowledge_cutoff / datasets）在下面按需追加。
+            # 旧键（kind / frozen_bars / symbols）逐字保留 —— 老读端不受影响，
+            # 而**老卡本来就没有 `manifest_version`**，读端按 v1 处理（裁定见设计文档）。
         }
+        dataset_links: dict[str, str] = {}
+        if dataset_snapshot is not None:
+            manifest["knowledge_cutoff"] = dataset_snapshot.knowledge_cutoff
+            manifest["datasets"] = {
+                "cn.index.daily_bars": {"snapshot_id": dataset_snapshot.snapshot_id},
+            }
+            dataset_links["cn.index.daily_bars"] = dataset_snapshot.snapshot_id
+
         save_evidence_set(
             evidence_set_id=evidence_set_id,
             decision_id=decision_id,
             manifest=manifest,
             run_id=run_id,
+            # 血缘与主行同事务 —— 不允许「manifest 写着快照号而链接行没落库」
+            dataset_snapshots=dataset_links,
             path=self._path,
         )
         return evidence_set_id

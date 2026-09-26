@@ -47,13 +47,26 @@ RL="$PY skills/decision-card/scripts/run_ledger.py"
 #    并驱动全部状态转移——它是唯一真正知道「走到哪一步」的地方。本脚本收缩成
 #    薄 CLI：五道守卫 → 调 orchestrator → 渲染 → 退出码。`--status` 仍用 run_ledger 读。
 
+# 🔴 库还不存在时**静默返回空**，不打 traceback。
+#    `connect(readonly=True)` 按设计会抛 `StoreNotInitialised`（那是对的：
+#    读一个不存在的库该报错）。但本函数的调用点全是
+#    `BEFORE=$(_sql "SELECT MAX(decision_id) …")` 这种「取个基线值」的用法，
+#    空字符串本来就是它们语义正确的兜底。
+#
+#    不接住的后果不是功能坏了，是**一屏 Python 调用栈进了 stderr** ——
+#    而那会让第一次跑这条命令的人以为出卡失败了。
+#    > 报错要指路。一个不影响结果的异常打出完整调用栈，指的是错的路。
+#    ⚠️ 只咽 `StoreNotInitialised`，不咽别的：库存在但查询写错了要照样炸。
 _sql() { $PY - "$@" <<'EOF'
 import sys, pathlib
 sys.path.insert(0, "skills")
-from _store import db
-with db.connect(readonly=True) as c:
-    for r in c.execute(sys.argv[1]):
-        print("\t".join("" if x is None else str(x) for x in r))
+from _store import StoreNotInitialised, db
+try:
+    with db.connect(readonly=True) as c:
+        for r in c.execute(sys.argv[1]):
+            print("\t".join("" if x is None else str(x) for x in r))
+except StoreNotInitialised:
+    pass          # 还没建库 ⇒ 没有基线值，调用点按空处理
 EOF
 }
 

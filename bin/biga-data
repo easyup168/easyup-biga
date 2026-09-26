@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# biga-data —— 数据平台的命令行入口（Phase 3）。
+#
+# 🔴 为什么是一个独立可执行文件，而不是 `biga data ...`
+# ----------------------------------------------------
+# `bin/biga` 是 **openclaw CLI 的纯 passthrough**（最后一行 exec 到
+# openclaw 的 dist/index.js）。`biga data list` 会被原样转给 openclaw，
+# 而它没有 `data` 子命令 —— 当场报未知子命令。
+# 仓库自己的 CLI 一直是独立文件：biga-card / biga-calendar / biga-notify / biga-reap。
+# 见 docs/design/phase-3-data-platform.md 裁定 2。
+#
+# 🔴 实现不在这个文件里，在 src/easyup_biga/data/cli.py
+# ------------------------------------------------------
+# 子命令长到 18 个之后，写在 heredoc 里的那份既不能 import、也不能被单元
+# 测试直接调 —— 想验一条子命令就只能起子进程。⇒ 壳只负责挂 PYTHONPATH。
+#
+# ⚠️ `python3` 不是 `python`：本机没有 `python` 这个名字。
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 1
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m easyup_biga.data.cli "$@"

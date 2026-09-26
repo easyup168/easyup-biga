@@ -101,6 +101,7 @@ Phase 1 的设计原本是 `architecture.md` 的 §11 —— 一段**历史**躺
 | [`design/architecture.md`](design/architecture.md) | 常青 | 架构 SSOT：拓扑、契约、数据层、失败模式清单 |
 | [`design/phase-1-walking-skeleton.md`](design/phase-1-walking-skeleton.md) | 阶段 · **已冻结** | Phase 1：范围、步骤、验收与最终结果 |
 | [`design/phase-2-specialists.md`](design/phase-2-specialists.md) | 阶段 · 进行中 | Phase 2：范围、步骤、关键取舍、出口条件 |
+| [`design/phase-3-data-platform.md`](design/phase-3-data-platform.md) | 阶段 · 未开工 | Phase 3：数据平台地基 + 第一条调度，含外部设计包的 14 条适配裁定 |
 | [`design/deterministic-orchestration.md`](design/deterministic-orchestration.md) | 阶段 · 进行中 | 确定性编排升级：把工作流从 LLM 拿回程序，七批迁移 A–G |
 | [`guide/install.md`](guide/install.md) | 操作 | 在已有 OpenClaw 实例旁并排装第二套 |
 | [`guide/phase1-kickoff-prompt.md`](guide/phase1-kickoff-prompt.md) | 操作 | Phase 1 启动提示词（自包含，可直接粘贴） |
