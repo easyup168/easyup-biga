@@ -230,9 +230,9 @@ PostgreSQL / Kafka / 多机        —— architecture.md §5.1 的触发条件�
 | P3-1 | Data Run / Raw Artifact / Partition / Quality / Snapshot / EvidenceSet 链接 | **v23–v26** | ✅ |
 | P3-2 | 把现有 `index_daily` 接到通用 `DatasetSnapshotService` | — | ✅ |
 | P3-3 | Security Master（point-in-time universe） | **v27** | 🔶 **链路建成，上游未探活** |
-| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | 🔶 **代码在，未进注册表** |
-| P3-5 | Tradability + Adjustment Factors | — | 🔶 同上 |
-| P3-6 | 迁移 §2.2 那五条 direct feed | — | ⬜ |
+| P3-4 | 全市场 EOD + Raw 归档 + Parquet + DuckDB + **第一条 cron** | — | ✅ `cn.equity.daily_bars` 进册 + `eod-daily-bars-biga.timer` |
+| P3-5 | Tradability + Adjustment Factors | — | ⬜ **三个 dataset 都没有读取方** —— 见 §3.5 |
+| P3-6 | 迁移 §2.2 那五条 direct feed | — | 🔶 **6a 完成**（provider 选择进数据层），主体待真实端到端验收 |
 | P3-7 | SnapshotResolver + `required_datasets` + EvidenceSet v2 | — | ⬜ |
 | P3-11 | 确定性离线回放 | — | ✅ |
 | P3-12 | point-in-time / 修订链审计 | — | ✅ |
@@ -524,6 +524,47 @@ P3-4/P3-5 的四个 dataset 模块在上一轮已合入 `src/easyup_biga/data/da
 > **模块合进来了 ≠ 它能跑。** 上一轮四个模块的测试都绿，因为那些测试测的是
 > `write_parquet_rows` 这类不经过注册表的下层函数。
 > ⇒ 「有测试」和「有能跑到底的路径」是两件事。
+
+### 3.5 P3-5 的三个 dataset 为什么没进册 —— 它们真的没有读取方
+
+`DatasetDefinition` 的契约把判据写死了：**答不出谁读它，这条就还不该进册**。
+逐个问：
+
+| dataset | 谁读它 |
+|---|---|
+| `cn.equity.daily_bars` | `analytics.query_eod_as_of` / `query_eod_between`（真扫 Parquet）✅ |
+| `cn.security.tradability` | 无 —— 算出来当场用掉（日线覆盖率的分母），从没被读回过 |
+| `cn.equity.adjustment_factors` | 无，连写入方都没人调 |
+| `cn.market.emotion_close` | 无，同上 |
+
+⇒ 它们不是漏注册。**触发条件**：
+- `tradability` —— 筛选/复盘需要区分「停牌」与「数据缺失」的那一刻。
+  那时它的 raw 必须指向**同一份 provider 响应**（与日线共用），
+  不能再是把自己的输出重新序列化（见第 65 章）
+- `adjustment_factors` / `emotion_close` —— 先有调用方，再谈注册
+
+### 3.6 P3-6 拆成 6a / 6b，且 6b 不能无人值守做
+
+**6a（已完成）**：provider 选择进数据层。`src/easyup_biga/data/client.py` 按注册表的
+PRIMARY → FALLBACK 链路取数；`bin/biga-calendar` 改走它，不再 import 任何
+provider（AST 判据钉住）。这一步让 `cn.trading_calendar` 声明了很久的那条
+降级路径第一次真的存在，也给 `failover` 模块补上了生产消费方。
+
+**6b（未做）**：五条盘中 direct feed 迁进 Dataset 层，重写 5 个 skill +
+`orchestrator.py`。
+
+🔴 **它不能在无人值守模式下做完**，理由不是工作量，是**验收方式**：
+
+> 开发流程第 6 条：端到端必须开新会话且等结算。
+
+6b 改的是**生产决策路径**。改坏了不报错，只是某天 Card 上的数不对 ——
+而那种错误只有真实跑一次、看 Card 上的数才发现得了。
+在拿不到那个信号的情况下把它做完，等于把一段未验证的改动推进生产路径。
+
+⇒ 6b 单独一轮，按设计自己的规矩「旧行为回归全绿 + 新红灯测试全绿」逐个
+milestone 收，每个 milestone 后跑一次真实端到端。
+
+---
 
 ### 3.4 `tools/verify/phase3_acceptance.py` —— Phase 3 的发布闸门
 

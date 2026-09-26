@@ -1624,12 +1624,18 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
       顺带：修订线性不变量收进服务（跳号被拒）、取数失败也留 run、
       质量不过时 fact 表不登记分区。
 
-- [ ] **② P3-6：五条 direct feed 迁进 Dataset 层** —— 重写 6 个 skill + `orchestrator.py`。
-      **验收**：设计自己的规矩 —— 「旧行为回归全绿 + 新红灯测试全绿」，**逐个里程碑收**，
-      不允许一次性替换。
-      **为什么最危险**：这是**生产决策路径**。改坏了不报错，只是某天 Card 上的数不对。
+- [x] **②a P3-6a：provider 选择进数据层**（2026-09-26 完成）
+      `data/client.py` 按注册表链路取数；`bin/biga-calendar` 不再 import 任何 provider。
+      `cn.trading_calendar` 声明很久的降级路径第一次真的存在；`failover` 有了生产消费方。
 
-- [ ] **③ P3-7：`required_datasets` resolver** —— 依赖 ② 完成。
+- [ ] **②b P3-6b：五条盘中 direct feed 迁进 Dataset 层** —— 重写 5 个 skill + `orchestrator.py`。
+      🔴 **不能无人值守做完**，理由不是工作量是**验收方式**：开发流程第 6 条要求
+      端到端开新会话且等结算。它改的是**生产决策路径** —— 改坏了不报错，
+      只是某天 Card 上的数不对，而那只有真实跑一次才发现得了。
+      **验收**：每个 milestone「旧行为回归全绿 + 新红灯测试全绿」+ 一次真实端到端。
+      详见 `docs/design/phase-3-data-platform.md` §3.6。
+
+- [ ] **③ P3-7：`required_datasets` resolver** —— 依赖 ②b 完成。
       它引用的 `cn.sector.board_snapshot` / `cn.news.flash` / `cn.market.limit_pool`
       **在 ② 之前根本不存在** ⇒ 提前做等于引用不存在的 dataset id。
 
