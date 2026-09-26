@@ -81,6 +81,28 @@ chmod 600 ~/.openclaw-biga/.env
 🔴 **不要**放 `workspace/.env`。OpenClaw 也会读进程 CWD 下的 `.env`，
 而网关的 CWD 就是 workspace —— 那等于把密钥放回仓库里。
 
+#### 🔴 改完 `.env` **必须重启网关**
+
+`.env` 是在**进程启动时**读进 `process.env` 的，skill 脚本作为网关的子进程
+继承它。网关先起来的话，它看不到之后新增的行 —— **而且不会报错**，
+只会让 skill 以「没配密钥」的方式失败。
+
+判据（不打印任何值）：
+
+```bash
+PID=$(systemctl --user show openclaw-gateway-biga.service -p MainPID --value)
+tr '\0' '\n' < /proc/$PID/environ | grep -c '^YOUR_KEY_NAME='
+```
+
+`0` = 这个网关进程看不到它。重启：
+
+```bash
+~/.openclaw-biga/bin/biga gateway restart
+```
+
+⚠️ 直接跑脚本（不经网关）不受影响 —— 自己 source 一下就行。
+所以「命令行能跑」**不代表** agent 也能用。
+
 ### 4. 验证
 
 ```bash
@@ -112,4 +134,18 @@ _CACHE_DB = _WORKSPACE / "data" / "cache.db"
 如果同一把 key 也在别处用着，「每天 N 次」是**两边一起算**的，
 而各自的本地用量库互不知情 ⇒ **两边都会低报**。
 
-⚠️ 这不会报错，只会在某天提前耗尽配额，而 `--usage` 说还剩很多。
+**实测（2026-09-26）**：厂商控制台显示某个 API 今日已用 1 次，
+而本机刚建的库显示 0 —— 因为那 1 次是别处发的。
+
+⇒ 字段名要说清楚这是**本地**计数：把它叫 `remaining` 等于宣称我们知道
+厂商的余额。我们不知道，只知道「从这台机器发出去了几次」。
+搬过来那份因此改成了 `used_here` / `remaining_if_only_here` + 一句 `note`。
+
+### 额度常量是**厂商的数**，不是我们的 —— 而它会过期
+
+搬过来的脚本里写着 `DAILY_LIMIT = 50`，而厂商控制台上是 **150**。
+
+后果不是「统计不准」：客户端在 `used >= DAILY_LIMIT` 时**直接拒绝发请求**
+⇒ 还剩 100 次就罢工，而错误信息说「今日额度已用完」。
+
+⇒ 允许环境变量覆盖（`MX_DAILY_LIMIT`），免得下次厂商改额度又要改代码。
