@@ -66,6 +66,12 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina_calendar",),
     ),
     ProviderDefinition(
+        provider_id="sina_breadth",
+        title="新浪涨跌家数 —— cn.market.breadth 的 FALLBACK；从全市场快照自算，含北交所",
+        source_prefix="sina",
+        modules=("easyup_biga.providers.sina_breadth",),
+    ),
+    ProviderDefinition(
         provider_id="tdx_daily_package",
         title="通达信官网盘后包 —— cn.equity.daily_bars 的 FALLBACK；唯一能按指定交易日补历史",
         source_prefix="tdx",

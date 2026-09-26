@@ -119,3 +119,50 @@ def test_归一化把供数方写进每一行():
 def test_没有价格的行不产生假OHLC():
     rows = [EodBar(symbol="600000", open="-", high="-", low="-", close="-")]
     assert normalize(rows, "20260925", "2026-09-25T15:10:00+08:00") == ()
+
+
+# ── 「0」的两种含义 ────────────────────────────────────────────────────────
+def test_涨跌幅为零要保留_那是平盘():
+    """🔴 我自己埋过这个 bug：把 `"0.000"` 写进统一的空值表 ⇒ **平盘恒为 0**。
+
+    实测：全市场首页 2000 只里 58 只 `changepercent == "0.000"`，
+    它们有成交量、有真实价格。一个恒为 0 的计数不会报错，
+    只会让人以为那天市场没有平盘。
+    """
+    page = json.dumps([{"symbol": "sh600000", "code": "600000", "name": "甲",
+                        "open": "10.0", "high": "10.5", "low": "9.8",
+                        "trade": "10.0", "settlement": "10.0",
+                        "volume": 100000, "amount": 1000000,
+                        "pricechange": "0.000", "changepercent": "0.000"}])
+    row = parse_eod_page(page, page_no=1)[0]
+    assert row.change_percent == "0.000", "平盘被当成缺失了"
+    assert row.change_amount == "0.000"
+
+
+def test_价格为零要当缺失_那是没成交():
+    """价格与涨跌幅的「0」含义**相反**：开高低收为 0 是没成交。"""
+    page = json.dumps([{"symbol": "sh600001", "code": "600001", "name": "乙",
+                        "open": "0.000", "high": "0.000", "low": "0.000",
+                        "trade": "0.000", "settlement": "0.000",
+                        "volume": 0, "amount": 0,
+                        "pricechange": "0.000", "changepercent": "0.000"}])
+    row = parse_eod_page(page, page_no=1)[0]
+    assert row.close is None and row.open is None and row.prev_close is None
+
+
+def test_市场从symbol前缀带出来():
+    """🔴 `symbol` 形如 `sh600000` —— 前两位就是市场，这个源知道，
+    所以要带出去，不要让下游按代码前缀去猜。
+
+    猜的后果不是报错：`000001` 在沪是上证指数、在深是平安银行。
+    """
+    page = json.dumps([
+        {"symbol": "sh600000", "code": "600000", "name": "甲", "open": "1",
+         "high": "1", "low": "1", "trade": "1", "settlement": "1",
+         "volume": 1, "amount": 1, "pricechange": "0", "changepercent": "0"},
+        {"symbol": "bj920000", "code": "920000", "name": "乙", "open": "1",
+         "high": "1", "low": "1", "trade": "1", "settlement": "1",
+         "volume": 1, "amount": 1, "pricechange": "0", "changepercent": "0"},
+    ])
+    rows = parse_eod_page(page, page_no=1)
+    assert [r.market_hint for r in rows] == ["sh", "bj"]

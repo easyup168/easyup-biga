@@ -209,7 +209,11 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         title="决策时点全市场涨跌家数冻结",
         schema_version=1,
         primary_provider="eastmoney",
-        fallback_providers=(), validation_providers=(),
+        # 🔴 备用源**自算**家数（主源是源自己报的）。差异见适配器模块头：
+        #    口径多了北交所、「平盘」的定义是我们定的、代价是要拉整个市场。
+        #    ⚠️ 登记它的前提同前：**真跑通过**（2026-09-26 实测
+        #      涨 1120 / 跌 4305 / 平 137，8~12 秒）。
+        fallback_providers=("sina_breadth",), validation_providers=(),
         partition_keys=("evidence_set_id",), storage_policy="parquet_evidence_bundle",
         quality_policy="cn-market-breadth-v1", raw_table="raw_artifacts",
         consumers=("easyup_biga.data.decision_client:DecisionDataClient",),

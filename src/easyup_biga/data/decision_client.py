@@ -56,8 +56,12 @@ from easyup_biga.providers.tencent import (
 )
 
 from .contracts import DatasetLink, DatasetStatus
+from .failover import ProviderExecutionAttempt, execute_with_fallback
 from .file_store import FileStore
 from .datasets import emotion_close
+from easyup_biga.providers.sina_breadth import (
+    fetch_breadth as _sina_fetch_breadth,
+)
 from .publication import DatasetRowPublisher, PublishResult
 from .registry import get_dataset
 from .snapshot_resolver import resolve_evidence_set_snapshot
@@ -288,7 +292,16 @@ class DecisionDataClient:
                 quality_metrics={"row_count": len(rows), "trade_date": trade_date},
             )
         if dataset_id == "cn.market.breadth":
-            b = _fetch_breadth()
+            # 🔴 走降级链，不是写死主源。2026-09-26 起 `cn.market.breadth`
+            #    有了真跑通过的备用源 —— 而主源那天正整组故障，
+            #    三个 eastmoney dataset 在真机出卡时同时失败。
+            attempts: list[ProviderExecutionAttempt] = []
+            outcome = execute_with_fallback(
+                dataset_id,
+                {"eastmoney": _fetch_breadth, "sina_breadth": _sina_fetch_breadth},
+                on_attempt=attempts.append,
+            )
+            b = outcome.value
             rows = [{
                 "advance": b.advance,
                 "decline": b.decline,
@@ -297,9 +310,15 @@ class DecisionDataClient:
             }]
             return self.publisher.publish(
                 dataset_id=dataset_id, job_id="decision-freeze-breadth",
-                provider_id="eastmoney", partition_key=key, raw_text=b.raw_text or _json(b.raw),
+                # 写**实际供数方** —— 写 primary 会让降级过的那天
+                # 在库里看起来像正常的一天。
+                provider_id=outcome.provider_id, partition_key=key,
+                raw_text=b.raw_text or _json(b.raw),
                 rows=rows, as_of=now_cn().isoformat(),
                 quality_metrics={"row_count": 1, "trade_date": trade_date},
+                failover_attempts=tuple(
+                    (a.provider_id, a.role.value, a.succeeded, a.error)
+                    for a in attempts),
             )
         if dataset_id == "cn.sector.board_snapshot":
             results = [_fetch_boards("industry"), _fetch_boards("concept")]

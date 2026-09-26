@@ -37,9 +37,8 @@
 
 分页与限流
 ----------
-`getHQNodeDataSimple` 在 `num=500` 时真给 500 行；
-**非 Simple 的 `getHQNodeData` 在 `num=500` 时静默截断到 100** —— 实测过，
-所以这里固定用 Simple。约 12 页，串行 + 限流约 15 秒。
+固定用 Simple：**非 Simple 的 `getHQNodeData` 在 `num=500` 时静默截断到 100**。
+页大小取 2000（实测依据见 `_PAGE_SIZE` 的注释）⇒ 3 页，串行 + 限流约 10 秒。
 """
 from __future__ import annotations
 
@@ -65,9 +64,26 @@ SINA_EOD_URL = (
 )
 _REFERER = "https://vip.stock.finance.sina.com.cn/mkt/"
 _NODE = "hs_a"
-#: 🔴 500 是 Simple 端点实测的**真实**上限（非 Simple 会静默截到 100）。
-_PAGE_SIZE = 500
-_MAX_PAGES = 40
+#: 🔴 这个数是**量出来的**，不是抄来的。
+#:
+#: 同机另一套长期运行的实例用 `num=500`（12 页 / 28 秒）。实测（2026-09-26）：
+#:
+#: | num | 返回 | 体积 | 耗时 |
+#: |---|---|---|---|
+#: | 500 | 500 | — | 3.7s |
+#: | 2000 | 2000 | ~570 KB | 3.1s |
+#: | 6000 | **5568（全市场）** | 1587 KB | 7.2s |
+#: | 8000 | 5568 | 1587 KB | 6.0s |
+#:
+#: ⚠️ `num=8000` 仍然只返回 5568 ⇒ **没有静默截断**（对比：非 Simple 的
+#:    `getHQNodeData` 在 `num=500` 时静默截到 100 —— 那种才是危险的）。
+#:
+#: 取 2000（3 页 ≈ 10 秒）而不是 6000（1 页）：一次 1.6 MB 的请求失败就全丢，
+#: 三次中等请求的单次失败面更小。**不是「越少请求越好」，是「单次失败的
+#: 代价要可控」。**
+_PAGE_SIZE = 2000
+#: 全市场约 5600 ⇒ 3 页。上限留足余量，但撞到它是**错误**不是正常结束。
+_MAX_PAGES = 20
 #: 🔴 **成交量单位守卫的窗口。**
 #:
 #: 同机另一套长期运行的实例，代码里留着一句用真金白银换来的注释：
@@ -84,9 +100,35 @@ _MAX_PAGES = 40
 _VOLUME_UNIT_WINDOW = (0.5, 2.0)
 
 
-def _num(value: Any) -> Any:
-    """原样搬运，只把明确的空值统一成 `None`。"""
-    return None if value in (None, "", "-", "0.000") else value
+def _blank(value: Any) -> Any:
+    """原样搬运，只把**明确的空值**统一成 `None`。"""
+    return None if value in (None, "", "-") else value
+
+
+def _price(value: Any) -> Any:
+    """价格字段：空值之外，**0 也视为没有**（没成交就没有价）。
+
+    🔴 价格和涨跌幅的「0」含义**相反**，必须分开处理：
+
+    | | `0.000` 的含义 |
+    |---|---|
+    | 开高低收 | 没有成交 ⇒ 缺失 |
+    | 涨跌幅 | **平盘** ⇒ 一个真实的值 |
+
+    第一版把 `"0.000"` 写进了统一的空值表，于是**平盘家数恒为 0** ——
+    实测抓到：全市场 58 只（首页 2000 只里）的 `changepercent` 就是
+    `"0.000"`，它们有成交量、有真实价格，是货真价实的平盘。
+
+    > 一个恒为 0 的计数不会报错，只会让人以为那天市场没有平盘。
+    """
+    value = _blank(value)
+    if value is None:
+        return None
+    try:
+        return None if float(value) <= 0 else value
+    except (TypeError, ValueError):
+        # 不是数字 ⇒ 原样交给归一化层去炸，别在这里吞掉。
+        return value
 
 
 def parse_eod_page(text: str, *, page_no: int) -> list[EodBar]:
@@ -109,22 +151,29 @@ def parse_eod_page(text: str, *, page_no: int) -> list[EodBar]:
         code = item.get("code")
         if not code:
             raise SourceError(f"sina eod page {page_no}: row missing code: {item!r}")
+        # 🔴 `symbol` 形如 `sh600000` / `bj920000` —— 前两位就是**市场**，
+        #    这个源是知道的，所以要带出去，不要让下游按代码前缀去猜。
+        #    猜的后果不是报错：`000001` 在沪是上证指数、在深是平安银行。
+        symbol = str(item.get("symbol") or "")
+        market = symbol[:2].lower() if len(symbol) >= 2 else None
         out.append(EodBar(
             symbol=code,
+            market_hint=market,
             name=item.get("name"),
-            open=_num(item.get("open")),
-            high=_num(item.get("high")),
-            low=_num(item.get("low")),
+            open=_price(item.get("open")),
+            high=_price(item.get("high")),
+            low=_price(item.get("low")),
             # `trade` 是最新价；收盘后取就是收盘价。
-            close=_num(item.get("trade")),
+            close=_price(item.get("trade")),
             # `settlement` 是昨收。
-            prev_close=_num(item.get("settlement")),
+            prev_close=_price(item.get("settlement")),
             # 原样搬运。单位由 `parse_eod_pages` 的守卫核对，不在这里换算 ——
             # 写死倍数正是上游改单位那天会静默出错的地方。
-            volume=_num(item.get("volume")),
-            amount=_num(item.get("amount")),
-            change_amount=_num(item.get("pricechange")),
-            change_percent=_num(item.get("changepercent")),
+            volume=_blank(item.get("volume")),
+            amount=_blank(item.get("amount")),
+            change_amount=_blank(item.get("pricechange")),
+            # ⚠️ **不走 `_price`** —— 涨跌幅的 0 是平盘，是个真实的值。
+            change_percent=_blank(item.get("changepercent")),
         ))
     return out
 

@@ -116,7 +116,7 @@ python3 tools/verify/source_survey.py --markdown # 贴文档
 | `cn.equity.adjustment_factors` | CSV 导入 | — | 人工导入 |
 | `cn.index.daily_bars` | 新浪 K 线 | — | |
 | `cn.index.realtime_quote` | 腾讯 | — | |
-| `cn.market.breadth` | 东财 `ulist.np` | — | |
+| `cn.market.breadth` | 东财 `ulist.np` | **新浪（自算）** | 主源**报数**、备用源**数数**；口径多北交所；「平盘」的定义变成我们定的 |
 | `cn.sector.board_snapshot` | 东财 `clist` | — | |
 | `cn.market.limit_pool` | 东财 `push2ex` | — | |
 | `cn.news.flash` | 新浪 7×24 | — | |
@@ -125,7 +125,7 @@ python3 tools/verify/source_survey.py --markdown # 贴文档
 
 | dataset | 现状 | 实测可用的候选 |
 |---|---|---|
-| `cn.market.breadth` | 主源 502 | 新浪 `hs_a` **自算**（每行带 `changepercent`）⚠️ 自算是**派生**，要按派生数据集的规矩引上游血缘，不能当采集源登记 |
+| ~~`cn.market.breadth`~~ | ✅ **2026-09-26 已配上**（`sina_breadth`）| 实测 涨 1120 / 跌 4305 / 平 137，8~12 秒。raw 是**算它所依据的那份快照**，不是算完的结果 |
 | `cn.sector.board_snapshot` | 主源 502 | 同花顺热榜 ✅ |
 | `cn.index.realtime_quote` | 正常 | 新浪 `hq.sinajs.cn` ✅ |
 | `cn.news.flash` | 正常 | 金十 ✅（财联社需签名，暂不可用）|
@@ -270,6 +270,55 @@ VWAP 与收盘价的偏离（实测当日 p5/p95 = 0.99 / 1.02）。
 ⚠️ 它还有一条我们**不需要**抄的：它用 `verify_data_is_fresh()` 靠 `ticktime`
 猜「新浪是不是返回了周末缓存」。我们的 `_verify_eod_date` 比它强 ——
 要求日历确认是交易日**且**同日收盘后取，那个坑结构上进不来。
+
+---
+
+## 3.7 主源「报数」、备用源「数数」—— 一种要写出来的性质差别
+
+`cn.market.breadth` 的两个源不只是端点不同：
+
+| | 东财（主源） | 新浪（备用） |
+|---|---|---|
+| 家数从哪来 | **源报的**（`f104/f105/f106`）| **我们数的** |
+| 口径 | 沪 + 深 | 沪 + 深 + **京** |
+| 「平盘」的定义 | 源的口径，我们不知道 | `changepercent == 0`，**我们定的** |
+| 成本 | 一次请求 | 拉整个市场（~1.7 MB / 3 页 / 8 秒）|
+
+🔴 **不去掉北交所来「对齐」主源** —— 那是硬凑：为了让两个数看起来可比，
+而丢掉真实观测到的一部分市场。差异应当**被声明**，不应当被抹平。
+
+⚠️ 实测过没有更便宜的替代：东财的 `ulist.np` 只存在于挂掉的那组 host，
+同花顺 `realhead` 502、涨跌幅排行返回 HTML，百度返回空。
+
+### 3.8 🔴 加备胎那一刻差点让系统更脆
+
+`ProviderChainExhausted` 的基类原来是 `RuntimeError`，而
+`decision_client.freeze_required` 只接 `(SourceError, ValueError)` 当可降级失败。
+
+于是给 breadth 配上备胎的那一刻，「两个源都挂」从
+**「这条数据缺失」变成了「整张卡出不来」**。
+
+> **降级链的终点必须仍然是一次可降级的失败。**
+
+测试当场抓到了它（stub 掉整条链之后炸在 `ProviderChainExhausted` 上）。
+下一个给别的 dataset 配备胎的人会走到同一个路口。
+
+### 3.9 「0」的两种相反含义
+
+| 字段 | `0.000` 的含义 |
+|---|---|
+| 开 / 高 / 低 / 收 | 没有成交 ⇒ **缺失** |
+| 涨跌幅 | **平盘** ⇒ 一个真实的值 |
+
+第一版把 `"0.000"` 写进了统一的空值表 ⇒ **平盘家数恒为 0**。
+实测：全市场首页 2000 只里 58 只的 `changepercent` 就是 `"0.000"`，
+它们有成交量、有真实价格。
+
+> 一个恒为 0 的计数不会报错，只会让人以为那天市场没有平盘。
+
+同理，停牌的判据是**有没有价**，不是「涨跌幅是不是空」——
+停牌票的涨跌幅可能是 `0.000`，按涨跌幅判会把它算成平盘，
+于是停牌多的日子看起来像市场很平静。
 
 ---
 

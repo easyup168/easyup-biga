@@ -127,8 +127,12 @@ def test_冻结失败也要在数据平台账本里留痕(tmp_path, monkeypatch)
 
     db = tmp_path / "biga.db"
     init_schema(db)
+    # ⚠️ 2026-09-26 起 breadth 有备用源 ⇒ **整条链都要桩掉**才测得到失败路径。
+    #    只桩主源的话，降级源会去打真网络 —— 那会被 hermetic 守卫拦下（它拦对了）。
     monkeypatch.setattr(dc, "_fetch_breadth",
                         lambda: (_ for _ in ()).throw(SourceError("全部备选主机失败")))
+    monkeypatch.setattr(dc, "_sina_fetch_breadth",
+                        lambda: (_ for _ in ()).throw(SourceError("备用源也失败")))
     client = dc.DecisionDataClient(db_path=db, data_root=str(tmp_path / "data"))
 
     result = client.freeze_required("es-test", ["cn.market.breadth"], trade_date="20260926")
@@ -166,8 +170,12 @@ def test_留痕失败不许盖住原始的取数失败(tmp_path, monkeypatch):
 
     db = tmp_path / "biga.db"
     init_schema(db)
+    # ⚠️ 2026-09-26 起 breadth 有备用源 ⇒ **整条链都要桩掉**才测得到失败路径。
+    #    只桩主源的话，降级源会去打真网络 —— 那会被 hermetic 守卫拦下（它拦对了）。
     monkeypatch.setattr(dc, "_fetch_breadth",
                         lambda: (_ for _ in ()).throw(SourceError("源挂了")))
+    monkeypatch.setattr(dc, "_sina_fetch_breadth",
+                        lambda: (_ for _ in ()).throw(SourceError("备用源也失败")))
     client = dc.DecisionDataClient(db_path=db, data_root=str(tmp_path / "data"))
     monkeypatch.setattr(
         type(client.publisher._service), "record_fetch_failure",

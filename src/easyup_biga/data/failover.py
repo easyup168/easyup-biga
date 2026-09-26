@@ -46,7 +46,25 @@ class ProviderExecutionResult:
     attempts: tuple[ProviderExecutionAttempt, ...]
 
 
-class ProviderChainExhausted(RuntimeError):
+class ProviderChainExhausted(SourceError):
+    """整条 PRIMARY/FALLBACK 链都失败了。
+
+    🔴 **基类是 `SourceError` 而不是 `RuntimeError`**（2026-09-26 改）。
+
+    「每一个 provider 都失败了」本来就是一种**取数失败** ——
+    它该和单源失败走同一条降级路径（上浮到 `missing[]`），
+    而不是把整次决策炸掉。
+
+    改这个基类之前它是 `RuntimeError`，而 `decision_client.freeze_required`
+    只接 `(SourceError, ValueError)` 当作可降级失败。于是给 breadth 配上
+    备用源的那一刻，「两个源都挂」从「这条数据缺失」变成了
+    **「整张卡出不来」** —— 加备胎反而让系统更脆。
+
+    ⚠️ 测试当场抓到了它。写在这里，因为下一个给别的 dataset 配备胎的人
+    会走到同一个路口：**降级链的终点必须仍然是一次可降级的失败。**
+    """
+
+
     def __init__(self, dataset_id: str, attempts: tuple[ProviderExecutionAttempt, ...]):
         self.dataset_id = dataset_id
         self.attempts = attempts
