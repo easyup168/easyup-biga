@@ -470,20 +470,36 @@ stat -c '%y' ~/.openclaw/state/openclaw.sqlite     # 必须没变
 
 ## 当前状态
 
-**Phase 1 已验收（在 `main`）。Phase 2 代码收口完成，出口条件 7/8 —— 只差条件 3。**
+**Phase 1 已验收。Phase 2 代码收口完成，出口条件 7/8。**
+**Phase 3 代码收口完成，出口条件 0/3 —— 三条都在等证据，不在等开发。**
+
+⚠️ 开发在 `phase3` 分支，合并到 `main` **走 PR**（由人点 merge）。
 
 | | 状态 |
 |---|---|
 | Agent | **7 / 8**。`main` + Stage 1 五个（market/sector/technical/emotion/news）+ Stage 2 `risk`。<br>第 8 个 `discipline` **故意不建**（裁定 13：没有输入源） |
-| 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v22**，十一张表，只追加由触发器强制（v4 时这句话是**假的** —— 分配器没有触发器，五取四；v6 起 `agent_verdicts` 加 `kind` 列区分事实/判断/合体；v9 收敛 `run_id` 三同名；v10 `run_id` capture 贯穿全链；v11 加 `ux_fact_per_task_agent`——一个 `(task_id, agent)` 至多一份 fact 原件（批 F）；v12 加外发通知 `notification_outbox` / `notification_deliveries` 两张只追加表（批 G-I）；v13 给 `raw_market_snapshot` 加 `raw_text`，`content_sha256` 改基于原始响应文本算（批 I）；v14 给 `decision_ids` 加 `trigger_id` 列做入站幂等键（批 G-II）；v15 加 `fact_trading_calendar`——**第一张真实的 `fact_*` 表**，深交所官方日历，`market_is_open` 认节假日了（批 L）；v16 加 Run Provenance 三列 + `ux_evidence_set_per_run`——一张在线卡属于哪次执行、基于哪份切片，现在是一句 SQL 而不是解 card_json（批 N）；v17 把 Fact 唯一约束从 `(task_id, agent)` 拆成按 run 分区的两条——「一次执行一份事实」，同一决策的第二个 run 因此能写自己的那份（批 O）；v18 `ux_evidence_sets_run`——一次 run 至多一个 EvidenceSet（P1-1）；v19 `agent_runs.provenance_mode`——区分在线执行行与历史行，Run 级 spawn 核验的三态判据（P1-2）；v20 撤掉 v18——它与 v16 的 `ux_evidence_set_per_run` **逐字相同**，一条不变量两个名字就是 L-3（照抄评审给的建议索引、没先 grep 一遍既有约束）；v21 `ux_online_agent_run_once`——一次 run 一个 agent 至多一条在线账本行，多条时一条真 `runtime_run_id` 会把另一条伪造的盖住；v22 `decision_runs.expected_spawn_agents`（冻结「这次该启动谁」，**不等于**卡上的 expected_roster）+ `ux_online_runtime_run_id`（一个运行时 id 不许给两行背书）） |
+| 契约 / 数据层 | `_contract` 四条铁律构造时拒绝；`_store` schema **v27**，二十张表，只追加由触发器强制。
+**v1–v22 是冻结的 Phase 2 历史，Phase 3 数据平台从 v23 起**（`data_job_runs` / `data_run_events` / `raw_artifacts` / `dataset_partitions` / `quality_reports` / `dataset_snapshots` / `provider_attempts` / `fact_security_master` …）。
+下面是 v1–v22 的来历（每一条都是一次踩坑，保留是因为它们解释了**为什么**）：（v4 时这句话是**假的** —— 分配器没有触发器，五取四；v6 起 `agent_verdicts` 加 `kind` 列区分事实/判断/合体；v9 收敛 `run_id` 三同名；v10 `run_id` capture 贯穿全链；v11 加 `ux_fact_per_task_agent`——一个 `(task_id, agent)` 至多一份 fact 原件（批 F）；v12 加外发通知 `notification_outbox` / `notification_deliveries` 两张只追加表（批 G-I）；v13 给 `raw_market_snapshot` 加 `raw_text`，`content_sha256` 改基于原始响应文本算（批 I）；v14 给 `decision_ids` 加 `trigger_id` 列做入站幂等键（批 G-II）；v15 加 `fact_trading_calendar`——**第一张真实的 `fact_*` 表**，深交所官方日历，`market_is_open` 认节假日了（批 L）；v16 加 Run Provenance 三列 + `ux_evidence_set_per_run`——一张在线卡属于哪次执行、基于哪份切片，现在是一句 SQL 而不是解 card_json（批 N）；v17 把 Fact 唯一约束从 `(task_id, agent)` 拆成按 run 分区的两条——「一次执行一份事实」，同一决策的第二个 run 因此能写自己的那份（批 O）；v18 `ux_evidence_sets_run`——一次 run 至多一个 EvidenceSet（P1-1）；v19 `agent_runs.provenance_mode`——区分在线执行行与历史行，Run 级 spawn 核验的三态判据（P1-2）；v20 撤掉 v18——它与 v16 的 `ux_evidence_set_per_run` **逐字相同**，一条不变量两个名字就是 L-3（照抄评审给的建议索引、没先 grep 一遍既有约束）；v21 `ux_online_agent_run_once`——一次 run 一个 agent 至多一条在线账本行，多条时一条真 `runtime_run_id` 会把另一条伪造的盖住；v22 `decision_runs.expected_spawn_agents`（冻结「这次该启动谁」，**不等于**卡上的 expected_roster）+ `ux_online_runtime_run_id`（一个运行时 id 不许给两行背书）） |
+| 数据平台（Phase 3） | **12 个 dataset / 17 个 provider / 20 条绑定边，其中 8 条 FALLBACK**。<br>降级链在 2026-09-26 一次真实故障里生效：东财 `push2` 四台同时 502，`breadth` / `board_snapshot` / `limit_pool` 全靠备用源顶住，**账本记下了是谁供的数**。<br>🔶 出口条件 **0/3**：EOD 连续 5 个交易日 **0/5**、演练 `QUARANTINED` 与 `REVISION_V2` 未跑（其余四个已过）。判据 `tools/verify/phase3_acceptance.py`（三态） |
 | 测试 | 2343 条 |
 | 端到端 | 盘中 172.6s / $1.20（Decision SLO **180s**，裁定 17）；盘后 198s / $1.37 —— **不纳入 Phase 2 SLO**，收盘后一小时快讯量翻倍（184 vs ~70 条）是另一种负载形态 |
 | 隔离 | `tools/verify/isolation.py` **三态**（`UNKNOWN` 不计入通过）；判据由 `tests/test_isolation.py` 钉住 |
 | 外部评审 | 两份，共 29 条，**全部处理完**（见 `TODO.md` 的合并台账）|
 
-🔴 **只差出口条件 3（一次真实 Risk Veto），而它等的是行情、不是开发。**
-盘中 `emotion`/`news` 报「今天」、日线类报「上一交易日」⇒ `risk` 每次「无法判定」——
-这条根因已随交易日历落地（v15 / `bin/biga-calendar`）解决，剩下的是等盘面真的
-命中 risk 的阈值之一。详见 `docs/design/phase-2-specialists.md` §3.11 与 §4。
+🔴 **Phase 2 只差出口条件 3（一次真实 Risk Veto），而它等的是行情、不是开发。**
 
-详见 `TODO.md` 与 `docs/design/phase-2-specialists.md`。
+⏩ **2026-09-26 更正：上一版这里写着「这条根因已随交易日历落地解决」—— 那是假的。**
+
+实测历史 12 次出卡，**9 次**仍在报「上游交易日不一致」⇒ risk 按判断表给「无法判定」。
+真正的两个原因当天才查出来，都与日历无关：
+
+1. `news` 用 `trade_date` 装的是「最新一条快讯发生在哪天」—— 7x24 是连续事件流，
+   **它没有交易日**。同名不同义，于是每个非交易日都报假冲突（已改名 `newest_flash_date`）
+2. 盘中「日线锚定上一交易日、实时类锚定今天」是**结构性**的，两边都对 ——
+   而判据把它和「跨了三天」压成同一个 `False`（已改成交出跨度与逐 agent 明细，
+   由 agent 判断，见 `agents/risk/AGENTS.md` 的判断表）
+
+> 一条写着「已解决」的状态，比写着「未解决」更危险 —— **没人会回头核对它。**
+
+详见 `TODO.md`、`docs/design/phase-2-specialists.md`、`docs/design/phase-3-data-platform.md`。

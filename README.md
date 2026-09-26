@@ -4,7 +4,7 @@
 
 ### 基于 OpenClaw 的可追溯 Multi-Agent A 股决策内核
 
-[![Status](https://img.shields.io/badge/status-phase%202%20code%20closed%20%C2%B7%20baseline%20v1--2-2ea043)](#当前边界)
+[![Status](https://img.shields.io/badge/status-phase%203%20code%20closed%20%C2%B7%20exit%200%2F3-e3b341)](#当前实现状态)
 [![Runtime](https://img.shields.io/badge/runtime-OpenClaw-1f6feb)](https://docs.openclaw.ai)
 [![Tests](https://img.shields.io/badge/tests-2343%20selected-555)](#当前实现状态)
 [![Store](https://img.shields.io/badge/store-SQLite%20WAL%20%C2%B7%20schema%20v27-555)](docs/tutorial/04-store-layer.md)
@@ -434,8 +434,29 @@ Notification = FAILED / RETRYING
 | Phase 2 出口条件 5（延迟预算） | ✅ 盘中 Decision SLO **180s**，唯一定义在 `latency_report.py::DEFAULT_BUDGET_MS`；盘后负载另立 Profile（裁定 17）|
 | AgentRun 写边界闭合（三个显式入口） | ✅ 裸接口已私有 |
 | 交易日历（`market_is_open` 认节假日） | ✅ 2026-09-25 起真的认了（`bin/biga-calendar`）|
-| Dataset / Provider / Pipeline Registry | ⬜ 后续 |
+| Dataset / Provider Registry | ✅ **12 个 dataset / 17 个 provider / 20 条绑定边**，其中 **8 条 FALLBACK** |
+| Data Run 状态机 + Raw Artifact + Partition + Quality + Snapshot | ✅ |
+| 降级链（主源挂了自动换备用源，且**账本记下是谁供的数**） | ✅ 2026-09-26 真实故障中生效：东财 `push2` 四台同时 502，`breadth` / `board_snapshot` / `limit_pool` 全靠备用源顶住 |
+| Security Master（point-in-time universe） | ✅ |
+| 全市场 EOD Daily Bars → Parquet → DuckDB | ✅ 代码面；**尚未连续跑满 5 个交易日**，见下 |
 | 选股、回测、实时交易、Web | ⬜ 长期路线 |
+
+### Phase 3 出口条件：代码面已过，**证据 0/3**
+
+判据是 `python3 tools/verify/phase3_acceptance.py`，它自己分三态
+（`0` 全过 / `2` 代码面过但证据不足 / `1` 代码面有问题）。当前输出是
+**`🔶 代码面已过，证据不足`**：
+
+| | 状态 |
+|---|---|
+| 十项代码面检查 | ✅ 全绿（Registry / Producer Runtime Gate / P3-6 边界 / P3-7 链路 / 离线回放 …）|
+| EOD 连续 5 个交易日 | ⬜ **0 / 5** —— 等 09-28 起的五个交易日，**不是开发问题** |
+| 演练 `QUARANTINED` | ⬜ 等一次真实源冲突，或像 `RAW_TAMPER` 那样人为制造 |
+| 演练 `REVISION_V2` | ⬜ 同上 |
+| 其余四个演练 | ✅ `PRIMARY_FALLBACK` / `RAW_TAMPER` / `SOURCE_ZIP_REPLAY` / `DUCKDB_RUNTIME` |
+
+🔴 **徽章因此是琥珀色不是绿色。** 代码写完不等于验收通过 ——
+这条分界是裁定 14 要守的东西：**徽章与验收数字必须描述一个真被测过的提交**。
 
 当前仓库有 **2343 条 Hermetic 测试选中，SQLite schema v27**，0 failed。
 
@@ -460,10 +481,17 @@ Notification = FAILED / RETRYING
 
 ### tag 现状
 
+🔴 **本页的数字描述的是 `phase3` 的 HEAD，不是某个 tag。**
+
+Phase 3 的开发在 `phase3` 分支上做，合并到 `main` 走 PR。
+在那次合并落地之前，**`main` 上的版本比本页旧** —— 这句话本身就是
+裁定 14 要求的：数字必须说清楚自己描述的是哪一棵树。
+
 | tag | 指向 | 现在该怎么读它 |
 |---|---|---|
-| **`v0.5.0`** | 当前 `main` | **最新状态。**克隆下来对着它读，本页的数字描述的就是它 |
-| `v0.3.6` · `v0.3.7` · `v0.4.0` | 前几次复核 | 过程快照 |
+| **（无 Phase 3 tag）** | — | Phase 3 **出口条件 0/3 未达成**，还不到打 tag 的时候。上一次过早打 tag 的教训见下面 `v1-architecture-baseline` |
+| `v0.5.1` | 合并前的 `main` | Phase 2 收口。**本页的数字不描述它** |
+| `v0.3.6` · `v0.3.7` · `v0.4.0` · `v0.5.0` | 前几次复核 | 过程快照 |
 | `v1-architecture-baseline` | 一个更早的提交 | ⚠️ **已解冻，不再代表「可发布」。**保留是因为它是历史事实（当时确实 sign-off 过），不是因为它仍然成立 |
 | `v0.3.1` … `v0.3.4` | 各自的发布点 | 过程快照 |
 
@@ -494,6 +522,15 @@ Spawn Proof 仍是 decision 级、测试基线不可复现）；随后那批修�
 条件 4 的工具改严了（演练与弱证据不再计入）数字反而还在线上，条件 5 是把
 早已重推完的 180s 从两个字面量收敛成一处定义。
 详见 [`phase-2-specialists.md`](docs/design/phase-2-specialists.md) §4。
+
+🔶 **Phase 3 代码收口已完成，出口条件 0/3。** 三条都在等证据，不在等开发：
+EOD 要连续跑满 5 个交易日（当前 **0/5**），`QUARANTINED` 与 `REVISION_V2`
+两个演练还没跑过（其余四个已过）。判据与当前输出见上面
+[「Phase 3 出口条件」](#phase-3-出口条件代码面已过证据-03)。
+
+⚠️ 两个阶段的出口条件**都还没满**，而它们卡在同一类原因上：
+**等真实市场发生某件事**。这类条件不能靠改判据达成 ——
+上一次为了让徽章变绿而提早打 tag 的后果，就写在这一节开头。
 
 ---
 
@@ -759,12 +796,19 @@ Replay 专用写入口、Migration 原子性、Notification Worker 单实例—�
 这六项在 v0.3.1–v0.3.4 落地，**v0.3.6 复核后才真正到位**：那次复核发现其中
 三项的守卫没有任何生产调用方（写了函数 ≠ 那条路被守住），详见 CHANGELOG。
 
-当前剩余的出口条件：
+当前剩余的出口条件（**两个阶段的加在一起，共 4 条**）：
 
 ```text
-Phase 2 条件 3（真实否决）—— 等行情，不是等开发
+Phase 2 条件 3（真实否决）      —— 等行情命中 risk 阈值
+Phase 3 EOD 连续 5 个交易日     —— 0/5，等 09-28 起
+Phase 3 演练 QUARANTINED        —— 等真实源冲突，或人为制造
+Phase 3 演练 REVISION_V2        —— 同上
 Live Acceptance 重新独立通过
 ```
+
+🔴 **前四条没有一条在等开发。** 它们等的是「真实市场发生某件事」，
+而这类条件**不能靠改判据达成** —— 上一次为了让徽章变绿而提早打 tag
+的后果写在「tag 现状」那一节。
 
 🔒 **已另打新 tag**（不移动、不覆盖旧的那个 —— 见上文「tag 现状」）：
 
@@ -774,16 +818,27 @@ v1-architecture-baseline-2    2026-09-25 · 口径 = 代码与架构收口
 
 上面那两条**不在这个 tag 的声称范围内**，见「当前边界」一节。
 
-### Data Platform
+### Data Platform — 代码面已交付（Phase 3）
 
 ```text
-Dataset Registry
-Provider Registry
-Security Master
-Trading Calendar
-EOD Daily Bars
-Emotion Snapshot
+✅ Dataset Registry        12 个 dataset
+✅ Provider Registry       17 个 provider · 20 条绑定边 · 其中 8 条 FALLBACK
+✅ Security Master         point-in-time universe
+✅ Trading Calendar        market_is_open 认节假日
+✅ EOD Daily Bars          Raw 归档 → Parquet → DuckDB
+✅ Emotion Snapshot        由股池派生，血缘引用上游那条 raw
+🔶 出口条件                 0/3（见「Phase 3 出口条件」一节）
 ```
+
+**降级链是这一层最吃劲的部分**，而它在 2026-09-26 一次真实故障里
+证明了自己：东财 `push2` 四台主机同时 502，
+`cn.market.breadth` / `cn.sector.board_snapshot` / `cn.market.limit_pool`
+全部改由备用源供数，**而账本记下了是谁供的**。
+
+⚠️ 同一次故障也暴露出三个只在降级时才会触发的缺陷
+（写死主源字面量的查表键 ×2、只接了 1/5 的限流器）——
+它们此前每一次测试和每一次真实出卡都是绿的。
+经过与教训见 CHANGELOG `[0.9.15]` 起。
 
 ### Research & Decision
 
