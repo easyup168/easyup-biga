@@ -87,21 +87,63 @@ chmod 600 ~/.openclaw-biga/.env
 继承它。网关先起来的话，它看不到之后新增的行 —— **而且不会报错**，
 只会让 skill 以「没配密钥」的方式失败。
 
-判据（不打印任何值）：
-
-```bash
-PID=$(systemctl --user show openclaw-gateway-biga.service -p MainPID --value)
-tr '\0' '\n' < /proc/$PID/environ | grep -c '^YOUR_KEY_NAME='
-```
-
-`0` = 这个网关进程看不到它。重启：
+重启：
 
 ```bash
 ~/.openclaw-biga/bin/biga gateway restart
 ```
 
-⚠️ 直接跑脚本（不经网关）不受影响 —— 自己 source 一下就行。
-所以「命令行能跑」**不代表** agent 也能用。
+##### 🔴 判据**不能**用 `/proc/<pid>/environ` —— 它查的不是同一个地方
+
+本文档一度写着「`tr '\0' '\n' < /proc/$PID/environ | grep -c '^KEY='`，
+`0` = 网关看不到它」。**那是错的，而且方向刚好反**：
+
+`/proc/<pid>/environ` 是 **`exec()` 那一刻**的环境快照。OpenClaw 的
+dotenv 是在进程**起来之后**把值写进 `process.env` 的
+（`src/infra/dotenv.ts`：`env[key] = value`）—— 运行时对 `process.env`
+的修改**永远不会**反映到 `/proc/<pid>/environ` 里。
+
+⇒ 那个数**恒为 0**，无论配没配成功。它不是判据，是一句必然成立的废话。
+
+实测证伪（2026-09-26）：网关 `environ` 里两个变量都是 `0`，
+而同一个网关派生出来的子进程里两个都**读得到**。
+
+**真判据是端到端 —— 让网关派生的子进程自己报：**
+
+```bash
+~/.openclaw-biga/bin/biga agent --agent main --message \
+  '只做一件事，不要解释：运行这条命令并把输出原样贴出来（它只打印长度，不打印密钥）：
+python3 -c "import os;print(len(os.environ.get(\"YOUR_KEY_NAME\",\"\")))"'
+```
+
+非 0 = agent 侧真的拿得到。
+
+> 通用原则：**守卫必须查它声称在查的那个地方。**
+> 查错地方的守卫比没有守卫更糟 —— 它会一直绿，而你以为已经验过了。
+
+##### ⚠️ 外层环境里已有同名变量时，`.env` **不会**覆盖它
+
+dotenv 的写法是「没定义才写」：
+
+```js
+if (env[key] !== void 0) continue;
+env[key] = value;
+```
+
+⇒ 从登录 shell 启动的进程（比如你手敲的 CLI）带着 shell 里那份，
+`.env` 里更新过的值**进不去**。而网关是 systemd 用户单元，**不读 shell 配置**，
+所以它拿到的是 `.env` 那份。
+
+**同一把 key 换了新值时，这两条路会用不同的值，而且都不报错。**
+实测踩过：换完 key 在命令行测，用的还是 shell 里的旧值。
+
+⇒ 命令行验证时显式取 `.env` 那份：
+
+```bash
+export YOUR_KEY_NAME=$(grep '^YOUR_KEY_NAME=' ~/.openclaw-biga/.env | cut -d= -f2-)
+```
+
+所以「命令行能跑」**不代表** agent 也能用，反过来也一样。
 
 ### 4. 验证
 

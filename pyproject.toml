@@ -20,7 +20,7 @@ name = "easyup-biga"
 #    开发版记号，明确表示「在 0.2.0 之后、尚未发布」。
 #    ⚠️ 这个数字现在有两个出处（这里 + CHANGELOG.md），正是 L-3 的形状 ——
 #    由 tests/test_packaging.py 钉住两者不矛盾。发版时两处一起改。
-version = "0.9.13.dev0"
+version = "0.9.14.dev0"
 description = "Multi-Agent A 股短线决策辅助系统：不自动下单，产出证据可追溯、可回放的 Decision Card"
 readme = "README.md"
 requires-python = ">=3.12"
