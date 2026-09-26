@@ -72,6 +72,16 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.eastmoney_security_master",),
     ),
     ProviderDefinition(
+        provider_id="eastmoney_eod",
+        title="东财全市场收盘行情 —— 一次请求拿回全市场，EOD 日线的唯一来源",
+        # 与 eastmoney_security_master 同一个站点 ⇒ 同一个 source 前缀。
+        # 🔴 前缀是**站点级**的、provider_id 是**适配器级**的，两者不是一对一
+        #    （sina 与 sina_calendar 也都写 "sina:"）。这正是 P13 要按
+        #    「本 dataset 登记了谁」求交集、而不能直接拿前缀查的原因。
+        source_prefix="em",
+        modules=("easyup_biga.providers.eastmoney_eod",),
+    ),
+    ProviderDefinition(
         provider_id="szse",
         title="深交所官方日历 —— 本项目部署环境连不通，作 fallback 保留",
         source_prefix="szse",

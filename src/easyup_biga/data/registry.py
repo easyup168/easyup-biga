@@ -93,6 +93,31 @@ DATASETS: tuple[DatasetDefinition, ...] = (
         ),
     ),
     DatasetDefinition(
+        dataset_id="cn.equity.daily_bars",
+        title="全市场 A 股 EOD 日线（不复权原始 OHLCV）",
+        schema_version=1,
+        primary_provider="eastmoney_eod",
+        fallback_providers=(),
+        # 🔴 留空的理由和 security_master 那条一样：登记一个没探活过的备胎，
+        #    等于承诺一条降级路径而它可能也是断的。
+        validation_providers=(),
+        # 一天一个分区。修订（盘后更正）走同分区的新 data_version，
+        # 不改写已经落盘的那份 —— 物理路径里带 data_version=N。
+        partition_keys=("trade_date",),
+        storage_policy="parquet_lake",
+        quality_policy="cn-equity-daily-bars-v1",
+        # 🔴 raw 落的是**文件面**，控制面里只留一行元数据 ⇒ raw_table 指
+        #    `raw_artifacts`（工件登记表），不是 `raw_market_snapshot`。
+        #    这两张表不是一回事：后者存 body，前者只存 uri + 哈希。
+        raw_table="raw_artifacts",
+        fact_table=None,
+        # 真读它的是 DuckDB 那两条查询 —— 它们直接扫 lake/ 下的 Parquet。
+        consumers=(
+            "easyup_biga.data.analytics:query_eod_as_of",
+            "easyup_biga.data.analytics:query_eod_between",
+        ),
+    ),
+    DatasetDefinition(
         dataset_id="cn.index.daily_bars",
         title="指数日线（market/sector/technical 共用的脊梁）",
         schema_version=1,

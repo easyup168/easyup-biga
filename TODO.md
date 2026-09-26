@@ -1600,18 +1600,24 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 🔴 **按这个顺序做，理由是风险递增、且后一件依赖前一件。**
 
-- [ ] **⓪ 把 P3-4/P3-5 的四个 dataset 注册进 `data/registry.py`** —— 🔴 **它们今天跑不了**。
-      `cn.equity.daily_bars` / `cn.security.tradability` / `cn.equity.adjustment_factors` /
-      `cn.market.emotion_close` 四个模块在 `datasets/` 下，但注册表里没有它们的
-      `DatasetDefinition` ⇒ 一调 `run()` 就在 `get_dataset()` 抛。
-      **验收**：`python3 tools/verify/phase3_acceptance.py --code-only` 的
-      「P3-4 / P3-5 尚未落地」两行消失；每个新 dataset 都有被证明的消费方（P11 守卫）。
-      ⚠️ **不是四行配置**：`tradability` / `emotion_close` 用的 `provider_id="derived-biga"`
-      是个**派生伪 provider**，它没有采数模块。要先定：派生数据集在 Provider Registry
-      里到底算不算一个 provider（牵涉裁定 15「一个事实一个生产 agent」与裁定 16
-      的 `derived` 证据类别）。**先定这个，再写注册**。
-      **为什么排最前**：它让上一轮合进来的四个模块从死代码变成活代码，
-      且范围比 ① 还小 —— 但它有一个真的设计问题要先答。
+- [x] **⓪ 把 P3-4/P3-5 的 dataset 注册进 `data/registry.py`**（2026-09-26 完成）
+      结论与原设想不同：四个里**只有 `cn.equity.daily_bars` 够格**。
+      `DatasetDefinition` 的判据是「答得出谁读它吗」，另外三个答不出 ——
+      `tradability` 算出来当场用掉（日线覆盖率的分母）、`adjustment_factors`
+      与 `emotion_close` 连写入方都没人调。**它们不是漏注册，是真的还没有读取方。**
+      进册后第一条端到端测试挖出修订功能一次都没成功过（见 CHANGELOG）。
+
+- [ ] **⓪-b 可交易性进册 —— 等它真有读取方** ⇒ 触发条件：筛选/复盘需要区分
+      「停牌」与「数据缺失」的那一刻。那时它的 raw 必须指向**同一份 provider
+      响应**（与日线共用），不能再是把自己的输出重新序列化。
+
+- [ ] **⓪-c Parquet 的两阶段提交（残留窗口，不阻塞）**
+      发布是「先写文件、再进账本」。幂等 bug 修掉之后，**确定性**的孤儿分区没有了，
+      但「写完文件、进账本前崩了」这个窗口仍在 —— 那时盘上有一个控制面不认的分区，
+      而 `query_eod_between` 是扫盘的，会读到它。
+      **验收**：Parquet 先写 staging、账本提交后再原子移进 lake；
+      探针：在账本写入前抛异常，`lake/` 下不许多出目录。
+      ⚠️ `query_eod_as_of` 走控制面，不受影响 —— 这是它存在的理由之一。
 
 - [ ] **① `security_master` 的账本收口** —— `src/easyup_biga/data/datasets/security_master.py`
       里还有**第三处**账本流程（它在流程中段直接写 `fact_security_master` 行）。

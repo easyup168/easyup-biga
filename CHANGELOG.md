@@ -13,6 +13,85 @@
 
 ---
 
+## [未发布]
+
+### 修复 · 🔴 修订功能原来一次都没成功过，而它让同一个交易日出现两套价格
+
+`cn.equity.daily_bars` 进注册表之后写的第一条端到端测试就挖到了它。
+
+`DatasetSnapshotService.publish()` 的幂等判据**完全不看 `request.data_version`**：
+
+```python
+existing = find_dataset_snapshot(dataset_id, partition_key, status=COMPLETE)
+if existing is not None:
+    return ...reuse...
+```
+
+分区只要已有一份 COMPLETE，请求 v2 也原样退回 v1。
+
+后果不是「修订失败」那么简单。调用方（`DatasetRowPublisher`）是
+**先写 Parquet、再进账本**的，所以 v2 的文件已经落盘：
+
+```text
+盘上：   data_version=000001/  +  data_version=000002/
+控制面： 只认 v1
+
+query_eod_between（扫盘取最高版本）→ [99.0, 100.0, 101.0, 102.0, 103.0]
+query_eod_as_of（走控制面）        → [10.0,  11.0,  12.0,  13.0,  14.0]
+```
+
+> 🔴 **同一个交易日，两条查询给出两套完全不同的价格，两边都不报错。**
+> 这正是裁定 15 要防的「某天悄悄给出两个数」。
+
+修法两条：
+
+1. 幂等判据改成 `existing["data_version"] >= request.data_version`
+2. `data_version > 1` 时**当场**要求修订指向当前有效快照，不指就 `DataStoreConflict`
+
+第 2 条为什么不能只靠事后的 `audit_revision_chain`：等审计发现断链时，两份
+快照都已经落库了，而「哪份是当前有效的」已经答不出来。
+**不变量要在写入时守，审计是第二道防线不是第一道。**
+
+### 新增 · `cn.equity.daily_bars` 进注册表 —— 上一轮合进来的模块从死代码变成活代码
+
+上一轮合入的四个 P3-4/P3-5 dataset 模块，引用的 dataset id **从没进过注册表**，
+而每条发布路径第一行就是 `get_dataset()` ⇒ 一调就抛，全是死代码。
+它们的单元测试当时全绿，因为测的是 `normalize` / `derive` /
+`write_parquet_rows` 这类**不经过注册表**的下层函数。
+
+> 🔴 **「有测试」和「有能跑到底的路径」是两件事。**
+> 判断标准很朴素：**有没有一条测试是从真正的入口函数调进去的。**
+
+⇒ 新增 `tests/test_eod_dataset_live.py`，十条判据全部打在「跑完之后库里/盘上
+有什么」：账本四张表留痕、Parquet 读得回来且数值对、PIT cutoff 之前看不见、
+同日重跑复用、修订走新版本且旧分区一字节不动、停牌票不产生假 OHLC、
+空 Security Master 拒绝跑。
+
+### 变更 · 另外三个 dataset **故意不进册** —— 它们真的还没有读取方
+
+`DatasetDefinition` 的契约把判据写死了：「答不出谁读它，这条就还不该进册」。
+逐个问下来，四个里只有一个答得出：
+
+| dataset | 谁读它 |
+|---|---|
+| `cn.equity.daily_bars` | `analytics.query_eod_as_of` / `query_eod_between`（真扫 Parquet）✅ |
+| `cn.security.tradability` | 无 —— 算出来当场用掉（日线覆盖率的分母），从没被读回过 |
+| `cn.equity.adjustment_factors` | 无，连写入方都没人调 |
+| `cn.market.emotion_close` | 无，同上 |
+
+顺带查出 `tradability` 那条发布路径还有个更具体的问题：它把**自己的输出
+重新序列化**当原始响应存（`json.dumps([r.to_dict() for r in records])`）。
+回放去校验这份 raw，校验的是「我刚写的文件还是我刚写的样子」——
+证明不了任何关于出处的事，而 Parquet 里存的又是同一批行。
+
+> 裁定 16 那句正好适用：**凑出来的溯源比没有溯源更糟，它会让人以为查得到。**
+
+⇒ `run_eod_bundle` 只发布日线，可交易性留在结果里作覆盖率的分母
+（`tradability_counts`）。等它真有读取方再进册，那时它的 raw 应当指向
+**同一份 provider 响应**，而不是自己的输出。
+
+---
+
 ## [0.6.0] - 2026-09-26
 
 > 发布在 `phase3` 分支上。本版之前先把 `main` 并了进来（带回 `[0.5.1]`

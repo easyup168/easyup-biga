@@ -11,7 +11,7 @@ from ..records import DailyBar
 from ..publication import DatasetRowPublisher, PublishResult
 
 DATASET_ID = "cn.equity.daily_bars"
-PROVIDER_ID = "eastmoney-eod"
+PROVIDER_ID = "eastmoney_eod"
 JOB_ID = "eod-daily-bars"
 
 

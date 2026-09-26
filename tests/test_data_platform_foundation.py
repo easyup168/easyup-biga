@@ -79,6 +79,17 @@ def test_只激活已有生产持久链的数据集():
         # 已经建成且有读路径；取不到数时 Data Run 会 FAILED、不发布快照 ——
         # fail-closed，不是「注册了就等于能用」。
         "cn.security_master",
+        # P3-4 加入（2026-09-26）。读路径是 DuckDB 那两条查询，真的扫 lake/ 下的
+        # Parquet；端到端判据在 tests/test_eod_dataset_live.py。
+        #
+        # 🔴 同一批合进来的另外三个模块**故意没进册**：
+        #    · cn.security.tradability      —— 算出来当场用掉（日线覆盖率的分母），
+        #      从没被读回过
+        #    · cn.equity.adjustment_factors —— 连写入方都没人调
+        #    · cn.market.emotion_close      —— 同上
+        #    `DatasetDefinition` 的契约写死了「答不出谁读它，这条就还不该进册」。
+        #    它们不是漏注册，是**真的还没有读取方**。
+        "cn.equity.daily_bars",
     }
 
 

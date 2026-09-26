@@ -115,15 +115,27 @@ class DatasetSnapshotService:
         if any(a.provider_id != request.provider_id for a in request.raw_artifacts):
             raise ValueError("P3-2 bundle requires one provider_id; mixed-provider publish is later work")
 
-        # Idempotency by immutable logical partition.  P3-2 calls this before the
-        # EvidenceSet row is inserted, so retrying the bridge itself is safe.
+        # 幂等键是「逻辑分区 + 请求的 data_version」。P3-2 在插 EvidenceSet 行之前
+        # 调它，所以重试桥接本身是安全的。
+        #
+        # 🔴 `>= request.data_version` 这一半是 2026-09-26 补的，原本只判
+        #    `existing is not None` —— 于是**修订整体不可用**：该分区只要已经有
+        #    一份 COMPLETE，请求 v2 也原样退回 v1。
+        #
+        #    后果不是「修订失败」那么简单。调用方（`DatasetRowPublisher`）是
+        #    **先写 Parquet、再进账本**的，所以 v2 的文件已经落盘 ⇒ 盘上有 v2、
+        #    控制面只认 v1。而两条查询走的是不同的路：
+        #      · `query_eod_between` 扫盘取最高 data_version → 读到 v2
+        #      · `query_eod_as_of`   走控制面              → 读到 v1
+        #    实测同一个交易日拿到两套价格，**两边都不报错**。
+        #    这正是裁定 15 要防的「某天悄悄给出两个数」。
         existing = find_dataset_snapshot(
             request.dataset_id,
             dict(request.partition_key),
             status=DatasetStatus.COMPLETE,
             path=self._path,
         )
-        if existing is not None:
+        if existing is not None and int(existing["data_version"]) >= int(request.data_version):
             manifest = existing["manifest"]
             partition_ids = manifest.get("partition_ids", [])
             if not partition_ids:
@@ -137,6 +149,20 @@ class DatasetSnapshotService:
                 knowledge_cutoff=str(existing["knowledge_cutoff"]),
                 reused=True,
             )
+
+        if request.data_version > 1:
+            # 🔴 修订必须当场说清取代谁。等 `audit_revision_chain` 事后发现断链
+            #    太晚了：那时两份快照都已经落库，而「哪份是当前有效的」
+            #    已经答不出来。
+            if existing is None:
+                raise DataStoreConflict(
+                    f"{request.dataset_id} 请求发布 v{request.data_version}，"
+                    f"但该分区没有任何 COMPLETE 的前一版 —— 修订链会从中间开始。")
+            if request.supersedes_snapshot_id != str(existing["snapshot_id"]):
+                raise DataStoreConflict(
+                    f"{request.dataset_id} 的修订没有指向当前有效快照："
+                    f"声称取代 {request.supersedes_snapshot_id!r}，"
+                    f"实际当前是 {existing['snapshot_id']!r}。")
 
         now = now_cn().isoformat()
         data_run_id = new_data_run_id()

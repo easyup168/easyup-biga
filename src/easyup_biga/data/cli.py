@@ -262,9 +262,10 @@ def _dispatch(args: argparse.Namespace) -> Any:
             "status": result.status.value,
             "trade_date": result.trade_date,
             "daily_bars": _publish_result(result.daily_bars),
-            "tradability": _publish_result(result.tradability),
             "universe_count": result.universe_count,
             "normalized_bar_count": result.normalized_bar_count,
+            # 未发布成数据集，只是覆盖率的分母 —— 见 eod_pipeline 的模块头
+            "tradability_counts": dict(result.tradability_counts),
         }
     if cmd == "query-eod":
         from .analytics import query_eod_between
