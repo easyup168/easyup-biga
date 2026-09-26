@@ -354,6 +354,59 @@ class DatasetSnapshotService:
             raise
 
 
+    def record_fetch_failure(
+        self,
+        *,
+        dataset_id: str,
+        job_id: str,
+        partition_key: Mapping[str, str],
+        trigger_id: str,
+        provider_id: str,
+        role: ProviderRole = ProviderRole.PRIMARY,
+        started_at: str,
+        elapsed_ms: int,
+        error: BaseException | str,
+        error_code: str = "data.provider.unavailable",
+        data_version: int = 1,
+    ) -> str:
+        """取数就失败了 —— 连 raw 都没有，但**必须留一次可查的 run**。
+
+        🔴 「源挂了」和「今天没跑」在库里长得一模一样的话，
+        排查时最先要区分的就是这两件事。
+
+        ⚠️ 这不只是日志。`drills.provider_fallback_drill()` 读的就是
+        `provider_attempts` —— 失败的取数从不落那张表，那么「真实的
+        Primary→Fallback 演练」**结构上就取不到证据**：
+        主源失败那一半永远不会出现。
+
+        实测（2026-09-26 第一次真机跑 P3-6）：三个 eastmoney dataset 冻结失败，
+        卡上的 `missing` 报对了、编排器的 run 事件也记了 `dataset_errors`，
+        而 `data_job_runs` / `provider_attempts` **一行都没有**。
+        离线测试测不出这件事 —— 它要的是一次真实的 provider 故障。
+        """
+        now = now_cn().isoformat()
+        data_run_id = new_data_run_id()
+        open_data_run(
+            DataJobRun(
+                data_run_id=data_run_id, job_id=job_id, dataset_id=dataset_id,
+                partition_key=dict(partition_key), requested_data_version=data_version,
+                trigger_id=trigger_id, created_at=started_at,
+            ),
+            path=self._path,
+        )
+        transition_data_run(data_run_id, "RECEIVED", "FETCHING", path=self._path)
+        record_provider_attempt(
+            ProviderAttempt(
+                data_run_id=data_run_id, provider_id=provider_id, role=role,
+                attempt_no=1, status=ProviderAttemptStatus.FAILED_RETRYABLE,
+                started_at=started_at, finished_at=now, elapsed_ms=int(elapsed_ms),
+                error_code=error_code, error_detail=str(error)[:2000],
+            ),
+            path=self._path,
+        )
+        transition_data_run(data_run_id, "FETCHING", "FAILED", path=self._path)
+        return data_run_id
+
     def record_unpublishable(
         self,
         *,

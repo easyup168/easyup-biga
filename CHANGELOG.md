@@ -13,6 +13,87 @@
 
 ---
 
+## [0.8.1] - 2026-09-26
+
+> 一次真机出卡换来的两条修复。两条都是**离线测不出来**的：
+> 一条要真实的 provider 故障，一条要生产定时器恰好并发。
+
+### 修复 · 🔴 冻结失败在数据平台账本里不留痕 —— **第一次真机跑 P3-6 才暴露**
+
+2026-09-26 11:10，飞书触发了一次真实出卡（`BIGA-20260926-001`），
+那是 P3-6 合进来之后的第一次生产路径执行。**它跑通了**（COMPLETED，132s），
+`cn.index.realtime_quote` 与 `cn.news.flash` 真的被冻进了 EvidenceSet。
+
+但 6 个 required dataset 只冻上 3 个 —— 三个 eastmoney 的全挂了。
+卡上的 `missing` 报对了，编排器的 run 事件也记了 `dataset_errors`，
+而数据平台自己的账本 **一行都没有**：
+
+```text
+data_job_runs      —— 三个失败的 dataset 一行都没有
+provider_attempts  —— 只有 4 条 SUCCEEDED，没有任何 FAILED
+```
+
+根因：`DecisionDataClient._freeze_one()` 在 `publish()` **之前**就抛了，
+DataRun 根本没开过。
+
+#### 后果不只是「日志少一行」
+
+| | |
+|---|---|
+| 「源挂了」和「今天没跑」 | 在数据平台里**长得一模一样** |
+| 🔴 `drills.provider_fallback_drill()` | 它读的就是 `provider_attempts` ⇒ 失败的取数从不落表，**「真实 Primary→Fallback 演练」对这 5 个 dataset 结构上取不到证据**（主源失败那一半永远不出现）|
+
+也就是说：**E-1 的一项解除条件，之前是结构上无法满足的。**
+
+#### 修法：收成一处
+
+这是本轮第二次需要「取数失败也留痕」——
+`security_master` 那一轮已经写过一份私有实现。两个调用方就是收敛的信号，
+不等第三个 ⇒ `DatasetSnapshotService.record_fetch_failure()`，两边都调它。
+
+⚠️ 留痕本身失败**不许盖住**原始的取数失败 —— 那会把「源挂了」变成
+「账本写不进去」，排查方向立刻跑偏（由探针钉住）。
+
+#### 🔴 这条为什么离线测不出来
+
+它要的是**一次真实的 provider 故障**。所有离线测试里 provider 都是桩，
+而桩要么成功、要么按测试预期抛 —— 没有人会去问「抛完之后库里有什么」。
+
+> 真机跑一次的价值不在「跑通了」，在于**它会以你没设想过的方式失败**。
+
+### 修复 · `test_biga_notify` 与**生产定时器抢同一把锁**（同一次真机执行撞出来）
+
+那次真实出卡之后跑全量，两条 notify 测试红；重跑又绿。
+看起来像 flaky —— 不是。
+
+`bin/biga-notify` 的单实例锁写死在**仓库根**（`$ROOT/.biga-notify.lock`），
+而这台机器上 `notify-worker-biga.timer` 每 2 分钟跑一次同一个脚本。
+测试起两个 worker 验「只发一次」，撞上生产那次执行就红。
+
+> 🔴 这违反 P1-3「默认 pytest 必须 hermetic」，
+> 而且**只在并发窗口里现形** —— 所以它躲过了之前每一次全量。
+> 让它暴露的不是新代码，是**生产恰好在同一分钟跑了一次**。
+
+⇒ 锁路径可被 `BIGA_NOTIFY_LOCK` 覆盖（**为测试隔离，不是配置项**），
+默认值不变、生产行为一个字节没动。
+
+探针：把生产那把锁占死 25 秒，这 5 条测试照样全绿 —— 改之前会红。
+
+### 观察 · 这次真机执行的时间分布
+
+```text
+11:10:02  RECEIVED → PREFLIGHTED
+11:11:24  → SNAPSHOT_FROZEN      ← 82s，三个 eastmoney 重试占了绝大部分
+11:11:50  → STAGE1_COMPLETED     ← 26s
+11:12:14  → COMPLETED            ← 总计 132s（预算 180s）
+```
+
+⚠️ P3-6 把冻结挪到 Stage 1 **之前**，于是 provider 故障的重试时间
+直接进了关键路径。这次还在预算内，但**故障越多越慢**这个方向是新的 ——
+以前各 skill 并行抓，一个慢不拖累别人。记在这里，等有第二次真机数据再判。
+
+---
+
 ## [0.8.0] - 2026-09-26
 
 > **Phase 3 代码面闸门第一次退 0。** `--code-only` 退 0、完整模式退 2 ——
@@ -9374,6 +9455,7 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
+[0.8.1]: https://github.com/easyup168/easyup-biga/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/easyup168/easyup-biga/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/easyup168/easyup-biga/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/easyup168/easyup-biga/compare/v0.6.0...v0.7.0

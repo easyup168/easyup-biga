@@ -25,7 +25,17 @@ cd "$ROOT" || exit 2
 PY=python3
 
 # 单实例锁：systemd timer 与手动调用并发时，第二个进程直接退出，不重复投递。
-LOCK_FILE="$ROOT/.biga-notify.lock"
+#
+# 🔴 路径可被 `BIGA_NOTIFY_LOCK` 覆盖 —— **这是为了测试隔离，不是配置项**。
+#    2026-09-26 撞到：`tests/test_biga_notify.py` 起两个 worker 验「只发一次」，
+#    而它们用的是**仓库根那把锁** —— 和这台机器上每 2 分钟跑一次的
+#    `notify-worker-biga.timer` 是同一把。生产恰好并发时测试就红，
+#    而重跑又绿 ⇒ 看起来像 flaky，其实是**测试与生产抢同一个资源**。
+#
+#    这违反 P1-3「默认 pytest 必须 hermetic」，且只在并发窗口里现形 ——
+#    所以它躲过了之前每一次全量。
+#    ⚠️ 默认值不变（仓库根），生产行为一个字节没动。
+LOCK_FILE="${BIGA_NOTIFY_LOCK:-$ROOT/.biga-notify.lock}"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "BigA notification worker is already running; skip duplicate start." >&2

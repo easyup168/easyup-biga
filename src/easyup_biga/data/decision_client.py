@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Mapping
@@ -58,6 +59,7 @@ from .contracts import DatasetLink, DatasetStatus
 from .file_store import FileStore
 from .datasets import emotion_close
 from .publication import DatasetRowPublisher, PublishResult
+from .registry import get_dataset
 from .snapshot_resolver import resolve_evidence_set_snapshot
 
 __all__ = [
@@ -207,6 +209,8 @@ class DecisionDataClient:
             if existing:
                 frozen[dataset_id] = existing.snapshot_id
                 continue
+            started_at = now_cn().isoformat()
+            started_mono = time.monotonic()
             try:
                 result = self._freeze_one(dataset_id, evidence_set_id, day)
                 if result.status != DatasetStatus.COMPLETE or not result.snapshot_id:
@@ -221,8 +225,43 @@ class DecisionDataClient:
                 # Provider/data-quality failures are expected degradation. Programming,
                 # storage and dependency errors must fail loudly instead of being
                 # disguised as a missing market feed.
+                #
+                # 🔴 但「预期内的降级」不等于「不用留痕」。2026-09-26 第一次真机跑
+                #    P3-6：三个 eastmoney dataset 冻结失败，卡上的 missing 报对了、
+                #    编排器的 run 事件也记了 dataset_errors，而数据平台自己的账本
+                #    （data_job_runs / provider_attempts）**一行都没有** ——
+                #    `_freeze_one()` 在 publish() 之前就抛了，DataRun 根本没开过。
+                #
+                #    后果不只是「日志少一行」：`drills.provider_fallback_drill()`
+                #    读的就是 provider_attempts ⇒ 失败的取数从不落表，
+                #    「真实 Primary→Fallback 演练」对这 5 个 dataset
+                #    **结构上取不到证据**（主源失败那一半永远不出现）。
                 errors[dataset_id] = f"{type(exc).__name__}: {exc}"
+                self._record_freeze_failure(dataset_id, evidence_set_id, day,
+                                            started_at, started_mono, exc)
         return DecisionDataFreezeResult(evidence_set_id, frozen, errors)
+
+    def _record_freeze_failure(self, dataset_id, evidence_set_id, trade_date,
+                               started_at, started_mono, error) -> None:
+        """冻结失败也落一次 DataRun + 失败的 ProviderAttempt。见上面那段说明。
+
+        ⚠️ 留痕本身失败不许盖住原始的取数失败 —— 那会把「源挂了」变成
+        「账本写不进去」，排查方向立刻跑偏。
+        """
+        definition = get_dataset(dataset_id)
+        try:
+            self.publisher._service.record_fetch_failure(
+                dataset_id=dataset_id,
+                job_id=f"decision-freeze-{dataset_id.rsplit('.', 1)[-1]}",
+                partition_key={"evidence_set_id": evidence_set_id},
+                trigger_id=f"decision-freeze:{evidence_set_id}:{dataset_id}",
+                provider_id=definition.primary_provider,
+                started_at=started_at,
+                elapsed_ms=int((time.monotonic() - started_mono) * 1_000),
+                error=error,
+            )
+        except Exception:                                   # noqa: BLE001
+            pass
 
     def _freeze_one(self, dataset_id: str, evidence_set_id: str, trade_date: str) -> PublishResult:
         key = {"evidence_set_id": evidence_set_id}

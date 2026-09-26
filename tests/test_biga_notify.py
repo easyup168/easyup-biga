@@ -48,8 +48,13 @@ def fake_biga(tmp_path):
     return stub, marker
 
 
-def _run(*args, env_extra=None, timeout=30):
+def _run(*args, env_extra=None, timeout=30, lock=None):
+    # 🔴 锁路径必须指到测试自己的地盘。默认那把在**仓库根**，与这台机器上
+    #    每 2 分钟跑一次的 notify-worker-biga.timer 是同一把 ——
+    #    生产恰好并发时测试就红、重跑又绿，看起来像 flaky，
+    #    实际是**测试与生产抢同一个资源**（违反 P1-3「默认 pytest hermetic」）。
     env = {**os.environ, **(env_extra or {})}
+    env.setdefault("BIGA_NOTIFY_LOCK", str(lock or (REPO / ".biga-notify.test.lock")))
     return subprocess.run(["bash", str(REPO / "bin" / "biga-notify"), *args],
                           cwd=REPO, env=env, capture_output=True,
                           text=True, timeout=timeout)
@@ -121,6 +126,10 @@ class TestSingleInstanceLock:
         env = {**os.environ,
                "BIGA_DB_PATH": str(p),
                "BIGA": str(slow_stub),
+               # 🔴 这一把锁**必须是本测试专属的**：被测的正是「两个 worker 只发
+               #    一次」，而默认锁在仓库根、与生产定时器共用 ⇒ 生产并发时
+               #    这条会红（2026-09-26 实测撞到）。见 `_run()` 的说明。
+               "BIGA_NOTIFY_LOCK": str(tmp_path / "notify.lock"),
                "BIGA_FEISHU_OWNER_ID": "ou_test"}
         import threading
         procs = []

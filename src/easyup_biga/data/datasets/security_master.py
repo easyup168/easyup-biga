@@ -521,28 +521,16 @@ class SecurityMasterService:
         self, *, partition_key, target_version, trigger_id, requested_date,
         started_at, elapsed_ms, error,
     ) -> None:
-        """取数失败也要留一次可查的 run（RECEIVED → FETCHING → FAILED）。"""
-        data_run_id = new_data_run_id()
-        open_data_run(
-            DataJobRun(
-                data_run_id=data_run_id, job_id=JOB_ID, dataset_id=DATASET_ID,
-                partition_key=partition_key, requested_data_version=target_version,
-                trigger_id=trigger_id or f"{JOB_ID}:{requested_date}:{uuid.uuid4().hex}",
-                created_at=started_at,
-            ),
-            path=self._path,
-        )
-        transition_data_run(data_run_id, "RECEIVED", "FETCHING", path=self._path)
-        record_provider_attempt(
-            ProviderAttempt(
-                data_run_id=data_run_id, provider_id=PROVIDER_ID,
-                role=ProviderRole.PRIMARY, attempt_no=1,
-                status=ProviderAttemptStatus.FAILED_RETRYABLE,
-                started_at=started_at, finished_at=now_cn().isoformat(),
-                elapsed_ms=elapsed_ms,
-                error_code="data.provider.unavailable", error_detail=str(error),
-            ),
-            path=self._path,
-        )
-        transition_data_run(data_run_id, "FETCHING", "FAILED", path=self._path)
+        """取数失败也要留一次可查的 run。
 
+        🔴 实现在 `DatasetSnapshotService.record_fetch_failure()` —— **只有一份**。
+        这里曾经自己写过一遍（本文件的账本收口那一轮留下的），而 2026-09-26
+        真机跑 P3-6 时发现 `decision_client` 也需要同一件事 ⇒ 两个调用方就是
+        收敛的信号，别等第三个。
+        """
+        DatasetSnapshotService(path=self._path).record_fetch_failure(
+            dataset_id=DATASET_ID, job_id=JOB_ID, partition_key=partition_key,
+            trigger_id=trigger_id or f"{JOB_ID}:{requested_date}:{uuid.uuid4().hex}",
+            provider_id=PROVIDER_ID, started_at=started_at,
+            elapsed_ms=elapsed_ms, error=error, data_version=target_version,
+        )
