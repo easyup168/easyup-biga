@@ -48,53 +48,116 @@
 
 ---
 
-## 2. 12 个 ACTIVE dataset 的供数关系
+## 2. 实测普查（2026-09-26，本机）
 
-判据在代码里（`src/easyup_biga/data/registry.py` + `src/easyup_biga/data/provider_registry.py`），
-这张表是**给人读的摘要**，不是第二份真相。查当前状态用：
+判据是**这台机器上此刻跑出来的结果**，不是目录里的描述：
 
 ```bash
-bin/biga-data providers --json
-python3 tools/verify/phase3_runtime.py --installed
+python3 tools/verify/source_survey.py            # 人读
+python3 tools/verify/source_survey.py --markdown # 贴文档
 ```
+
+| 层 | 源 | 端点 | 服务于 | 结果 |
+|---|---|---|---|---|
+| 全市场截面 | 新浪 | `sina_hs_a_simple` | `daily_bars`(主) / `security_master`(备) | ✅ 500 条/页 |
+| 全市场截面 | 东财 push2 | `em_clist` | `daily_bars`(备) / `security_master`(主) | ❌ 502 |
+| 全市场截面 | 通达信官网 | `tdx_package` | `daily_bars`（历史补数候选）| ✅ 1874 KB / 6 文件 |
+| 涨跌家数 | 东财 push2 | `em_ulist` | `breadth`(主) | ❌ 502 |
+| 涨跌家数 | 新浪 | `sina_breadth_derivable` | `breadth`（候选，自算）| ✅ 每行带涨跌幅 |
+| 指数/实时 | 腾讯 | `tencent_quote` | `index.realtime_quote`(主) | ✅ |
+| 指数/实时 | 新浪 hq | `sina_hq` | `index.realtime_quote`（候选备胎）| ✅ |
+| 指数/日线 | 新浪 | `sina_kline` | `index.daily_bars`(主) | ✅ |
+| 交易日历 | 新浪 | `sina_calendar` | `trading_calendar`(主) | ✅ |
+| 交易日历 | 深交所官方 | `szse_calendar` | `trading_calendar`(备) | ❌ 连不通（本机）|
+| 快讯 | 新浪 | `sina_7x24` | `news.flash`(主) | ✅ |
+| 快讯 | 金十 | `jin10_flash` | `news.flash`（候选备胎）| ✅ |
+| 快讯 | 财联社 | `cls_roll` | `news.flash`（候选备胎）| ❌ 返回 `{errno,msg}`，需签名 |
+| 板块 | 东财 push2 | `em_boards` | `sector.board_snapshot`(主) | ❌ 502 |
+| 板块 | 同花顺 | `ths_hot` | `sector.board_snapshot`（候选备胎）| ✅ |
+| 对照组 | 东财 push2ex | `em_push2ex` | `limit_pool`(主) | ✅ |
+| 对照组 | 东财 push2his | `em_push2his` | — | ❌ 连接被关闭 |
+| 对照组 | 东财 datacenter | `em_datacenter` | —（口径不合）| ✅ |
+
+**可用 12 / 18。**
+
+### 2.1 对照组读出来的结论：东财是**按 host 组**挂的，不是整体限流
+
+`push2` / `push2his` 全挂，而**同一时刻、同一 IP、同样的请求头**下
+`push2ex` / `datacenter` 正常。所以：
+
+> 这不是「我被限流了」（那该等），是「那一组挂了」（那该走降级链）。
+> 两件事下一步完全相反，而屏幕上长得一样。
+
+⚠️ 同一天内还观察到**故障在扩散**：`push2his` 上午还是 200，下午变成连接被关闭。
+⇒ 「现在它还好」不等于「一小时后它还好」，这正是备胎要**提前**探活的理由。
+
+### 2.2 两个探针本身踩的坑（写下来，别重踩）
+
+| 坑 | 后果 |
+|---|---|
+| 盘后包探针用「今天」的日期 | 它在**非交易日返回 404** —— 周末跑一次就读成「源挂了」。实测第一版写了中秋当天，404 被当成故障查了半天 ⇒ 改用**固定的已知交易日** |
+| 只判 HTTP 200 | 限流页、空壳 JSON、登录跳转**都是 200**。财联社就是 200 + `{errno,msg}` ⇒ 判据必须打在**形状**上 |
+
+---
+
+## 3. 12 个 ACTIVE dataset 的供数关系
+
+这张表是**给人读的摘要**，不是第二份真相。判据在
+`src/easyup_biga/data/registry.py` + `src/easyup_biga/data/provider_registry.py`，
+查当前状态用 `bin/biga-data providers --json`。
 
 | dataset | 主源 | 备用源 | 换源后失效的校验 |
 |---|---|---|---|
-| `cn.security_master` | 东财 `clist` | **新浪 `hs_a`** | 自报总数交叉校验；上市日（`list_date` 全空，进 `missing_list_date_count`）|
-| `cn.equity.daily_bars` | **新浪 `hs_a` Simple** | 东财 `clist` | 自报总数交叉校验（新浪不自报）|
+| `cn.security_master` | 东财 `clist` | **新浪 `hs_a`** | 自报总数交叉校验；上市日全空（进 `missing_list_date_count`）|
+| `cn.equity.daily_bars` | **新浪 `hs_a` Simple** | 东财 `clist` | 自报总数交叉校验 |
 | `cn.trading_calendar` | 新浪日历 | 深交所官方 | 备用源按月取、**缺未来排期** ⇒ 标 `degraded` |
-| `cn.security.tradability` | 派生（`derived_biga`）| — | 派生无外部源；血缘引用日线那条 raw |
-| `cn.market.emotion_close` | 派生（`derived_biga`）| — | 同上，血缘引用股池那条 raw |
-| `cn.equity.adjustment_factors` | CSV 导入 | — | 人工导入，无自动源 |
+| `cn.security.tradability` | 派生 | — | 派生无外部源；血缘引用日线那条 raw |
+| `cn.market.emotion_close` | 派生 | — | 同上，血缘引用股池那条 raw |
+| `cn.equity.adjustment_factors` | CSV 导入 | — | 人工导入 |
 | `cn.index.daily_bars` | 新浪 K 线 | — | |
 | `cn.index.realtime_quote` | 腾讯 | — | |
-| `cn.market.breadth` | 东财 | — | |
-| `cn.sector.board_snapshot` | 东财 | — | |
+| `cn.market.breadth` | 东财 `ulist.np` | — | |
+| `cn.sector.board_snapshot` | 东财 `clist` | — | |
 | `cn.market.limit_pool` | 东财 `push2ex` | — | |
 | `cn.news.flash` | 新浪 7×24 | — | |
 
-### 2.1 🔴 五个盘中 dataset **一个备胎都没有**
+### 3.1 🔴 五个盘中 dataset **一个备胎都没有**，而普查给出了候选
 
-`breadth` / `board_snapshot` / `limit_pool` 三个走东财，`realtime_quote` 走腾讯，
-`news.flash` 走新浪 —— `fallback_providers` 全是空的。
+| dataset | 现状 | 实测可用的候选 |
+|---|---|---|
+| `cn.market.breadth` | 主源 502 | 新浪 `hs_a` **自算**（每行带 `changepercent`）⚠️ 自算是**派生**，要按派生数据集的规矩引上游血缘，不能当采集源登记 |
+| `cn.sector.board_snapshot` | 主源 502 | 同花顺热榜 ✅ |
+| `cn.index.realtime_quote` | 正常 | 新浪 `hq.sinajs.cn` ✅ |
+| `cn.news.flash` | 正常 | 金十 ✅（财联社需签名，暂不可用）|
+| `cn.market.limit_pool` | 正常 | 暂无（`push2ex` 与 `push2` 不同组，本次未受牵连）|
 
-2026-09-26 那次真机出卡，三个东财 dataset **同时**失败（`push2` 整组故障），
-卡上的 `missing` 如实报了，但那一天的决策**少了三分之一的输入**。
+⚠️ **候选 ≠ 已登记。** 登记一个**没探活过**的备胎比没有备胎更糟 ——
+它承诺了一条可能也是断的降级路径。上面这些刚探活过，
+但**口径还没逐个核对**（成员范围、字段单位、停牌怎么表示），
+而口径没核对就登记，等于把「差 100 倍」这种错留到降级那天才爆。
 
-⚠️ 这不是「忘了配」：登记一个**没探活过**的备胎，等于承诺一条
-可能也是断的降级路径 —— 那比没有备胎更糟。
-⇒ 补备胎的正确顺序永远是「先探活、再登记」，不是「先登记、出事再说」。
+### 3.2 为什么日线的主源是新浪，以及通达信盘后包的特殊价值
 
-### 2.2 为什么日线的主源是新浪而不是东财
+主备在 2026-09-26 对调。依据**不是**「东财那天挂了」（那只是触发），
+是两条长期证据：同机另一套长期运行的实例每天走的就是新浪；
+公开源目录把东财标为「共用同一套风控，IP 被封会成片失联」。
 
-2026-09-26 对调。依据**不是**「东财那天挂了」（那只是触发），是两条长期证据：
+🔴 **通达信官网盘后包值得单独说**，因为它有一个别人都没有的能力：
 
-1. 同机另一套长期运行的实例，每天的全市场日线走的就是新浪
-   `Market_Center.getHQNodeDataSimple`（`node=hs_a`，`num=500`）
-2. `a-stock-data` 把东财标为「共用同一套风控，IP 被封会成片失联」，
-   并建议优先用不封 IP 的源
+| | 新浪 / 东财 | 通达信盘后包 |
+|---|---|---|
+| 取数方式 | **快照**端点 —— 只能拿「此刻」 | 按**指定交易日**下载 |
+| 能不能补历史 | ❌ 不能 | ✅ 实测取到 2023-01-03 |
+| 含北交所 | ✅ | ✅ |
+| 风控面 | sina.com.cn / eastmoney.com | **tdx.com.cn**，第三个面 |
+| 代价 | JSON | 二进制（`.cod` + `.md1`，需 struct 解析）|
 
-⚠️ 口径差异（写在 `src/easyup_biga/providers/sina_eod.py` 模块头里，不当等价替换）：
+这条能力直接影响上线验收：**某一天的定时器没跑成，可以事后补那一天**，
+而快照型端点做不到 —— 错过就永远错过了。
+
+⚠️ 它在**非交易日返回 404**，那是正确行为，不是故障。
+
+### 3.3 口径差异（`cn.equity.daily_bars` 主备之间）
 
 | | 东财 `clist` | 新浪 `hs_a` |
 |---|---|---|
@@ -132,6 +195,39 @@ VWAP 与收盘价的偏离（实测当日 p5/p95 = 0.99 / 1.02）。
 **这道守卫抓的是数量级跳变，不是精度。**
 
 样本不足 20 只时**宁可失败**，不假装查过。
+
+---
+
+## 3.4 同机那套实例**每天真的在调**哪些端点
+
+普查是「能不能取到」，这一节是「哪条路扛得住天天跑」—— 两件事不能互相替代。
+按它源码里的出现次数归并（只列 A 股相关）：
+
+| 端点 | 用途 | 我们的对应关系 |
+|---|---|---|
+| `hq.sinajs.cn/list` | 实时报价（出现最多）| 我们走腾讯；这是**已验证的备胎候选** |
+| `vip.stock.finance.sina.com.cn/.../Market_Center.getHQNodeDataSimple` | **全市场日线落库** | ✅ 我们 2026-09-26 起的日线主源就是它 |
+| `money.finance.sina.com.cn/.../CN_MarketData.getKLineData` | 个股历史 K 线（回测）| 我们的指数日线走同一族端点 |
+| `datacenter-web.eastmoney.com/api/data` | 龙虎榜等 | 我们没用（口径不合，见 §2）|
+| `push2.eastmoney.com/api/qt` | 板块资金流、流通市值 | 我们的 `board_snapshot` 主源同域 ⇒ **同一组故障面** |
+| `push2ex.eastmoney.com` | 涨停池 | ✅ 与我们 `limit_pool` 主源一致 |
+| `qt.gtimg.cn/q` | 腾讯实时 | ✅ 与我们 `index.realtime_quote` 主源一致 |
+| `www.cls.cn/v1/roll` | 财联社电报 | 候选备胎（本次探活需签名，未通）|
+
+**三条可直接抄的结论：**
+
+1. **全市场日线用新浪 Simple 端点、`num=500`、串行 + 间隔** —— 它每天在跑
+2. 🔴 **不要相信 `volume` 字段的单位** —— 它的代码里留着
+   「成交股数用 `amount/close` 推，不用 `volume` —— volume 单位跨某日变过」
+3. **交易日判断必须查真日历，不能只判 weekday** —— 它为此记过一次事故：
+   节假日被当成交易日，catch-up 把上一交易日的数写进节假日标签下，污染了十几张表
+
+第 3 条我们已经满足（`fact_trading_calendar` + `holiday_fallback`），
+且定时器**故意不判交易日**（判断塞进 `OnCalendar` 会产生第二份日历口径）。
+
+⚠️ 它还有一条我们**不需要**抄的：它用 `verify_data_is_fresh()` 靠 `ticktime`
+猜「新浪是不是返回了周末缓存」。我们的 `_verify_eod_date` 比它强 ——
+要求日历确认是交易日**且**同日收盘后取，那个坑结构上进不来。
 
 ---
 
