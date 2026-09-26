@@ -1603,14 +1603,20 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 `3d9ce90` 已经把预算闸门接进 `bin/biga-card`（在第一个花钱的动作之前）。
 ⇒ 条件形式上满足，**但解除是人的决定，不自动做**。
 
-### 🔶 `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback
+### ✅ `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback（2026-09-26 已修）
 
-批 A-II 测试 F-4 时在沙盒里发现：`BEFORE=$(_sql "SELECT MAX(decision_id)...")`
-那一行用 `readonly=True` 打开一个还不存在的 `data/biga.db`，
-`connect()` 按设计会抛 `StoreNotInitialised`——但这里没接住，
-异常信息进了 stderr，`BEFORE` 拿到空字符串（恰好是语义正确的兜底值），
-**不影响功能**。真实机器上 `data/biga.db` 建库之后就不会再触发。
-不在这一批修（与 A1/A2/A5/A6/A7/A8/F-4 都无关）——留着当下一次顺手活。
+`connect(readonly=True)` 按设计会抛 `StoreNotInitialised`（读一个不存在的库
+该报错），但 `_sql()` 的调用点全是 `BEFORE=$(_sql "SELECT MAX(...)")` 这种
+取基线值的用法，空字符串本来就是语义正确的兜底。
+
+不接住的后果不是功能坏了，是**一屏 Python 调用栈进了 stderr** ——
+而那会让第一次跑这条命令的人以为出卡失败了。
+
+> 报错要指路。**一个不影响结果的异常打出完整调用栈，指的是错的路。**
+
+⇒ 只咽 `StoreNotInitialised`，不咽别的（库存在但 SQL 写错了要照样炸，
+由探针钉住）。判据是**跑一遍看 stderr**，不是「源码里有没有 try」
+（`tests/test_cli_error_shapes.py`）。
 
 ---
 
