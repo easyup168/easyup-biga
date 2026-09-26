@@ -8,16 +8,12 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import importlib
 import json
 import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
-
-if TYPE_CHECKING:  # makes the runtime dependency visible to packaging/static scanners
-    import duckdb  # noqa: F401
+from typing import Any, Iterable, Mapping
 
 
 class FileStoreError(RuntimeError):
@@ -26,7 +22,8 @@ class FileStoreError(RuntimeError):
 
 def _duckdb():
     try:
-        return importlib.import_module("duckdb")  # store-exempt: declared DuckDB runtime, never sqlite3
+        import duckdb
+        return duckdb
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on local install
         raise RuntimeError(
             "Phase 3 Parquet/DuckDB operations require runtime dependency 'duckdb'. "
@@ -126,8 +123,20 @@ class StagedParquet:
         try:
             os.link(self.staging, self.target)
         except FileExistsError as exc:
-            raise FileStoreError(
-                f"immutable Parquet target already exists: {self.target}") from exc
+            # Crash-recovery path: a previous attempt may have materialized the exact
+            # bytes and died before the control-plane snapshot was committed.  Reuse
+            # only byte-identical content; a different file at the same immutable
+            # data_version is a hard conflict.
+            try:
+                existing_sha = _sha256_bytes(self.target.read_bytes())
+            except OSError as read_exc:
+                raise FileStoreError(
+                    f"immutable Parquet target exists but is unreadable: {self.target}") from read_exc
+            if existing_sha != self.sha256:
+                raise FileStoreError(
+                    f"immutable Parquet target already exists with different content: {self.target}") from exc
+            self.staging.unlink()
+            return self.target
         self.staging.unlink()
         try:
             dfd = os.open(self.target.parent, os.O_RDONLY)
@@ -256,10 +265,6 @@ class FileStore:
             schema_version=schema_version,
             data_version=data_version,
         )
-        # A data-version path is immutable.  Sequential retry/revision logic must never
-        # replace bytes that an existing DatasetPartition already references.
-        if path.exists():
-            raise FileStoreError(f"immutable Parquet target already exists: {path}")
         # 🔴 暂存目录在 `lake/` **之外** —— 扫盘查询的 glob 以 `lake/` 开头，
         #    所以未提交的分区它绝对看不到。放在 lake 里再靠文件名前缀躲，
         #    是拿「glob 恰好不匹配」当不变量，那种约定迟早被一次改 glob 破掉。

@@ -66,17 +66,13 @@ def _run() -> DataJobRun:
 
 
 def test_Phase3收口后所有必需dataset都已激活():
-    """P4-G0：注册表必须与 Phase 3 发布闸门的必需数据集完全一致。
-
-    这条从早期「只激活 3 个」升级为收口判据：P3-4～P3-6 每个迁移项都
-    已有真实生产/消费链，不能再把未接管的数据集登记成名义条目。
-    """
+    """Phase 3 必需集必须存在；Phase 4+ 新数据集可以合法扩展全局 Registry。"""
     # 🔴 **显式手写，不从 `REQUIRED_DATASETS` 派生。**
     #    P4-G0 的版本写的是 `set(DATASET_REGISTRY) == set(REQUIRED_DATASETS)`，
     #    那让两张表互相印证 —— 而这条守卫的全部价值在于它是**独立**的一份：
     #    派生之后，「注册表里多了一个」与「闸门要求里多了一个」会互相解释，
     #    没有任何一处还在逼人做那个明确的动作。
-    assert set(DATASET_REGISTRY) == {
+    assert {
         # ── Phase 3 之前就在生产链上的 ──────────────────────────────
         "cn.trading_calendar",
         "cn.index.daily_bars",
@@ -97,7 +93,7 @@ def test_Phase3收口后所有必需dataset都已激活():
         "cn.sector.board_snapshot",
         "cn.market.limit_pool",
         "cn.news.flash",
-    }
+    } <= set(DATASET_REGISTRY)
 
 
 def test_schema到v27且八张地基表都在(tmp_path):

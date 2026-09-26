@@ -19,7 +19,8 @@ import json
 
 import pytest
 
-from easyup_biga.data.acceptance import DRILL_TYPES, record_acceptance_event
+from easyup_biga.data.acceptance import DRILL_TYPES, record_acceptance_event, record_drill_result
+from easyup_biga.data.drills import DrillResult
 from easyup_biga.data.finalizer import (
     REQUIRED_DATASETS,
     RELEASE_TAG,
@@ -35,7 +36,7 @@ def _full_ledger(path, days):
     for day in days:
         record_acceptance_event(path, "EOD_COMPLETE", trade_date=day)
     for kind in DRILL_TYPES:
-        record_acceptance_event(path, kind)
+        record_drill_result(path, DrillResult(True, kind, {"test_fixture": True}))
 
 
 def test_P4G0后代码面没有里程碑缺口():

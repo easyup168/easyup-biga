@@ -23,6 +23,8 @@ import pytest
 
 from easyup_biga.data.client import CALENDAR_DATASET, refresh_trading_calendar
 from easyup_biga.data.failover import ProviderChainExhausted
+from easyup_biga.persistence import init_schema
+from easyup_biga.providers.http import SourceError
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -32,12 +34,14 @@ def _ok(n=730):
 
 
 def _boom(msg="primary down"):
-    return lambda: (_ for _ in ()).throw(RuntimeError(msg))
+    return lambda: (_ for _ in ()).throw(SourceError(msg))
 
 
-def test_主源正常时不碰备用源():
+def test_主源正常时不碰备用源(tmp_path):
+    db = tmp_path / "biga.db"
+    init_schema(db)
     calls: list[str] = []
-    result = refresh_trading_calendar(fetchers={
+    result = refresh_trading_calendar(path=db, fetchers={
         "sina_calendar": lambda: (calls.append("sina"), (730, "20240101", "20261231"))[1],
         "szse": lambda: (calls.append("szse"), (0, "", ""))[1],
     })
@@ -46,20 +50,24 @@ def test_主源正常时不碰备用源():
     assert result.degraded is False
 
 
-def test_主源挂了真的降到备用源():
-    result = refresh_trading_calendar(fetchers={
+def test_主源挂了真的降到备用源(tmp_path):
+    db = tmp_path / "biga.db"
+    init_schema(db)
+    result = refresh_trading_calendar(path=db, fetchers={
         "sina_calendar": _boom(), "szse": _ok(120)})
     assert result.provider_id == "szse"
     assert result.rows_written == 120
 
 
-def test_降级被标记出来而不是悄悄发生():
+def test_降级被标记出来而不是悄悄发生(tmp_path):
     """🔴 「成了」和「降级之后成了」不是一回事 —— 后者覆盖范围更窄。
 
     只看返回值成不成，读的人会以为这天和平常一样；
     而降级之后「下个月某天开不开市」可能已经答不出来了。
     """
-    result = refresh_trading_calendar(fetchers={
+    db = tmp_path / "biga.db"
+    init_schema(db)
+    result = refresh_trading_calendar(path=db, fetchers={
         "sina_calendar": _boom("connection reset"), "szse": _ok()})
     assert result.degraded is True
     failed = [a for a in result.attempts if not a.succeeded]
@@ -67,21 +75,25 @@ def test_降级被标记出来而不是悄悄发生():
     assert "connection reset" in failed[0].error
 
 
-def test_两个都挂了才整条失败():
+def test_两个都挂了才整条失败(tmp_path):
+    db = tmp_path / "biga.db"
+    init_schema(db)
     with pytest.raises(ProviderChainExhausted) as exc:
-        refresh_trading_calendar(fetchers={
+        refresh_trading_calendar(path=db, fetchers={
             "sina_calendar": _boom("a"), "szse": _boom("b")})
     assert len(exc.value.attempts) == 2
     assert CALENDAR_DATASET in str(exc.value)
 
 
-def test_链路顺序来自注册表不是来自调用方():
+def test_链路顺序来自注册表不是来自调用方(tmp_path):
     """探针方向：把 fetchers 的字典顺序倒过来，结果必须不变。
 
     ⚠️ 判据是「顺序由注册表决定」。若哪天有人改成按 `fetchers` 的插入序走，
     这条会红 —— 而那正是「provider 选择又回到调用点」的形状。
     """
-    result = refresh_trading_calendar(fetchers={
+    db = tmp_path / "biga.db"
+    init_schema(db)
+    result = refresh_trading_calendar(path=db, fetchers={
         "szse": _ok(1), "sina_calendar": _ok(2)})
     assert result.provider_id == "sina_calendar"
     assert result.rows_written == 2

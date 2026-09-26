@@ -12,62 +12,46 @@ if TYPE_CHECKING:
 
 def query_eod_between(
     *,
+    db_path=None,
     data_root: Path | str = "data",
     start_date: str,
     end_date: str,
     instrument_ids: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Query latest COMPLETE-style EOD revisions across days.
+    """Query the latest COMPLETE EOD revision across days via the control plane.
 
-    The physical data plane keeps every ``data_version`` in a separate immutable
-    directory.  For analytical convenience this query selects the highest physical
-    revision for each trade date; replay continues to read the exact URI frozen in a
-    DatasetSnapshot instead of using this latest-view helper.
+    P3-R2 deliberately stopped scanning ``lake/``.  A physical Parquet file can exist
+    without a committed DatasetSnapshot after a process crash; such an orphan must be
+    invisible to every supported reader.  Therefore this latest-view helper first asks
+    SQLite which COMPLETE snapshot is current for each trade date, then reads only those
+    immutable URIs.  Replay/as-of queries use the same control-plane rule with a cutoff.
     """
     if len(start_date) != 8 or not start_date.isdigit():
         raise ValueError("start_date must be YYYYMMDD")
     if len(end_date) != 8 or not end_date.isdigit() or end_date < start_date:
         raise ValueError("end_date must be YYYYMMDD and >= start_date")
 
-    pattern = (
-        Path(data_root)
-        / "lake"
-        / "cn_equity_daily_bars"
-        / "schema_version=1"
-        / "trade_date=*"
-        / "data_version=*"
-        / "part-*.parquet"
-    )
-    # DuckDB raises on an empty glob; an empty range is a normal analytical result.
-    if not list(Path(data_root).glob(
-        "lake/cn_equity_daily_bars/schema_version=1/"
-        "trade_date=*/data_version=*/part-*.parquet"
-    )):
+    chosen = {
+        day: pair
+        for day, pair in _eod_snapshot_uris_as_of(
+            db_path=db_path, knowledge_cutoff="9999-12-31T23:59:59+08:00"
+        ).items()
+        if start_date <= day <= end_date
+    }
+    if not chosen:
         return []
-
+    source_list = "[" + ",".join(f"'{_sql_path(uri)}'" for _sid, uri in chosen.values()) + "]"
     db = _duckdb()
     con = db.connect(database=":memory:")
     try:
-        # ``filename=true`` avoids relying on Hive partition type inference.
-        # data_version is parsed only for selecting the newest immutable revision.
-        sql = (
-            "WITH versioned AS ("
-            " SELECT *, CAST(regexp_extract(filename, "
-            "'data_version=([0-9]+)', 1) AS BIGINT) AS _data_version"
-            f" FROM read_parquet('{_sql_path(pattern)}', union_by_name=true, filename=true)"
-            " WHERE trade_date BETWEEN ? AND ?"
-            "), latest AS ("
-            " SELECT *, MAX(_data_version) OVER (PARTITION BY trade_date) AS _latest_version"
-            " FROM versioned"
-            ") SELECT * EXCLUDE(filename, _data_version, _latest_version) FROM latest"
-            " WHERE _data_version = _latest_version"
-        )
+        sql = (f"SELECT * FROM read_parquet({source_list}, union_by_name=true) "
+               "WHERE trade_date BETWEEN ? AND ?")
         args: list[Any] = [start_date, end_date]
         ids = tuple(dict.fromkeys(instrument_ids or ()))
         if ids:
             sql += " AND instrument_id IN (" + ",".join("?" for _ in ids) + ")"
             args.extend(ids)
-        sql += " ORDER BY trade_date, instrument_id"
+        sql += " ORDER BY trade_date,instrument_id"
         cur = con.execute(sql, args)
         columns = [item[0] for item in cur.description]
         return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]

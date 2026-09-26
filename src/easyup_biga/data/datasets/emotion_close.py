@@ -5,7 +5,7 @@ from easyup_biga.data.contracts import DatasetStatus
 from easyup_biga.domain import now_cn
 from ..records import EmotionCloseRecord
 from ..publication import DatasetRowPublisher, PublishResult
-DATASET_ID='cn.market.emotion_close'; PROVIDER_ID='derived-biga'; JOB_ID='emotion-close'
+DATASET_ID='cn.market.emotion_close'; PROVIDER_ID='derived_biga'; JOB_ID='emotion-close'
 class EmotionCollector(Protocol):
     def collect(self,trade_date:str)->Mapping[str,Any]: ...
 class LegacyEmotionCollectorAdapter:

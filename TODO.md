@@ -1678,6 +1678,22 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
       闸门用 **AST** 判据核「编排器真的调用了 `required_datasets_for_agents` 与
       `freeze_required`」—— 原交付用的是字符串扫描，注释里提一句就能骗过。
 
+- [x] **④ P3-R2：Runtime Reconciliation**（2026-09-26，合外部评审增量包）
+      新增 `data/producers.py`（12 个 ACTIVE dataset 各自声明谁在生产它）
+      + `tools/verify/phase3_runtime.py`（三态闸门）；四项演练从「手工记账」
+      改成「读真实痕迹」，并堵死 `record_acceptance_event()` 手工写 PASS 这条路。
+      所有分析读取改走控制面 ⇒ 崩溃遗留的孤儿 Parquet 对任何读取路径都不可见；
+      两阶段提交顺序因此翻转（文件先、快照后）。
+
+      🔴 **合并方法记一笔**：交付方自报 `93 passed`、两道闸门 exit 0。
+      跑**全量回归**多出 4 条红的，其中第 4 条是那道新闸门自己的 L-13 ——
+      它比的是自己那份 provider id 抄件，而运行时用的是 dataset 模块里的常量。
+      改坏常量 ⇒ `emotion_close.run()` 必抛，而闸门全程报绿。
+      修法不是加第四份清单，是扫模块自报的 `(DATASET_ID, PROVIDER_ID)` 配对。
+
+      > 外部交付的验证口径是「我跑的那些测试」，不是「这棵树的全部测试」。
+      > **合包的第一件事是全量回归，不是读 diff。**
+
 ### ⬜ 余留（不阻塞，但别忘）
 
 - [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`
@@ -1700,7 +1716,7 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 | # | 事项 | 卡在什么上 | 解除条件 |
 |---|---|---|---|
-| E-1 | **Phase 3 上线验收** | 代码面已闭环（闸门退 0），但连续 5 个交易日 EOD + 五项真实演练**一条都没有** | 真跑。P4-G0 自己的边界也写着「不包含 Live Acceptance 结果」|
+| E-1 | **Phase 3 上线验收** | 连续 5 个交易日 EOD（9/28、9/29、9/30、10/8、10/9，跨国庆）+ 四项演练。**P3-R2 之后演练变成可跑的了**：`bin/biga-data drill-*` 读真实痕迹，手工记 PASS 已被堵死 | 真跑。定时器已装（`eod-daily-bars-biga.timer`），需要连续 5 天开机 |
 | E-2 | ~~P3-6/P3-7 的**行为**验收~~ | ✅ **2026-09-26 11:10 已解除** —— 飞书触发的 `BIGA-20260926-001` 跑通（COMPLETED，132s），realtime_quote 与 news.flash 真的冻进了 EvidenceSet。**并当场暴露一个离线测不出的缺陷**（冻结失败不留痕，见 CHANGELOG）| — |
 | E-2b | P3-6 在**provider 正常**时的行为 | 这次三个 eastmoney 全挂 ⇒ 走的全是降级分支，**正常路径一次都没被真机跑过** | 等 eastmoney 不限流时再触发一次 |
 | E-2c | 冻结进关键路径后的延迟 | P3-6 把冻结挪到 Stage 1 之前 ⇒ provider 重试时间直接进关键路径。这次 82s / 总 132s（预算 180s）| 攒第二次真机数据再判是否要给冻结加超时 |
@@ -1752,6 +1768,20 @@ P3-4…P3-7 在**我们的契约上**补齐，Phase 3 Code Gate 变 PASS。
 
 > 🔴 **「代码有了」和「可以合了」和「验收过了」是三件事。**
 > 这三件在这几个包上恰好分别卡住，很容易被读成同一件。
+
+### 🆕 `easyup-biga-p3-r2-runtime-reconciliation-delta-20260926` —— 已合（v0.9.0）
+
+基线是**本仓库自己的 HEAD**（`0.8.2.dev0`），不是某个更早的版本 ⇒ 可以走
+三方合并而不是手工缝。自报 `93 passed / 1 skipped`、两道闸门 exit 0，
+边界写明「**没有运行全量回归和真实多交易日 Live Acceptance**」—— 这句是真的。
+
+合并后全量回归抓出 4 条（见 CHANGELOG v0.9.0），已全部修掉。
+
+🔴 **它改变了 E-1 的形状，但没有解除 E-1**：
+四项演练**从「结构上做不到」变成「跑一次就行」**——
+`PRIMARY_FALLBACK` 以前查不到证据是因为 `refresh_trading_calendar` 的 attempts
+只活在返回值里、进程一退就没了；现在真的落 `provider_attempts` 了。
+但「可跑」不等于「跑过」，账本里仍然是零条。
 
 ---
 

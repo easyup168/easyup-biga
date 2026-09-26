@@ -361,6 +361,30 @@ def load_dataset_snapshot(snapshot_id: str, *, path: pathlib.Path | str | None =
     return out
 
 
+def find_dataset_partition(
+    dataset_id: str,
+    partition_key: dict[str, str],
+    data_version: int,
+    *,
+    path: pathlib.Path | str | None = None,
+) -> dict[str, Any] | None:
+    """按「逻辑分区 + 版本」找分区行。**给崩溃重试用的。**
+
+    🔴 为什么需要它：发布是「登记分区 → 落物理文件 → 出快照」三步。
+    崩在最后一步会留下「分区行 + 文件都在，但没有快照」的状态 ——
+    这时重试会撞 `UNIQUE(dataset_id, partition_key_json, data_version)`，
+    而那条冲突的**真实含义**是「上次跑到一半」，不是「这份数据已经发布过」。
+    分不清这两者，运维就只剩「手工删库」一条路。
+    """
+    with connect(path, readonly=True) as conn:
+        row = conn.execute(
+            "SELECT partition_id FROM dataset_partitions "
+            "WHERE dataset_id=? AND partition_key_json=? AND data_version=?",
+            (dataset_id, _partition_json(partition_key), int(data_version)),
+        ).fetchone()
+    return load_dataset_partition(row["partition_id"], path=path) if row else None
+
+
 def find_dataset_snapshot(
     dataset_id: str,
     partition_key: dict[str, str],

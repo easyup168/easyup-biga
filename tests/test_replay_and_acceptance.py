@@ -27,8 +27,9 @@ from easyup_biga.data.acceptance import (
     evaluate_acceptance,
     load_acceptance_events,
     record_acceptance_event,
+    record_drill_result,
 )
-from easyup_biga.data.drills import raw_tamper_drill
+from easyup_biga.data.drills import DrillResult, raw_tamper_drill
 from easyup_biga.data.failover import (
     ProviderChainExhausted,
     execute_with_fallback,
@@ -46,6 +47,7 @@ from easyup_biga.data.replay import (
 )
 from easyup_biga.persistence import init_schema
 from easyup_biga.providers import parse_index_daily
+from easyup_biga.providers.http import SourceError
 
 TID = "BIGA-20260302-001"
 
@@ -261,7 +263,7 @@ def test_降级后返回的是真正取到数的那个provider():
     result = execute_with_fallback(
         "cn.trading_calendar",
         {
-            "sina_calendar": lambda: (_ for _ in ()).throw(RuntimeError("primary down")),
+            "sina_calendar": lambda: (_ for _ in ()).throw(SourceError("primary down")),
             "szse": lambda: "fallback-ok",
         },
         on_attempt=calls.append,
@@ -270,13 +272,26 @@ def test_降级后返回的是真正取到数的那个provider():
     assert result.provider_id == "szse"
     assert [x.succeeded for x in result.attempts] == [False, True]
     # 失败那次也被回调出去了 —— 落账的人才看得见「降过级」
-    assert len(calls) == 2 and calls[0].error.startswith("RuntimeError")
+    assert len(calls) == 2 and calls[0].error.startswith("SourceError")
 
 
 def test_全挂时抛出且带上每一次失败():
     with pytest.raises(ProviderChainExhausted) as exc:
-        execute_with_fallback("cn.trading_calendar", {})
+        execute_with_fallback("cn.trading_calendar", {
+            "sina_calendar": lambda: (_ for _ in ()).throw(SourceError("p down")),
+            "szse": lambda: (_ for _ in ()).throw(SourceError("f down")),
+        })
     assert len(exc.value.attempts) == 2
+
+
+def test_程序bug不允许被fallback掩盖():
+    called = []
+    with pytest.raises(TypeError, match="program bug"):
+        execute_with_fallback("cn.trading_calendar", {
+            "sina_calendar": lambda: (_ for _ in ()).throw(TypeError("program bug")),
+            "szse": lambda: called.append("fallback") or "ok",
+        })
+    assert called == []
 
 
 def test_没有降级源的dataset链上只有primary():
@@ -304,7 +319,7 @@ def _fill_ledger(ledger, days):
     for day in days:
         record_acceptance_event(ledger, "EOD_COMPLETE", trade_date=day)
     for kind in DRILL_TYPES:
-        record_acceptance_event(ledger, kind)
+        record_drill_result(ledger, DrillResult(True, kind, {"test_fixture": True}))
 
 
 def test_账本链完整时闸门才过(tmp_path):

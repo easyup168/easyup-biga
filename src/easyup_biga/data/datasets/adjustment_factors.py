@@ -36,7 +36,7 @@ def _trade_date(value: str) -> str:
 class CsvAdjustmentFactorProvider:
     """Deterministic local-file adapter used until a production factor API is chosen."""
 
-    provider_id = "csv-adjustment"
+    provider_id = "csv_adjustment"
 
     def __init__(self, path: Path | str):
         self.path = Path(path)

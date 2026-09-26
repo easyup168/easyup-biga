@@ -36,8 +36,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from easyup_biga.domain import now_cn
+from easyup_biga.persistence import open_data_run, record_provider_attempt, transition_data_run
 
-from .failover import ProviderExecutionAttempt, execute_with_fallback
+from .contracts import DataJobRun, ProviderAttempt, ProviderAttemptStatus, new_data_run_id
+from .failover import ProviderChainExhausted, ProviderExecutionAttempt, execute_with_fallback
 
 CALENDAR_DATASET = "cn.trading_calendar"
 
@@ -51,6 +53,7 @@ class CalendarRefresh:
     coverage_start: str
     coverage_end: str
     attempts: tuple[ProviderExecutionAttempt, ...] = field(default=())
+    data_run_id: str | None = None
 
     @property
     def degraded(self) -> bool:
@@ -85,6 +88,58 @@ def _szse_range(*, back_days: int, path: Any, fetcher: Any = None) -> tuple[int,
     return written, start.strftime("%Y%m%d"), today.strftime("%Y%m%d")
 
 
+def _record_calendar_attempts(
+    attempts: tuple[ProviderExecutionAttempt, ...],
+    *,
+    path: Any,
+    succeeded: bool,
+) -> str:
+    """Persist one real PRIMARY/FALLBACK execution so acceptance can prove it later."""
+    now = now_cn().isoformat()
+    run_id = new_data_run_id()
+    open_data_run(
+        DataJobRun(
+            data_run_id=run_id,
+            job_id="trading-calendar-refresh",
+            dataset_id=CALENDAR_DATASET,
+            partition_key={"as_of": now},
+            requested_data_version=1,
+            trigger_id=f"trading-calendar-refresh:{now}",
+            created_at=now,
+        ),
+        path=path,
+    )
+    transition_data_run(run_id, "RECEIVED", "FETCHING", path=path)
+    for attempt_no, attempt in enumerate(attempts, start=1):
+        record_provider_attempt(
+            ProviderAttempt(
+                data_run_id=run_id,
+                provider_id=attempt.provider_id,
+                role=attempt.role,
+                attempt_no=attempt_no,
+                status=(ProviderAttemptStatus.SUCCEEDED if attempt.succeeded
+                        else ProviderAttemptStatus.FAILED_RETRYABLE),
+                started_at=now,
+                finished_at=now,
+                elapsed_ms=0,
+                error_detail=attempt.error,
+            ),
+            path=path,
+        )
+    if not succeeded:
+        transition_data_run(run_id, "FETCHING", "FAILED", path=path)
+        return run_id
+    # The provider adapters have already written raw + normalized calendar facts.  Walk
+    # the common state machine so this audit run reaches a legal terminal state without
+    # inventing a DatasetSnapshot for the legacy SQLite calendar table.
+    state = "FETCHING"
+    for nxt in ("RAW_STORED", "NORMALIZING", "VALIDATING", "PUBLISHING",
+                "SNAPSHOT_CREATED", "COMPLETED"):
+        transition_data_run(run_id, state, nxt, path=path)
+        state = nxt
+    return run_id
+
+
 def refresh_trading_calendar(
     *,
     back_days: int = 730,
@@ -106,7 +161,12 @@ def refresh_trading_calendar(
             "szse": lambda: _szse_range(back_days=back_days, path=path),
         }
 
-    result = execute_with_fallback(CALENDAR_DATASET, fetchers)
+    try:
+        result = execute_with_fallback(CALENDAR_DATASET, fetchers)
+    except ProviderChainExhausted as exc:
+        _record_calendar_attempts(exc.attempts, path=path, succeeded=False)
+        raise
+    run_id = _record_calendar_attempts(result.attempts, path=path, succeeded=True)
     written, start, end = result.value
     return CalendarRefresh(
         provider_id=result.provider_id,
@@ -114,4 +174,5 @@ def refresh_trading_calendar(
         coverage_start=str(start),
         coverage_end=str(end),
         attempts=result.attempts,
+        data_run_id=run_id,
     )

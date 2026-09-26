@@ -13,6 +13,122 @@
 
 ---
 
+## [0.9.0] - 2026-09-26
+
+> 合并外部评审交付的 **P3-R2 · Runtime Reconciliation** 增量包。
+> 主题只有一个：**让「代码面闸门绿」这件事，真的意味着生产路径跑得通。**
+>
+> 🔴 这一轮最值得记的不是它修了什么，而是**它怎么被验出来的**：
+> 交付方自报 `93 passed / 1 skipped`，两道闸门 exit 0。
+> 跑一次**全量回归**，多出 4 条红的 —— 全部在那 93 条的射程之外。
+> 而其中两条，是**为了消灭 false-green 而写的那道闸门自己带的 false-green**。
+
+### 新增 · Producer Registry —— 关掉「注册了 + 绑定了 + 没人生产」这处假绿
+
+`src/easyup_biga/data/producers.py`：12 个 ACTIVE dataset 各自声明
+**谁在生产它**（`module:attr` 入口 + 固定的 provider 身份）。
+
+在此之前，Dataset Registry 回答的是「平台拥有哪些数据集」，
+Provider Registry 回答的是「谁可以供数」，
+**没有任何一处回答「今天真的有代码在产它吗」** ——
+于是一个只在注册表里存在、生产路径早就断掉的 dataset，照样让闸门退 0。
+
+入口写成字符串而不是直接持有 callable，是为了**避开 import 环**
+（producers → datasets/\* → publication → snapshots → registry，而注册表侧要反查 producer）。
+
+配套 `tools/verify/phase3_runtime.py`（三态）：代码面查解析，
+`--installed` 另查本机 DuckDB —— 运行时缺依赖算 **UNKNOWN**，不算代码 PASS。
+
+### 新增 · 四项演练从「手工记账」变成「读真实痕迹」
+
+`bin/biga-data drill-fallback / drill-quarantine / drill-revision / drill-replay`。
+
+🔴 同时**堵掉了手工记 PASS 这条路**：`record_acceptance_event()` 现在遇到
+演练类事件 + `status=PASS` 直接抛错，唯一合法入口是 `record_drill_result()` ——
+它只接受 `data.drills` 真跑出来的 `DrillResult`。
+
+> 为什么值得堵：验收账本原本能被一条 CLI 命令写进「PRIMARY_FALLBACK PASS」，
+> 而那句话与库里有没有那条 FALLBACK 记录**毫无关系**。
+> 一个能被意图写进去的账本，记的是意图，不是观察。
+
+### 变更 · 🔴 所有分析读取改走控制面 —— 孤儿文件对任何读取路径都不可见
+
+`query_eod_between` 原来**扫 `lake/` 目录**挑最高 `data_version`。
+崩溃会在 lake 里留下一个已落盘、但没有 COMPLETE 快照的分区；
+扫盘路径**看得见它**，而 as-of 路径看不见 ⇒ 同一个交易日两条查询给出两个行数，
+两边都不报错。
+
+改成先问 SQLite「这天的 COMPLETE 快照是哪个」，再只读它的 URI。
+连带把两阶段提交的顺序翻过来：物理文件**先**落、快照**后**出
+（`materialize_after_snapshot=False`）。顺序不变式仍然是那一条：
+
+> **最后写的那一样，必须是「它不在就整体不可见」的那一样。**
+
+以前 lake 有扫盘这条不看快照的读取路径 ⇒ 文件必须最后写；
+现在没有了 ⇒ 快照必须最后写。
+
+### 变更 · `run-eod` 与 `run-eod-bundle` 收敛到同一条发布边界
+
+`run-eod` 原来直连 `datasets.eod_daily_bars:run`，绕开了交易日判定与
+可交易性发布。**一个 CLI 捷径不该能造出生产路径会拒绝的快照。**
+
+### 修复 · 日历取数的 PRIMARY/FALLBACK 真的落账了
+
+`refresh_trading_calendar` 以前只把 attempts 放在返回值里，
+进程一退就没了 ⇒ `provider_fallback_drill` 结构上永远查不到证据。
+现在开真实 DataRun、逐条写 `provider_attempts`、走完状态机。
+
+### 修复 · 复用既有 COMPLETE 快照前先验物理对象
+
+`DatasetRowPublisher` 重跑时若发现同分区已 COMPLETE 就直接 `reused=True` 返回，
+**不看文件还在不在**。控制面说完成、数据面已经坏掉 —— 这种腐化快照
+原来会被当成成功。现在校验分区谱系 + 文件哈希，不一致就响亮失败。
+
+### 修复 · 合并本包时全量回归抓出的 4 条（交付方的 93 条测不到）
+
+| # | 缺陷 | 为什么那 93 条测不到 |
+|---|---|---|
+| 1 | 调了一个**不存在的** `save_trading_calendar` 签名 | 那条路只在真实日历刷新里走 |
+| 2 | 一条测试断言「崩溃重试会收养孤儿分区」，而代码**没实现收养** | 断言写在被 `importorskip` 跳过的模块里 |
+| 3 | `producers.py` 的 `import_module` 触发间接导入守卫（两种扫描模式都红） | 守卫在另一个 suite 里 |
+| 4 | 🔴 `validate_producer_binding` 比的是**它自己那份抄件** | 见下 |
+
+第 4 条单独说，因为它是 **L-13 的教科书形状**，而且发生在一个
+*专门为了消灭 false-green 而写的闸门*里：
+
+provider id 今天有**三份**手写副本 —— 注册表的 `primary_provider`、
+`producers.py` 的声明、以及 dataset 模块里那个 `PROVIDER_ID` 常量。
+**运行时传给 `publish()` 的是第三份**，而闸门比的是第二份和第一份。
+
+实测后果：2026-09-26 我把注册表里的 id 从连字符改成下划线、漏改了模块常量，
+`emotion_close.run()` 从此必抛 `ValueError`，而它在生产上走
+`decision_client._freeze_one`（limit_pool）—— 被 eastmoney 故障挡着，没炸出来。
+闸门全程报绿。
+
+修法不是加第四份清单：改成**扫 `data/datasets/` 下每个模块自报的
+`(DATASET_ID, PROVIDER_ID)` 配对** —— 配对是自描述的。
+（不能从 producer 的 `entrypoint` 推：`cn.security.tradability` 的入口是
+`eod_pipeline:run_eod_bundle`，常量却在 `datasets/tradability.py` 里。）
+
+### 新增 · 崩溃重试收养孤儿分区（含内容哈希校验）
+
+账本写到一半崩了会留下分区行 + 物理文件、没有快照。重试时撞唯一约束，
+那一天从此发不出来。现在重试**收养**它 —— 但**必须先比 `content_sha256`**：
+
+> 「上次跑到一半」与「同一个版本算出了两份数据」是两件事。
+> 哈希对不上就是后者，必须响亮失败。
+
+⚠️ 这条校验的守卫是探针逼出来的：破坏 `if ... != ...` 改成 `if False:`，
+全套测试**照样绿** ⇒ 那个分支当时没有任何测试覆盖。
+
+### 修复 · 降级扫描模式与 git 模式扫的文件集合不一致
+
+`tests/_scan.py` 在 git 模式下走 `git ls-files -co --exclude-standard`（排除已忽略文件），
+降级模式却走 `rglob` ⇒ `docs/external/` 下的外部交付包会被扫进来。
+同一道守卫在两种模式下检查的**不是同一棵树**。
+
+---
+
 ## [0.8.1] - 2026-09-26
 
 > 一次真机出卡换来的两条修复。两条都是**离线测不出来**的：
