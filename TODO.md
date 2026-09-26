@@ -898,21 +898,36 @@ PostgreSQL / Redis / 回测 / 历史数据回补 / Web UI
         `--run-id` 无关的副作用，`FactBundle` 的契约校验按设计正常拦截，未落库。）
         成本 $0.097（123 input / 200 output tokens）。批 J-I 至此没有未决项。
 
-### 🔶 孤儿告警分组显示（2026-09-23 回合二评审建议，未做）
+### ❌ 孤儿告警分组显示 —— 2026-09-26 核实后**不做**（判据在真实数据上不存在）
 
-`orphan_spawns()` 接上 `task_runs` 之后，信号里混进了刻意的验证/spike spawn
-（09-22 那 15 条全是 `只回复两个字：收到` / `取消测试` 这类）。它们**按定义
-确实是孤儿**（钱花了、没进卡），但会把生产那一条淹掉。
+建议是：孤儿里混进了验证/spike 的 spawn，**分组显示、不过滤**，
+按「生产会话是 `agent:main:orchestrator-<32 位裸 hex>`，spike 自己带标签」分。
+写完实现之后去真实数据上验，**前提不成立**：
 
-⇒ **分组显示，不要过滤**：生产会话是 `agent:main:orchestrator-<32 位裸 hex>`，
-spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` / `-capture-…`）。
-全库统计：裸 hex 2 个、带标签 12 个。区分是**按次的，不是按天的** ——
-不需要「验证日」这种新口径。约 5 行。
+| 查的东西 | 实测 |
+|---|---|
+| 孤儿行的 `child_session_key` | 是**子**会话 `agent:emotion:subagent:<uuid>`，每次都不同，分不出来源 |
+| 孤儿行的 `requester_session_key` | 是 **specialist 自己的**子会话（这些行是 skill 调用，不是 specialist spawn 本身） |
+| `parent_task_id` / `parent_flow_id` | 那批行上**全是 `None`**，链断了 |
+| 经 `subagent_runs` 往上接 | 全库覆盖 **18/57**；而**验证日 20260922 是 0/5** |
+| spike 标签本身 | `spike-p1`/`spike-cancel`/`capture`/`cap2`/`cancel`/`tn`/`osf`/`ostest`/`p2-l14` —— 人手起的，认不全 |
+| 09-21 的编排会话 | 是 `agent:main:card-171535` / `e2e-104025`，**不是裸 hex** —— 裸 hex 从 09-22 才出现 |
 
-🔴 为什么不过滤：过滤是个静音开关，而**验证日恰恰是最容易跑出真孤儿的那天**。
-分组不丢任何东西，只是让生产那一条浮出来。
-⚠️ 它依赖 spike 会话继续自觉带标签，是**约定不是强制** —— 所以更要分组而非过滤：
-约定失效时分组最多归错组（仍看得见），过滤则是直接消失。
+⇒ 第一版实现把 09-21 19:31:52 那批（docstring 里点名的**生产缺陷招牌例子**，
+L-11 身份晚于证据）归进了「非生产」。**分组因此是误导性的，比不分组更糟。**
+
+🔴 教训两条：
+
+1. **TODO 里写的统计与要分类的那批行不是同一个总体。**
+   「全库裸 hex 2 个、带标签 12 个」数的是**不同的编排会话**，
+   而要分类的是**孤儿行**，两者之间那条边正好是断的。
+2. 判据先挂在了约定上（人手起的 spike 标签），改成挂结构（机器生成的 hex）
+   之后仍然不成立 —— 因为**结构信号根本不在那些行上**。
+   > 判据要挂在结构上，不要挂在约定上；但先得确认**那个结构在被判的对象上存在**。
+
+⇒ 真要做，前提是运行时把「这次 spawn 属于哪次编排」记进 `task_runs`
+（今天 `parent_task_id` 为空）。那是运行时的事，不是本仓库能补的。
+在那之前**不分组** —— 一个大部分落在「判不出」的分组，看起来像信息，其实不是。
 
 ### 🔶 spawn 核验的两条余留（2026-09-23 评审，不阻塞）
 
@@ -922,22 +937,40 @@ spike/测试会话自己带标签（`orchestrator-spike-p1-…` / `-cancel-…` 
    agent 自己可控的文本里。今天打不中（扫了全库，「一行里出现 2 个以上决策号」
    **0 行**，交叉污染不存在），且批 J-II 的强绑定对新行已接管这条路径。
    哪天有个提示词引用了上一张卡的号，那行就会记到那张卡头上。
-2. **`tools/verify/budget_report.py --day 20260922` 会崩** —— `--day` 不是 flag
-   （位置参数）。与 spawn 核验无关，评审顺手撞到的。
+2. ✅ **`tools/verify/budget_report.py --day 20260922` 会崩** —— 2026-09-26 已修。
+   原来是 `argv[0]`，于是 `"--day"` 这个字符串被当成日期，一路走到 `strptime`
+   抛一屏调用栈。**那不是「参数写错了」的报错** —— 读的人看到的是
+   `_strptime.py` 的栈，第一反应会去查这个工具是不是坏了。
+   现在位置参数与 `--day` 都收，非法值当场指路（`tests/test_budget_report_args.py`）。
 
 ### 🔴 两条 enforce 欠账（都归「引入同 decision_id 重试」的那一批）
 
 两条的根因都在**分发提示词**，不在实现 —— 两批都严格照提示词做了。记在这里
 免得随 commit 沉下去。
 
-1. **`runtime_run_id` 的强绑定是 per-agent、按数据有无启用的**（批 J-II）。
-   `NULL` 今天的含义是「迁移前的老行」，等六个 agent 都走上新路径之后会悄悄
-   变成「也可能是漏填的新行」，而没有任何东西会注意到这个转变。
-   ⇒ 加 **per-decision 一致性检查**：同一个 decision 里只要有一行带
-   `runtime_run_id`，其余行也必须带，否则那一行按「无法核实」处理（R-3，
-   不是退回弱判据）。
+1. ✅ **`runtime_run_id` 的强绑定是 per-agent、按数据有无启用的**（批 J-II）——
+   **2026-09-26 已加 per-decision 一致性检查。**
 
-2. 🔴 **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）。它是 Agent 从命令行
+   ⚠️ 落地时发现原设想需要修正：逐行判据**本来就已经 fail-closed**
+   （缺 `runtime_run_id` → `UNKNOWN/missing_runtime_run_id`），
+   所以要补的不是「判得更严」，是**把两种含义分开**——
+
+   | 形状 | 含义 | 该去查什么 |
+   |---|---|---|
+   | 整次 run 一行都没有 | 可能是迁移前的旧路径 | 这次 run 是怎么起的 |
+   | 有的有、有的没有 | 兄弟行证明走的是新路径 ⇒ **映射漏了这个 agent** | orchestrator 收集 `runtime_run_ids` 的地方 |
+
+   两种都仍然是 UNKNOWN（R-3）。**判据不变，指的路变了** ——
+   新原因码 `runtime_run_id_partially_missing`，附人话说明。
+   对照测试钉住「整次都没有时不许被新原因码盖掉」（否则等于丢掉旧诊断）。
+
+2. ✅ **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）—— **已在批 P1-1 修掉**
+   （2026-09-26 核实：`_assert_run_owns_decision()` 在同一写事务里断言
+   「run 在 `decision_runs` 里存在、且属于这个 decision」，与下面设想的修法
+   逐字一致；`save_card_with_notifications` / `save_evidence_set` 同样接了）。
+   原始分析保留如下作台账。
+
+   ~~🔴 **`save_fact_bundle` 的 `run_id` 零校验**（批 J-I）~~。它是 Agent 从命令行
    抄下来的字符串，直接进 INSERT —— 那条 INSERT 里其余每个字段都经过
    `FactBundle` 构造 + 规范序列化 + 严格重建，唯独它是挂在旁边的裸参数，
    **绕过了批 A-I 立的「写边界重校验」原则（A3）**。
@@ -1570,14 +1603,20 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 `3d9ce90` 已经把预算闸门接进 `bin/biga-card`（在第一个花钱的动作之前）。
 ⇒ 条件形式上满足，**但解除是人的决定，不自动做**。
 
-### 🔶 `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback
+### ✅ `bin/biga-card` 的 `_sql()` 在库不存在时会打一屏无害的 traceback（2026-09-26 已修）
 
-批 A-II 测试 F-4 时在沙盒里发现：`BEFORE=$(_sql "SELECT MAX(decision_id)...")`
-那一行用 `readonly=True` 打开一个还不存在的 `data/biga.db`，
-`connect()` 按设计会抛 `StoreNotInitialised`——但这里没接住，
-异常信息进了 stderr，`BEFORE` 拿到空字符串（恰好是语义正确的兜底值），
-**不影响功能**。真实机器上 `data/biga.db` 建库之后就不会再触发。
-不在这一批修（与 A1/A2/A5/A6/A7/A8/F-4 都无关）——留着当下一次顺手活。
+`connect(readonly=True)` 按设计会抛 `StoreNotInitialised`（读一个不存在的库
+该报错），但 `_sql()` 的调用点全是 `BEFORE=$(_sql "SELECT MAX(...)")` 这种
+取基线值的用法，空字符串本来就是语义正确的兜底。
+
+不接住的后果不是功能坏了，是**一屏 Python 调用栈进了 stderr** ——
+而那会让第一次跑这条命令的人以为出卡失败了。
+
+> 报错要指路。**一个不影响结果的异常打出完整调用栈，指的是错的路。**
+
+⇒ 只咽 `StoreNotInitialised`，不咽别的（库存在但 SQL 写错了要照样炸，
+由探针钉住）。判据是**跑一遍看 stderr**，不是「源码里有没有 try」
+（`tests/test_cli_error_shapes.py`）。
 
 ---
 
@@ -1600,48 +1639,117 @@ skill 真接了这个参数」一致，没有权威源可派生。加了新日�
 
 🔴 **按这个顺序做，理由是风险递增、且后一件依赖前一件。**
 
-- [ ] **⓪ 把 P3-4/P3-5 的四个 dataset 注册进 `data/registry.py`** —— 🔴 **它们今天跑不了**。
-      `cn.equity.daily_bars` / `cn.security.tradability` / `cn.equity.adjustment_factors` /
-      `cn.market.emotion_close` 四个模块在 `datasets/` 下，但注册表里没有它们的
-      `DatasetDefinition` ⇒ 一调 `run()` 就在 `get_dataset()` 抛。
-      **验收**：`python3 tools/verify/phase3_acceptance.py --code-only` 的
-      「P3-4 / P3-5 尚未落地」两行消失；每个新 dataset 都有被证明的消费方（P11 守卫）。
-      ⚠️ **不是四行配置**：`tradability` / `emotion_close` 用的 `provider_id="derived-biga"`
-      是个**派生伪 provider**，它没有采数模块。要先定：派生数据集在 Provider Registry
-      里到底算不算一个 provider（牵涉裁定 15「一个事实一个生产 agent」与裁定 16
-      的 `derived` 证据类别）。**先定这个，再写注册**。
-      **为什么排最前**：它让上一轮合进来的四个模块从死代码变成活代码，
-      且范围比 ① 还小 —— 但它有一个真的设计问题要先答。
+- [x] **⓪ 把 P3-4/P3-5 的 dataset 注册进 `data/registry.py`**（2026-09-26 完成）
+      结论与原设想不同：四个里**只有 `cn.equity.daily_bars` 够格**。
+      `DatasetDefinition` 的判据是「答得出谁读它吗」，另外三个答不出 ——
+      `tradability` 算出来当场用掉（日线覆盖率的分母）、`adjustment_factors`
+      与 `emotion_close` 连写入方都没人调。**它们不是漏注册，是真的还没有读取方。**
+      进册后第一条端到端测试挖出修订功能一次都没成功过（见 CHANGELOG）。
 
-- [ ] **① `security_master` 的账本收口** —— `src/easyup_biga/data/datasets/security_master.py`
-      里还有**第三处**账本流程（它在流程中段直接写 `fact_security_master` 行）。
-      **验收**：`DatasetSnapshotService` 加一个 `materialize` 回调，三处账本流程收敛成一处；
-      探针：把回调删掉，`tests/test_security_master.py` 必须红。
-      **为什么排第一**：范围最小、不碰生产决策路径，且它是 L-3 的活实例 ——
-      留着它，后面每加一个 dataset 都会有人照着它再抄一遍。
-      ⚠️ 它是**我自己上一轮合进来的**，当轮没看出来。
-      **L-3 最容易在 grep 共同调用时现形，不是在读 diff 时。**
+- [ ] **⓪-b 可交易性进册 —— 等它真有读取方** ⇒ 触发条件：筛选/复盘需要区分
+      「停牌」与「数据缺失」的那一刻。那时它的 raw 必须指向**同一份 provider
+      响应**（与日线共用），不能再是把自己的输出重新序列化。
 
-- [ ] **② P3-6：五条 direct feed 迁进 Dataset 层** —— 重写 6 个 skill + `orchestrator.py`。
-      **验收**：设计自己的规矩 —— 「旧行为回归全绿 + 新红灯测试全绿」，**逐个里程碑收**，
-      不允许一次性替换。
-      **为什么最危险**：这是**生产决策路径**。改坏了不报错，只是某天 Card 上的数不对。
+- [x] **⓪-c Parquet 两阶段提交**（2026-09-26 完成）
+      暂存区在 `lake/` 之外，落 lake 交给 `materialize` 回调。
+      🔴 发现 `materialize` 的位置对两类存储是**相反**的：`fact_*` 只经快照
+      ⇒ 快照最后写；Parquet lake 还有扫盘这条路 ⇒ 文件最后写。
+      不变量是「最后写的那一样，必须是它不在就整体不可见的那一样」。
+      探针 4/4。
 
-- [ ] **③ P3-7：`required_datasets` resolver** —— 依赖 ② 完成。
+- [x] **① `security_master` 的账本收口**（2026-09-26 完成）
+      给 `DatasetSnapshotService.publish()` 加 `materialize` 回调，三处账本流程收敛成一处。
+      新增 AST 守卫 `test_只有一处走完整的账本流程` 钉住它；探针 4/4 验证能真的红。
+      顺带：修订线性不变量收进服务（跳号被拒）、取数失败也留 run、
+      质量不过时 fact 表不登记分区。
+
+- [x] **②a P3-6a：provider 选择进数据层**（2026-09-26 完成）
+      `data/client.py` 按注册表链路取数；`bin/biga-calendar` 不再 import 任何 provider。
+      `cn.trading_calendar` 声明很久的降级路径第一次真的存在；`failover` 有了生产消费方。
+
+- [ ] **②b P3-6b：五条盘中 direct feed 迁进 Dataset 层** —— 重写 5 个 skill + `orchestrator.py`。
+      🔴 **不能无人值守做完**，理由不是工作量是**验收方式**：开发流程第 6 条要求
+      端到端开新会话且等结算。它改的是**生产决策路径** —— 改坏了不报错，
+      只是某天 Card 上的数不对，而那只有真实跑一次才发现得了。
+      **验收**：每个 milestone「旧行为回归全绿 + 新红灯测试全绿」+ 一次真实端到端。
+      详见 `docs/design/phase-3-data-platform.md` §3.6。
+
+- [ ] **③ P3-7：`required_datasets` resolver** —— 依赖 ②b 完成。
       它引用的 `cn.sector.board_snapshot` / `cn.news.flash` / `cn.market.limit_pool`
       **在 ② 之前根本不存在** ⇒ 提前做等于引用不存在的 dataset id。
 
 ### ⬜ 余留（不阻塞，但别忘）
 
-- [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`，
-      挑一个没被限流的时候跑。过了就删掉 provider title 与 `data/quality.py`
+- [ ] `cn.security_master` 上游探活 —— `python3 tools/verify/security_master_probe.py`
+      **2026-09-26 再试一次：三个 host 仍全部 502**，退出码 2（UNKNOWN）不是 1。
+      东财整体限流时连已知可用的端点也 502 ⇒ 这是「没验成」不是「不可用」。
+      挑一个没被限流的时候再跑。过了就删掉 provider title 与 `data/quality.py`
       的 `not_checked` 里那两处「尚未探活成功」的说明。
-      ⚠️ 上次探活失败是**我自己把自己限流了**（连控制组端点都 502）⇒
-      当时记的是「未验证」，不是「不可用」——**这两个不是一回事**。
 
-- [ ] deploy / CLI 面三件（外部包给的那份**没合**，因为它从没在本机跑过）：
-      systemd 单元名必须 `-biga` **后缀**（R-2；前缀式的 `biga-xxx` 守卫根本不认，**比报红更糟**）、
-      `WorkingDirectory` 指向本仓库、可执行文件用 `python3`（本机没有 `python`）。
+- [x] deploy / CLI 面三件（2026-09-26 完成）
+      `deploy/openclaw/eod-daily-bars-biga.{service,timer}` + `install_eod_timer.py`，
+      与既有两个定时器同构。外部实现包那份三处都不对：路径不存在、写 `python`、
+      单元名是 `biga-` **前缀**而非 `-biga` 后缀（守卫根本不认它 —— 比报红更糟）。
+
+---
+
+## ⏸ 卡在外部条件的事项（登记台账，2026-09-26）
+
+🔴 **这里每一条都不是「没写代码」，是「写了也验不了」。**
+分开登记是因为它们的**解除条件各不相同**，混在待办里会让人误以为是排期问题。
+
+| # | 事项 | 卡在什么上 | 解除条件 |
+|---|---|---|---|
+| E-1 | **P3-6b** 五条盘中 direct feed 迁进 Dataset 层 | 改**生产决策路径**，验收要真实端到端 | 开新会话跑一次真实出卡并等结算（开发流程第 6 条）|
+| E-2 | **P3-7** `required_datasets` resolver | 依赖 E-1 | 同上 |
+| E-3 | `cn.security.tradability` 进册 | **没有读取方**（契约：答不出谁读它就不该进册）| 筛选/复盘真的需要区分「停牌」与「数据缺失」那一刻 |
+| E-4 | `cn.security_master` 上游探活 | 东财**整体限流**，三个 host 全 502 | 挑一个没被限流的时段重跑 `security_master_probe.py`（退出码 2=UNKNOWN 不是 1）|
+| E-5 | 批 C-II 的 P5：`cancel()` 同序映射 | 需要**真实运行时** N=5 + 至少一个 spawn 已离场 | 一次 Stage 1 部分启动失败的真实场景 |
+| E-6 | 解除 `.biga-card-stop` | **人的决定**，不自动做 | 你说解除 |
+| E-7 | ⓪-c 残留：Parquet 崩在写文件与进账本之间 | 需要 staging→commit 的两阶段**再往前挪一层** | 已大幅收窄（见 v0.7.0），剩余窗口是一条语句宽；真要归零得改 `write_parquet_rows` 的 API |
+
+### 🔴 关于「外部提供的 P3 代码有没有实现这些」—— 核实结论
+
+**E-1 / E-2 的代码是有的，我此前的说法不准确，这里更正。**
+
+`biga-phase3-p3-0-p3-17-code-complete` 包里：
+- `registry.py` 有 **12 个** dataset（那 5 条 direct feed 走 `_decision_snapshot()`
+  工厂传**位置参数** —— 我第一次用 `grep 'dataset_id="..."'` 数漏了）
+- `domain/registry.py` 有 per-agent 的 `required_datasets`（P3-7）
+- 5 个 skill 都 import 了 `easyup_biga.data.client.DecisionDataClient`
+- `orchestrator.py` 接了 `DecisionDataBridge`
+
+⚠️ **但它建在它自己那套 `DatasetDefinition` 上** —— 有 `freshness_policy` /
+`point_in_time`，**没有 `consumers`**。合它 = 把契约换回他们那版，连带丢掉：
+
+| 丢掉什么 | 本轮哪件事靠它 |
+|---|---|
+| `consumers` + 零消费方守卫 | ⓪ 的全部判据（「答得出谁读它吗」）|
+| `primary_provider` / `fallback_providers` + 绑定派生 | ②a 的降级链 |
+| `raw_table` + 表存在性守卫 | P7 |
+
+⇒ **能合的是它的做法**（`DecisionDataClient` 读冻结快照、`required_datasets`、
+decision-snapshot 分区键），**不是它的文件**。
+
+### 🆕 `easyup-biga-p4-g0-phase3-closed-delta-20260926` —— 这个不一样
+
+它的基线是**本仓库自己**（registry 的 docstring 是我们的原文，契约字段是
+`consumers=` / `primary_provider=`，还引用了 `tests/test_phase3_gate.py` 与
+`tools/verify/phase3_acceptance.py` —— 都是本轮写的）。它宣称把
+P3-4…P3-7 在**我们的契约上**补齐，Phase 3 Code Gate 变 PASS。
+
+🔴 **但基线是 v0.6.0**，在我这 5 个提交之前：
+- 它加的 provider 是 `eastmoney-eod`（连字符），而 ⓪ 里已经是 `eastmoney_eod`
+- 它「激活 `cn.equity.daily_bars`」，而 ⓪ 已经激活了
+- 它改的 18 个文件里 **6 个与本轮重叠**：`cli.py` / `provider_registry.py` /
+  `quality.py` / `registry.py` / `data/analytics.py` / `test_data_platform_foundation.py`
+
+⇒ 它是**待评审的候选**，不是可直接 apply 的补丁。而且它的边界写着
+「不包含 Live Acceptance 结果」—— 所以合了它，**E-1 的解除条件一条都没变**：
+代码换成谁写的都一样，闸门要的是真实跑一次。
+
+> 🔴 **「代码有了」和「可以合了」和「验收过了」是三件事。**
+> 这三件在这几个包上恰好分别卡住，很容易被读成同一件。
 
 ---
 

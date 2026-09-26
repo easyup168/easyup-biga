@@ -97,6 +97,23 @@ QUALITY_POLICIES: dict[str, QualityPolicy] = {
             ),
         ),
         QualityPolicy(
+            policy_id="cn-equity-daily-bars-v1",
+            checks=(
+                "覆盖率 = 归一化条数 / 期望开盘数（期望数由当日 tradability 推出）",
+                "provider 自报的 total 与实际翻页取回的条数相等",
+                "OHLC 自洽（low <= open/close <= high，且都为正）",
+                "instrument_id 在本分区内唯一",
+            ),
+            not_checked=(
+                "🔴 **与第二个源交叉验证**。今天只有一个源，没有可对的第二份。"
+                "⇒ 「东财给错了一个价」这一类错误本策略抓不到，别以为它抓得到。",
+                "复权因子 —— 原始 OHLC 永不改写，复权是独立数据集的事"
+                "（`cn.equity.adjustment_factors`，今天还没有读取方，未进册）。",
+                "停牌 vs 数据缺失的区分 —— 那是 `cn.security.tradability` 的职责，"
+                "它今天只作为**覆盖率的分母**参与，本身未进册（没有读取方）。",
+            ),
+        ),
+        QualityPolicy(
             policy_id="cn-trading-calendar-v1",
             checks=(),
             not_checked=(

@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
@@ -101,6 +102,49 @@ def _duck_type(values: list[Any]) -> str:
     return "VARCHAR"
 
 
+@dataclass(frozen=True, slots=True)
+class StagedParquet:
+    """一个写好但**还没进 lake** 的 Parquet 分区。
+
+    `commit()` 之前它对扫盘查询不可见；`abort()` 丢弃它，不留痕迹。
+    两者都是幂等的 —— 提交后再 abort 不会删掉已发布的分区。
+    """
+
+    staging: Path
+    target: Path
+    sha256: str
+    row_count: int
+
+    def commit(self) -> Path:
+        """原子地把它放进 lake。目标已存在 ⇒ 抛，绝不覆盖已发布的字节。"""
+        if not self.staging.exists():
+            if self.target.exists():
+                return self.target          # 已经提交过，幂等
+            raise FileStoreError(f"staged Parquet is gone, cannot commit: {self.staging}")
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        # 同设备硬链接：**不替换**地原子发布 ⇒ 即使并发也守得住不可变性。
+        try:
+            os.link(self.staging, self.target)
+        except FileExistsError as exc:
+            raise FileStoreError(
+                f"immutable Parquet target already exists: {self.target}") from exc
+        self.staging.unlink()
+        try:
+            dfd = os.open(self.target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+        return self.target
+
+    def abort(self) -> None:
+        """丢弃暂存文件。已经提交过就什么都不做。"""
+        if self.staging.exists():
+            self.staging.unlink()
+
+
 class FileStore:
     def __init__(self, root: Path | str = "data") -> None:
         self.root = Path(root)
@@ -160,6 +204,45 @@ class FileStore:
         schema_version: int = 1,
         data_version: int = 1,
     ) -> tuple[str, str, int]:
+        """写一个不可变 Parquet 分区并**立刻**落进 lake。
+
+        ⚠️ 生产发布路径**不走这个**，走 `stage_parquet_rows()` —— 见那边的说明。
+        这里保留是因为「我只想写个分区」在测试与一次性脚本里是合理诉求，
+        而让它们去凑一个两阶段协议只会让人绕开协议。
+        """
+        staged = self.stage_parquet_rows(
+            dataset_id, partition_key, rows,
+            schema_version=schema_version, data_version=data_version)
+        staged.commit()
+        return str(staged.target), staged.sha256, staged.row_count
+
+    def stage_parquet_rows(
+        self,
+        dataset_id: str,
+        partition_key: Mapping[str, str],
+        rows: Iterable[Mapping[str, Any]],
+        schema_version: int = 1,
+        data_version: int = 1,
+    ) -> "StagedParquet":
+        """把分区写进暂存区，**先不放进 lake**；返回可提交/可丢弃的句柄。
+
+        🔴 为什么要两阶段
+        -----------------
+        发布是「写文件」+「进账本」两件事，中间总有一个窗口。问题是**哪一半
+        先做**，因为两种失败的可见性天差地别：
+
+        - **先文件、后账本**：崩在中间 ⇒ lake 里多一个控制面不认的分区。
+          `query_eod_as_of` 走控制面看不见它，而 `query_eod_between` 是**扫盘**的，
+          会读到它 —— 同一个交易日两条查询给出两套数，**都不报错**。哑的。
+        - **先账本、后文件**：崩在中间 ⇒ 账本行指向一个不存在的文件。
+          回放与完整性审计都会重算哈希，**当场抛**。响的。
+
+        ⇒ 取后者。暂存区在 `lake/` **之外**，所以扫盘查询绝对看不到未提交的分区。
+
+        实际接法是把 `commit()` 交给 `DatasetSnapshotService.publish()` 的
+        `materialize` 回调 —— 于是文件落进 lake 这一步发生在分区行之后、
+        快照之前。提交失败 ⇒ run 走 FAILED ⇒ **不出快照** ⇒ 下游看不见。
+        """
         items = [{str(k): _scalar(v) for k, v in dict(row).items()} for row in rows]
         if not items:
             raise ValueError("cannot publish an empty Parquet partition")
@@ -177,8 +260,12 @@ class FileStore:
         # replace bytes that an existing DatasetPartition already references.
         if path.exists():
             raise FileStoreError(f"immutable Parquet target already exists: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=".part-", suffix=".parquet.tmp", dir=path.parent)
+        # 🔴 暂存目录在 `lake/` **之外** —— 扫盘查询的 glob 以 `lake/` 开头，
+        #    所以未提交的分区它绝对看不到。放在 lake 里再靠文件名前缀躲，
+        #    是拿「glob 恰好不匹配」当不变量，那种约定迟早被一次改 glob 破掉。
+        staging_dir = self.root / "_staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix="part-", suffix=".parquet.staged", dir=staging_dir)
         os.close(fd)
         tmp = Path(tmp_name)
         try:
@@ -213,27 +300,11 @@ class FileStore:
             sha = _sha256_bytes(data)
             with tmp.open("rb") as fh:
                 os.fsync(fh.fileno())
-            # Same-directory hard-link publishes atomically *without* replacement.
-            # FileExistsError therefore preserves immutability even under a race.
-            try:
-                os.link(tmp, path)
-            except FileExistsError as exc:
-                raise FileStoreError(
-                    f"immutable Parquet target already exists: {path}"
-                ) from exc
-            tmp.unlink()
-            try:
-                dfd = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(dfd)
-                finally:
-                    os.close(dfd)
-            except OSError:
-                pass
-        finally:
+        except Exception:
             if tmp.exists():
                 tmp.unlink()
-        return str(path), sha, len(items)
+            raise
+        return StagedParquet(staging=tmp, target=path, sha256=sha, row_count=len(items))
 
     def read_parquet_rows(self, uri: str) -> list[dict[str, Any]]:
         db = _duckdb()

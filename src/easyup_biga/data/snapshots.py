@@ -23,7 +23,7 @@ RawArtifact 引用，再调这里。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from easyup_biga.domain import now_cn
 from easyup_biga.persistence import (
@@ -80,6 +80,10 @@ class SnapshotPublishRequest:
     #: 修订：这次发布取代的是哪个分区/快照（`--new-revision`）。旧版本永不覆盖。
     supersedes_partition_id: str | None = None
     supersedes_snapshot_id: str | None = None
+    #: 由调用方预先指定分区 id。**只有一种情况需要它**：物理落点的 uri 里含
+    #: 分区 id（如 `biga+sqlite://fact_security_master/<pid>`）⇒ 调用方得先知道
+    #: id 才拼得出 `storage_uri`。不给就由服务生成。
+    partition_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +108,42 @@ class DatasetSnapshotService:
     def __init__(self, *, path=None) -> None:
         self._path = path
 
-    def publish(self, request: SnapshotPublishRequest) -> SnapshotPublishResult:
+    def publish(
+        self,
+        request: SnapshotPublishRequest,
+        *,
+        materialize: Callable[[str], None] | None = None,
+        materialize_after_snapshot: bool = False,
+    ) -> SnapshotPublishResult:
+        """把一份数据发布成 DatasetPartition + QualityReport（+ DatasetSnapshot）。
+
+        `materialize` —— **物理行由本次发布写**时给它。回调收到 `partition_id`，
+        负责把归一化后的行真正写进去（`fact_*` 表）。
+
+        🔴 给不给它，决定了「质量没过时要不要登记分区」，而这不是随手的开关：
+
+        - **不给**（Parquet / 旧 raw 行）：物理字节在进来之前就已经落盘了 ⇒
+          质量没过也照样登记分区，因为那份数据**真的存在**，留痕才查得到。
+        - **给**（`fact_*` 表）：物理行由回调写 ⇒ 质量没过就不写，
+          于是也**不能**登记分区。否则那一行会声称
+          `biga+sqlite://fact_security_master/<pid>` 底下有 N 行，而那里空空如也 ——
+          一个指向不存在数据的分区，比没有分区更糟。
+
+        `materialize_after_snapshot` —— **物理数据还有一条不看快照的读取路径**时给它。
+
+        🔴 不变量是：**最后写的那一样，必须是「它不在就整体不可见」的那一样。**
+        崩在中间时，我们要的结果只有两种 —— 整体不可见，或者读的时候炸响。
+        **绝不能是「静默地可见」。**
+
+        | 存储 | 读取路径 | 最后写什么 | 崩在中间 |
+        |---|---|---|---|
+        | `fact_*` | **只**经快照 | 快照 | 行写了没人引用 ⇒ 不可见 ✅ |
+        | Parquet lake | 快照 **+ 扫盘** | 文件 | 快照指向缺失文件 ⇒ 读时炸响 ✅ |
+
+        反过来放，Parquet 那条会变成：文件在 lake 里、快照没落 ⇒
+        `query_eod_between`（扫盘）读得到、`query_eod_as_of`（走控制面）读不到，
+        **同一交易日两套数，两边都不报错**。那正是这套两阶段要消灭的东西。
+        """
         definition = get_dataset(request.dataset_id)
         if request.row_count < 0:
             raise ValueError("row_count must be >= 0")
@@ -115,15 +154,27 @@ class DatasetSnapshotService:
         if any(a.provider_id != request.provider_id for a in request.raw_artifacts):
             raise ValueError("P3-2 bundle requires one provider_id; mixed-provider publish is later work")
 
-        # Idempotency by immutable logical partition.  P3-2 calls this before the
-        # EvidenceSet row is inserted, so retrying the bridge itself is safe.
+        # 幂等键是「逻辑分区 + 请求的 data_version」。P3-2 在插 EvidenceSet 行之前
+        # 调它，所以重试桥接本身是安全的。
+        #
+        # 🔴 `>= request.data_version` 这一半是 2026-09-26 补的，原本只判
+        #    `existing is not None` —— 于是**修订整体不可用**：该分区只要已经有
+        #    一份 COMPLETE，请求 v2 也原样退回 v1。
+        #
+        #    后果不是「修订失败」那么简单。调用方（`DatasetRowPublisher`）是
+        #    **先写 Parquet、再进账本**的，所以 v2 的文件已经落盘 ⇒ 盘上有 v2、
+        #    控制面只认 v1。而两条查询走的是不同的路：
+        #      · `query_eod_between` 扫盘取最高 data_version → 读到 v2
+        #      · `query_eod_as_of`   走控制面              → 读到 v1
+        #    实测同一个交易日拿到两套价格，**两边都不报错**。
+        #    这正是裁定 15 要防的「某天悄悄给出两个数」。
         existing = find_dataset_snapshot(
             request.dataset_id,
             dict(request.partition_key),
             status=DatasetStatus.COMPLETE,
             path=self._path,
         )
-        if existing is not None:
+        if existing is not None and int(existing["data_version"]) >= int(request.data_version):
             manifest = existing["manifest"]
             partition_ids = manifest.get("partition_ids", [])
             if not partition_ids:
@@ -137,6 +188,25 @@ class DatasetSnapshotService:
                 knowledge_cutoff=str(existing["knowledge_cutoff"]),
                 reused=True,
             )
+
+        if request.data_version > 1:
+            # 🔴 修订必须当场说清取代谁。等 `audit_revision_chain` 事后发现断链
+            #    太晚了：那时两份快照都已经落库，而「哪份是当前有效的」
+            #    已经答不出来。
+            if existing is None:
+                raise DataStoreConflict(
+                    f"{request.dataset_id} 请求发布 v{request.data_version}，"
+                    f"但该分区没有任何 COMPLETE 的前一版 —— 修订链会从中间开始。")
+            if request.supersedes_snapshot_id != str(existing["snapshot_id"]):
+                raise DataStoreConflict(
+                    f"{request.dataset_id} 的修订没有指向当前有效快照："
+                    f"声称取代 {request.supersedes_snapshot_id!r}，"
+                    f"实际当前是 {existing['snapshot_id']!r}。")
+            if int(request.data_version) != int(existing["data_version"]) + 1:
+                raise DataStoreConflict(
+                    f"{request.dataset_id} 的修订必须是 "
+                    f"v{int(existing['data_version']) + 1}，收到 v{request.data_version}"
+                    f" —— 跳号会在修订链上留一个查不到的空洞。")
 
         now = now_cn().isoformat()
         data_run_id = new_data_run_id()
@@ -176,24 +246,35 @@ class DatasetSnapshotService:
 
             transition_data_run(data_run_id, state, "NORMALIZING", path=self._path)
             state = "NORMALIZING"
-            partition = DatasetPartition(
-                partition_id=new_partition_id(),
-                dataset_id=request.dataset_id,
-                partition_key=request.partition_key,
-                schema_version=definition.schema_version,
-                data_version=request.data_version,
-                storage_format=request.storage_format,
-                storage_uri=request.storage_uri,
-                content_sha256=request.content_sha256,
-                row_count=request.row_count,
-                provider_id=request.provider_id,
-                # One bundle may have many RawArtifacts. ProviderAttempt is the
-                # one-to-many lineage edge for P3-2; do not lie with one arbitrary FK.
-                raw_artifact_id=(request.raw_artifacts[0].artifact_id
-                                 if len(request.raw_artifacts) == 1 else None),
-                supersedes_partition_id=request.supersedes_partition_id,
-            )
-            save_dataset_partition(partition, path=self._path)
+            partition_id = request.partition_id or new_partition_id()
+
+            def _register_partition() -> None:
+                save_dataset_partition(
+                    DatasetPartition(
+                        partition_id=partition_id,
+                        dataset_id=request.dataset_id,
+                        partition_key=request.partition_key,
+                        schema_version=definition.schema_version,
+                        data_version=request.data_version,
+                        storage_format=request.storage_format,
+                        storage_uri=request.storage_uri,
+                        content_sha256=request.content_sha256,
+                        row_count=request.row_count,
+                        provider_id=request.provider_id,
+                        # 一个 bundle 可能有多个 RawArtifact。一对多那条血缘边是
+                        # ProviderAttempt —— 不要拿其中任意一个当外键去撒谎。
+                        raw_artifact_id=(request.raw_artifacts[0].artifact_id
+                                         if len(request.raw_artifacts) == 1 else None),
+                        supersedes_partition_id=request.supersedes_partition_id,
+                    ),
+                    path=self._path,
+                )
+
+            # 物理字节已经在了 ⇒ 现在就登记（质量不过也留痕）。
+            # 要靠 materialize 才写 ⇒ 推迟到质量过了再登记，见 publish 的 docstring。
+            deferred = materialize is not None
+            if not deferred:
+                _register_partition()
 
             transition_data_run(data_run_id, state, "VALIDATING", path=self._path)
             state = "VALIDATING"
@@ -201,7 +282,7 @@ class DatasetSnapshotService:
                 quality_report_id=new_quality_report_id(),
                 data_run_id=data_run_id,
                 dataset_id=request.dataset_id,
-                partition_id=partition.partition_id,
+                partition_id=None if deferred else partition_id,
                 status=request.quality_status,
                 policy_id=definition.quality_policy,
                 metrics=dict(request.quality_metrics),
@@ -219,13 +300,19 @@ class DatasetSnapshotService:
                 transition_data_run(data_run_id, state, terminal, path=self._path)
                 return SnapshotPublishResult(
                     data_run_id=data_run_id, snapshot_id="",
-                    partition_id=partition.partition_id,
+                    partition_id="" if deferred else partition_id,
                     quality_report_id=quality.quality_report_id,
                     as_of=request.as_of, knowledge_cutoff=request.knowledge_cutoff,
                 )
 
             transition_data_run(data_run_id, state, "PUBLISHING", path=self._path)
             state = "PUBLISHING"
+            if deferred:
+                _register_partition()
+                if not materialize_after_snapshot:
+                    # 🔴 先登记分区、再写行：materialize 抛了的话，整个 run 走
+                    #    FAILED，而快照还没落 ⇒ 下游看不到它。分区行留着是痕迹。
+                    materialize(partition_id)
             snapshot = DatasetSnapshot(
                 snapshot_id=new_dataset_snapshot_id(),
                 dataset_id=request.dataset_id,
@@ -235,12 +322,17 @@ class DatasetSnapshotService:
                 status=DatasetStatus.COMPLETE,
                 schema_version=definition.schema_version,
                 data_version=request.data_version,
-                partition_ids=(partition.partition_id,),
+                partition_ids=(partition_id,),
                 quality_report_id=quality.quality_report_id,
                 content_sha256=request.content_sha256,
                 supersedes_snapshot_id=request.supersedes_snapshot_id,
             )
             save_dataset_snapshot(snapshot, path=self._path)
+            if deferred and materialize_after_snapshot:
+                # 🔴 物理数据最后写。它抛了 ⇒ run 走 FAILED，而快照已经落了 ——
+                #    这是**有意的**：留下一条指向缺失文件的账本行，回放与完整性
+                #    审计重算哈希时当场炸响。响的失败好过静默地可见。
+                materialize(partition_id)
             transition_data_run(data_run_id, state, "SNAPSHOT_CREATED", path=self._path)
             state = "SNAPSHOT_CREATED"
             transition_data_run(data_run_id, state, "COMPLETED", path=self._path)
@@ -248,7 +340,7 @@ class DatasetSnapshotService:
             return SnapshotPublishResult(
                 data_run_id=data_run_id,
                 snapshot_id=snapshot.snapshot_id,
-                partition_id=partition.partition_id,
+                partition_id=partition_id,
                 quality_report_id=quality.quality_report_id,
                 as_of=request.as_of,
                 knowledge_cutoff=request.knowledge_cutoff,

@@ -25,24 +25,23 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+# ⚠️ 这两个 import 块**变短了**，那不是清理，是证据：
+#    `DatasetPartition` / `DatasetSnapshot` / `QualityReport` /
+#    `save_dataset_partition` / `save_dataset_snapshot` / `save_quality_report` /
+#    `save_raw_artifact` 这一整套，正是本文件原先自己走一遍的那条账本流程。
+#    现在它们只出现在 `data/snapshots.py` 里 —— 全仓**只有一处**。
 from easyup_biga.data.contracts import (
     DataIssue,
     DataJobRun,
-    DatasetPartition,
-    DatasetSnapshot,
     DatasetStatus,
     ProviderAttempt,
     ProviderAttemptStatus,
     ProviderRole,
-    QualityReport,
     RawArtifact,
     new_data_run_id,
-    new_dataset_snapshot_id,
     new_partition_id,
-    new_quality_report_id,
     new_raw_artifact_id,
 )
-from easyup_biga.data.registry import get_dataset
 from easyup_biga.domain import now_cn
 from easyup_biga.persistence import (
     find_dataset_snapshot,
@@ -50,10 +49,6 @@ from easyup_biga.persistence import (
     open_data_run,
     raw_text_sha256,
     record_provider_attempt,
-    save_dataset_partition,
-    save_dataset_snapshot,
-    save_quality_report,
-    save_raw_artifact,
     save_raw_snapshot,
     save_security_master_records,
     transition_data_run,
@@ -63,6 +58,7 @@ from easyup_biga.providers.eastmoney_security_master import (
     fetch_security_master,
 )
 from easyup_biga.providers.http import SourceError
+from ..snapshots import DatasetSnapshotService, SnapshotPublishRequest
 
 DATASET_ID = "cn.security_master"
 JOB_ID = "security-master-sync"
@@ -421,11 +417,6 @@ class SecurityMasterService:
         target_version = data_version or 1
         if existing is None and target_version != 1:
             raise ValueError("the first Security Master version must be 1")
-        if existing is not None and target_version != latest_version + 1:
-            raise ValueError(
-                f"new Security Master revision must be v{latest_version + 1}, "
-                f"got v{target_version}"
-            )
         supersedes_snapshot_id = str(existing["snapshot_id"]) if existing else None
         supersedes_partition_id = None
         if existing is not None:
@@ -434,215 +425,124 @@ class SecurityMasterService:
                 raise ValueError("existing Security Master snapshot has invalid partition lineage")
             supersedes_partition_id = str(prior_partitions[0])
 
-        started_at = now_cn()
-        data_run_id = new_data_run_id()
-        open_data_run(
-            DataJobRun(
-                data_run_id=data_run_id,
-                job_id=JOB_ID,
-                dataset_id=DATASET_ID,
-                partition_key=partition_key,
-                requested_data_version=target_version,
-                trigger_id=trigger_id or f"{JOB_ID}:{requested_date}:{uuid.uuid4().hex}",
-                created_at=started_at.isoformat(),
-            ),
-            path=self._path,
-        )
-        state = "RECEIVED"
+        # ── 取数：provider 交互与失败留痕，是本数据集**自己**的事 ──────────
         fetch_started = time.monotonic()
         fetch_started_at = now_cn().isoformat()
-
         try:
-            transition_data_run(data_run_id, state, "FETCHING", path=self._path)
-            state = "FETCHING"
-            try:
-                fetched = self._fetch()
-            except SourceError as exc:
-                finished_at = now_cn().isoformat()
-                record_provider_attempt(
-                    ProviderAttempt(
-                        data_run_id=data_run_id,
-                        provider_id=PROVIDER_ID,
-                        role=ProviderRole.PRIMARY,
-                        attempt_no=1,
-                        status=ProviderAttemptStatus.FAILED_RETRYABLE,
-                        started_at=fetch_started_at,
-                        finished_at=finished_at,
-                        elapsed_ms=int((time.monotonic() - fetch_started) * 1_000),
-                        error_code="data.provider.unavailable",
-                        error_detail=str(exc),
-                    ),
-                    path=self._path,
-                )
-                raise
+            fetched = self._fetch()
+        except SourceError as exc:
+            # 🔴 取数就失败 ⇒ 没有可发布的东西，但**必须留下一次 run**：
+            #    「源挂了」和「今天没跑」在库里长得一模一样的话，排查时
+            #    最先要区分的就是这两件事。
+            self._record_fetch_failure(
+                partition_key=partition_key, target_version=target_version,
+                trigger_id=trigger_id, requested_date=requested_date,
+                started_at=fetch_started_at, elapsed_ms=int(
+                    (time.monotonic() - fetch_started) * 1_000),
+                error=exc)
+            raise
 
-            retrieved_at = fetched.retrieved_at
-            retrieved_date = retrieved_at[:10].replace("-", "")
-            if self._live_current_only and retrieved_date != requested_date:
-                raise ValueError(
-                    "live Security Master retrieval date differs from partition date"
-                )
-            legacy_raw_id = save_raw_snapshot(
-                source=fetched.source,
-                as_of=retrieved_at,
-                retrieved_at=retrieved_at,
-                payload=fetched.raw,
-                raw_text=fetched.raw_text,
-                path=self._path,
-            )
-            artifact = RawArtifact(
-                artifact_id=new_raw_artifact_id(),
+        retrieved_at = fetched.retrieved_at
+        if self._live_current_only and retrieved_at[:10].replace("-", "") != requested_date:
+            raise ValueError(
+                "live Security Master retrieval date differs from partition date")
+
+        legacy_raw_id = save_raw_snapshot(
+            source=fetched.source, as_of=retrieved_at, retrieved_at=retrieved_at,
+            payload=fetched.raw, raw_text=fetched.raw_text, path=self._path)
+        artifact = RawArtifact(
+            artifact_id=new_raw_artifact_id(),
+            dataset_id=DATASET_ID,
+            provider_id=PROVIDER_ID,
+            request_fingerprint=_sha256({
+                "dataset_id": DATASET_ID, "provider_id": PROVIDER_ID,
+                "adapter_version": fetched.adapter_version,
+                "as_of_date": requested_date,
+            }),
+            body_uri=f"biga+sqlite://raw_market_snapshot/{legacy_raw_id}",
+            body_sha256=raw_text_sha256(fetched.raw_text),
+            size_bytes=len(fetched.raw_text.encode("utf-8")),
+            retrieved_at=retrieved_at, content_type="application/json",
+            compression=None, as_of=retrieved_at, available_at=retrieved_at,
+        )
+
+        records = normalize_security_master_rows(
+            fetched.rows, provider_id=PROVIDER_ID,
+            raw_artifact_id=artifact.artifact_id, retrieved_at=retrieved_at)
+        quality_result = self._quality.evaluate(
+            records, declared_total=fetched.total, as_of_date=requested_date)
+
+        # ── 发布：账本流程走**唯一那一处** ────────────────────────────────
+        # 🔴 这里原本是本仓库第三处逐项重复的 `DataRun → RawArtifact →
+        #    Partition → Quality → Snapshot`。三份实现意味着给状态机加一个格子
+        #    要改三处，而**漏改是静默的**（一个数据集用新规则、另一个用旧的，
+        #    两边都不报错）。⇒ 收敛到 `DatasetSnapshotService`。
+        #
+        #    它需要的唯一新能力是 `materialize`：本数据集的物理行落在
+        #    `fact_security_master` 里，而那张表要等分区 id 才写得进去。
+        partition_id = new_partition_id()
+        normalized_hash = _sha256([item.to_dict() for item in records])
+        result = DatasetSnapshotService(path=self._path).publish(
+            SnapshotPublishRequest(
                 dataset_id=DATASET_ID,
-                provider_id=PROVIDER_ID,
-                request_fingerprint=_sha256(
-                    {
-                        "dataset_id": DATASET_ID,
-                        "provider_id": PROVIDER_ID,
-                        "adapter_version": fetched.adapter_version,
-                        "as_of_date": requested_date,
-                    }
-                ),
-                body_uri=f"biga+sqlite://raw_market_snapshot/{legacy_raw_id}",
-                body_sha256=raw_text_sha256(fetched.raw_text),
-                size_bytes=len(fetched.raw_text.encode("utf-8")),
-                retrieved_at=retrieved_at,
-                content_type="application/json",
-                compression=None,
-                as_of=retrieved_at,
-                available_at=retrieved_at,
-            )
-            save_raw_artifact(artifact, path=self._path)
-            record_provider_attempt(
-                ProviderAttempt(
-                    data_run_id=data_run_id,
-                    provider_id=PROVIDER_ID,
-                    role=ProviderRole.PRIMARY,
-                    attempt_no=1,
-                    status=ProviderAttemptStatus.SUCCEEDED,
-                    started_at=fetch_started_at,
-                    finished_at=retrieved_at,
-                    elapsed_ms=int((time.monotonic() - fetch_started) * 1_000),
-                    artifact_id=artifact.artifact_id,
-                ),
-                path=self._path,
-            )
-            transition_data_run(data_run_id, state, "RAW_STORED", path=self._path)
-            state = "RAW_STORED"
-
-            transition_data_run(data_run_id, state, "NORMALIZING", path=self._path)
-            state = "NORMALIZING"
-            records = normalize_security_master_rows(
-                fetched.rows,
-                provider_id=PROVIDER_ID,
-                raw_artifact_id=artifact.artifact_id,
-                retrieved_at=retrieved_at,
-            )
-
-            transition_data_run(data_run_id, state, "VALIDATING", path=self._path)
-            state = "VALIDATING"
-            quality_result = self._quality.evaluate(
-                records,
-                declared_total=fetched.total,
-                as_of_date=requested_date,
-            )
-            quality_report_id = new_quality_report_id()
-            if quality_result.status != DatasetStatus.COMPLETE:
-                save_quality_report(
-                    QualityReport(
-                        quality_report_id=quality_report_id,
-                        data_run_id=data_run_id,
-                        dataset_id=DATASET_ID,
-                        partition_id=None,
-                        status=quality_result.status,
-                        policy_id=self._quality.policy_id,
-                        metrics=quality_result.metrics,
-                        issues=quality_result.issues,
-                        checked_at=now_cn().isoformat(),
-                    ),
-                    path=self._path,
-                )
-                transition_data_run(
-                    data_run_id,
-                    state,
-                    quality_result.status.value,
-                    detail={"issues": [item.to_dict() for item in quality_result.issues]},
-                    path=self._path,
-                )
-                return SecurityMasterSyncResult(
-                    status=quality_result.status,
-                    as_of_date=requested_date,
-                    data_run_id=data_run_id,
-                    snapshot_id=None,
-                    partition_id=None,
-                    quality_report_id=quality_report_id,
-                    row_count=len(records),
-                )
-
-            transition_data_run(data_run_id, state, "PUBLISHING", path=self._path)
-            state = "PUBLISHING"
-            partition_id = new_partition_id()
-            normalized_hash = _sha256([item.to_dict() for item in records])
-            partition = DatasetPartition(
-                partition_id=partition_id,
-                dataset_id=DATASET_ID,
+                job_id=JOB_ID,
                 partition_key=partition_key,
-                schema_version=get_dataset(DATASET_ID).schema_version,
-                data_version=target_version,
+                trigger_id=trigger_id or f"{JOB_ID}:{requested_date}:{uuid.uuid4().hex}",
+                provider_id=PROVIDER_ID,
+                raw_artifacts=(artifact,),
                 storage_format="sqlite_fact",
                 storage_uri=f"biga+sqlite://fact_security_master/{partition_id}",
                 content_sha256=normalized_hash,
                 row_count=len(records),
-                provider_id=PROVIDER_ID,
-                raw_artifact_id=artifact.artifact_id,
-                supersedes_partition_id=supersedes_partition_id,
-            )
-            save_dataset_partition(partition, path=self._path)
-            save_security_master_records(partition_id, records, path=self._path)
-            save_quality_report(
-                QualityReport(
-                    quality_report_id=quality_report_id,
-                    data_run_id=data_run_id,
-                    dataset_id=DATASET_ID,
-                    partition_id=partition_id,
-                    status=DatasetStatus.COMPLETE,
-                    policy_id=self._quality.policy_id,
-                    metrics=quality_result.metrics,
-                    issues=quality_result.issues,
-                    checked_at=now_cn().isoformat(),
-                ),
-                path=self._path,
-            )
-            snapshot = DatasetSnapshot(
-                snapshot_id=new_dataset_snapshot_id(),
-                dataset_id=DATASET_ID,
-                partition_key=partition_key,
                 as_of=retrieved_at,
                 knowledge_cutoff=retrieved_at,
-                status=DatasetStatus.COMPLETE,
-                schema_version=get_dataset(DATASET_ID).schema_version,
+                quality_metrics=quality_result.metrics,
+                quality_issues=quality_result.issues,
                 data_version=target_version,
-                partition_ids=(partition_id,),
-                quality_report_id=quality_report_id,
-                content_sha256=normalized_hash,
+                quality_status=quality_result.status,
+                supersedes_partition_id=supersedes_partition_id,
                 supersedes_snapshot_id=supersedes_snapshot_id,
-            )
-            save_dataset_snapshot(snapshot, path=self._path)
-            transition_data_run(data_run_id, state, "SNAPSHOT_CREATED", path=self._path)
-            state = "SNAPSHOT_CREATED"
-            transition_data_run(data_run_id, state, "COMPLETED", path=self._path)
-
-            return SecurityMasterSyncResult(
-                status=DatasetStatus.COMPLETE,
-                as_of_date=requested_date,
-                data_run_id=data_run_id,
-                snapshot_id=snapshot.snapshot_id,
                 partition_id=partition_id,
-                quality_report_id=quality_report_id,
-                row_count=len(records),
-            )
-        except Exception:
-            try:
-                transition_data_run(data_run_id, state, "FAILED", path=self._path)
-            except Exception:
-                pass
-            raise
+            ),
+            materialize=lambda pid: save_security_master_records(
+                pid, records, path=self._path),
+        )
+        return SecurityMasterSyncResult(
+            status=quality_result.status,
+            as_of_date=requested_date,
+            data_run_id=result.data_run_id,
+            snapshot_id=result.snapshot_id or None,
+            partition_id=result.partition_id or None,
+            quality_report_id=result.quality_report_id,
+            row_count=len(records),
+        )
+
+    def _record_fetch_failure(
+        self, *, partition_key, target_version, trigger_id, requested_date,
+        started_at, elapsed_ms, error,
+    ) -> None:
+        """取数失败也要留一次可查的 run（RECEIVED → FETCHING → FAILED）。"""
+        data_run_id = new_data_run_id()
+        open_data_run(
+            DataJobRun(
+                data_run_id=data_run_id, job_id=JOB_ID, dataset_id=DATASET_ID,
+                partition_key=partition_key, requested_data_version=target_version,
+                trigger_id=trigger_id or f"{JOB_ID}:{requested_date}:{uuid.uuid4().hex}",
+                created_at=started_at,
+            ),
+            path=self._path,
+        )
+        transition_data_run(data_run_id, "RECEIVED", "FETCHING", path=self._path)
+        record_provider_attempt(
+            ProviderAttempt(
+                data_run_id=data_run_id, provider_id=PROVIDER_ID,
+                role=ProviderRole.PRIMARY, attempt_no=1,
+                status=ProviderAttemptStatus.FAILED_RETRYABLE,
+                started_at=started_at, finished_at=now_cn().isoformat(),
+                elapsed_ms=elapsed_ms,
+                error_code="data.provider.unavailable", error_detail=str(error),
+            ),
+            path=self._path,
+        )
+        transition_data_run(data_run_id, "FETCHING", "FAILED", path=self._path)
+

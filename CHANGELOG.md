@@ -13,6 +13,302 @@
 
 ---
 
+## [0.7.1] - 2026-09-26
+
+> 清掉评审余留的小欠账。三条**修的都是「报错形状」**：
+> 一个不影响结果的异常打出完整调用栈，指的是错的路。
+
+### 修复 · `budget_report.py --day 20260922` 会崩（评审余留）
+
+原来取 `argv[0]`，于是 `"--day"` 这个字符串被当成日期，一路走到 `strptime`
+抛一屏调用栈。**那不是「参数写错了」的报错** —— 读的人看到的是
+`_strptime.py` 的栈，第一反应会去查这个工具是不是坏了。
+
+现在位置参数与 `--day` 都收，非法值当场指路。
+
+⚠️ 探针指出这个修复有个真空白：**没有任何东西断言 `main()` 真的调用了
+`_parse_day`** —— 它可能是个零消费方的解析器（五条测试全绿而命令行照样崩）。
+补 AST 判据。
+
+### 修复 · `bin/biga-card` 的 `_sql()` 在库不存在时打一屏无害 traceback
+
+`connect(readonly=True)` 按设计会抛 `StoreNotInitialised`，而 `_sql()` 的调用点
+全是「取个基线值」，空字符串本来就是语义正确的兜底。
+⇒ 只咽这一种，不咽别的（库存在但 SQL 写错了要照样炸）。
+判据是**跑一遍看 stderr**，不是「源码里有没有 try」。
+
+### 新增 · per-decision 的 `runtime_run_id` 一致性信号（🔴 enforce 欠账 #1）
+
+落地时发现原设想要修正：逐行判据**本来就已经 fail-closed**。
+要补的不是「判得更严」，是把两种含义分开 —— 它们今天给出同一个原因码，
+而排查方向相反：
+
+| 形状 | 含义 | 该去查什么 |
+|---|---|---|
+| 整次 run 一行都没有 | 可能是迁移前的旧路径 | 这次 run 是怎么起的 |
+| 有的有、有的没有 | 兄弟行证明走的是新路径 ⇒ **映射漏了这个 agent** | orchestrator 收集 `runtime_run_ids` 的地方 |
+
+强绑定是 per-agent、按数据有无启用的（批 J-II）⇒ `NULL` 的含义会随着六个
+agent 陆续走上新路径**悄悄从前者变成后者**，而没有任何东西会注意到这个转变。
+
+两种都仍然是 UNKNOWN（R-3）。**判据不变，指的路变了。**
+
+### 移除 · 孤儿告警分组显示 —— 核实后**不做**（判据在真实数据上不存在）
+
+建议是按「生产会话是 `orchestrator-<32 位裸 hex>`」分组。实现写完之后去
+真实数据上验，前提不成立：孤儿行的 `requester_session_key` 是 **specialist
+自己的**子会话；`parent_task_id` 全是 `None`；经 `subagent_runs` 往上接，
+全库覆盖 18/57，而**验证日 20260922 是 0/5**。
+
+第一版实现把 09-21 19:31:52 那批（docstring 里点名的**生产缺陷招牌例子**）
+归进了「非生产」⇒ **分组是误导性的，比不分组更糟。**
+
+> 🔴 两条教训：
+> 1. **TODO 里写的统计与要分类的那批行不是同一个总体** ——
+>    「裸 hex 2 个、带标签 12 个」数的是不同的**编排会话**，
+>    而要分类的是**孤儿行**，两者之间那条边正好是断的。
+> 2. 判据先挂在约定上（人手起的 spike 标签），改成挂结构（机器生成的 hex）
+>    之后仍不成立 —— 因为**那个结构根本不在被判的行上**。
+>    判据要挂在结构上；但先得确认那个结构**在被判的对象上存在**。
+
+### 核实 · `save_fact_bundle` 的 `run_id` 零校验（🔴 enforce 欠账 #2）已在批 P1-1 修掉
+
+`_assert_run_owns_decision()` 在同一写事务里断言 run 存在且属于该 decision，
+与 TODO 里设想的修法逐字一致。只是 TODO 没勾。
+
+---
+
+## [0.7.0] - 2026-09-26
+
+> 无人值守跑完的一轮：TODO ⓪ / ① / ⓪-c / ②a 四个里程碑。
+> 三个真 bug 的共同形状是**「看起来有、其实没有」**——
+> 修订功能一次都没成功过、账本流程有三份实现、降级路径声明了却不存在。
+
+### 新增 · P3-6a：provider 选择进数据层，交易日历的降级路径第一次真的存在
+
+`cn.trading_calendar` 的注册表里一直写着 `fallback_providers=("szse",)`，
+而 `bin/biga-calendar` **写死了 sina 一个源** —— 主源挂掉就整条失败。
+
+> 🔴 **一条声明了却没有实现的降级路径，比没声明更糟**：
+> 读注册表的人会以为这件事已经有人管了。
+
+同时 `failover` 模块（上一版合进来的）**零生产消费方** —— 又一个 L-1，
+只有测试在用它。
+
+⇒ 新增 `src/easyup_biga/data/client.py`：按注册表的 PRIMARY → FALLBACK 链路
+取数，`bin/biga-calendar` 改为走它，不再 import 任何 provider（AST 判据钉住）。
+
+#### ⚠️ 降级**不等价**，这件事必须说出来
+
+新浪那个端点一次返回全量，**含交易所已公布的未来排期**（实测到次年年末）；
+深交所那个按月取，只覆盖**已公布的月份**。所以降级之后
+「下个月某天开不开市」可能答不出，落回 `market_is_open` 的兜底层。
+
+⇒ `CalendarRefresh.degraded` 把这件事摆到台面上，CLI 降级时打黄字说明。
+只看「成没成」的话，读的人会以为这天和平常一样。
+
+#### 顺带：一处观察不到生效的排序
+
+`provider_chain()` 里有一行 `sort` —— 探针实测把它删掉**没有任何测试会红**，
+因为 `bindings_for_dataset()` 返回的已经是那个顺序。
+
+> 一个永远观察不到生效的排序，和一个永远不会红的守卫是同一种东西：
+> 它让读的人以为顺序在这里被保证，于是不再去看真正保证它的地方。
+
+⇒ 删掉，顺序契约收到 `bindings_for_dataset` 一处，并由
+`test_provider绑定的顺序是确定的` 钉住。
+⚠️ 那条测试的夹具第一版用了**两个** fallback —— 而 `sorted` 与 `reversed`
+对两个元素可能给出同一结果，于是「把排序换成逆序」这个破坏变成了恒等操作，
+探针照样绿。**夹具本身要让「顺序错了」表现得出来。**
+
+### 新增 · EOD 的 systemd 定时器（调度命令的字面量）
+
+`bin/biga-data run-eod-bundle` 之前全仓 grep 不到任何调度方 ——
+CLAUDE.md 那条「新增写数据模块必须有被证明的读取方，**判据是调度命令的
+字面量**」在这里落了空。
+
+外部实现包给过一份单元，**三处都不对，一处比一处安静**：
+
+1. `WorkingDirectory=%h/easyup-biga` —— 路径不存在，装上起不来（最响）
+2. `ExecStart=… python -m …` —— 本机只有 `python3`
+3. 🔴 单元名 `biga-eod-daily-bars`（`biga-` **前缀**）而非 `-biga` 后缀 ——
+   `isolation.py` 的判据是「引用 BigA 路径的单元名以 `-biga.*` 结尾」，
+   前缀式的名字它**根本不算 BigA 的单元**，一声不吭地放行。
+   **比报红更糟**：报红会被修，静默漏检不会。
+
+⇒ 三处都没合，按仓库既有形制重写（`deploy/openclaw/eod-daily-bars-biga.{service,timer}`
++ `install_eod_timer.py`，与既有两个定时器同构）。
+
+⚠️ 定时器**不判交易日**，周末/节假日照跑。把交易日判断塞进 `OnCalendar`
+等于日历口径多一份实现（L-3），而 `OnCalendar` 根本表达不了 A 股的调休。
+跑空的那天由 `run-eod-bundle` 自己 fail-closed。
+
+### 已知问题 · `cn.security_master` 上游仍未探活成功（2026-09-26 再试一次）
+
+三个 host 全部 502。`security_master_probe.py` 退出码 **2（UNKNOWN）**，
+不是 1 —— 东财会整体限流，被限流时连已知可用的端点也返回 502。
+
+> 🔴 **「不可用」和「我没验成」是两件事，而屏幕上长得一样。**
+
+### 变更 · Parquet 两阶段提交（TODO ⓪-c）—— 崩在中间只许「不可见」或「炸响」
+
+发布是「写文件」+「进账本」两件事，中间总有窗口。问题不是消灭窗口，是
+**哪一半先做** —— 因为两种失败的可见性天差地别：
+
+| 顺序 | 崩在中间留下什么 | 可见性 |
+|---|---|---|
+| 先文件、后账本 | lake 里一个控制面不认的分区 | `query_eod_between` 扫盘**读得到**、`query_eod_as_of` 读不到 ⇒ 同一交易日两套数，**都不报错**。哑的 |
+| 先账本、后文件 | 一条指向不存在文件的账本行 | 回放与完整性审计重算哈希 ⇒ **当场抛**。响的 |
+
+⇒ `FileStore.stage_parquet_rows()` 先写**暂存区**（在 `lake/` **之外** ——
+放 lake 里再靠文件名前缀躲，是拿「glob 恰好不匹配」当不变量），
+落进 lake 这一步交给刚加的 `materialize` 回调。
+
+#### 🔴 但 `materialize` 的位置对两类存储是**相反**的
+
+不变量是：**最后写的那一样，必须是「它不在就整体不可见」的那一样。**
+
+| 存储 | 读取路径 | 最后写什么 | 崩在中间 |
+|---|---|---|---|
+| `fact_*` | **只**经快照 | 快照 | 行写了没人引用 ⇒ 不可见 ✅ |
+| Parquet lake | 快照 **+ 扫盘** | 文件 | 快照指向缺失文件 ⇒ 读时炸响 ✅ |
+
+反过来放，Parquet 那条就退回上面那个「哑的」格子。
+⇒ `publish(..., materialize_after_snapshot=True)`。
+
+⚠️ 质量没过时暂存文件直接丢弃，lake 里什么都不会多出来。
+丢掉的只是**归一化后**的行 —— 原始响应已作为 RawArtifact 落盘，
+「为什么没过」照样查得到。
+
+### 变更 · 账本流程从三份收成一份（TODO ①）
+
+`DataRun → RawArtifact → Partition → Quality → Snapshot` 这条流程，
+本仓库一度有**三份逐项相同的实现**：
+
+1. `DatasetSnapshotService`（唯一该有的那份）
+2. 外部 P3-4 的 `Phase3Publisher`（2026-09-26 合并时消除）
+3. `datasets/security_master.py` 自己又走了一遍 —— **它是我上一轮自己合进来的，
+   当轮没看出来**
+
+> 🔴 **L-3 最容易在 grep 共同调用时现形，不是在读 diff 时。**
+
+三份实现意味着给状态机加一个格子、或改幂等判据要改三处，而**漏改是静默的**：
+一个数据集用新规则发布、另一个用旧的，两边都不报错。
+
+#### 收敛需要的唯一新能力：`materialize` 回调
+
+`security_master` 的物理行落在 `fact_security_master` 里，而那张表要等
+分区 id 才写得进去 ⇒ 给 `publish()` 加一个可选回调，它在分区登记之后、
+快照落库之前被调用。
+
+🔴 给不给这个回调，决定了「质量没过时要不要登记分区」—— 而这不是随手的开关：
+
+| | 物理字节什么时候存在 | 质量没过时 |
+|---|---|---|
+| 不给回调（Parquet / 旧 raw 行） | 进来之前就落盘了 | **登记**分区 —— 数据真的在，留痕才查得到 |
+| 给回调（`fact_*` 表） | 由回调在发布过程中写 | **不登记** —— 否则分区会声称某处有 N 行而那里空空如也 |
+
+一个指向不存在数据的分区，比没有分区更糟：完整性审计会去重算它。
+
+#### 顺带收进服务的线性不变量
+
+修订必须是 `latest + 1`。原来这条检查写在 `security_master` 里，现在归服务 ——
+**跳号会在修订链上留一个空洞，而事后查不出是「丢了一版」还是「本来就没有」。**
+
+#### 新增守卫：AST 钉住「只有一处」
+
+`test_只有一处走完整的账本流程` 扫全仓，谁**真的调用**了
+`save_dataset_snapshot` / `save_dataset_partition` / `save_quality_report`。
+判据是 AST 不是字符串 —— 注释和 docstring 里提到它们是正常的（那条测试自己就提了）。
+
+⚠️ 收敛的直接证据是 `security_master.py` 的 import 块**变短了 10 个名字**，
+全是账本机械。
+
+### 修复 · 取数失败也留下一次可查的 run
+
+重构时顺手补上：`SourceError` 之后仍然
+`open_data_run → FETCHING → provider_attempt(FAILED_RETRYABLE) → FAILED`。
+
+> 🔴 「源挂了」和「今天没跑」在库里长得一模一样的话，排查时最先要区分的
+> 就是这两件事。
+
+### 修复 · 🔴 修订功能原来一次都没成功过，而它让同一个交易日出现两套价格
+
+`cn.equity.daily_bars` 进注册表之后写的第一条端到端测试就挖到了它。
+
+`DatasetSnapshotService.publish()` 的幂等判据**完全不看 `request.data_version`**：
+
+```python
+existing = find_dataset_snapshot(dataset_id, partition_key, status=COMPLETE)
+if existing is not None:
+    return ...reuse...
+```
+
+分区只要已有一份 COMPLETE，请求 v2 也原样退回 v1。
+
+后果不是「修订失败」那么简单。调用方（`DatasetRowPublisher`）是
+**先写 Parquet、再进账本**的，所以 v2 的文件已经落盘：
+
+```text
+盘上：   data_version=000001/  +  data_version=000002/
+控制面： 只认 v1
+
+query_eod_between（扫盘取最高版本）→ [99.0, 100.0, 101.0, 102.0, 103.0]
+query_eod_as_of（走控制面）        → [10.0,  11.0,  12.0,  13.0,  14.0]
+```
+
+> 🔴 **同一个交易日，两条查询给出两套完全不同的价格，两边都不报错。**
+> 这正是裁定 15 要防的「某天悄悄给出两个数」。
+
+修法两条：
+
+1. 幂等判据改成 `existing["data_version"] >= request.data_version`
+2. `data_version > 1` 时**当场**要求修订指向当前有效快照，不指就 `DataStoreConflict`
+
+第 2 条为什么不能只靠事后的 `audit_revision_chain`：等审计发现断链时，两份
+快照都已经落库了，而「哪份是当前有效的」已经答不出来。
+**不变量要在写入时守，审计是第二道防线不是第一道。**
+
+### 新增 · `cn.equity.daily_bars` 进注册表 —— 上一轮合进来的模块从死代码变成活代码
+
+上一轮合入的四个 P3-4/P3-5 dataset 模块，引用的 dataset id **从没进过注册表**，
+而每条发布路径第一行就是 `get_dataset()` ⇒ 一调就抛，全是死代码。
+它们的单元测试当时全绿，因为测的是 `normalize` / `derive` /
+`write_parquet_rows` 这类**不经过注册表**的下层函数。
+
+> 🔴 **「有测试」和「有能跑到底的路径」是两件事。**
+> 判断标准很朴素：**有没有一条测试是从真正的入口函数调进去的。**
+
+⇒ 新增 `tests/test_eod_dataset_live.py`，十条判据全部打在「跑完之后库里/盘上
+有什么」：账本四张表留痕、Parquet 读得回来且数值对、PIT cutoff 之前看不见、
+同日重跑复用、修订走新版本且旧分区一字节不动、停牌票不产生假 OHLC、
+空 Security Master 拒绝跑。
+
+### 变更 · 另外三个 dataset **故意不进册** —— 它们真的还没有读取方
+
+`DatasetDefinition` 的契约把判据写死了：「答不出谁读它，这条就还不该进册」。
+逐个问下来，四个里只有一个答得出：
+
+| dataset | 谁读它 |
+|---|---|
+| `cn.equity.daily_bars` | `analytics.query_eod_as_of` / `query_eod_between`（真扫 Parquet）✅ |
+| `cn.security.tradability` | 无 —— 算出来当场用掉（日线覆盖率的分母），从没被读回过 |
+| `cn.equity.adjustment_factors` | 无，连写入方都没人调 |
+| `cn.market.emotion_close` | 无，同上 |
+
+顺带查出 `tradability` 那条发布路径还有个更具体的问题：它把**自己的输出
+重新序列化**当原始响应存（`json.dumps([r.to_dict() for r in records])`）。
+回放去校验这份 raw，校验的是「我刚写的文件还是我刚写的样子」——
+证明不了任何关于出处的事，而 Parquet 里存的又是同一批行。
+
+> 裁定 16 那句正好适用：**凑出来的溯源比没有溯源更糟，它会让人以为查得到。**
+
+⇒ `run_eod_bundle` 只发布日线，可交易性留在结果里作覆盖率的分母
+（`tradability_counts`）。等它真有读取方再进册，那时它的 raw 应当指向
+**同一份 provider 响应**，而不是自己的输出。
+
+---
+
 ## [0.6.0] - 2026-09-26
 
 > 发布在 `phase3` 分支上。本版之前先把 `main` 并了进来（带回 `[0.5.1]`
@@ -8991,6 +9287,8 @@ Phase 1 目标达成：环境隔离安装 + 跨 Agent 编排跑通 + 首张可�
   该 CLI 启动会跑 doctor 迁移，漏掉参数就是在改另一套实例的库
 - workspace 骨架、架构设计文档、安装指南
 
+[0.7.1]: https://github.com/easyup168/easyup-biga/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/easyup168/easyup-biga/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/easyup168/easyup-biga/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/easyup168/easyup-biga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/easyup168/easyup-biga/compare/v0.4.0...v0.5.0

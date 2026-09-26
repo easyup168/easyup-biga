@@ -156,6 +156,23 @@ def test_missing_exchange_is_quarantined(tmp_path):
     assert data_run_state(result.data_run_id, path=db) == "QUARANTINED"
     assert find_security_master_snapshot_at(RETRIEVED, path=db) is None
 
+    # 🔴 隔离 ⇒ `materialize` 没跑 ⇒ `fact_security_master` 里一行都没有。
+    #    此时**也不许有分区行**：它的 storage_uri 会声称
+    #    `biga+sqlite://fact_security_master/<pid>` 底下有 N 行，而那里空空如也。
+    #    一个指向不存在数据的分区，比没有分区更糟 —— 完整性审计会去重算它。
+    #    ⚠️ 这与 Parquet 那条路**相反**：那边物理文件在进来之前就写好了，
+    #    质量不过也要登记分区，因为那份数据真的存在，留痕才查得到。
+    with connect(db, readonly=True) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dataset_partitions "
+            "WHERE dataset_id='cn.security_master'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM fact_security_master").fetchone()[0] == 0
+        # 但质量报告在 —— 「为什么被隔离」查得到
+        report = conn.execute(
+            "SELECT status,partition_id FROM quality_reports").fetchone()
+        assert report["status"] == "QUARANTINED"
+        assert report["partition_id"] is None
+
 
 def test_security_master_rows_are_append_only(tmp_path):
     db = tmp_path / "biga.db"
@@ -208,3 +225,74 @@ def test_live_provider_cannot_backdate_current_universe():
     service = SecurityMasterService()
     with pytest.raises(ValueError, match="current universe"):
         service.sync(as_of_date="20000101")
+
+
+# ── 账本收口之后新增的三条（2026-09-26）────────────────────────────────────
+def test_materialize失败时不出快照(tmp_path, monkeypatch):
+    """🔴 物理行没写进去，就不许有快照。
+
+    `fact_security_master` 的行是由 `materialize` 回调在发布过程中写的。
+    它抛了而快照照落的话，下游会读到一个指向**空表**的快照 ——
+    而下游只认快照，于是「这次同步失败了」变成了「这次同步的结果是 0 只票」。
+    """
+    import easyup_biga.data.datasets.security_master as sm
+
+    db = tmp_path / "biga.db"
+    init_schema(db)
+    monkeypatch.setattr(sm, "save_security_master_records",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk on fire")))
+    service = SecurityMasterService(
+        path=db, fetcher=_fetch_result,
+        quality_policy=SecurityMasterQualityPolicy(minimum_rows=5))
+    with pytest.raises(RuntimeError, match="disk on fire"):
+        service.sync(as_of_date="20260925")
+
+    with connect(db, readonly=True) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dataset_snapshots "
+            "WHERE dataset_id='cn.security_master'").fetchone()[0] == 0
+        # 但**留了痕**：分区行与失败的 run 都在，查得到为什么没发出来
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dataset_partitions "
+            "WHERE dataset_id='cn.security_master'").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT to_state FROM data_run_events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()[0] == "FAILED"
+
+
+def test_修订跳号被拒(tmp_path):
+    """修订链不许跳号 —— 空洞事后查不出是「丢了一版」还是「本来就没有」。"""
+    from easyup_biga.persistence import DataStoreConflict
+
+    db = tmp_path / "biga.db"
+    init_schema(db)
+    service = SecurityMasterService(
+        path=db, fetcher=_fetch_result,
+        quality_policy=SecurityMasterQualityPolicy(minimum_rows=5))
+    service.sync(as_of_date="20260925")
+    with pytest.raises(DataStoreConflict, match="必须是 v2"):
+        service.sync(as_of_date="20260925", data_version=5)
+
+
+def test_取数失败也留下一次可查的run(tmp_path):
+    """🔴 「源挂了」和「今天没跑」在库里不能长得一模一样。"""
+    from easyup_biga.providers.http import SourceError
+
+    db = tmp_path / "biga.db"
+    init_schema(db)
+    service = SecurityMasterService(
+        path=db,
+        fetcher=lambda: (_ for _ in ()).throw(SourceError("all hosts failed")),
+        quality_policy=SecurityMasterQualityPolicy(minimum_rows=5))
+    with pytest.raises(SourceError):
+        service.sync(as_of_date="20260925")
+
+    with connect(db, readonly=True) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM data_job_runs").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT to_state FROM data_run_events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()[0] == "FAILED"
+        attempt = conn.execute(
+            "SELECT status,error_code FROM provider_attempts").fetchone()
+        assert attempt["status"] == "FAILED_RETRYABLE"
+        assert attempt["error_code"] == "data.provider.unavailable"
