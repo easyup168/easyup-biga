@@ -301,3 +301,132 @@ def test_没有Security_Master就拒绝跑(tmp_path):
     init_schema(db)
     with pytest.raises(RuntimeError, match="Security Master"):
         _run(db, tmp_path, [_bar_row("600000", 10.0)])
+
+
+# ── 两阶段提交（⓪-c）────────────────────────────────────────────────────────
+def test_账本写不进去时_lake里什么都不会多出来(tmp_path, monkeypatch):
+    """🔴 「先账本、后落 lake」的全部意义。
+
+    先文件后账本的话，崩在中间会在 lake 里留一个**控制面不认、而扫盘查询
+    读得到**的孤儿分区 —— 同一交易日两套数，都不报错（哑的）。
+    反过来崩，留下的是一条指向不存在文件的账本行 —— 回放与完整性审计
+    当场抛（响的）。这条钉住前者不会发生。
+    """
+    import easyup_biga.data.snapshots as snap_mod
+
+    db = tmp_path / "biga.db"
+    _seed_universe(db)
+    real = snap_mod.save_dataset_snapshot
+    monkeypatch.setattr(snap_mod, "save_dataset_snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger down")))
+    with pytest.raises(RuntimeError, match="ledger down"):
+        _run(db, tmp_path, [_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)])
+
+    lake = tmp_path / "data" / "lake"
+    assert list(lake.rglob("*.parquet")) == [], "lake 里留下了孤儿分区"
+    staging = tmp_path / "data" / "_staging"
+    assert list(staging.glob("*")) == [], "暂存区没清干净"
+    assert real is not None     # 引用留着，monkeypatch 退出时会自动还原
+
+
+def test_质量不过时不落lake也不登记分区(tmp_path):
+    """坏数据不进 lake —— 但原始响应留着，诊断材料不丢。"""
+    db = tmp_path / "biga.db"
+    _seed_universe(db)
+    # declared_total 远大于实际取回 ⇒ 覆盖率判据不过
+    result = run_eod_bundle(
+        TRADE_DATE, db_path=db, data_root=str(tmp_path / "data"),
+        fetcher=lambda: _fetched(
+            [_bar_row(MASTER_ROWS[0]["f12"], 10.0)], declared=5000))
+
+    assert result.status is not DatasetStatus.COMPLETE
+    assert list((tmp_path / "data" / "lake").rglob("*.parquet")) == []
+    assert list((tmp_path / "data" / "_staging").glob("*")) == []
+    with connect(db, readonly=True) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dataset_snapshots "
+            "WHERE dataset_id='cn.equity.daily_bars'").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dataset_partitions "
+            "WHERE dataset_id='cn.equity.daily_bars'").fetchone()[0] == 0
+        # 🔴 原始响应在 —— 「为什么没过」查得到
+        assert conn.execute(
+            "SELECT COUNT(*) FROM raw_artifacts "
+            "WHERE dataset_id='cn.equity.daily_bars'").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT status FROM quality_reports "
+            "WHERE dataset_id='cn.equity.daily_bars'").fetchone()["status"] != "COMPLETE"
+
+
+def test_暂存区不在lake里_扫盘查询绝对看不到(tmp_path):
+    """判据打在**路径关系**上，不是文件名前缀 —— 后者是拿 glob 恰好不匹配当不变量。"""
+    from easyup_biga.data.file_store import FileStore
+
+    fs = FileStore(tmp_path / "data")
+    staged = fs.stage_parquet_rows(
+        "cn.equity.daily_bars", {"trade_date": TRADE_DATE},
+        [{"instrument_id": "600000.SH", "trade_date": TRADE_DATE, "close": 10.0}],
+        1, 1)
+    lake = (tmp_path / "data" / "lake").resolve()
+    assert not staged.staging.resolve().is_relative_to(lake)
+    assert staged.target.resolve().is_relative_to(lake)
+    assert not staged.target.exists(), "还没 commit 就已经在 lake 里了"
+    assert query_eod_between(
+        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE) == []
+
+    staged.commit()
+    assert staged.target.exists()
+    assert len(query_eod_between(
+        data_root=str(tmp_path / "data"), start_date=TRADE_DATE, end_date=TRADE_DATE)) == 1
+
+
+def test_commit与abort都是幂等的(tmp_path):
+    from easyup_biga.data.file_store import FileStore
+
+    fs = FileStore(tmp_path / "data")
+    staged = fs.stage_parquet_rows(
+        "cn.equity.daily_bars", {"trade_date": TRADE_DATE},
+        [{"instrument_id": "600000.SH", "trade_date": TRADE_DATE, "close": 10.0}], 1, 1)
+    assert staged.commit() == staged.target
+    assert staged.commit() == staged.target      # 再提交一次不炸
+    staged.abort()                               # 提交之后 abort 不许删掉它
+    assert staged.target.exists()
+
+
+def test_落lake失败_留下的是响的失败而不是静默可见(tmp_path, monkeypatch):
+    """🔴 两阶段的另一半：最后一步失败时，后果必须**吵**。
+
+    文件没落进 lake，而快照已经落了 ⇒ 这是有意的：
+    · 扫盘查询看不到它（lake 里没有）
+    · 走控制面的查询会去读那个不存在的文件 —— **炸响**
+    · 完整性审计重算哈希 —— **炸响**
+
+    对照组是没有两阶段时的样子：文件在 lake、快照没落 ⇒ 扫盘读得到、
+    控制面读不到，**两边都不报错**。那才是要消灭的东西。
+    """
+    from easyup_biga.data.file_store import StagedParquet
+    from easyup_biga.data.integrity import audit_snapshot_integrity
+
+    db = tmp_path / "biga.db"
+    _seed_universe(db)
+    monkeypatch.setattr(StagedParquet, "commit",
+                        lambda self: (_ for _ in ()).throw(RuntimeError("disk full")))
+    with pytest.raises(RuntimeError, match="disk full"):
+        _run(db, tmp_path, [_bar_row(r["f12"], 10.0 + i) for i, r in enumerate(MASTER_ROWS)])
+    monkeypatch.undo()
+
+    assert list((tmp_path / "data" / "lake").rglob("*.parquet")) == []
+    snap_id = _latest_snapshot_id(db)
+
+    # 完整性审计当场抓到
+    report = audit_snapshot_integrity(snap_id, path=db, data_root=str(tmp_path / "data"))
+    assert not report.ok
+    assert any("unreadable" in e for e in report.errors), report.errors
+
+    # run 的终态是 FAILED —— 不是悄悄 COMPLETED
+    with connect(db, readonly=True) as conn:
+        last = conn.execute(
+            "SELECT to_state FROM data_run_events e JOIN data_job_runs r "
+            "USING(data_run_id) WHERE r.dataset_id='cn.equity.daily_bars' "
+            "ORDER BY e.seq DESC LIMIT 1").fetchone()[0]
+    assert last == "FAILED"

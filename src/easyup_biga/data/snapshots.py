@@ -113,6 +113,7 @@ class DatasetSnapshotService:
         request: SnapshotPublishRequest,
         *,
         materialize: Callable[[str], None] | None = None,
+        materialize_after_snapshot: bool = False,
     ) -> SnapshotPublishResult:
         """把一份数据发布成 DatasetPartition + QualityReport（+ DatasetSnapshot）。
 
@@ -127,6 +128,21 @@ class DatasetSnapshotService:
           于是也**不能**登记分区。否则那一行会声称
           `biga+sqlite://fact_security_master/<pid>` 底下有 N 行，而那里空空如也 ——
           一个指向不存在数据的分区，比没有分区更糟。
+
+        `materialize_after_snapshot` —— **物理数据还有一条不看快照的读取路径**时给它。
+
+        🔴 不变量是：**最后写的那一样，必须是「它不在就整体不可见」的那一样。**
+        崩在中间时，我们要的结果只有两种 —— 整体不可见，或者读的时候炸响。
+        **绝不能是「静默地可见」。**
+
+        | 存储 | 读取路径 | 最后写什么 | 崩在中间 |
+        |---|---|---|---|
+        | `fact_*` | **只**经快照 | 快照 | 行写了没人引用 ⇒ 不可见 ✅ |
+        | Parquet lake | 快照 **+ 扫盘** | 文件 | 快照指向缺失文件 ⇒ 读时炸响 ✅ |
+
+        反过来放，Parquet 那条会变成：文件在 lake 里、快照没落 ⇒
+        `query_eod_between`（扫盘）读得到、`query_eod_as_of`（走控制面）读不到，
+        **同一交易日两套数，两边都不报错**。那正是这套两阶段要消灭的东西。
         """
         definition = get_dataset(request.dataset_id)
         if request.row_count < 0:
@@ -293,9 +309,10 @@ class DatasetSnapshotService:
             state = "PUBLISHING"
             if deferred:
                 _register_partition()
-                # 🔴 先登记分区、再写行：materialize 抛了的话，整个 run 走 FAILED，
-                #    而快照还没落 ⇒ 下游看不到它。分区行留着是可审计的痕迹。
-                materialize(partition_id)
+                if not materialize_after_snapshot:
+                    # 🔴 先登记分区、再写行：materialize 抛了的话，整个 run 走
+                    #    FAILED，而快照还没落 ⇒ 下游看不到它。分区行留着是痕迹。
+                    materialize(partition_id)
             snapshot = DatasetSnapshot(
                 snapshot_id=new_dataset_snapshot_id(),
                 dataset_id=request.dataset_id,
@@ -311,6 +328,11 @@ class DatasetSnapshotService:
                 supersedes_snapshot_id=request.supersedes_snapshot_id,
             )
             save_dataset_snapshot(snapshot, path=self._path)
+            if deferred and materialize_after_snapshot:
+                # 🔴 物理数据最后写。它抛了 ⇒ run 走 FAILED，而快照已经落了 ——
+                #    这是**有意的**：留下一条指向缺失文件的账本行，回放与完整性
+                #    审计重算哈希时当场炸响。响的失败好过静默地可见。
+                materialize(partition_id)
             transition_data_run(data_run_id, state, "SNAPSHOT_CREATED", path=self._path)
             state = "SNAPSHOT_CREATED"
             transition_data_run(data_run_id, state, "COMPLETED", path=self._path)

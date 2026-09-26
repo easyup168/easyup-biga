@@ -122,24 +122,42 @@ class DatasetRowPublisher:
             )
             return PublishResult(terminal, run_id, None, None)
 
-        # ── Parquet 分区（不可变：目标已存在就抛，修订走新的 data_version）──
-        parquet_uri, parquet_sha, row_count = self.fs.write_parquet_rows(
+        # ── Parquet 分区：先写**暂存区**，进账本之后才放进 lake ─────────────
+        #
+        # 🔴 两阶段的理由见 `FileStore.stage_parquet_rows` 的 docstring。
+        #    一句话：先文件后账本，崩在中间会留一个控制面不认、而扫盘查询
+        #    读得到的孤儿分区 —— **哑的**；先账本后文件，崩在中间是一条指向
+        #    不存在文件的账本行 —— 回放与完整性审计当场抛，**响的**。
+        staged = self.fs.stage_parquet_rows(
             dataset_id, key, rows, definition.schema_version, version)
-
-        result = self._service.publish(SnapshotPublishRequest(
-            dataset_id=dataset_id, job_id=job_id, partition_key=key,
-            trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=(raw,),
-            storage_format="parquet", storage_uri=parquet_uri,
-            content_sha256=parquet_sha, row_count=row_count,
-            as_of=as_of, knowledge_cutoff=now,
-            quality_metrics=dict(quality_metrics or {"row_count": row_count}),
-            quality_issues=quality_issues, data_version=version,
-            quality_status=quality_status,
-            supersedes_partition_id=(
-                str(existing["manifest"]["partition_ids"][0]) if existing else None),
-            supersedes_snapshot_id=str(existing["snapshot_id"]) if existing else None,
-        ))
+        try:
+            result = self._service.publish(
+                SnapshotPublishRequest(
+                    dataset_id=dataset_id, job_id=job_id, partition_key=key,
+                    trigger_id=trigger_id, provider_id=provider_id, raw_artifacts=(raw,),
+                    storage_format="parquet", storage_uri=str(staged.target),
+                    content_sha256=staged.sha256, row_count=staged.row_count,
+                    as_of=as_of, knowledge_cutoff=now,
+                    quality_metrics=dict(
+                        quality_metrics or {"row_count": staged.row_count}),
+                    quality_issues=quality_issues, data_version=version,
+                    quality_status=quality_status,
+                    supersedes_partition_id=(
+                        str(existing["manifest"]["partition_ids"][0]) if existing else None),
+                    supersedes_snapshot_id=(
+                        str(existing["snapshot_id"]) if existing else None),
+                ),
+                # 落进 lake 是**最后一步**（快照之后）—— lake 还有「扫盘」这条
+                # 不看快照的读取路径，所以文件必须最后写。详见发布服务的 docstring。
+                materialize=lambda _pid: staged.commit(),
+                materialize_after_snapshot=True,
+            )
+        finally:
+            # 质量没过 / 中途抛了 ⇒ 暂存文件丢弃，lake 里什么都不会多出来。
+            # ⚠️ 丢掉的只是**归一化后**的行；原始响应已经作为 RawArtifact 落盘，
+            #    诊断材料还在，坏数据照样查得到。
+            staged.abort()
         _ = role      # 角色已在 role_of 里 fail-closed 校验过；账本里由服务记录
         return PublishResult(
             quality_status, result.data_run_id,
-            result.snapshot_id or None, result.partition_id)
+            result.snapshot_id or None, result.partition_id or None)
