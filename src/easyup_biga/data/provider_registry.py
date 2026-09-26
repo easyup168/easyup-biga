@@ -94,19 +94,17 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
         modules=("easyup_biga.providers.sina",),
     ),
     ProviderDefinition(
-        provider_id="eastmoney-eod",
-        title="东财全市场 EOD 快照",
-        source_prefix="em",
-        modules=("easyup_biga.providers.eastmoney_eod",),
-    ),
-    ProviderDefinition(
-        provider_id="derived-biga",
-        title="BigA 本地确定性派生数据",
+        provider_id="derived_biga",
+        # ⚠️ **不是网络数据源** —— 它是「这份数据由 BigA 自己算出来」的身份。
+        #    没有它，派生数据集的 `provider_id` 只能借一个真数据源的名字，
+        #    而那会让溯源**假装**这行来自某个行情商（裁定 16 的「不硬凑」）。
+        #    `source_prefix="derived"` 让 raw 层的 source 字符串自己说清这件事。
+        title="BigA 本地确定性派生数据（不是网络源）",
         source_prefix="derived",
         modules=("easyup_biga.providers.derived",),
     ),
     ProviderDefinition(
-        provider_id="csv-adjustment",
+        provider_id="csv_adjustment",
         title="本地 CSV 复权因子适配器",
         source_prefix="csv-adjustment",
         modules=("easyup_biga.providers.csv_adjustment",),

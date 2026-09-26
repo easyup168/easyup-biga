@@ -53,7 +53,12 @@ def _third_party_imports(files: list[pathlib.Path]) -> dict[str, list[str]]:
     返回 `{模块名: [出现位置, ...]}`。
     """
     siblings = _sibling_module_names()
-    own = {"easyup_biga", "_contract", "_store", "_sources", "_runtime", "_snapshot"}
+    # `skills/` 下的本地薄壳包。新增一个就要在这里登记一次 —— 那是**有意的**：
+    # 这条守卫真正防的是「`skills/` 里悄悄冒出一个没人声明得了的依赖」，
+    # 所以判据必须是白名单，而白名单只能靠人加。
+    # `_data`（P3-6）是第六个：决策数据边界，specialist 经它读冻结快照。
+    own = {"easyup_biga", "_contract", "_store", "_sources", "_runtime",
+           "_snapshot", "_data"}
     found: dict[str, list[str]] = {}
     for p in files:
         tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))

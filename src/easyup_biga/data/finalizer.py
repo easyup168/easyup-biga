@@ -86,6 +86,26 @@ def _declared_dependencies(pyproject: Path) -> list[str]:
     return list(data.get("project", {}).get("dependencies", []))
 
 
+def _called_names(path: Path) -> set[str]:
+    """一个源文件里**真正被调用**的函数名（含 `x.foo()` 的 `foo`）。
+
+    注释与 docstring 里出现的名字不算 —— 那正是字符串扫描会误判的地方。
+    """
+    import ast
+
+    if not path.exists():
+        return set()
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = (node.func.id if isinstance(node.func, ast.Name)
+                    else getattr(node.func, "attr", None))
+            if name:
+                out.add(name)
+    return out
+
+
 def _code_checks(repo: Path) -> tuple[list[str], list[str]]:
     """只看代码面。任何要查库/查账本的判据都不属于这里。"""
     checks: list[str] = []
@@ -132,10 +152,19 @@ def _code_checks(repo: Path) -> tuple[list[str], list[str]]:
         errors.append(f"P3-7 Agent required_datasets 未注册：{missing_required}")
     else:
         checks.append(f"P3-7 Agent required_datasets 可解析：{len(required)} 个")
+    # 🔴 判据是 AST（**真的调用了**），不是字符串扫描。
+    #    第一版写的是 `"required_datasets_for_agents" not in orch_text` ——
+    #    那样一句注释、一段 docstring、甚至一条「TODO: 以后接上
+    #    freeze_required()」都能让它变绿。守卫声称守的是「编排器按名册冻结」，
+    #    实际守的是「源码里出现过这两个词」，两者不是同一处（L-13）。
     orch = repo / "skills/decision-card/scripts/orchestrator.py"
-    orch_text = orch.read_text(encoding="utf-8") if orch.exists() else ""
-    if "required_datasets_for_agents" not in orch_text or ".freeze_required(" not in orch_text:
-        errors.append("P3-7 Orchestrator 尚未按 Agent Registry 冻结 required_datasets")
+    called = _called_names(orch)
+    if not {"required_datasets_for_agents", "freeze_required"} <= called:
+        missing_calls = sorted(
+            {"required_datasets_for_agents", "freeze_required"} - called)
+        errors.append(
+            f"P3-7 Orchestrator 没有真的调用：{missing_calls} —— "
+            f"名册说归平台管，而编排器没按它冻结")
     elif not (repo / "src/easyup_biga/data/snapshot_resolver.py").exists():
         errors.append("P3-7 SnapshotResolver 缺失")
     else:

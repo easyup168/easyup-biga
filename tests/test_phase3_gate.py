@@ -44,6 +44,37 @@ def test_P4G0后代码面没有里程碑缺口():
     assert any("P3-6 Specialist Provider 边界已收口" in c for c in checks)
     assert any("P3-7 AgentRegistry" in c for c in checks)
 
+
+def test_缺的dataset按里程碑报而不是一坨id(monkeypatch):
+    """🔴 「少了 5 个 id」和「P3-6 还没做」对读者是两件事，下一步也不同。
+
+    ⚠️ 这条在 P4-G0 交付里被**删掉**了，理由是注册表齐了之后它必然红。
+    但那等于连同「红灯该长什么样」这个判据一起丢了 —— 而红灯迟早会再出现
+    （下一个里程碑加新 dataset 的那一刻）。
+    ⇒ 用**合成缺口**保留它：从注册表里拿掉两个属于不同里程碑的 dataset，
+      断言报出来的是**两条按里程碑分组**的错误，不是一坨 id。
+    """
+    import easyup_biga.data.finalizer as fin
+
+    shrunk = {k: v for k, v in fin.DATASET_REGISTRY.items()
+              if k not in {"cn.news.flash", "cn.equity.adjustment_factors"}}
+    monkeypatch.setattr(fin, "DATASET_REGISTRY", shrunk)
+    _checks, errors = fin._code_checks(REPO)
+
+    by_milestone = {e.split(" ")[0] for e in errors if e.startswith("P3-")}
+    # P3-5 / P3-6：两条缺口各自成一条，不串。
+    p36 = next(e for e in errors if e.startswith("P3-6"))
+    assert "cn.news.flash" in p36 and "cn.equity.adjustment_factors" not in p36, (
+        "两个里程碑的缺口串到一条里去了")
+    assert {"P3-5", "P3-6"} <= by_milestone, errors
+
+    # 🔴 P3-7 **也**该红 —— `news` 的 required_datasets 指着 cn.news.flash。
+    #    这条顺带证明两个检查是**接上的**：注册表少一个，Agent 侧当场解析不了。
+    #    （拿掉它就等于「注册表说没有、而编排器仍会去冻结」，那正是要防的状态。）
+    assert "P3-7" in by_milestone, errors
+    p37 = next(e for e in errors if e.startswith("P3-7"))
+    assert "cn.news.flash" in p37
+
 def test_里程碑标注覆盖到每一个必需dataset():
     """探针：往 REQUIRED_DATASETS 加一条却忘了标里程碑，这条会红。"""
     assert all(v and v.startswith("P3-") for v in REQUIRED_DATASETS.values())

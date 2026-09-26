@@ -121,6 +121,26 @@ def _freeze(db, tid=TID, bars=120):
     return coord.freeze_index_daily(tid, ["sh000001", "sz399106"], bars=bars)
 
 
+def _freeze_breadth(db, tmp_path, esid, monkeypatch, result):
+    """把一份**指定内容**的涨跌家数冻进这份 EvidenceSet。
+
+    桩打在 `decision_client` 的取数函数上 —— 那是 P3-6 之后真正的出网边界。
+    """
+    import easyup_biga.data.decision_client as dc
+
+    monkeypatch.setattr(dc, "_fetch_breadth", lambda: result)
+    dc.DecisionDataClient(db_path=db, data_root=str(tmp_path / "data")).freeze_required(
+        esid, ["cn.market.breadth"], trade_date="20260302")
+
+
+def _freeze_boards(db, tmp_path, esid, monkeypatch, fetch_boards):
+    import easyup_biga.data.decision_client as dc
+
+    monkeypatch.setattr(dc, "_fetch_boards", fetch_boards)
+    dc.DecisionDataClient(db_path=db, data_root=str(tmp_path / "data")).freeze_required(
+        esid, ["cn.sector.board_snapshot"], trade_date="20260302")
+
+
 # ─────────────────────────────────────────────────── P1 · 四个 skill 产 FactBundle
 
 
@@ -228,14 +248,25 @@ class TestP3SkillSelfDetectsLimits:
     唯一的例外是 market.trend.no_history —— 见 test_market_trend_是范围外不产。
     """
 
-    def test_market自检涨跌家数0_0_0(self, db, monkeypatch):
+    def test_market自检涨跌家数0_0_0(self, db, monkeypatch, tmp_path):
+        """⚠️ P3-6 之后**打桩点变了**：给了 evidence_set_id 就读冻结快照，
+        不再联网 ⇒ monkeypatch `market.fetch_breadth` 打不中任何东西。
+
+        被测的判断本身没变（0/0/0 ⇒ `not_yet_formed`，那个判断在 skill 里），
+        变的是数据从哪来。⇒ 桩挪到**数据层的取数边界**，先冻一份 0/0/0 的
+        快照，再让 skill 去读它。
+
+        🔴 这正是 L-12「只替换最外层出网边界，不 mock 被测逻辑本身」——
+        P3-6 把那条边界从 skill 里挪到了 Data 层，桩跟着挪。
+        """
         esid = _freeze(db)
-        monkeypatch.setattr(market, "fetch_breadth",
-                            lambda: BreadthResult(0, 0, 0, [], {"rc": 0},
-                                                  raw_text=json.dumps({"rc": 0})))
+        _freeze_breadth(db, tmp_path, esid, monkeypatch,
+                        BreadthResult(0, 0, 0, [], {"rc": 0},
+                                      raw_text=json.dumps({"rc": 0})))
         mv = market.build_fact_bundle(date=None, break_source={"tencent"},
                                       store=False, task_id=TID, evidence_set_id=esid)
-        assert any(m.code == "market.breadth.not_yet_formed" for m in mv.missing)
+        assert any(m.code == "market.breadth.not_yet_formed" for m in mv.missing), (
+            f"0/0/0 应自检出 not_yet_formed，实际 missing={[m.code for m in mv.missing]}")
 
     def test_market自检涨跌家数源不可用(self, db, monkeypatch):
         esid = _freeze(db)
@@ -247,17 +278,23 @@ class TestP3SkillSelfDetectsLimits:
                                       store=False, task_id=TID, evidence_set_id=esid)
         assert any(m.code == "market.breadth.unavailable" for m in mv.missing)
 
-    def test_sector自检盘前板块榜无数据(self, db, monkeypatch):
+    def test_sector自检盘前板块榜无数据(self, db, monkeypatch, tmp_path):
         esid = _freeze(db)
         from _sources import BoardResult
         # 全部板块涨跌幅为 0 ⇒ nonzero_count==0 ⇒ skill 自己报 pre_session
         def _zero_boards(kind):
-            from types import SimpleNamespace
-            boards = [SimpleNamespace(name=f"板块{i}", pct=0.0, main_inflow=0.0,
-                                      leader=None) for i in range(10)]
+            # ⚠️ 用真的 `Board`，不用 SimpleNamespace：P3-6 之后这批对象要经过
+            #    冻结→Parquet→读回，缺任何一个字段都会在**写入**时才炸，
+            #    而那时的报错指向 decision_client 而不是这个夹具。
+            from easyup_biga.providers.eastmoney import Board
+            boards = [Board(code=f"BK{i:04d}", name=f"板块{i}", pct=0.0,
+                            main_inflow=0.0, advance=0, decline=0, leader=None)
+                      for i in range(10)]
             return BoardResult(kind=kind, total=10, raw={"pages": []}, boards=boards,
                                raw_text=json.dumps({"kind": kind, "pages": []}))
-        monkeypatch.setattr(sector, "fetch_boards", _zero_boards)
+        # ⚠️ 同上：P3-6 之后 sector 读冻结的 cn.sector.board_snapshot，
+        #    桩挪到数据层的取数边界。
+        _freeze_boards(db, tmp_path, esid, monkeypatch, _zero_boards)
         sv = sector.build_fact_bundle(break_source=set(), store=False,
                                       task_id=TID, evidence_set_id=esid)
         assert any(m.code == "sector.board.pre_session" for m in sv.missing)
