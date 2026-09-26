@@ -1398,6 +1398,53 @@ class TestProvenanceModeIsRead:
             "在线行缺 runtime_run_id 必须进第三态，"
             f"实际 unproven={proof.unproven!r}")
 
+    def test_同一次run里有的有id有的没有_指向不同的排查方向(self, tmp_path, monkeypatch):
+        """🔴 per-decision 一致性（2026-09-26，enforce 欠账 #1）。
+
+        `missing_runtime_run_id` 原本有两种含义，**排查方向相反**：
+
+        · 整次 run 一个都没有 ⇒ 可能是迁移前的旧路径（去看这次 run 怎么起的）
+        · 有的有、有的没有   ⇒ 兄弟行证明了走的是新路径 ⇒ **映射漏了这个 agent**
+          （去看 orchestrator 收集 runtime_run_ids 的地方）
+
+        强绑定是 per-agent、按数据有无启用的（批 J-II）⇒ `NULL` 的含义会随着
+        六个 agent 陆续走上新路径**悄悄从前者变成后者**，而没有任何东西会注意到。
+        这条测试就是那个「注意到」。
+
+        ⚠️ 两种都仍然是 UNKNOWN（R-3：证不了就是证不了）。
+        **判据不变，指的路变了** —— 所以断言打在 reason 上，不在 status 上。
+        """
+        self._wire(tmp_path, monkeypatch,
+                   [("market", "run-0", None), ("sector", None, None)],
+                   [("market", MINE), ("sector", MINE)])
+        proof = pa.spawn_proof_for_run(self.RID)
+
+        assert proof.per_agent["market"] == (True, True)
+        assert proof.unproven == {"sector": "runtime_run_id_partially_missing"}, (
+            "兄弟行带了 id，这一行没带 ⇒ 原因码要指向「映射漏了这个 agent」，"
+            f"实际 unproven={proof.unproven!r}")
+        # 仍然是第三态，不是伪造
+        assert spawn_check.main(["--run-id", self.RID]) == 2
+
+    def test_整次run都没有id时仍是原来那个原因码(self, tmp_path, monkeypatch):
+        """对照组：一行都没有 ⇒ 不许被新原因码盖掉。
+
+        没有这条对照，「把所有 missing 都改成新原因码」也能让上一条绿 ——
+        而那等于丢掉了「整次走旧路径」这个诊断。
+        """
+        self._wire(tmp_path, monkeypatch,
+                   [("market", None, None), ("sector", None, None)],
+                   [("market", MINE), ("sector", MINE)])
+        proof = pa.spawn_proof_for_run(self.RID)
+        assert proof.unproven == {"market": "missing_runtime_run_id",
+                                  "sector": "missing_runtime_run_id"}
+
+    def test_两个原因码都有给人看的说明(self):
+        """点名一个没有说明的原因码 = 屏幕上只剩一个下划线命名的英文串。"""
+        for code in ("missing_runtime_run_id", "runtime_run_id_partially_missing"):
+            assert code in pa._UNPROVEN_HINT, f"{code} 没有对应的人话说明"
+            assert len(pa._UNPROVEN_HINT[code]) > 20
+
     def test_legacy行判不了不算伪造(self, tmp_path, monkeypatch):
         self._wire(tmp_path, monkeypatch,
                    [("market", None, "legacy")], [("market", MINE)])

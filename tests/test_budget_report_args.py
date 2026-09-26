@@ -60,3 +60,22 @@ def test_day后面缺参数():
     with pytest.raises(SystemExit) as exc:
         br._parse_day(["--day"])
     assert "用法" in str(exc.value)
+
+
+def test_main真的用了_parse_day():
+    """🔴 否则 `_parse_day` 是个零消费方的解析器 —— 上面五条全绿，而命令行照样崩。
+
+    探针实测：把 `main()` 里那行换回 `argv[0]`，上面五条**一条都不红**。
+    判据落在 AST 上（`main` 的函数体里有没有调用它），不是字符串扫描 ——
+    docstring 里提到这个名字是正常的（本文件就提了）。
+    """
+    import ast
+
+    src = (REPO / "tools" / "verify" / "budget_report.py").read_text(encoding="utf-8")
+    main_fn = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+    called = {n.func.id for n in ast.walk(main_fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_parse_day" in called, (
+        "budget_report.main() 没有调用 _parse_day —— "
+        "那个解析器因此是零消费方，命令行仍会拿 argv[0] 当日期。")
