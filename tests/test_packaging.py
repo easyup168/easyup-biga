@@ -219,6 +219,13 @@ def test_磁盘上的每个子包都真的会被打进去():
     )
 
 
+def _next_dev(released: str) -> str:
+    """最后一段 +1 再挂 `.dev0` —— 只用于把报错指向一个**真能让它变绿**的值。"""
+    parts = released.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts) + ".dev0"
+
+
 def test_版本号与CHANGELOG不矛盾():
     """🔴 版本号这个事实现在有两个出处（pyproject + CHANGELOG）= L-3 的形状。
 
@@ -231,7 +238,9 @@ def test_版本号与CHANGELOG不矛盾():
     assert _version_tuple(declared) > _version_tuple(released), (
         f"pyproject 写着 {declared}，而 CHANGELOG 最近的发布版是 {released}。\n"
         f"  {declared} <= {released} 等于宣称「这棵树就是那个发布版」。\n"
-        "  发版时：CHANGELOG 的 [未发布] 改成版本号 + 日期，这里去掉 .devN，两处一起改。"
+        "  发版时两处一起改：CHANGELOG 的 [未发布] → 版本号 + 日期，\n"
+        f"  这里 → **下一个** dev 版本（比 {released} 大，如 {_next_dev(released)}）。\n"
+        "  🔴 不是「去掉 .devN」—— 那会让两处相等，而相等就是这条断言要拦的。"
     )
 
 

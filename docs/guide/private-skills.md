@@ -106,14 +106,20 @@ tr '\0' '\n' < /proc/$PID/environ | grep -c '^YOUR_KEY_NAME='
 ### 4. 验证
 
 ```bash
-~/.openclaw-biga/bin/biga skills list | grep <name>
+~/.openclaw-biga/bin/biga skills list --agent main | grep <name>
 ```
 
 预期：出现一行，`Source` 列是 `openclaw-extra`。
 
+⚠️ 配了多个 agent 时**必须带 `--agent <id>`** —— skill 白名单是
+按 agent 算的（`agents.entries.*.skills` 是替换语义），不指定它没法替你选。
+
 ---
 
-## 两个容易踩的
+## 搬 skill 时容易踩的
+
+⚠️ 这张单子是**踩一条记一条**长出来的，不要在标题里写个数 ——
+写了就会有某次加了一节忘了改数（这行字本身就是补一次失效计数换来的）。
 
 ### 位置约定型的路径计算，换个位置不报错，只指向别处
 
@@ -149,3 +155,41 @@ _CACHE_DB = _WORKSPACE / "data" / "cache.db"
 ⇒ 还剩 100 次就罢工，而错误信息说「今日额度已用完」。
 
 ⇒ 允许环境变量覆盖（`MX_DAILY_LIMIT`），免得下次厂商改额度又要改代码。
+
+### 判响应对象的真值，判到的是「成不成功」
+
+```python
+except requests.exceptions.HTTPError as e:
+    if e.response:                       # ❌ 恒假：4xx/5xx 时 __bool__ 是 .ok
+        detail = e.response.text
+```
+
+`requests.Response.__bool__` 返回的是 `.ok` ⇒ **4xx/5xx 时为 `False`**。
+于是「有响应就取正文」和「401/400 不重试」这两件事**都不会发生**，
+而且**不报错**：你只会拿到一句 `400 Client Error: Bad Request for url: …`，
+然后对着一个必然失败的请求重试到底。
+
+实测（2026-09-26）：真实原因是 `{"message":"Not enough credits"}`。
+看不见它，就会去查网络、查 key、查 header —— 全是错的方向。
+
+⇒ 判 `e.response is not None`。
+
+> 通用原则：**「这个对象有没有」和「这个对象好不好」是两个问题。**
+> 凡是库给 `__bool__` 赋了业务语义的类型（`Response`、numpy 数组、
+> 空 `DataFrame`…），一律显式判 `is not None` / `len()`。
+
+### 错误信息里写常量，等于替代码宣称一件它没做的事
+
+```python
+return {"error": f"API 请求失败（{MAX_RETRIES}次重试后）: {last_error}"}
+```
+
+修好短路之后，401/400 只试 1 次 —— 这句**照样说「3次重试后」**。
+排查的人会照着它去找「为什么重试三次都失败」，而真相是压根没重试。
+
+⇒ 报**实际发生的**次数（循环变量在 `break` 后仍然绑定）。
+判据是时间：短路后 3.2s（纯网络往返），没短路时是 3 次 + 2 次 `sleep`。
+
+> 通用原则：错误信息是**证词**。写进去的每个数都得是真发生过的，
+> 否则它把排查引向错误的方向 —— 比不写更糟。
+
