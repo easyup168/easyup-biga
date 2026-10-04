@@ -1,0 +1,102 @@
+# === 数据（自建事实层，不入库）===
+/data/*
+!/data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# === 个人偏好（非项目契约；本仓库公开）===
+USER.md
+
+# === Specialist 的脚手架残留 ===
+# 运行时**每次 spawn 都会重建**这些文件（不是一次性的，删了还会回来）。
+# spawned session 不加载 SOUL.md / IDENTITY.md，所以它们对 Specialist 是死文件；
+# 提交进来只会误导后来的人去改一个不生效的地方。
+# ⚠️ 只忽略 agents/ 下的 —— 仓库根的那两个是 Supervisor 的，是有效契约。
+/agents/*/SOUL.md
+/agents/*/IDENTITY.md
+/agents/*/BOOTSTRAP.md
+
+# === 运行时 / 密钥 ===
+.env
+*.key
+*.pem
+node_modules/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+/build/
+/dist/
+
+# === Windows 残留 ===
+# 从 Windows 复制文件到 WSL 时产生的 NTFS 备用数据流标记
+*:Zone.Identifier
+
+# === 临时 ===
+*.log
+/tmp/
+.DS_Store
+
+# 🔴 运行时产物不进仓库（审查第 11 项）
+#    上面那十项用 `grep -I` 跳过二进制 ⇒ 压缩包里的内容一个字都扫不到。
+#    而仓库是 Public、推即发布。外部评审的原文留在本机 docs/external/ 下即可。
+#    ⚠️ 已经进过历史的两个（feishu-design / phase2-code-review）撤不回来 ——
+#       它们的内容核过：密钥/家目录/应用标识/邮箱五类全 0 处，不是泄漏。
+*.zip
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# 🔴 2026-09-23 起：docs/external/ 下的新文档一律不提交（决策，非疏漏）。
+#    这个目录既装「审本项目自己代码/架构的外部评审」，也开始装用户自己的
+#    业务规划材料（如全系统总体设计）——后者不是密钥泄漏，但也不该进一个
+#    Public 仓库的历史。`docs/README.md` 的文档规约（覆盖/不覆盖、命名）
+#    仍然按文件系统校验，不受这条影响——本地开发体验不变，只是不进 git。
+#    ⚠️ 已经提交过的三份（upstream 设计稿 / 两份 phase2 评审）不受影响，
+#       这条规则只挡「以后新增的」，不追溯、不撤回已发布的历史。
+/docs/external/*
+
+# 🔴 2026-09-24：docs/troubleshooting/ 同理不进 git（用户明确决定，非疏漏）。
+#    装的是从真实使用场景（飞书私聊）里现场记录的排查笔记——含用户的具体反馈
+#    原话、私聊往来细节，跟 docs/external/* 是同一类"本地留存参考、不进公开
+#    仓库历史"的材料，理由同上一条。
+/docs/troubleshooting/*
+
+# OpenClaw 自己写的记忆 / 做梦产物。
+# 🔴 `.dreams/session-corpus/*.txt` 是**会话逐字记录** ——
+#    今天内容无害不代表明天无害，而它是**自动长出来的**，内容不由你决定。
+# ⚠️ 已经进过历史的 8 个撤不回来（内容已抽样核过，是行情问答与决策卡）。
+memory/
+
+# Claude Code 的本地状态：会话、worktree、锁、个人设置 —— 都不进仓库。
+.claude/*
+# 🔴 唯一的例外：仓库内的 dev-workflow 技能**必须**在仓库里。
+#    它存在的理由是**覆盖用户级同名技能** —— 那一份的 Track D 会去改
+#    同机已有实例的 cron 配置，照做直接破坏 I-1。
+#    删掉它，任何人克隆后 `/dev-workflow` 就会命中危险的那份。
+!.claude/skills/
+
+# 出卡总闸与单实例锁 —— 运行时产物，属于这台机器此刻的状态，不是代码。
+# 🔴 进了仓库会有两个后果：克隆下来的仓库带着一个别人机器上的紧急闸门，
+#    以及沙盒测试把它复制进去、把三条出卡路径测试全判成「被拦」。
+.biga-card-stop
+.biga-card.lock
+# 通知 worker 的单实例锁（P2-4）。⚠️ 加这一条晚了一步：`bin/biga-notify` 的
+# flock 落在 `$ROOT/.biga-notify.lock`，而同批加的并发测试用 `cwd=REPO` 启动
+# 真脚本 —— 于是**跑一次测试就在仓库根留一个未跟踪文件**。公开仓库里这是
+# 随时可能被顺手 `git add .` 带进去的东西，也会让「同步条数前先看
+# git status」那条纪律天天看到噪声。
+.biga-notify.lock
+
+# 🔴 例外：测试 fixture 要进仓库，即使它是 `.log`
+# 上面的 `*.log` 会把 `tests/fixtures/stalled-session.log` 一起忽略掉 ——
+# 而那是看门狗解析器的**唯一**真实形状来源。
+# 后果是静默的：本机跑全绿（文件在硬盘上），克隆下来就没有这个文件。
+# ⇒ 由 tests/test_stall_watchdog.py 的「fixture 真的被 git 跟踪」一条钉住。
+!tests/fixtures/
+!tests/fixtures/**

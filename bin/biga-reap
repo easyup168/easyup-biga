@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# biga-reap —— 把卡在非终态太久的 run 收成 TIMEOUT（对齐外部评审 §14 / D-2）。
+#
+# 为什么要有这个脚本
+# ------------------
+# `tools/maintenance/stale_run_reaper.py` 本身早就能干这件事，但它默认
+# dry-run（运维工具的安全姿态：不小心跑一下不该改任何库）——真收敛需要记住
+# `--apply`，记不住这个约定就是「reaper 建了但从没真正收敛过一个卡住的 run」
+# 这类事故的形状：2026-09-24 对抗性复核指出全仓 grep 不到任何调度方调用它，
+# 违反 CLAUDE.md 自己那条「新增写数据模块必须有被证明的读取方，判据是调度
+# 命令的字面量」。
+#
+# ⇒ 固化默认值：这条命令默认就是真收敛，不用每次都敲那个参数。
+#   仍然可以 `bin/biga-reap --dry-run-only` 走原始的纯 dry-run 排查（见下）。
+#
+# 这个脚本本身不联网、不认证——收敛逻辑（CAS 安全的 expected 取值、只收非终态
+# 且超龄的 run）全在 `stale_run_reaper.py`，这里只是把「定期跑一次、真的
+# --apply」变成一条固定命令，供人手动调用，也供 `stale-run-reaper-biga.timer`
+# 调用（见 deploy/openclaw/）。
+#
+# 用法
+#   bin/biga-reap                  收敛超过默认阈值（1200s）的卡住 run（真转移）
+#   bin/biga-reap --dry-run-only   只打印候选，不真转移（排查用）
+#   bin/biga-reap --threshold-sec 600   改判定"卡住"的阈值
+
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+PY=python3
+
+# --dry-run-only 是这条命令自己的开关（转成 stale_run_reaper.py 认的「不传
+# --apply」）；除此之外的参数原样透传（比如 --threshold-sec）。
+ARGS=()
+dry_run_only=0
+for a in "$@"; do
+  if [ "$a" = "--dry-run-only" ]; then
+    dry_run_only=1
+  else
+    ARGS+=("$a")
+  fi
+done
+[ "$dry_run_only" = 0 ] && ARGS+=(--apply)
+
+exec $PY tools/maintenance/stale_run_reaper.py "${ARGS[@]}"

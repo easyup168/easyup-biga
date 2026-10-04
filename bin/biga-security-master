@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Sync the current A-share Security Master into the Phase 3 data platform.
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+
+ROOT = pathlib.Path.cwd()
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "skills"))
+
+from easyup_biga.data.datasets.security_master import (  # noqa: E402
+    SecurityMasterService,
+)
+from easyup_biga.persistence import init_schema  # noqa: E402
+from easyup_biga.providers import SourceError  # noqa: E402
+
+parser = argparse.ArgumentParser(description="Sync BigA A-share Security Master")
+parser.add_argument("--as-of-date", help="YYYYMMDD; default is current China date")
+parser.add_argument("--json", action="store_true", help="print machine-readable result")
+args = parser.parse_args(sys.argv[1:])
+
+init_schema()
+try:
+    result = SecurityMasterService().sync(as_of_date=args.as_of_date)
+except (SourceError, ValueError, RuntimeError) as exc:
+    if args.json:
+        print(json.dumps({"status": "FAILED", "error": str(exc)}, ensure_ascii=False))
+    else:
+        print(f"🔴 Security Master 同步失败：{exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+payload = {
+    "status": result.status.value,
+    "as_of_date": result.as_of_date,
+    "data_run_id": result.data_run_id,
+    "snapshot_id": result.snapshot_id,
+    "partition_id": result.partition_id,
+    "quality_report_id": result.quality_report_id,
+    "row_count": result.row_count,
+    "reused": result.reused,
+}
+if args.json:
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+else:
+    icon = "✅" if result.status.value == "COMPLETE" else "⚠️"
+    mode = "已存在，复用" if result.reused else "新发布"
+    print(
+        f"{icon} Security Master {result.status.value}: {result.row_count} 条，{mode}\n"
+        f"   as_of_date={result.as_of_date}\n"
+        f"   snapshot_id={result.snapshot_id or '-'}\n"
+        f"   data_run_id={result.data_run_id or '-'}"
+    )
+
+raise SystemExit(0 if result.status.value == "COMPLETE" else 2)
+PY

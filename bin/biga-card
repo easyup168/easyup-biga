@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+# biga-card —— 出一张决策卡，或看已有的卡。
+#
+# 为什么要有这个脚本
+# ------------------
+# 在它之前，出一张卡要手敲一段很长的提示词，而且**漏一句就会出问题**：
+#
+#   · 漏 `--session-key`  ⇒ 用默认会话，一轮 end_turn 就返回，卡不出来
+#   · 漏「带上决策编号」  ⇒ Specialist 用临时号，落库直接报错
+#   · 漏「等全部结算」    ⇒ 两次运行交叠（2026-09-21 真出过一次）
+#
+# 这些都属于「靠人记得」的约定 —— 而本项目反复证明那类约定会失效。
+# ⇒ 固化成一条命令。
+#
+# 用法
+#   bin/biga-card                 出一张新卡（等它跑完，然后渲染）
+#   bin/biga-card --show <决策号>  看一张已有的卡
+#   bin/biga-card --list [n]      列出最近 n 张（默认 10）
+#   bin/biga-card --check <决策号> 用冻结证据重跑，断言**组装结果**逐字段相同
+#                                （验的是管线无损，不是「结论能被独立复算」——见 F14）
+#   bin/biga-card --status <run_id> 说出某次运行「死在哪一步」（批 B 状态机）
+#
+# ⚠️ 出一张新卡实测需要 **3 分钟左右**、约 $1.2。不是瞬时操作。
+
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+
+# ══ 🔴 总闸（2026-09-21 21:47 事故期间加的紧急止血）══════════════════
+#
+# 存在这个文件就一律拒绝出新卡。放在**最前面**，在任何花钱的动作之前。
+# 只拦「出新卡」，不拦 --show / --list / --check（那些不花钱，事故排查要用）。
+#
+# 为什么是文件而不是环境变量：环境变量只对「记得导出它的那个 shell」有效，
+# 而雪崩的触发源是**几十个各自独立的进程组**，它们的 env 我控制不了。
+# 文件是所有路径都绕不过去的同一个事实。
+BIGA_STOP_FILE="${BIGA_STOP_FILE:-$ROOT/.biga-card-stop}"
+# ⚠️ 可覆盖**只为测试**：验「取不到提示词就停」时必须能证明
+#    那条昂贵的 agent 调用**根本没被走到**（一次真跑 3 分钟 / $1.3）。
+#    第一版测试没这个缝，探针把守卫改成 fail-open 之后，
+#    测试当场把真实出卡流程跑了起来 —— **一个坏掉时会花钱的测试**。
+BIGA="${BIGA:-$HOME/.openclaw-biga/bin/biga}"
+PY=python3
+RL="$PY skills/decision-card/scripts/run_ledger.py"
+
+# 🔴 批 C-II：run 记账不再在这里做。DecisionOrchestrator（Python）自己 open_run
+#    并驱动全部状态转移——它是唯一真正知道「走到哪一步」的地方。本脚本收缩成
+#    薄 CLI：五道守卫 → 调 orchestrator → 渲染 → 退出码。`--status` 仍用 run_ledger 读。
+
+# 🔴 库还不存在时**静默返回空**，不打 traceback。
+#    `connect(readonly=True)` 按设计会抛 `StoreNotInitialised`（那是对的：
+#    读一个不存在的库该报错）。但本函数的调用点全是
+#    `BEFORE=$(_sql "SELECT MAX(decision_id) …")` 这种「取个基线值」的用法，
+#    空字符串本来就是它们语义正确的兜底。
+#
+#    不接住的后果不是功能坏了，是**一屏 Python 调用栈进了 stderr** ——
+#    而那会让第一次跑这条命令的人以为出卡失败了。
+#    > 报错要指路。一个不影响结果的异常打出完整调用栈，指的是错的路。
+#    ⚠️ 只咽 `StoreNotInitialised`，不咽别的：库存在但查询写错了要照样炸。
+_sql() { $PY - "$@" <<'EOF'
+import sys, pathlib
+sys.path.insert(0, "skills")
+from _store import StoreNotInitialised, db
+try:
+    with db.connect(readonly=True) as c:
+        for r in c.execute(sys.argv[1]):
+            print("\t".join("" if x is None else str(x) for x in r))
+except StoreNotInitialised:
+    pass          # 还没建库 ⇒ 没有基线值，调用点按空处理
+EOF
+}
+
+case "${1:-}" in
+  --show)
+    [ -n "${2:-}" ] || { echo "用法: biga-card --show <决策号>" >&2; exit 2; }
+    exec $PY skills/decision-card/scripts/replay.py "$2"
+    ;;
+  --check)
+    [ -n "${2:-}" ] || { echo "用法: biga-card --check <决策号>" >&2; exit 2; }
+    exec $PY skills/decision-card/scripts/replay.py "$2" --check
+    ;;
+  --status)
+    # 批 B：说出某次运行「死在哪一步」。不花钱，事故排查要用（与 --show/--list 同类）。
+    [ -n "${2:-}" ] || { echo "用法: biga-card --status <run_id>" >&2; exit 2; }
+    exec $RL status "$2"
+    ;;
+  --list)
+    n=${2:-10}
+    printf '%-22s %-7s %-14s %s\n' "决策号" "状态" "生成时间" "缺失项"
+    _sql "SELECT decision_id, status, generated_at, missing_count
+          FROM decision_records ORDER BY rowid DESC LIMIT $n" |
+      while IFS=$'\t' read -r id st at mc; do
+        printf '%-22s %-7s %-14s %s\n' "$id" "$st" "${at:5:5} ${at:11:5}" "$mc"
+      done
+    exit 0
+    ;;
+  -h|--help)
+    sed -n '2,25p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  "") : ;;
+  *)
+    echo "未知参数 $1（-h 看用法）" >&2; exit 2
+    ;;
+esac
+
+# ── 出新卡 ───────────────────────────────────────────────────────
+
+# 🔴 总闸优先于一切 —— 它必须在第一个花钱的动作**之前**。
+if [ -e "$BIGA_STOP_FILE" ]; then
+  echo "🔴 出新卡已被总闸拦下。" >&2
+  echo "   闸门文件：$BIGA_STOP_FILE" >&2
+  sed 's/^/   │ /' "$BIGA_STOP_FILE" >&2 2>/dev/null
+  echo "   解除：rm $BIGA_STOP_FILE（解除前先确认触发源已经停了）" >&2
+  echo "   看已有的卡不受影响：bin/biga-card --list / --show <决策号>" >&2
+  exit 3
+fi
+
+# 🔴 Ownership 守卫 —— 顶层入口只能由人 / CLI / cron 启动
+# ------------------------------------------------------------------
+# 外部评审对事故当天那两道修复（改契约文字 + 单实例锁）的评价是对的：
+#
+#   > AGENTS.md = Intent / Behavior Guidance
+#   > Code Guard = Safety Invariant   —— 两者职责必须分开。
+#
+# 锁只保证「照抄了也只死一次」，它拦的是**并发**，不是**越权**：
+# 一次**串行**的递归（上一层退出后下一层才起）锁根本拦不住。
+#
+# ⇒ 把「谁有权启动顶层流水线」变成代码判据。判据与理由在
+#   `skills/decision-card/scripts/entry_guard.py`（两个信号，各自补对方的漏）。
+if [ "${BIGA_CARD_ALLOW_AGENT:-0}" != "1" ]; then
+  CALLER=$($PY - <<'EOF'
+import sys
+sys.path.insert(0, "skills/decision-card/scripts")
+from entry_guard import AGENT, classify_caller
+kind, why = classify_caller()
+print(f"{kind}\t{why}")
+sys.exit(3 if kind == AGENT else 0)
+EOF
+  )
+  CALLER_RC=$?
+  # 🔴 判不了也要把依据打出来 —— 静默放行才是红线 R-3 要防的东西。
+  #    这一道判不了时**放行**（它是入口不是巡检，拒绝就等于人也用不了）；
+  #    兜底交给紧接着的单实例锁与预算闸门。
+  case "$CALLER" in
+    UNKNOWN*) echo "🔶 发起方判不了 —— ${CALLER#*	}" >&2
+              echo "   本道守卫放行，并依赖单实例锁与预算闸门兜底。" >&2 ;;
+  esac
+  if [ "$CALLER_RC" -eq 3 ]; then
+    echo "🔴 这条命令不能从 agent 会话里调用。" >&2
+    echo "   依据：${CALLER#*	}" >&2
+    echo >&2
+    echo "   它做的事就是**把编排提示词喂给 main** —— 你去调它，" >&2
+    echo "   等于让系统再造一个自己。2026-09-21 21:03–21:50 真的发生过：" >&2
+    echo "   187 个 main 会话、约 195 次调用、\$8.99。" >&2
+    echo >&2
+    echo "   如果你收到了「请出一张决策卡，严格按以下步骤」那段消息：" >&2
+    echo "   **你就是执行者**，照那段步骤做，不要调这条命令。" >&2
+    echo "   见 AGENTS.md「绝对不要运行」一节。" >&2
+    exit 3
+  fi
+fi
+
+# 🔴 单实例锁 —— 递归与并发的止损（2026-09-21 21:03–21:50 事故）
+# ------------------------------------------------------------------
+# 那次雪崩的形状是**递归**，不是误触：
+#
+#   bin/biga-card → $BIGA agent --agent main → 新的 main 会话
+#                                                 ↓ 读 AGENTS.md
+#                                           bin/biga-card → …
+#
+# 因为 `AGENTS.md` 当时写着「🔴 要出卡？跑这一条」并贴出了这条命令，
+# 而这条命令做的事就是把编排提示词喂给 `main` —— 也就是那个读到这句话的人。
+# 实测 187 个 main 会话 / 约 195 次调用，其中 92 次是那行命令的逐字复制。
+#
+# 契约那一侧已经改了（`AGENTS.md` 现在写「绝对不要运行它」）。
+# 但本项目的第一课就是**契约写了不等于会被遵守** ——
+# 同一天 19:31 那次「四个 spawn 无归属」，规则也一条不缺地写在契约里。
+# ⇒ 机器这一侧必须自己拦。
+#
+# 为什么用 flock 而不是环境变量：
+#   env 传不过网关。`$BIGA agent` 起的会话在**另一个进程树**里，
+#   `BIGA_CARD_DEPTH=1` 这种标记根本到不了下一层。
+#   而文件锁是所有层都看得见的同一个事实。
+#
+# ⚠️ 锁**不替代** `AGENTS.md` 那条规则 —— 它只保证「照抄了也只死一次」。
+if [ "${BIGA_CARD_NOLOCK:-0}" != "1" ]; then
+  exec 9>"$ROOT/.biga-card.lock" || exit 2
+  if ! flock -n 9; then
+    echo "🔴 已经有一次出卡在跑，这次不再起（单实例锁）。" >&2
+    echo "   锁文件：$ROOT/.biga-card.lock" >&2
+    echo "   如果你是 agent：**不要调这条命令**，见 AGENTS.md「绝对不要运行」一节。" >&2
+    echo "   看在跑的那次：bin/biga-card --list 3" >&2
+    exit 3
+  fi
+  # 🔴 D-3（外部评审 §15）：编排器自己也下沉了一份单实例锁检查（纵深防御，
+  # 同 ownership 那道）。但 flock 是排他资源，子进程重新 open() 同一个锁文件
+  # 会与这里已经拿到的锁互斥而不是共享（不同 file description）——告诉它锁
+  # 已经在手上了，不要再自己抢一次，否则正常出卡也会被自己拦下。
+  export BIGA_CARD_LOCK_HELD=1
+fi
+
+# 🔴 预算闸门要在**第一个花钱的动作之前**跑一次（2026-09-21 21:42 事故）
+# ------------------------------------------------------------------
+# 闸门本来就在路上 —— `new_decision.py` 的 Stage 0 占号之前。
+# 事故当天它**开火了约 58 次**，今天只放行了 2 个号，挡住的正是贵的那部分
+# （58 × 一次 fan-out ≈ $48）。
+#
+# ⚠️ 但它漏掉了一笔：`bin/biga-card` 先把一整个 `main` LLM 轮次付掉，
+#    才走到闸门那里被拒。实账：雪崩窗口 32 个 main 轮次 = **$8.99**，
+#    而同期只出了一张卡。
+#
+# > 闸门装在**身份**的咽喉点（占号），而**成本**的边界比它早一步。
+# > 「唯一入口」这个原则是对的，选错的是「哪一处才算入口」——
+# > 对花钱的事，入口是**第一次花钱的地方**，不是第一次产生事实的地方。
+#
+# ⇒ 同一个判据在这里预跑一次。不是第二套口径：它 import 的是同一个
+#   `check_budget()`，阈值只有一份（L-3）。这里拒绝的代价是 $0。
+if [ "${BIGA_CARD_FORCE:-0}" != "1" ]; then
+  GATE=$($PY - <<'EOF' 2>&1
+import os, sys
+sys.path.insert(0, "skills")
+sys.path.insert(0, "skills/decision-card/scripts")
+from budget import check_budget, explain
+# 🔴 飞书 inbound 路径在拉起本脚本之前已经占了号（accept_trigger 的幂等占号）——
+# 排除掉这个号自己，闸门比的才是「跟别的尝试比」，不是「跟自己刚占的号比」
+# （P6 live 实测过：不排除时每一次飞书触发都会被这里拒，见 budget.py 文档字符串）。
+# CLI 路径没有这个 env（此时号也确实还不存在），传 None 就是原来的行为。
+r = check_budget(exclude_decision_id=os.environ.get("BIGA_CARD_DECISION_ID") or None)
+if r:
+    print(explain(r)); sys.exit(3)
+EOF
+  )
+  if [ $? -ne 0 ]; then
+    echo "$GATE" >&2
+    echo >&2
+    echo "   ⓘ 这次拦下的代价是 \$0 —— 闸门在 agent 调用**之前**。" >&2
+    echo "     确实要跑：BIGA_CARD_FORCE=1 bin/biga-card" >&2
+    exit 3
+  fi
+fi
+
+# 🔴 判据是 **record_id**，不是 MAX(decision_id)。
+#    决策号是**按字典序**比大小的，而它并不随落库先后单调递增：飞书路径会
+#    预占号，于是「先占 001 → 启动失败 → 后来 999 先成功落库 → 001 稍后重试
+#    成功」完全可能发生。那时 MAX(decision_id) 出卡前后都是 999，wrapper 会
+#    把一张**真落库了的卡**判成「没有新卡」（评审 §4.2 的 PoC 实测 rc=4）。
+#    record_id 是 AUTOINCREMENT，它才真的描述「谁后落的」。
+BEFORE_RECORD_ID=$(_sql "SELECT COALESCE(MAX(record_id),0) FROM decision_records")
+echo "▸ 程序驱动出卡  起 $(date +%T)"
+# 🔴 `\$1.2` 必须转义：脚本以无参数方式跑（出新卡），`set -u` 下裸 `$1` 是
+#    未绑定的位置参数会**当场终止脚本**。总闸开着时撞不到这行，一旦解除就会咬人。
+echo "  （实测约 3 分钟、约 \$1.2；期间可以做别的事）"
+
+# 🔴 批 C-II：出卡由 DecisionOrchestrator（Python）驱动，不再 spawn main。
+#
+#    编排 / 等待 / 传号 / 合成 / 占号 全在代码里 —— 老路径那段「把提示词喂给
+#    main、轮询落库、看门狗防 ask_user 死锁」整体没了：orchestrator 是同步的，
+#    它自己 open_run、走 8 步细粒度状态链、通过 Adapter spawn 五个 Specialist +
+#    risk + synthesizer 判官，合成并落库，返回并渲染。
+#
+#    🔴 main 在这里**没有步骤可执行** —— 它不是可被 spawn 的编排者，这条命令
+#    也不把任何提示词喂给它。这就是 L-14「谁能启动」那条边界从提示词约定变成
+#    程序结构的地方：不是「守卫拦住 main」，是「main 够不到编排器」。
+#
+# 🔴 硬超时：orchestrator 内部按 BIGA_CARD_DEADLINE_SEC 分段等待；外层再套一个
+#    timeout 兜底，防它在 attach / 某个 MCP 调用上永久卡死（这是「锁 + 硬超时」
+#    那一节的初衷 —— 持锁的那一次若永久卡死，整个入口会永久不可用）。
+CARD_DEADLINE_SEC="${BIGA_CARD_DEADLINE_SEC:-780}"
+
+# 🔴 收养兜底（评审阻塞项 2）：wrapper 死了，它起的编排子进程不许活下来继续花钱。
+# ------------------------------------------------------------------
+# 事故复盘（教程 24 章）：$1.2 那个 bash bug 不是孤儿化的根因 —— 那行在文本顺序上
+# 排在编排调用之前，真在那崩溃根本到不了 spawn。真正的根因是：一个外层短 timeout
+# 杀掉了上层 shell，而 `timeout 840 orchestrator.py` 那个子进程**被孤立后继续跑完了
+# 整轮 spawn**。这不是「手工瞎跑」独有的触发方式 —— 任何一次工具调用把 timeout 设短
+# 都可能撞上同一个洞。
+#
+# ⇒ 用 trap 做**代码兜底**，不是「以后手工别乱跑」这种记在脑子里的承诺。本项目的规矩
+#   是：安全保证必须是 Code Guard，不能靠意图（这条对 main 成立，对「我们自己会小心」
+#   也一样成立）。编排放到后台 + wait —— 前台子进程会把信号拖到它返回，后台 + wait
+#   才能让 TERM/INT 立刻打断 wait、触发 trap 把子进程收掉。
+_ORCH_PID=""
+_reap_orch() { [ -n "$_ORCH_PID" ] && kill -TERM "$_ORCH_PID" 2>/dev/null; }
+trap '_reap_orch' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
+# 🔴 批 G-II：飞书入站触发经环境变量把 origin / trigger_id / 预占决策号透传给
+#    orchestrator。三样都没设 = 人工 CLI（origin=cli，orchestrator 自己现占号）——
+#    **现有同步体验一字不变**（这正是「异步只对飞书生效、不许改坏人工 CLI」的落点）。
+#    异步发生在 inbound.py → 本脚本 这条边界（inbound 把本脚本整个脱离进程树拉起、
+#    立刻 ACK），不在本脚本内部：bin/biga-card 自己仍然从头同步跑到 Card 落库。
+ORCH_ARGS=()
+[ -n "${BIGA_CARD_ORIGIN:-}" ]      && ORCH_ARGS+=(--origin "$BIGA_CARD_ORIGIN")
+[ -n "${BIGA_CARD_TRIGGER_ID:-}" ]  && ORCH_ARGS+=(--trigger-id "$BIGA_CARD_TRIGGER_ID")
+[ -n "${BIGA_CARD_DECISION_ID:-}" ] && ORCH_ARGS+=(--decision-id "$BIGA_CARD_DECISION_ID")
+timeout $(( CARD_DEADLINE_SEC + 60 )) $PY skills/decision-card/scripts/orchestrator.py "${ORCH_ARGS[@]}" &
+_ORCH_PID=$!
+wait "$_ORCH_PID"
+ORCH_RC=$?
+# 正常跑完，编排子进程已退出 —— 撤掉 trap，后面的 spawn_check / readback 不受它影响。
+trap - EXIT TERM INT HUP
+
+# 本次新落的在线卡（record_id 严格大于出卡前的水位）。一行 = 决策号 \t run_id。
+# 🔴 `replay_of IS NULL` —— 回放不是「出了一张新卡」，别把它算进来。
+NEW_CARDS=$(_sql "SELECT decision_id || char(9) || COALESCE(run_id,'') FROM decision_records WHERE record_id > $BEFORE_RECORD_ID AND replay_of IS NULL ORDER BY record_id")
+# 飞书预占号时再收一道：只认**这次请求那个号**的卡，别的写入方同时落卡也不会混进来。
+# 🔴 仍然要求 `record_id > 水位`：这个号可能在**更早一次尝试**里就已经落过卡了
+#    （一个 decision 只允许一张在线卡），不加水位就会把上次的成果当成这次的。
+if [ -n "${BIGA_CARD_DECISION_ID:-}" ]; then
+  NEW_CARDS=$(_sql "SELECT decision_id || char(9) || COALESCE(run_id,'') FROM decision_records WHERE decision_id='$BIGA_CARD_DECISION_ID' AND replay_of IS NULL AND record_id > $BEFORE_RECORD_ID ORDER BY record_id DESC LIMIT 1")
+fi
+NEW_COUNT=$(printf '%s' "$NEW_CARDS" | grep -c . || true)
+NOW=$(printf '%s' "$NEW_CARDS" | tail -1 | cut -f1)
+
+# 🔴 多于一张 ⇒ **fail closed**。一次出卡只该产生一张在线卡；出现两张说明
+#    有并发写入方，此时「这次的卡是哪张」没有答案，往下核验就是在核别人的卡。
+if [ "$ORCH_RC" -eq 0 ] && [ "$NEW_COUNT" -gt 1 ]; then
+  echo >&2
+  echo "🔴 本次出卡期间落了 $NEW_COUNT 张在线卡 —— 说不清哪张是这次的，拒绝往下核验。" >&2
+  echo "   落的是：" >&2
+  printf '%s\n' "$NEW_CARDS" | sed 's/^/     /' >&2
+  echo "   单实例锁（.biga-card.lock）应当挡住并发出卡，出现这行说明它没生效。" >&2
+  exit 4
+fi
+
+if [ "$ORCH_RC" -ne 0 ] || [ "$NEW_COUNT" -eq 0 ]; then
+  echo >&2
+  if [ "$ORCH_RC" -eq 124 ]; then
+    echo "🔴 出卡超时（外层 $(( CARD_DEADLINE_SEC + 60 ))s 硬超时兜底触发）。" >&2
+    echo "   run_id 见上方 orchestrator 打印；查死在哪一步：bin/biga-card --status <run_id>" >&2
+  elif [ "$ORCH_RC" -eq 3 ]; then
+    # 🔴 2026-09-24（对抗性复核）：rc=3 是 orchestrator.py 自己的三道 preflight
+    #    守卫（总闸/预算/单实例锁）之一拒绝——这三处全在 new_run_context() 之前
+    #    return，压根没建过 run，没有 run_id 可查。旧消息无条件说"见上方打印…
+    #    --status <run_id>"，此时是一句指向不存在的东西的话（报错要指路，不能
+    #    指向空）；具体原因已经是上面 orchestrator 自己打的那行 🔴。
+    echo "🔴 出卡没有起：被内层守卫拦下了（原因见上面 orchestrator 打的那行）。" >&2
+    echo "   这次根本没建 run，没有 run_id 可查。" >&2
+  else
+    echo "🔴 出卡失败（orchestrator rc=$ORCH_RC，没有新卡落库）。" >&2
+    echo "   run_id 见上方 orchestrator 打印；查死在哪一步：bin/biga-card --status <run_id>" >&2
+  fi
+  exit 4
+fi
+
+# 🔴 spawn 核验 + 毒行巡检 —— 沿用既有 gate 与退出码语义（F3 / F-4）。
+#    orchestrator 是真 spawn（走 Adapter → subagent_runs），核验理应通过；
+#    留着它是纵深防御，退出码语义与老路径一致（4 = spawn 未过，6 = 历史毒行）。
+#
+# P1-2：按 orchestration_run_id（Run 级）精确核验，防止同 decision 的别的 Run
+#    借用本次 spawn 记录通过检查。
+#
+# 🔴 run_id 取自**刚落的那张卡**（`decision_records.run_id`，v16 加的列），
+#    不是 `decision_runs` 里这个 decision 最新的那次 run。
+#    最终验收条件写的是「Spawn Proof 精确绑定 **Card.run_id**」——
+#    `ORDER BY created_at DESC LIMIT 1` 给的是「最近开的那次 run」，
+#    而一个 decision 可以有多个 run（重投 / reaper / 将来的 Retry，
+#    那正是 P1-2 的威胁模型）。出卡之后若又开了一次 run，核验就会去查
+#    一个没出过这张卡的执行尝试 —— 查的不是这张卡的来路。
+RUN_ID=$(printf '%s' "$NEW_CARDS" | tail -1 | cut -f2)
+if [ -z "$RUN_ID" ]; then
+  echo "🔴 刚落的卡（决策号 $NOW）没有 run_id —— spawn 核验无法按 Run 级精确核验。" >&2
+  echo "   在线卡必须带 run_id（save_card 的在线分支会拒绝不带的）；"           >&2
+  echo "   查这张卡怎么落进去的：sqlite3 data/biga.db \\"                        >&2
+  echo "     \"SELECT record_id,run_id,replay_of FROM decision_records"          >&2
+  echo "       WHERE decision_id='$NOW'\""                                       >&2
+  exit 4
+fi
+$PY tools/verify/spawn_check.py --run-id "$RUN_ID"
+SPAWN_RC=$?
+echo
+$PY tools/verify/readback_check.py
+READBACK_RC=$?
+echo
+echo "▸ 延迟与成本：python3 tools/verify/latency_report.py --parallel-check"
+if [ "$SPAWN_RC" -ne 0 ]; then
+  echo >&2
+  echo "🔴 spawn 核验未通过（rc=$SPAWN_RC）—— 卡（$NOW）不能证明 Specialist 真被调用过。" >&2
+  echo "   rc=1 有伪造 · rc=2 判不了（读不到运行时记录）。细节：spawn_check.py --run-id $RUN_ID" >&2
+  exit 4
+fi
+if [ "$READBACK_RC" -ne 0 ]; then
+  echo >&2
+  echo "🔶 毒行巡检发现历史遗留问题（rc=$READBACK_RC）——与这次出卡无关。" >&2
+  echo "   这次的卡（$NOW）本身没事：spawn 核验已过。细节：readback_check.py" >&2
+  exit 6
+fi
+exit 0

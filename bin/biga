@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# BigA 2.0 —— OpenClaw CLI wrapper
+#
+# 为什么必须走这个 wrapper 而不是直接调 openclaw：
+#   1. 强制注入 --profile biga。少写一次就会读写【生产】的 ~/.openclaw 状态目录
+#      （openclaw CLI 会自动跑 doctor 迁移，这不是只读操作）。
+#   2. 钉死 node 版本。BigA 用 v24.21.0，生产用 v24.18.0，互不影响。
+#   3. 钉死 openclaw 本体路径。它刻意装在 nvm 之外（见约束 D-1）。
+set -euo pipefail
+
+BIGA_NODE="${BIGA_NODE:-$HOME/.nvm/versions/node/v24.21.0/bin/node}"
+BIGA_HOME="${BIGA_HOME:-$HOME/.openclaw-biga}"
+BIGA_ENTRY="$BIGA_HOME/runtime/node_modules/openclaw/dist/index.js"
+
+[ -x "$BIGA_NODE" ]  || { echo "biga: node 不存在: $BIGA_NODE" >&2; exit 1; }
+[ -f "$BIGA_ENTRY" ] || { echo "biga: openclaw 不存在: $BIGA_ENTRY" >&2; exit 1; }
+
+# 让 openclaw 派生的子进程也拿到 BigA 的 node，而不是 PATH 里生产那个
+export PATH="$(dirname "$BIGA_NODE"):$PATH"
+
+exec "$BIGA_NODE" "$BIGA_ENTRY" --profile biga "$@"

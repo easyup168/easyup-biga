@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# biga-notify —— 投递 notification_outbox 里积压的通知（对齐 minimal-feishu-design §6/§13）。
+#
+# 为什么要有这个脚本
+# ------------------
+# `notify_worker.py` 本身早就能干这件事（批 G-I），但它默认走 stdout 桩
+# （离线/测试安全），真投递要记住 `--deliverer feishu`——记不住这个约定，就是
+# 「本该推给你的通知一直攒在 outbox 里」这类事故的形状（P6 live 就撞过一次）。
+#
+# ⇒ 固化默认值：这条命令默认就是真投递，不用每次都敲那个参数。
+#   仍然可以 `bin/biga-notify --deliverer stdout` 覆盖回桩，排查用。
+#
+# 这个脚本本身不联网、不认证——投递逻辑与凭据全在 `bin/biga message send`
+# 那一层（`FeishuDeliverer`），这里只是把「定期跑一次」变成一条固定命令，
+# 供人手动调用，也供 `notify-worker-biga.timer` 调用（见 deploy/openclaw/）。
+#
+# 用法
+#   bin/biga-notify                   投递待发通知（真飞书）
+#   bin/biga-notify --deliverer stdout 只打印，不真发（排查用）
+#   bin/biga-notify --limit 20        单次最多投递 20 条（默认 100）
+
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+PY=python3
+
+# 单实例锁：systemd timer 与手动调用并发时，第二个进程直接退出，不重复投递。
+#
+# 🔴 路径可被 `BIGA_NOTIFY_LOCK` 覆盖 —— **这是为了测试隔离，不是配置项**。
+#    2026-09-26 撞到：`tests/test_biga_notify.py` 起两个 worker 验「只发一次」，
+#    而它们用的是**仓库根那把锁** —— 和这台机器上每 2 分钟跑一次的
+#    `notify-worker-biga.timer` 是同一把。生产恰好并发时测试就红，
+#    而重跑又绿 ⇒ 看起来像 flaky，其实是**测试与生产抢同一个资源**。
+#
+#    这违反 P1-3「默认 pytest 必须 hermetic」，且只在并发窗口里现形 ——
+#    所以它躲过了之前每一次全量。
+#    ⚠️ 默认值不变（仓库根），生产行为一个字节没动。
+LOCK_FILE="${BIGA_NOTIFY_LOCK:-$ROOT/.biga-notify.lock}"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "BigA notification worker is already running; skip duplicate start." >&2
+    exit 0
+fi
+
+# 除非调用方自己传了 --deliverer，否则默认真投递（feishu）——
+# 这正是这条命令存在的唯一理由：把默认值从「安全但什么都不发」
+# 换成「这条命令的调用者显然是想真的发」。
+ARGS=()
+has_deliverer=0
+for a in "$@"; do
+  [ "$a" = "--deliverer" ] && has_deliverer=1
+  ARGS+=("$a")
+done
+[ "$has_deliverer" = 0 ] && ARGS=(--deliverer feishu "${ARGS[@]}")
+
+exec $PY skills/decision-card/scripts/notify_worker.py "${ARGS[@]}"

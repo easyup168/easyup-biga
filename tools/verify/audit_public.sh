@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# 公开仓库敏感内容审查 —— 九项检查的**唯一实现**
+#
+# 用法
+#   tools/verify/audit_public.sh                      # 全历史（手工审查）
+#   tools/verify/audit_public.sh A..B                 # 只扫一个范围
+#   tools/verify/audit_public.sh <sha> --not --remotes # 新分支相对远端的增量
+#   tools/verify/audit_public.sh --worktree           # 扫工作区（commit 之前用）
+#   除 --worktree 外的参数原样传给 git log，不传则等价于 --all
+#
+# 三个扫描范围，**一套模式定义** —— 之前 CLAUDE.md 里另有一段「快速自查」
+# 用的是另一套正则（少两项、多一项），那就是 L-3 说的第二套口径：
+# 改了一份忘了另一份时，剩下那份仍然报绿。
+#
+# 退出码：0 = 全绿；1 = 有命中（pre-push 会据此拦下推送）
+#
+# 🔴 为什么默认 --all 而不是 main
+#    仓库已 Public ⇒ **所有推上去的分支都可见**（phase2 一样公开）。
+#    扫描范围必须与可见范围一致，只扫 main 就是漏掉正在写的那一半。
+#
+# 🔴 为什么 pre-push 只扫增量，不扫全历史
+#    已经公开的内容撤不回来（删分支也可能留在 fork、缓存与镜像里）。
+#    为一个撤不回的历史每次都报红 = 制造一个永远报警的检查，
+#    而永远报警的检查最终会被所有人忽略 —— 那等于把守卫变成摆设。
+#    ⇒ 拦截用增量口径，体检用 --all 口径。
+
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 2
+
+if [ "${1:-}" = "--worktree" ]; then
+  shift
+  # 工作区口径：含未提交与未跟踪文件（.gitignore 的不扫，data/ 因此被排除）。
+  # 每行加 '+' 前缀，让下面的 chk() 与 diff 口径共用同一个 '^+' 匹配。
+  # ':!tools/verify/audit_public.sh' —— 排除本脚本自己，否则它的正则字面量必然自匹配。
+  DIFF=$(git ls-files -co --exclude-standard -- . ':!tools/verify/audit_public.sh' \
+         | xargs -r -d'\n' grep -nHI '' 2>/dev/null | sed 's/^/+/')
+
+  SCOPE="工作区（含未提交与未跟踪）"
+else
+  REVS=("$@")
+  [ ${#REVS[@]} -eq 0 ] && REVS=(--all)
+  DIFF=$(git log "${REVS[@]}" -p 2>/dev/null)
+  SCOPE="git log ${REVS[*]}"
+fi
+
+if [ -z "$DIFF" ]; then
+  echo "（$SCOPE：没有内容可扫，无需审查）"
+  exit 0
+fi
+echo "扫描范围：$SCOPE"
+
+
+# 🔴 为什么模式里到处是 [x] 这样的单字符类
+#
+#    `[a]bcd` 与 `abcd` 在正则里完全等价，但**前者让本脚本
+#    自身不再字面包含那个词**。好处有三个，都是实际踩出来的：
+#
+#    1. `git filter-repo --replace-text` 清理历史时，会把本脚本的正则
+#       一起替换成 `***` —— 脚本静默失效，而且看起来一切正常
+#    2. 任何人 grep 仓库找这些词，不会被本脚本干扰
+#    3. 下面那个 `grep -v '^+chk "'` 的自排除不再是唯一防线
+#
+#    这就是 `ps aux | grep [b]ash` 那个老把戏，用在同一个问题上。
+#
+#    ⚠️ **九项模式全部这么写**，不只是新加的那一项 ——
+#       否则下次谁去清理别的类目（比如密钥前缀），就会改坏另一条检查。
+#
+FAIL=0
+# grep -v '^+chk "' 仍然保留：模式之外的说明文字也可能撞上关键词。
+#
+# 🔴 可选第三参数 `$3`：**豁免**模式，只用于 Gateway token 那一条。
+#
+#    豁免必须是**加法**：默认仍然是全量命中，例外要自己举手——
+#    这与只追加触发器「新表默认就该在清单里」、测试计数守卫「默认必须
+#    最新，例外自己标冻结」是同一条原则。反过来把正例判据收窄成
+#    「只在某种上下文才命中」，会把默认状态从「安全」改成「需要举证
+#    才安全」，方向是错的（评审 F-1：`--token <hex>` / `Authorization:
+#    Bearer <hex>` 这类真实泄露形状会因此漏检）。
+#
+#    🔴 豁免的**粒度**必须等于命中的粒度（评审 F-1b）：命中的单位是
+#    「一个十六进制串」，豁免就只能豁免**那一个串**，不能豁免它所在的
+#    整行——按整行豁免，会让同一行里另一个真令牌跟着被放过（例如
+#    `{"token":"<真令牌>","sha256":"<内容哈希>"}` 这一行，`sha256` 一词
+#    足以让整行豁免，`token` 那个真令牌也被一起放过了）。
+#    ⇒ `$3` 匹配到的不是「该不该数这一行」，而是**该从这一行里抠掉哪一段**
+#    ——用 `sed` 把「自称哈希的那个键 + 赋值 + 十六进制串」这一小段原地
+#    抹掉，抹完剩下的文本里如果还有裸十六进制，该命中的仍然命中。
+chk() {
+    body=$(printf '%s' "$DIFF")
+    [ -n "${3:-}" ] && body=$(printf '%s' "$body" | sed -E "s/$3//g")
+    c=$(printf '%s' "$body" | grep -E "^\+.*$2" | grep -vc '^+chk "' || true)
+    [ "$c" -gt 0 ] && { echo "⚠️  $1 —— $c 处"; FAIL=1; } || echo "✅ $1"
+}
+
+chk "凭据/私钥"      '([s]k-ant|[o]at[0-9]{2}_|[g]hp_|[g]ithub_pat_|[t]vly-|[B]EGIN [A-Z ]*PRIVATE KEY|[s]sh-(ed25519|rsa) AAAA)'
+#
+# 🔴 第三个分支是裸 `\b[0-9a-f]{64}\b`——任何 64 位十六进制都命中。
+#    sha256 恰好也是 64 位十六进制，于是 `payload_sha256` 的内容哈希
+#    （raw_market_snapshot / agent_verdicts 的 `content_sha256`，
+#    以及任何把它写进 fixture 的测试）会被一起命中。
+#
+#    第一版的修法是反过来收窄正例（要求「token 标识符 + 赋值 + 十六进制」
+#    才算令牌）——评审 F-1 指出这个方向是错的：`biga attach --token <hex>`
+#    （空格分隔，不含 `:`/`=`）、`Authorization: Bearer <hex>`（key 是
+#    Authorization 不是 token）、裸贴一个值，这些**真实的泄露形状**全部
+#    会因此漏检。安全检查的默认必须是「命中」，例外要自己举手——
+#    与只追加触发器「新表默认就该受保护」、测试计数守卫「默认必须最新」
+#    是同一条原则，反过来收窄正例等于把默认状态从「安全」改成「需要
+#    举证才安全」。
+#
+#    ⇒ 保留裸十六进制作为默认命中，只**豁免**明确自称哈希的赋值/键值
+#      形式——`sha256`/`content_sha256`/`raw_hash` 紧跟着 `:`/`=` 和它
+#      自己的那个十六进制串时，抠掉那一段再判。豁免判据仍然是**这一小段
+#      本身的语法结构**，不按文件名放行、也不按整行放行（都是 L-13 的
+#      形状——前者「文件名像 fixture 就不查」，后者「行里有别的东西提过
+#      哈希这个词就不查这一行」，宽窄不同，形状是同一个）。
+chk "Gateway token" '([b]ootstrapToken=|[g]ateway\.auth\.token[^s]|\b[0-9a-f]{64}\b)' \
+     '(content_)?([s]ha256|[r]aw_hash)("|'"'"')?[[:space:]]*[:=][[:space:]]*("|'"'"')?[0-9a-f]{64}'
+chk "家目录路径"     '/[h]ome/[a-z][a-z0-9_-]*'
+chk "个人邮箱"       '[a-zA-Z0-9._%-]+@([g]mail|[q]q|163|126|[o]utlook|[h]otmail|[f]oxmail|[s]ina)\.'
+chk "邻居可识别细节" '([E]ASYUP|\b[Q]MT\b|[m]arket\.db|[n]odeenv|[f]ind_node_bin|[0-9]+ 个 systemd|[a]nthropic:openclaw)'
+chk "IP 地址"        '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
+chk "旧用户名"       '\b[r]engydl\b'
+chk "密码赋值"       '([p]assword|[p]asswd|[s]ecret)["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
+# 🔴 第 9 项加于 2026-09-21。触发它的不是某次事故，是一次人工 review ——
+#    作者读教程第 7 章时指出：「如何接通 claude」属于个人/组织的特殊情况。
+#
+#    前八项一项都没抓到它，因为它既不是密钥，也不是路径，也不是邻居的模块名。
+#    它是**这台机器与这个账号的认证安排** —— 限制来自哪、
+#    账号处于什么层级、凭据从哪来。
+#
+#    ⚠️ 这类内容的危险在于它读起来像「踩坑记录」，所以会被顺手写进教程 ——
+#    而教程恰恰是最鼓励写细节的地方。
+chk "环境/账号策略" '([p]olicy-limits|[s]etup-token|[E]nterprise|[企]业策略|[组]织策略|[账]号级策略|[策]略禁止|[策]略收紧|[s]tatic token|[s]hared-from-neighbour)'
+
+# 🔴 第 10 项加于 2026-09-21，在 **IM 凭据进入本机之后、代码引用它之前**。
+#
+#    不是事后补的：飞书配好那天先加检查，再动代码。
+#    理由是仓库 Public ⇒ **推即发布**，而 appId 这类东西的特点是
+#    「看起来不像密钥」—— 它是个标识符，很容易被当成无害的配置贴进文档。
+#
+#    ⚠️ appSecret 目前存在 OpenClaw 的密钥库里（配置文件只有引用 id），
+#    所以真正的风险面是 **appId 与各类 token 被顺手抄进说明文字**。
+#
+#    覆盖：飞书/Lark 应用标识与四类密钥，以及通用的 webhook 地址。
+#    与前九项一样用 [a]bc 写法，保证脚本自己不会匹配自己。
+chk "IM 应用凭据"   '([c]li_[a-z0-9]{16}|[F]EISHU_APP_(ID|SECRET)|[F]EISHU_(VERIFICATION_TOKEN|ENCRYPT_KEY)|[a]pp_?[sS]ecret["'"'"'[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{8,}|open\.[f]eishu\.cn/open-apis/bot/v2/hook/)'
+
+# audit-check: 运行时产物不进仓库
+#
+# 🔴 第 11 项加于 2026-09-21。它不是「内容检查」，是**范围检查** ——
+#    有些东西的问题不在于「这次的内容有没有问题」，
+#    而在于**它是自动长出来的，下次长成什么样你不知道**。
+#
+# 两类，都是实际在仓库里发现的：
+#
+#   1. 归档（zip/tar）—— 上面那十项用 `grep -I` 跳过二进制
+#      ⇒ 压缩包里的内容**一个字都扫不到**
+#   2. `memory/` —— OpenClaw 自己写的记忆/做梦产物，
+#      其中 `.dreams/session-corpus/*.txt` 是**会话逐字记录**
+#      ⇒ 今天内容无害，不代表明天无害（凭据讨论、环境细节都会进去）
+#
+# 一度想给归档做「展开后扫描」。放弃了，两个理由：
+#   ① 外部设计文档会**合法地**讨论 `FEISHU_APP_*` 这类变量名 ⇒ 6 处误报
+#   ② 全历史口径做不到 —— `git log -p` 对二进制只输出「Binary files differ」
+#
+# ⇒ 换成**不让它进来**。规则更窄，但**可判定且完整**；
+#   而「进了再扫」两头都不完整。
+STRAY=$(git ls-files -- '*.zip' '*.tar.gz' '*.tgz' '*.7z' '*.rar' 'memory/*' 2>/dev/null)
+if [ -n "$STRAY" ]; then
+  echo "⚠️  运行时产物不进仓库 —— $(printf '%s\n' "$STRAY" | grep -c .) 个"
+  printf '%s\n' "$STRAY" | head -6 | sed 's/^/     /'
+  echo "     归档：十项检查用 grep -I 跳过二进制，扫不到里面。"
+  echo "     memory/：OpenClaw 自动写的会话语料，内容不由你决定。"
+  echo "     ⇒ git rm --cached <路径>，并加进 .gitignore。原文留在本机。"
+  FAIL=1
+else
+  echo "✅ 运行时产物不进仓库"
+fi
+
+if [ "$FAIL" -eq 0 ]; then
+  echo "══ 十一项全绿 ══"
+  exit 0
+fi
+echo "══ 有命中，不要 push ══"
+exit 1

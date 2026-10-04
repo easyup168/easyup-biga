@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# biga-calendar —— 刷新交易日历（fact_trading_calendar）。
+#
+# 为什么要有这条命令
+# ------------------
+# `market_is_open()` 分三层：日历表 → 硬编码兜底 → weekday。第一层长期是**空的**
+# （原生产方走深交所官方端点，本机连不通），于是它恒走 weekday 回退。
+# 2026-09-25（中秋）实测撞到后果：系统在休市日出了一张卡，`news` 按「今天」报
+# 交易日 20260925，日线类报 20260924，`risk` 因交易日不一致弃权。
+#
+# 这条命令把第一层填上，数据含**交易所已公布的未来排期**（实测到次年年末）。
+#
+# 🔴 什么时候跑
+#   · 装好之后跑一次
+#   · 每年 11-12 月交易所发次年日历后再跑一次
+#     （`tests/test_sina_calendar.py` 会在兜底表到期前 45 天提醒你）
+#
+# 用法
+#   bin/biga-calendar                 刷新（默认往回覆盖 730 天）
+#   bin/biga-calendar --back-days 90  只覆盖最近 90 天 + 未来
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 2
+
+BACK=730
+[ "${1:-}" = "--back-days" ] && BACK="${2:?--back-days 后面要跟天数}"
+
+exec python3 - "$BACK" <<'PY'
+import sys, pathlib
+_ROOT = pathlib.Path.cwd()
+sys.path.insert(0, str(_ROOT / "src"))
+sys.path.insert(0, str(_ROOT / "skills"))
+# 🔴 不直接 import 某个 provider —— 用哪个源是**数据层**的决定。
+#    这里原本写死 sina，而注册表里 szse 一直被声明为 fallback，
+#    于是那条降级路径从来没被走过（声明了却不存在，比没声明更糟）。
+from easyup_biga.data.client import refresh_trading_calendar
+from easyup_biga.data.failover import ProviderChainExhausted
+
+try:
+    result = refresh_trading_calendar(back_days=int(sys.argv[1]))
+except ProviderChainExhausted as e:
+    print(f"🔴 交易日历刷新失败（主源与备用源都没顶住）：{e}", file=sys.stderr)
+    print("   日历表保持原样，market_is_open 退回兜底表 / weekday —— "
+          "方向是安全的（宁可多报 missing），但节假日可能判不出来。", file=sys.stderr)
+    raise SystemExit(2)
+n, start, end = result.rows_written, result.coverage_start, result.coverage_end
+if result.degraded:
+    print(f"🔶 主源没顶住，本次由 {result.provider_id} 接手：", file=sys.stderr)
+    for a in result.attempts:
+        if not a.succeeded:
+            print(f"   · {a.provider_id}（{a.role.value}）{a.error}", file=sys.stderr)
+    print("   ⚠️ 备用源按月取、只覆盖已公布的月份 ⇒ **未来排期可能缺**，"
+          "「下个月某天开不开市」会落回兜底层。", file=sys.stderr)
+print(f"✅ 交易日历已刷新：{n} 行，覆盖 {start} … {end}（源：{result.provider_id}）")
+print(f"   核对一天：python3 -c \"import sys;sys.path.insert(0,'skills');"
+      f"from _store import is_trading_day;print(is_trading_day('20260925'))\"")
+PY
